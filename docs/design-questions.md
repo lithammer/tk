@@ -10,12 +10,6 @@ This file tracks unresolved design work before `tk` exists. Resolved questions s
 **Current recommendation**: Keep intent commands short, with `tk add` creating task Tickets by default, `--bug` for bug Tickets, and `--epic` for Epics.
 **Decision needed**: Finalize the v1 commands for create, update, dependency management, promotion, sync, workspace scope, and worktree handling.
 
-### DQ-003: What is the Backend Adapter interface?
-
-**Status**: open
-**Current recommendation**: Backend Adapters should call external CLIs such as `gh` and `acli` through an injectable subprocess runner.
-**Decision needed**: Define the adapter contract, supported operations, receipt format, failure model, and contract test strategy.
-
 ### DQ-004: How should sync failures and conflicts be handled?
 
 **Status**: open
@@ -36,6 +30,13 @@ This file tracks unresolved design work before `tk` exists. Resolved questions s
 **Decision**: Use SQLite.
 **Recorded in**: ADR 0005.
 **Rationale**: Ticket needs atomic updates across current state and the Mutation Log, easy temp-dir testing, and queryable local state without inventing a custom storage engine.
+
+### DQ-003: What is the Backend Adapter interface?
+
+**Status**: resolved
+**Decision**: Backend Adapters expose only Backend Pull and Mutation Apply operations in v1. Backend Pull imports backend state into the Repository Store. Mutation Apply applies one pending Mutation and returns a Mutation Receipt or failure. The sync engine owns mutation ordering, Sync Cursors, retries, and failure policy. Adapters call external CLIs such as `gh` and `acli` through an injectable subprocess runner.
+**Recorded in**: CONTEXT.md.
+**Rationale**: A narrow adapter boundary keeps backend-specific translation separate from sync orchestration, makes adapters testable with fake subprocess runners, and avoids pushing retry/order policy into each integration.
 
 ### DQ-006: What is the initial Mutation Type vocabulary?
 

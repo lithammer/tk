@@ -76,6 +76,14 @@ _Avoid_: Active Backend
 A component that maps between **Ticket Project** domain concepts and a specific **Backend**.
 _Avoid_: Facade, Provider, Connector
 
+**Backend Pull**:
+A **Backend Adapter** operation that imports backend state into the **Repository Store**.
+_Avoid_: Fetch, Import
+
+**Mutation Apply**:
+A **Backend Adapter** operation that applies one pending **Mutation** to a **Backend**.
+_Avoid_: Replay
+
 **Origin**:
 The source of authority for a **Ticket** or **Epic**.
 _Avoid_: Source
@@ -168,6 +176,10 @@ _Avoid_: ticket, tickets
 - A **Workspace Scope** belongs to one **Workspace**, not the **Repository Store**.
 - A **Repository Store** is untracked local state by default.
 - A **Backend Adapter** maps **Tickets**, **Epics**, and **Mutations** to one **Backend**.
+- A **Backend Adapter** exposes **Backend Pull** and **Mutation Apply** operations.
+- A **Mutation Apply** returns a **Mutation Receipt** or a failure.
+- The sync engine owns mutation ordering, cursors, retries, and failure policy.
+- **Backend Adapters** use injectable subprocess runners for external CLIs such as `gh` and `acli`.
 - A repository may have zero or one **Primary Backend**.
 - A **Ticket** has exactly one **Origin**.
 - An **Epic** has exactly one **Origin**.
@@ -230,6 +242,9 @@ _Avoid_: ticket, tickets
 > **Dev:** "Is Jira a facade or a backend?"
 > **Domain expert:** "Jira is a **Backend**; the Jira integration is a **Backend Adapter**."
 >
+> **Dev:** "Should the GitHub adapter decide which pending **Mutations** to apply next?"
+> **Domain expert:** "No — the sync engine owns ordering and cursors; the **Backend Adapter** applies one **Mutation** at a time."
+>
 > **Dev:** "When an agent finds a follow-up that should not interrupt current work, is that memory?"
 > **Domain expert:** "No — it is a **Local Ticket** unless it is explicitly promoted to the **Primary Backend**."
 >
@@ -269,6 +284,7 @@ _Avoid_: ticket, tickets
 - "workspace store" and "global store" were considered for local state — resolved: a **Repository Store** is shared across all **Workspaces** for one repository.
 - Checked-in ticket state was considered for portability — resolved: the **Repository Store** is untracked local state by default.
 - "facade", "provider", and "connector" were considered for integrations — resolved: **Backend Adapter** maps domain concepts to a **Backend**.
+- Backend orchestration inside adapters was considered — resolved: the sync engine owns orchestration, and **Backend Adapters** expose **Backend Pull** and **Mutation Apply**.
 - "memory" and "note" were considered for agent follow-ups — resolved: follow-ups are **Local Tickets**.
 - "publish" and "export" were considered for moving local work to a backend — resolved: **Promotion** converts a **Local Ticket** or **Local Epic** into a backend-backed object.
 - Keeping local IDs as visible IDs after **Promotion** was considered — resolved: **Promotion** replaces the **Display ID** and preserves the old local ID as an **Alias**.

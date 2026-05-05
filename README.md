@@ -14,6 +14,7 @@ The goal is similar in spirit to Beads: make work visible to humans and agents f
 - Promotion replaces the visible local ID with the backend ID and keeps the old local ID as an alias.
 - A repo can have zero or one **Primary Backend**.
 - **Backend Adapters** map Ticket domain concepts to backend systems.
+- Backend Adapters expose pull and apply-mutation operations; the sync engine owns ordering, cursors, retries, and failure policy.
 - The **Repository Store** is shared across workspaces for one repository and is untracked local state by default.
 - The Repository Store uses SQLite.
 - **Workspace Scope** is local-only and lets `tk` default reads to the current Ticket or Epic, usually from a git worktree context.
