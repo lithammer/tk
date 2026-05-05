@@ -10,12 +10,6 @@ This file tracks unresolved design work before `tk` exists. Resolved questions s
 **Current recommendation**: Keep intent commands short, with `tk add` creating task Tickets by default, `--bug` for bug Tickets, and `--epic` for Epics.
 **Decision needed**: Finalize the v1 commands for create, update, dependency management, promotion, sync, workspace scope, and worktree handling.
 
-### DQ-005: How should worktree creation and Workspace Scope inference work?
-
-**Status**: open
-**Current recommendation**: First-party worktree creation should write Workspace Scope automatically, with branch-name inference as a fallback.
-**Decision needed**: Define worktree command behavior, scope file location, branch naming, and how `tk scope` explains inferred scope.
-
 ## Resolved
 
 ### DQ-001: What storage backend should the Repository Store use?
@@ -38,6 +32,13 @@ This file tracks unresolved design work before `tk` exists. Resolved questions s
 **Decision**: Run Backend Pull before applying pending Mutations in v1. Apply pending Mutations in global Mutation Sequence order and stop on the first failed Mutation. Failed Mutations keep a structured failure and are retried by the next sync. A failed Mutation may be skipped only through an explicit command with a reason, and sync output warns when skipped Mutations exist. Conflicts are adapter-detected Mutation Failures only; v1 has no automatic merge or local conflict resolution model.
 **Recorded in**: CONTEXT.md.
 **Rationale**: Global ordering and stop-on-failure keep sync behavior simple and safe for v1. Pull-before-apply gives adapters fresh backend state before writing. Explicit skip prevents one permanent failure from blocking sync forever while making divergence visible.
+
+### DQ-005: How should worktree creation and Workspace Scope inference work?
+
+**Status**: resolved
+**Decision**: Store Workspace Scope in git worktree config for v1. Configured scope takes precedence over read-only branch-name inference. Ticket-created branches use `tk/<display-id>-<slug>`. `tk start <id> [path]` begins scoped work by creating a branch and git worktree, defaulting to a sibling worktree path, and setting status active unless `--no-status` is used. Configurable worktree root/layout is deferred from v1. `tk scope` reports the active scope and whether its source is configured, inferred, or none. `tk scope set <id>` writes Worktree Config, and `tk scope clear` removes configured scope without disabling inferred scope.
+**Recorded in**: CONTEXT.md.
+**Rationale**: Git worktree config avoids untracked per-workspace files, branch inference keeps manually created Ticket branches usable, and `tk start` provides a single intent command for beginning scoped work while still making git worktrees visible.
 
 ### DQ-006: What is the initial Mutation Type vocabulary?
 

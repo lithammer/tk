@@ -60,6 +60,26 @@ _Avoid_: Worktree
 The local-only association between a **Workspace** and a **Ticket** or **Epic**.
 _Avoid_: Workspace Binding
 
+**Worktree Config**:
+Git's per-worktree configuration used to store **Workspace Scope** in v1.
+_Avoid_: Workspace File
+
+**Inferred Workspace Scope**:
+A **Workspace Scope** discovered from the current branch name rather than stored configuration.
+_Avoid_: Implicit Binding
+
+**Ticket Branch**:
+A git branch created or recognized by **`tk`** using the pattern `tk/<display-id>-<slug>`.
+_Avoid_: Work Branch
+
+**Start**:
+The **`tk`** command intent for beginning work on a **Ticket** or **Epic** in a scoped git worktree.
+_Avoid_: Workspace New, Worktree Create
+
+**Scope Source**:
+The way **`tk`** determined the active **Workspace Scope**: configured, inferred, or none.
+_Avoid_: Binding Source
+
 **Repository Store**:
 The shared SQLite-backed local state for **Ticket Project** within one version-control repository.
 _Avoid_: Workspace Store, Global Store
@@ -183,6 +203,19 @@ _Avoid_: ticket, tickets
 - A **Workspace Scope** references exactly one **Ticket** or **Epic**.
 - **`tk`** commands inside a scoped **Workspace** default to the current **Ticket** or **Epic**.
 - **Workspace Scope** is local-only and is not synced to backends.
+- **Workspace Scope** is stored in **Worktree Config** in v1.
+- Non-git **Workspace Scope** storage is deferred from v1.
+- **Worktree Config** scope takes precedence over **Inferred Workspace Scope**.
+- **Inferred Workspace Scope** is read-only and may come from branch names containing a **Display ID** or **Alias**.
+- A **Ticket Branch** includes a **Display ID** so **Workspace Scope** can be inferred.
+- **Aliases** keep old **Ticket Branches** inferable after **Promotion** replaces the **Display ID**.
+- **Start** creates a **Ticket Branch**, creates a git worktree, stores **Workspace Scope**, and marks the scoped item `active` by default.
+- **Start** accepts an optional positional path for the worktree.
+- Without an explicit path, **Start** creates a sibling worktree by default.
+- Configurable worktree layout is deferred from v1.
+- **`tk scope`** reports the current **Workspace Scope** and **Scope Source**.
+- **`tk scope set <id>`** writes **Workspace Scope** to **Worktree Config**.
+- **`tk scope clear`** removes configured **Workspace Scope** without disabling **Inferred Workspace Scope**.
 - Scoped **`tk`** command output identifies the active **Workspace Scope**.
 - A **Repository Store** is shared by all **Workspaces** for the same version-control repository.
 - A **Workspace Scope** belongs to one **Workspace**, not the **Repository Store**.
@@ -251,6 +284,21 @@ _Avoid_: ticket, tickets
 > **Dev:** "When **`tk`** runs inside a git worktree for a Jira backend feature, should it show unrelated work by default?"
 > **Domain expert:** "No — the **Workspace Scope** should point at the relevant **Epic** or **Ticket** unless the user asks for all work."
 >
+> **Dev:** "Should **Workspace Scope** be stored in an untracked file in every worktree?"
+> **Domain expert:** "No — v1 stores **Workspace Scope** in **Worktree Config** to avoid working-tree litter."
+>
+> **Dev:** "If a branch is named `tk/TK-123-fix-login`, should **`tk`** infer scope?"
+> **Domain expert:** "Yes — if **Worktree Config** has no scope, **`tk`** may use **Inferred Workspace Scope** from the branch name."
+>
+> **Dev:** "What should a **Ticket Branch** look like?"
+> **Domain expert:** "Use `tk/<display-id>-<slug>` so the branch is recognizable and scope can be inferred."
+>
+> **Dev:** "What should **`tk start TK-123`** do?"
+> **Domain expert:** "It should create a **Ticket Branch**, create a scoped git worktree, and mark the item `active` unless status updates are disabled."
+>
+> **Dev:** "How should an agent know whether scope was configured or inferred?"
+> **Domain expert:** "**`tk scope`** reports the **Workspace Scope** and **Scope Source**."
+>
 > **Dev:** "How does an agent know whether **`tk list`** returned global or scoped results?"
 > **Domain expert:** "Scoped output identifies the active **Workspace Scope**, and global output is requested explicitly."
 >
@@ -302,6 +350,12 @@ _Avoid_: ticket, tickets
 - "parent" and "child" were considered for blocking relationships — resolved: **Dependency** links a **Blocking Item** to a **Blocked Item**.
 - "worktree" was considered for local checkout scope — resolved: **Workspace** is the domain term because git worktrees are the main implementation, not the concept itself.
 - "workspace binding" was considered for local checkout association — resolved: **Workspace Scope** is the local-only domain term.
+- Working-tree files were considered for **Workspace Scope** storage — resolved: v1 uses **Worktree Config** and defers non-git storage.
+- Implicit branch scope was considered — resolved: **Inferred Workspace Scope** is read-only and lower precedence than **Worktree Config**.
+- Branch names without a Ticket-specific prefix were considered — resolved: **Ticket Branches** use `tk/<display-id>-<slug>`.
+- Low-level worktree creation as the primary UX was considered — resolved: **Start** is the intent command for beginning scoped work.
+- Configurable worktree root and layout were considered for v1 — resolved: **Start** supports default sibling worktrees and explicit paths only.
+- Hiding scope origin was considered — resolved: **`tk scope`** reports **Scope Source**.
 - "workspace store" and "global store" were considered for local state — resolved: a **Repository Store** is shared across all **Workspaces** for one repository.
 - Checked-in ticket state was considered for portability — resolved: the **Repository Store** is untracked local state by default.
 - "facade", "provider", and "connector" were considered for integrations — resolved: **Backend Adapter** maps domain concepts to a **Backend**.
