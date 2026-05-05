@@ -1,0 +1,437 @@
+.\" Man page for tk, the Ticket CLI.
+.\" View with: man -l man/tk.1
+.TH TK 1 "May 2026" "tk 0.0.0" "Ticket Manual"
+.SH NAME
+tk \- agent-first ticket manager
+.SH SYNOPSIS
+.B tk
+.RI [ global-options ]
+.I command
+.RI [ arguments ]
+.SH DESCRIPTION
+.B tk
+is the command-line interface for
+.BR Ticket ,
+an agent-first tool for managing work items through a simple local
+interface and pluggable issue-tracker backends.
+.PP
+A
+.B Ticket
+is a backend-agnostic work item with a
+.B Ticket Kind
+.RB ( task " or " bug )
+and a
+.B Ticket Status
+.RB ( open ", " active ", " blocked ", or " done ).
+An
+.B Epic
+is a backend-agnostic grouping of related
+.B Tickets
+with its own status
+.RB ( open ", " active ", or " done );
+an
+.B Epic
+is not a
+.BR Ticket .
+.PP
+Newly created
+.B Tickets
+and
+.B Epics
+are local by default, even when a
+.B Primary Backend
+is configured.
+.B Promotion
+is the explicit step that converts a
+.B Local Ticket
+or
+.B Local Epic
+into a backend-backed object through the
+.BR "Primary Backend" .
+.PP
+This page is a draft of the
+.B tk
+CLI surface. Verb names, subcommand layouts, and any flags not stated in
+the project README, CONTEXT.md, or ADRs are proposed here for discussion.
+Storage layout, sync and conflict handling,
+.B Workspace
+creation, the
+.B Backend Adapter
+interface, and the
+.B Mutation Type
+vocabulary are open design areas and are not pinned down by this page.
+.SH COMMANDS
+.SS Repository setup
+.TP
+.B tk init
+Initialize the
+.B Repository Store
+for the current version-control repository. The
+.B Repository Store
+is shared by all
+.B Workspaces
+for the repository and is untracked local state by default (ADR 0001).
+.SS Creating tickets and epics
+.TP
+\fBtk add\fR [\fB\-\-epic\fR|\fB\-\-bug\fR] [\fB\-\-parent\fR \fIEPIC\fR]
+Create a new
+.B Local Ticket
+or
+.BR "Local Epic" .
+Without
+.B \-\-bug
+or
+.BR \-\-epic ,
+the new
+.B Ticket
+has
+.B Ticket Kind
+.BR task .
+.B \-\-bug
+and
+.B \-\-epic
+are mutually exclusive;
+.B Epic
+is not a
+.BR "Ticket Kind" .
+.B \-\-parent
+adds the new
+.B Ticket
+to an existing
+.B Epic
+and is not valid with
+.BR \-\-epic .
+.IP
+.B tk add
+opens
+.B $EDITOR
+on a template if standard input is a terminal, or reads standard input
+otherwise. The first non-blank line is the title; lines after the first
+blank line form the description. This is the same format as
+.BR git\-commit (1).
+An empty title cancels the
+.BR Mutation .
+.IP
+On success,
+.B tk add
+prints the new identifier on standard output.
+.SS Listing
+.TP
+\fBtk list\fR [\fB\-\-all\fR]
+List
+.B Tickets
+and
+.BR Epics ,
+rendered as a tree in which each
+.B Epic
+groups its child
+.BR Tickets .
+.B Tickets
+that do not belong to an
+.B Epic
+and
+.B Epics
+that have no children appear at the top level. Default views include
+both
+.B Local Tickets
+and
+.BR "Backend Tickets" ,
+and each row identifies the item's
+.BR Origin .
+.IP
+Each row begins with a status glyph, followed by the identifier, an
+.B Origin
+tag, a type tag (\fB[epic]\fR for
+.BR Epics ,
+\fB[bug]\fR for
+.B Ticket Kind
+.BR bug ;
+.B Ticket Kind
+.B task
+is unmarked), and the title.
+.IP
+Inside a
+.B Workspace
+scoped to an
+.BR Epic ,
+the list narrows to that
+.BR Epic 's
+.BR Tickets .
+With
+.BR \-\-all ,
+or in a
+.B Workspace
+without an
+.B Epic
+.BR "Workspace Scope" ,
+the list is repository-wide. A
+.B Workspace Scope
+on a
+.B Ticket
+does not narrow the list.
+.IP
+When the listing is narrowed by an
+.B Epic
+.BR "Workspace Scope" ,
+a banner identifying the active scope is printed to standard error so
+it does not appear in piped output. When standard output is a terminal,
+a status legend and a summary count are appended on standard output.
+.SS Showing
+.TP
+\fBtk show\fR [\fIID\fR]
+Show a single
+.B Ticket
+or
+.BR Epic .
+Without
+.IR ID ,
+shows the
+.B Workspace Scope
+target.
+.SS Updating fields
+.TP
+\fBtk update\fR [\fIID\fR] \fIflags\fR
+Change fields on an existing
+.B Ticket
+or
+.BR Epic .
+This is the post-hoc form for field changes; each invocation records one
+or more
+.BR Mutations .
+The exact flag set is part of the open CLI design discussion. Candidates
+include
+.B Ticket Status
+and
+.B Epic Status
+changes, description edits,
+.B Dependency
+add and remove, and
+.B Epic
+membership changes via
+.BR \-\-parent .
+Without
+.IR ID ,
+acts on the
+.B Workspace Scope
+target.
+.SS Promotion
+.TP
+\fBtk promote\fR [\fIID\fR]
+Promote a
+.B Local Ticket
+or
+.B Local Epic
+to a backend-backed object through the
+.BR "Primary Backend" .
+.B Promotion
+converts the same
+.B Ticket
+or
+.B Epic
+in place; it does not create a separate
+.B Backend Ticket
+alongside the local one.
+.SS Workspaces
+.TP
+.B tk workspace
+Print the current
+.B Workspace Scope
+or report that the
+.B Workspace
+has none.
+.TP
+\fBtk workspace set\fR \fIID\fR
+Set the
+.B Workspace Scope
+for the current
+.BR Workspace .
+.TP
+.B tk workspace clear
+Remove the
+.B Workspace Scope
+from the current
+.BR Workspace .
+.TP
+\fBtk workspace new\fR \fIID\fR
+Create a new
+.B Workspace
+scoped to the given
+.B Ticket
+or
+.BR Epic .
+Exact creation behavior is an open design area.
+.SS Syncing and the Mutation Log
+.TP
+.B tk sync
+Apply pending
+.B Mutations
+through the
+.BR "Primary Backend" 's
+.B Backend Adapter
+and pull updates for
+.B Backend Tickets
+and
+.B Backend Epics
+into the
+.BR "Repository Store" .
+Conflict handling is an open design area.
+.TP
+\fBtk log\fR [\fIID\fR] [\fB\-\-pending\fR]
+Show the
+.BR "Mutation Log" .
+With
+.IR ID ,
+restricts to
+.B Mutations
+that apply to that
+.B Ticket
+or
+.BR Epic .
+With
+.BR \-\-pending ,
+restricts to
+.B Mutations
+that have not yet been applied to a backend.
+.SS Backends
+.TP
+.B tk backend list
+List configured
+.B Backends
+and identify the
+.BR "Primary Backend" .
+.TP
+\fBtk backend add\fR \fINAME\fR \fITYPE\fR [\fIadapter-options\fR]
+Register a
+.B Backend
+under a local
+.IR NAME .
+.I TYPE
+selects the
+.BR "Backend Adapter" .
+.TP
+\fBtk backend remove\fR \fINAME\fR
+Remove a configured
+.BR Backend .
+Errors if pending
+.B Mutations
+target that
+.BR Backend .
+.TP
+\fBtk backend set\-primary\fR \fINAME\fR
+Mark the named
+.B Backend
+as the
+.BR "Primary Backend" .
+.SH WORKSPACE SCOPE
+A
+.B Workspace
+is a local checkout context, usually a git worktree, that may have a
+.B Workspace Scope
+referencing exactly one
+.B Ticket
+or
+.BR Epic .
+.B Workspace Scope
+is local-only and is not synced to backends.
+.PP
+When a command accepts an optional
+.IR ID ,
+the
+.I ID
+defaults to the scoped
+.B Ticket
+or
+.B Epic
+if the
+.B Workspace
+has a
+.BR "Workspace Scope" .
+Scoped command output identifies the active
+.B Workspace Scope
+so that humans and agents can tell scoped results from repository-wide
+results.
+.SH EXAMPLES
+Capture a follow-up locally:
+.PP
+.RS 4
+.nf
+tk add <<EOF
+Investigate flaky login retry
+
+Repro is intermittent on the staging cluster.
+First seen 2026-04-30.
+EOF
+.fi
+.RE
+.PP
+Capture a bug:
+.PP
+.RS 4
+.nf
+tk add \-\-bug <<EOF
+Fix login timeout on slow networks
+
+Symptom: 504 from /auth after ~30s on connections under 1 Mbps.
+EOF
+.fi
+.RE
+.PP
+Group related work under a new
+.B Local Epic
+and add a
+.B Ticket
+to it:
+.PP
+.RS 4
+.nf
+tk add \-\-epic <<EOF
+Jira backend
+
+Map Tickets and Epics to Jira issues through a Backend Adapter.
+EOF
+
+tk add \-\-parent EP-3 <<EOF
+Map Jira issue types to Ticket Kinds
+
+Decide on the bug/task split and how Epic membership maps to Jira links.
+EOF
+.fi
+.RE
+.PP
+List the
+.BR Workspace 's
+scoped work, or ignore
+.B Workspace Scope
+to list everything in the repository:
+.PP
+.RS 4
+.nf
+tk list
+tk list \-\-all
+.fi
+.RE
+.PP
+Promote a curated
+.B Local Ticket
+to the
+.BR "Primary Backend" :
+.PP
+.RS 4
+.nf
+tk promote TK-12
+.fi
+.RE
+.PP
+Inspect pending local intent before syncing:
+.PP
+.RS 4
+.nf
+tk log \-\-pending
+tk sync
+.fi
+.RE
+.SH SEE ALSO
+The project README, CONTEXT.md (domain glossary), and the ADRs under
+.IR docs/adr/ .
+.SH BUGS
+This is a design-phase project; no implementation exists yet.
