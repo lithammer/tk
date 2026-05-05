@@ -19,6 +19,8 @@ The goal is similar in spirit to Beads: make work visible to humans and agents f
 - The Repository Store uses SQLite.
 - **Workspace Scope** is local-only and lets `tk` default reads to the current Ticket or Epic, usually from a git worktree context.
 - **Mutations** record durable local intent as named domain operations so they can be synced by Backend Adapters.
+- Sync pulls backend state before applying pending Mutations, applies Mutations in global sequence order, and stops on the first failure.
+- Failed Mutations retry on the next sync; explicit skip requires a reason and remains visible.
 
 ## Resolved ADRs
 

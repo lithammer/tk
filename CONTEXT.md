@@ -144,6 +144,18 @@ _Avoid_: Offset
 Backend confirmation that a **Mutation** was applied.
 _Avoid_: Ack
 
+**Mutation Failure**:
+The latest structured failure recorded for a **Mutation** that could not be applied.
+_Avoid_: Error Log
+
+**Skipped Mutation**:
+A **Mutation** explicitly bypassed during sync without being applied to a **Backend**.
+_Avoid_: Ignored Mutation
+
+**Sync Conflict**:
+A **Mutation Failure** where a **Backend Adapter** refuses to apply a **Mutation** because backend state changed or the target is unavailable.
+_Avoid_: Merge Conflict
+
 **`tk`**:
 The executable name users and agents run from the command line.
 _Avoid_: ticket, tickets
@@ -177,8 +189,16 @@ _Avoid_: ticket, tickets
 - A **Repository Store** is untracked local state by default.
 - A **Backend Adapter** maps **Tickets**, **Epics**, and **Mutations** to one **Backend**.
 - A **Backend Adapter** exposes **Backend Pull** and **Mutation Apply** operations.
+- Sync runs **Backend Pull** before applying pending **Mutations** in v1.
 - A **Mutation Apply** returns a **Mutation Receipt** or a failure.
 - The sync engine owns mutation ordering, cursors, retries, and failure policy.
+- The sync engine applies pending **Mutations** in global **Mutation Sequence** order in v1.
+- The sync engine stops at the first failed **Mutation** in v1.
+- A failed **Mutation** keeps a **Mutation Failure** and is retried by the next sync.
+- A **Sync Conflict** is a kind of **Mutation Failure**.
+- v1 has no automatic merge or local conflict resolution model.
+- A failed **Mutation** may become a **Skipped Mutation** only through an explicit command with a reason.
+- Sync output warns when **Skipped Mutations** exist.
 - **Backend Adapters** use injectable subprocess runners for external CLIs such as `gh` and `acli`.
 - A repository may have zero or one **Primary Backend**.
 - A **Ticket** has exactly one **Origin**.
@@ -207,6 +227,7 @@ _Avoid_: ticket, tickets
 - A **Mutation** has exactly one **Mutation Sequence**.
 - A **Sync Cursor** belongs to one **Backend**.
 - A **Mutation Receipt** belongs to one **Mutation**.
+- A **Mutation Failure** belongs to one **Mutation**.
 - The **Repository Store** keeps current **Ticket** and **Epic** state.
 - The **Mutation Log** records replayable backend intent and is not the primary read model.
 

@@ -10,12 +10,6 @@ This file tracks unresolved design work before `tk` exists. Resolved questions s
 **Current recommendation**: Keep intent commands short, with `tk add` creating task Tickets by default, `--bug` for bug Tickets, and `--epic` for Epics.
 **Decision needed**: Finalize the v1 commands for create, update, dependency management, promotion, sync, workspace scope, and worktree handling.
 
-### DQ-004: How should sync failures and conflicts be handled?
-
-**Status**: open
-**Current recommendation**: Apply Mutations in sequence and stop on the first failed Mutation for v1.
-**Decision needed**: Define retry behavior, conflict reporting, manual resolution commands, and whether sync is global or per item.
-
 ### DQ-005: How should worktree creation and Workspace Scope inference work?
 
 **Status**: open
@@ -37,6 +31,13 @@ This file tracks unresolved design work before `tk` exists. Resolved questions s
 **Decision**: Backend Adapters expose only Backend Pull and Mutation Apply operations in v1. Backend Pull imports backend state into the Repository Store. Mutation Apply applies one pending Mutation and returns a Mutation Receipt or failure. The sync engine owns mutation ordering, Sync Cursors, retries, and failure policy. Adapters call external CLIs such as `gh` and `acli` through an injectable subprocess runner.
 **Recorded in**: CONTEXT.md.
 **Rationale**: A narrow adapter boundary keeps backend-specific translation separate from sync orchestration, makes adapters testable with fake subprocess runners, and avoids pushing retry/order policy into each integration.
+
+### DQ-004: How should sync failures and conflicts be handled?
+
+**Status**: resolved
+**Decision**: Run Backend Pull before applying pending Mutations in v1. Apply pending Mutations in global Mutation Sequence order and stop on the first failed Mutation. Failed Mutations keep a structured failure and are retried by the next sync. A failed Mutation may be skipped only through an explicit command with a reason, and sync output warns when skipped Mutations exist. Conflicts are adapter-detected Mutation Failures only; v1 has no automatic merge or local conflict resolution model.
+**Recorded in**: CONTEXT.md.
+**Rationale**: Global ordering and stop-on-failure keep sync behavior simple and safe for v1. Pull-before-apply gives adapters fresh backend state before writing. Explicit skip prevents one permanent failure from blocking sync forever while making divergence visible.
 
 ### DQ-006: What is the initial Mutation Type vocabulary?
 
