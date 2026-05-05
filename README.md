@@ -43,6 +43,17 @@ Important distinctions:
 
 Open design work is tracked in [docs/design-questions.md](./docs/design-questions.md).
 
+## Testing Direction
+
+Ticket should use layered tests from the start:
+
+- Zig unit tests for domain behavior and command handlers.
+- Inline snapshots for small rendered outputs.
+- Fake subprocess runners for Backend Adapter tests.
+- txtar-based CLI scenario fixtures with a small script runner inspired by `rsc.io/script` and Rust's `trycmd`.
+
+The CLI scenario runner should support multi-step command tests, expected stdout/stderr/exit checks, simple filesystem assertions, elision for unstable output, and an explicit snapshot update mode.
+
 ## CLI Direction
 
 Creation should keep the common path short:

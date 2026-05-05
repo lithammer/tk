@@ -28,18 +28,6 @@ This file tracks unresolved design work before `tk` exists. Resolved questions s
 **Current recommendation**: First-party worktree creation should write Workspace Scope automatically, with branch-name inference as a fallback.
 **Decision needed**: Define worktree command behavior, scope file location, branch naming, and how `tk scope` explains inferred scope.
 
-### DQ-006: What is the initial Mutation Type vocabulary?
-
-**Status**: open
-**Current recommendation**: Start with domain operations for creating, updating, commenting, dependency changes, epic membership, promotion, and closure.
-**Decision needed**: Define the exact Mutation Types for Tickets, Epics, Dependencies, and Promotion.
-
-### DQ-007: What is the CLI testing strategy in Zig?
-
-**Status**: open
-**Current recommendation**: Combine fast domain tests, command-handler tests with fake storage and subprocess runners, golden CLI tests, and filesystem integration tests.
-**Decision needed**: Decide test harness structure, fixture format, snapshot update flow, and how to run subprocess-style tests.
-
 ## Resolved
 
 ### DQ-001: What storage backend should the Repository Store use?
@@ -48,6 +36,20 @@ This file tracks unresolved design work before `tk` exists. Resolved questions s
 **Decision**: Use SQLite.
 **Recorded in**: ADR 0005.
 **Rationale**: Ticket needs atomic updates across current state and the Mutation Log, easy temp-dir testing, and queryable local state without inventing a custom storage engine.
+
+### DQ-006: What is the initial Mutation Type vocabulary?
+
+**Status**: resolved
+**Decision**: Use `create_ticket`, `update_ticket`, `set_ticket_status`, `create_epic`, `update_epic`, `set_epic_status`, `add_ticket_to_epic`, `remove_ticket_from_epic`, `add_dependency`, `remove_dependency`, `promote_ticket`, and `promote_epic`.
+**Recorded in**: CONTEXT.md.
+**Rationale**: The v1 set covers creation, title/body edits, status, epic membership, dependencies, and promotion while deferring comments, labels, and assignees. `update_ticket` and `update_epic` cover title/body only. Epic membership is limited to Tickets with no nested Epics. Dependencies may connect Tickets and Epics in any blocking or blocked combination, but cycles are rejected.
+
+### DQ-007: What is the CLI testing strategy in Zig?
+
+**Status**: resolved
+**Decision**: Use Zig unit tests for domain and command-handler behavior, inline snapshots for small rendered outputs, fake subprocess runners for adapters, and txtar-based CLI scenario fixtures with a small script runner inspired by `rsc.io/script` and Rust's `trycmd`.
+**Recorded in**: README.md.
+**Rationale**: txtar keeps multi-file CLI scenarios reviewable as one text fixture, the script runner supports multi-step command behavior, and trycmd-style output comparison plus update mode gives useful CLI snapshot tests without introducing a TOML schema first.
 
 ### DQ-000: What language should the first implementation use?
 

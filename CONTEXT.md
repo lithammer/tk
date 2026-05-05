@@ -116,6 +116,10 @@ _Avoid_: Epic Change, Change, Audit Entry
 A named domain operation that describes the intent of a **Mutation**.
 _Avoid_: Field Patch, JSON Patch
 
+**V1 Mutation Type**:
+A **Mutation Type** supported by the first implementation: `create_ticket`, `update_ticket`, `set_ticket_status`, `create_epic`, `update_epic`, `set_epic_status`, `add_ticket_to_epic`, `remove_ticket_from_epic`, `add_dependency`, `remove_dependency`, `promote_ticket`, or `promote_epic`.
+_Avoid_: Comment Mutation, Label Mutation, Assignee Mutation
+
 **Mutation Log**:
 The ordered local record of **Mutations** waiting to be applied or already applied to a backend.
 _Avoid_: Change Log, Audit Log
@@ -141,6 +145,7 @@ _Avoid_: ticket, tickets
 - **`tk`** is the command-line executable for **Ticket Project**.
 - A **Ticket** may be backed by a GitHub issue, Jira issue, Beads bead, or another backend-specific work item.
 - An **Epic** contains zero or more **Tickets**.
+- An **Epic** does not contain other **Epics** in v1.
 - A **Ticket** may belong to zero or one **Epic** in v1.
 - A **Ticket** has exactly one **Ticket Kind**.
 - A **Ticket** has exactly one **Ticket Status**.
@@ -151,6 +156,8 @@ _Avoid_: ticket, tickets
 - Child **Ticket** completion may suggest closing an **Epic**, but does not close it automatically.
 - A **Dependency** has exactly one **Blocking Item** and one **Blocked Item**.
 - A **Ticket** or **Epic** may have zero or more **Dependencies**.
+- **Dependencies** may connect **Tickets** and **Epics** in any blocking or blocked combination.
+- **Dependencies** must not form cycles.
 - **Dependency** is distinct from **Epic** membership.
 - A **Workspace** may have zero or one **Workspace Scope**.
 - A **Workspace Scope** references exactly one **Ticket** or **Epic**.
@@ -181,6 +188,9 @@ _Avoid_: ticket, tickets
 - A **Ticket Mutation** modifies exactly one **Ticket**.
 - An **Epic Mutation** modifies exactly one **Epic** or its ticket membership.
 - A **Mutation** has exactly one **Mutation Type**.
+- The first implementation supports only **V1 Mutation Types**.
+- `update_ticket` and `update_epic` modify title and body only.
+- Comments, labels, and assignees are deferred from v1.
 - A **Mutation Log** contains zero or more **Mutations**.
 - A **Mutation** has exactly one **Mutation Sequence**.
 - A **Sync Cursor** belongs to one **Backend**.
@@ -201,6 +211,9 @@ _Avoid_: ticket, tickets
 >
 > **Dev:** "Should **`tk`** store that as a generic status field patch?"
 > **Domain expert:** "No — it should store a **Mutation Type** like `set_status` so the backend adapter can preserve intent."
+>
+> **Dev:** "Should comments, labels, or assignees be **V1 Mutation Types**?"
+> **Domain expert:** "No — v1 only supports creation, title/body updates, status, epic membership, dependencies, and promotion."
 >
 > **Dev:** "When **`tk`** runs inside a git worktree for a Jira backend feature, should it show unrelated work by default?"
 > **Domain expert:** "No — the **Workspace Scope** should point at the relevant **Epic** or **Ticket** unless the user asks for all work."
@@ -262,4 +275,5 @@ _Avoid_: ticket, tickets
 - Backend-intended creation by default was considered when a **Primary Backend** exists — resolved: new **Tickets** and **Epics** are local by default to avoid upstream tracker noise.
 - "change log" and "audit log" were considered for replayable local intent — resolved: **Mutation Log** stores **Mutations**.
 - Generic field patches were considered for **Mutations** — resolved: **Mutations** use named domain operations.
+- Comment, label, and assignee mutations were considered for v1 — resolved: they are deferred.
 - Event sourcing was considered for current state — resolved: the **Repository Store** stores current state, and the **Mutation Log** acts as an outbox for backend replay.
