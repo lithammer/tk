@@ -53,6 +53,8 @@ Important distinctions:
 
 Open design work is tracked in [docs/design-questions.md](./docs/design-questions.md).
 
+The v1 CLI surface is documented in [docs/cli.md](./docs/cli.md).
+
 ## Testing Direction
 
 Ticket should use layered tests from the start:

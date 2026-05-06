@@ -4,11 +4,7 @@ This file tracks unresolved design work before `tk` exists. Resolved questions s
 
 ## Open
 
-### DQ-002: What is the initial CLI command surface?
-
-**Status**: open
-**Current recommendation**: Keep intent commands short, with `tk add` creating task Tickets by default, `--bug` for bug Tickets, `--epic` for Epics, `--parent <epic-id>` for Epic membership, and `--priority P0..P4` for local-only Priority. `tk update [id] --priority P0..P4` changes Priority; there is no top-level priority command in v1. `tk add` uses git-commit-style message input: repeatable `-m/--message`, `-F/--file`, `-F -` for stdin, or editor mode when no message/file is provided. Use lifecycle verbs `tk start [id]`, `tk stop [id]`, and `tk done [id]` instead of `tk status`. Use positional `tk block <blocked-id> <blocking-id>` and `tk unblock <blocked-id> <blocking-id>`. Use `tk promote <id>` for narrow promotion, with `tk promote <epic-id> --children` explicitly including directly contained Local Tickets. Use `tk sync --skip <mutation-id>` for skipped Mutations and `tk sync log` for Mutation Log inspection. Use CLI `remote` and `--remote` for backend-backed items, with `tk remote`, `tk remote set <kind>`, and `tk remote clear` managing zero or one configured Remote. Use `tk worktree` rather than `tk scope` or `tk workspace` for v1 Workspace Scope inspection and control, with git worktree creation under `tk worktree start <id> [path] [--no-status]`. `tk list` defaults to a tree view with Epics as top-level rows, child Tickets nested under Epics, and unparented Tickets as top-level rows. `tk list --ready` keeps the tree view and includes non-empty Epics as containers for ready child Tickets. `tk next` selects only ready Tickets with lowest local-only Priority, then oldest creation order, within the active Workspace Scope. Any item ID argument should resolve a Display ID or Alias.
-**Decision needed**: Finalize the v1 commands for reads, promotion, sync inspection, remote configuration, and worktree handling.
+No open design questions.
 
 ## Resolved
 
@@ -18,6 +14,13 @@ This file tracks unresolved design work before `tk` exists. Resolved questions s
 **Decision**: Use SQLite.
 **Recorded in**: ADR 0005.
 **Rationale**: Ticket needs atomic updates across current state and the Mutation Log, easy temp-dir testing, and queryable local state without inventing a custom storage engine.
+
+### DQ-002: What is the initial CLI command surface?
+
+**Status**: resolved
+**Decision**: Use the v1 command surface documented in docs/cli.md.
+**Recorded in**: docs/cli.md.
+**Rationale**: The CLI surface now reflects the resolved domain model: local-first creation, git-commit-style messages, local Priority, tree listing, explicit promotion, conservative sync, git worktree scope, and one configured Remote.
 
 ### DQ-003: What is the Backend Adapter interface?
 

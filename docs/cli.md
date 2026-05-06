@@ -1,0 +1,162 @@
+# Ticket CLI
+
+This is the v1 command surface for `tk`.
+
+## Global Rules
+
+- Any item ID argument resolves a current Display ID or Alias.
+- Commands with optional `[id]` use the current Workspace Scope target when omitted.
+- New Tickets and Epics are local by default.
+- Commands that affect upstream state or sync repair stay explicit.
+
+## Setup
+
+```sh
+tk init
+```
+
+Initializes the Repository Store.
+
+## Agent Briefing
+
+```sh
+tk prime
+```
+
+Prints static Markdown embedded from `docs/prime.md`.
+
+## Create
+
+```sh
+tk add [--bug | --epic] [--parent <epic-id>] [--priority P0..P4] (-m <paragraph>... | -F <file | ->)
+```
+
+Creates a local task Ticket by default.
+
+- `--bug` creates a bug Ticket.
+- `--epic` creates an Epic.
+- `--bug` and `--epic` are mutually exclusive.
+- `--parent <epic-id>` places a new Ticket under an Epic in v1.
+- `--priority` sets local-only Priority. Default is `P2`.
+- `-m/--message` is repeatable and follows git-commit-style paragraph joining.
+- `-F/--file` reads the message from a file, or from stdin with `-F -`.
+- With no message or file, `tk add` opens editor mode.
+
+The first paragraph becomes the title. Later paragraphs become the body.
+
+## Read
+
+```sh
+tk list [--all] [--ready | --blocked | --active] [--local | --remote]
+tk next [--all]
+tk show [id]
+```
+
+`tk list` renders a tree:
+
+- Epics are top-level rows.
+- Child Tickets are nested under their Epic.
+- Unparented Tickets are top-level rows.
+- `tk list --ready` keeps the tree shape and includes non-empty Epics as containers for ready child Tickets.
+
+`tk next` selects only ready Tickets, never Epics. It picks the ready Ticket with lowest local-only Priority, then oldest creation order, within the active Workspace Scope. `--all` ignores Workspace Scope.
+
+`tk show [id]` shows one Ticket or Epic. If `id` is omitted, it shows the current Workspace Scope target.
+
+## Update
+
+```sh
+tk update [id] [--priority P0..P4] [--parent <epic-id> | --no-parent] (-m <paragraph>... | -F <file | ->)
+```
+
+Updates title/body, local-only Priority, or Epic membership.
+
+- `-m/--message` and `-F/--file` use the same message parsing as `tk add`.
+- `--priority` changes local-only Priority.
+- `--parent <epic-id>` moves a Ticket under an Epic in v1.
+- `--no-parent` removes Epic membership.
+- `--parent` and `--no-parent` are mutually exclusive.
+
+## Lifecycle
+
+```sh
+tk start [id]
+tk stop [id]
+tk done [id]
+```
+
+- `tk start` marks a Ticket or Epic active.
+- `tk stop` moves active work back to open.
+- `tk done` marks a Ticket or Epic done.
+
+## Blocking
+
+```sh
+tk block <blocked-id> <blocking-id>
+tk unblock <blocked-id> <blocking-id>
+```
+
+Blocking affects `tk next` and `tk list --ready`.
+
+Dependencies may connect Tickets and Epics in any blocking or blocked combination, but cycles are rejected.
+
+## Promotion
+
+```sh
+tk promote [id] [--children]
+```
+
+Promotes a Local Ticket or Local Epic through the configured Remote.
+
+- Without `--children`, only the target is promoted.
+- `--children` is valid for Epics and includes directly contained Local Tickets.
+- `--children` does not follow Dependencies and is not recursive in v1.
+
+## Sync
+
+```sh
+tk sync [--skip <mutation-id>]
+tk sync log [--pending | --failed | --skipped] [id]
+```
+
+`tk sync` pulls remote state before applying pending Mutations. It applies Mutations in global sequence order and stops on the first failure.
+
+- Failed Mutations retry on the next sync.
+- `--skip <mutation-id>` marks one failed Mutation skipped and continues sync.
+- v1 has no force-apply mode and no automatic conflict resolution.
+- `tk sync log` inspects pending, failed, skipped, and applied Mutations.
+
+## Worktrees
+
+```sh
+tk worktree
+tk worktree start <id> [path] [--no-status]
+tk worktree set <id>
+tk worktree clear
+```
+
+`tk worktree` reports the current Workspace Scope and whether its source is configured, inferred, or none.
+
+`tk worktree start` creates a Ticket Branch, creates a git worktree, stores Workspace Scope in git worktree config, and marks the scoped item active by default.
+
+- Ticket Branches use `tk/<display-id>-<slug>`.
+- Without an explicit path, the worktree is created as a sibling path.
+- `--no-status` skips marking the item active.
+- `tk worktree set <id>` writes Workspace Scope to git worktree config.
+- `tk worktree clear` removes configured Workspace Scope without disabling branch-name inference.
+
+## Remote
+
+```sh
+tk remote
+tk remote set github --repo <owner/name>
+tk remote set jira --site <url> --project <key>
+tk remote clear
+```
+
+V1 supports zero or one configured Remote.
+
+- `tk remote` shows the configured Remote.
+- `tk remote set <kind>` configures or replaces it.
+- `tk remote clear` removes it when no pending remote Mutations would be orphaned.
+- Authentication is delegated to backend-specific CLIs such as `gh` and `acli`.
