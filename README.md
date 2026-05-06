@@ -91,5 +91,8 @@ The CLI uses `remote` for backend configuration and filters:
 ```sh
 tk remote
 tk remote set <kind>
+tk remote clear
 tk list --remote
 ```
+
+V1 supports zero or one configured remote. Backend authentication is delegated to external CLIs such as `gh` or `acli`.

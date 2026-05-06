@@ -268,6 +268,11 @@ _Avoid_: ticket, tickets
 - A **Repository Store** is untracked local state by default.
 - A **Backend Adapter** maps **Tickets**, **Epics**, and **Mutations** to one **Backend**.
 - **Remote** is the CLI-facing name for **Backend** configuration.
+- v1 supports zero or one configured **Remote**.
+- **`tk remote`** shows the configured **Remote**.
+- **`tk remote set <kind>`** configures or replaces the **Remote**.
+- **`tk remote clear`** removes the configured **Remote** when no pending remote **Mutations** would be orphaned.
+- **Remote** authentication is delegated to backend-specific external CLIs.
 - A **Backend Adapter** exposes **Backend Pull** and **Mutation Apply** operations.
 - Sync runs **Backend Pull** before applying pending **Mutations** in v1.
 - A **Mutation Apply** returns a **Mutation Receipt** or a failure.
@@ -370,6 +375,9 @@ _Avoid_: ticket, tickets
 >
 > **Dev:** "Should the CLI command be `tk backend`?"
 > **Domain expert:** "No — the domain term is **Backend**, but the CLI-facing command is **Remote**."
+>
+> **Dev:** "Should **`tk remote add`** support multiple remotes?"
+> **Domain expert:** "No — v1 has at most one configured **Remote**, managed with **`tk remote set`** and **`tk remote clear`**."
 >
 > **Dev:** "Should the GitHub adapter decide which pending **Mutations** to apply next?"
 > **Domain expert:** "No — the sync engine owns ordering and cursors; the **Backend Adapter** applies one **Mutation** at a time."
