@@ -37,6 +37,7 @@ Creates a local task Ticket by default.
 - `--epic` creates an Epic.
 - `--bug` and `--epic` are mutually exclusive.
 - `--parent <epic-id>` places a new Ticket under an Epic in v1.
+- `--parent` and `--epic` are mutually exclusive. Epics cannot contain other Epics.
 - `--priority` sets local-only Priority. Default is `P2`.
 - `-m/--message` is repeatable and follows git-commit-style paragraph joining.
 - `-F/--file` reads the message from a file, or from stdin with `-F -`.
@@ -57,7 +58,14 @@ tk show [id]
 - Epics are top-level rows.
 - Child Tickets are nested under their Epic.
 - Unparented Tickets are top-level rows.
-- `tk list --ready` keeps the tree shape and includes non-empty Epics as containers for ready child Tickets.
+- `tk list` defaults to open and active items. `--all` includes done items.
+- `--ready` shows only ready Tickets, keeping the tree shape and including non-empty Epics as containers.
+- `--blocked` shows only Tickets with at least one unresolved blocking Dependency.
+- `--active` shows only items with status active.
+- `--ready`, `--blocked`, and `--active` are mutually exclusive.
+- `--local` shows only Local Tickets and Local Epics.
+- `--remote` shows only items that have been promoted.
+- `--local` and `--remote` are mutually exclusive and may be combined with one of the readiness filters.
 
 `tk next` selects only ready Tickets, never Epics. It picks the ready Ticket with lowest local-only Priority, then oldest creation order, within the active Workspace Scope. `--all` ignores Workspace Scope.
 
@@ -76,6 +84,7 @@ Updates title/body, local-only Priority, or Epic membership.
 - `--parent <epic-id>` moves a Ticket under an Epic in v1.
 - `--no-parent` removes Epic membership.
 - `--parent` and `--no-parent` are mutually exclusive.
+- `--parent` and `--no-parent` are errors when the target is an Epic. Epics cannot contain other Epics.
 
 ## Lifecycle
 
@@ -110,6 +119,7 @@ Promotes a Local Ticket or Local Epic through the configured Remote.
 
 - Without `--children`, only the target is promoted.
 - `--children` is valid for Epics and includes directly contained Local Tickets.
+- `--children` on a Ticket is an error.
 - `--children` does not follow Dependencies and is not recursive in v1.
 
 ## Sync

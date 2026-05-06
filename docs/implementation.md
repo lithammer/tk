@@ -37,7 +37,6 @@ src/
   remote/
     runner.zig
     github.zig
-    jira.zig
   worktree/
     git.zig
   testing/
@@ -72,6 +71,8 @@ The Repository Store uses SQLite.
 Current Ticket and Epic state is stored directly. The Mutation Log is an outbox for replayable backend intent, not the primary read model.
 
 Any command that changes syncable state must update current state and append the corresponding Mutation in one SQLite transaction.
+
+A single command may append more than one Mutation, of different Mutation Types, in the same transaction. For example, `tk update --parent` edits Epic membership through `add_ticket_to_epic` (and `remove_ticket_from_epic` when moving between Epics), while editing title/body through `update_ticket` in the same call. Command-to-Mutation is many-to-one, not one-to-one.
 
 Workspace Scope is not stored in SQLite in v1. It is stored in git worktree config.
 
@@ -142,15 +143,20 @@ Implement in small vertical slices:
    - Exclude Epics.
    - Add dependency and scope tests.
 
-6. Lifecycle and blocking
+6. `tk show` and `tk update`
+   - Render a single Ticket or Epic with its current fields.
+   - Edit title/body, local-only Priority, and Epic membership.
+   - `--parent` and `--no-parent` append `add_ticket_to_epic` or `remove_ticket_from_epic` Mutations; title/body edits append `update_ticket` or `update_epic`. A single invocation may emit more than one Mutation in one transaction.
+
+7. Lifecycle and blocking
    - Implement `tk start`, `tk stop`, `tk done`, `tk block`, and `tk unblock`.
    - Enforce dependency cycle rejection.
 
-7. Worktree scope
+8. Worktree scope
    - Implement `tk worktree`, `set`, `clear`, and `start`.
    - Use git worktree config.
 
-8. Remote and sync skeleton
+9. Remote and sync skeleton
    - Implement `tk remote`.
    - Implement `tk sync log`.
    - Add fake remote adapter tests before real `gh` or `acli` behavior.
