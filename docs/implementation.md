@@ -49,20 +49,43 @@ Only add files when the slice needs them. The layout is a direction, not a scaff
 
 ## Boundaries
 
-`main.zig` owns process-level concerns: argv, stdin/stdout/stderr, exit codes, allocator setup, and command dispatch.
+`main.zig` is a thin process shim: it builds a `Deps` struct from `std.process.Init` (Zig 0.16's "juicy main"), calls `runArgv(deps, args_iter) !u8`, and translates the returned code into the process exit code. Nothing else.
 
-`cli.zig` parses arguments into command structs. It should not perform filesystem, SQLite, git, or subprocess work.
+`cli.zig` exports `runArgv`. It owns the top-level subcommand routing: a `SubCommand` enum, a tiny zig-clap spec for the top-level (`--help`, `<command>`), and a switch that calls `commands.<cmd>.run(deps, args_iter)`. It does not perform filesystem, SQLite, git, or subprocess work.
 
-Command handlers execute parsed commands against explicit dependencies:
+Each `commands/<cmd>.zig` owns its zig-clap parameter spec and its `run(deps, args_iter) !u8` handler. Per-command parsing keeps each command's flags co-located with its handler.
 
+Argument parsing uses [zig-clap](https://github.com/Hejsil/zig-clap). Hand-rolled parsing was considered but zig-clap covers our spec quirks (repeatable `-m`, named positionals, `--key=value`) and stays out of the boundary above (it returns typed structs; it does not own dispatch).
+
+Command handlers execute parsed commands against explicit dependencies (`Deps`):
+
+- `stdout`, `stderr`, `gpa` (slice #1)
 - Repository Store
 - Worktree service
 - Sync engine
 - Remote adapter registry
 - Subprocess runner
 - Clock or ID generator when needed
+- `tty_stdout: bool` and color-policy helpers (introduced when the first colored command lands; see Output)
+
+`Deps` grows additively. Slice #1 ships only `stdout`/`stderr`/`gpa`; later slices add fields as the commands they introduce need them.
+
+Exit codes returned by `runArgv`:
+
+- `0` — success
+- `1` — logical failure surfaced to the user (e.g. `tk next` finds nothing ready)
+- `2` — usage error (unknown subcommand, bad flag combo, zig-clap diagnostic)
+- `3+` — unexpected internal error caught at the top of `main.zig`
 
 Domain logic should not depend on SQLite, filesystem paths, git, or subprocess execution.
+
+## Output
+
+Commands write their primary output to stdout and diagnostics to stderr. `tk prime` is the primary case driven by an agent harness (e.g. Claude Code's `SessionStart` hook); its markdown body must reach stdout, never stderr. `tk prime` writes nothing to stderr, succeeds outside a `tk init`'d repo, and normalises its output to exactly one trailing newline so concatenation into an agent context window stays clean.
+
+Each command declares its own preconditions. There is no central "needs store" gate: `tk prime` requires nothing, `tk init` creates the store, and other commands fail-fast when the store is missing.
+
+The first colored command (`tk list` in slice #4) introduces a `--color=auto|always|never` flag (`auto` is the default), a `tty_stdout: bool` on `Deps` set from `init` and fakeable in tests, and honours `NO_COLOR` and `CLICOLOR_FORCE`. Slice #1 adds none of this — `tk prime` emits raw markdown unconditionally.
 
 ## Storage
 
@@ -111,18 +134,27 @@ Use layered tests:
 - Command-handler tests with fake stores and fake subprocess runners.
 - SQLite tests with a temp database and real migrations.
 - Inline snapshots for small rendered outputs.
-- txtar-based CLI scenario tests with a small script runner inspired by `rsc.io/script` and Rust's `trycmd`.
+- txtar-based CLI scenario tests with a small script runner inspired by `rsc.io/script` and Rust's `trycmd`. Each scenario file has a `-- script --` section with one or more `tk` invocations plus `-- expected/stdout --`, `-- expected/stderr --`, and `-- expected/exit --` sections. Scenarios run in-process against a synthesized `Deps` struct; a couple of subprocess smoke tests confirm the linked binary runs end to end.
 
 Avoid testing everything through subprocess CLI scenarios. Keep most behavior fast and local to domain or command-handler tests.
+
+Fixture wiring uses per-test `@embedFile` so a missing fixture is a build error. If the scenario set outgrows manual test functions (roughly 30–50 fixtures), introduce a `build.zig` step that walks `tests/scenarios/` and generates a Zig manifest the runner iterates over.
+
+The `-- script --` tokenizer follows [`rogpeppe/go-internal/testscript`](https://github.com/rogpeppe/go-internal/blob/master/testscript/testscript.go) (the maintained successor to `rsc.io/script`): whitespace splits args, `'…'` quotes a literal chunk, `''` inside a quoted chunk is a literal `'`, `#` starts a comment, and `$NAME` / `${NAME}` expand against the runner's env map. No double quotes, no backslash escapes. Output comparison is byte-exact — no whitespace normalisation. Setting `TK_UPDATE=1` rewrites the `expected/*` sections of each fixture in place, preserving section order and any non-expected sections (like `-- input/foo.md --`).
+
+Each scenario gets a fresh per-script work directory exposed as `$WORK` in the env map (matching testscript). From slice #2 onward, the runner also passes a `std.fs.Dir` handle for `$WORK` via `Deps.cwd`. The work directory is removed unconditionally after the scenario; setting `TK_TESTWORK=1` opts in to preserving it for debugging. Failure output substitutes the literal string `$WORK` for the actual path so messages stay readable; re-run with `TK_TESTWORK=1` to keep artefacts.
 
 ## First Slices
 
 Implement in small vertical slices:
 
 1. `tk prime`
-   - Set up Zig build and command dispatch.
-   - Print `docs/prime.md` through Zig `@embedFile`.
-   - Add the first CLI scenario test.
+   - `build.zig` declares the `tk` exe and a single `zig build test` target. Fetch zig-clap as a dependency.
+   - `main.zig` implements `pub fn main(init: std.process.Init) !void`, builds `Deps { stdout, stderr, gpa }` from `init`, calls `runArgv`, translates the returned `u8` into the process exit code.
+   - `cli.zig` exports `runArgv(deps, args_iter) !u8` with one `SubCommand` arm, plus top-level `--help` (stdout, exit 0) and `--version` (stdout, exit 0; `const VERSION = "v0.0.1";` lives here).
+   - `commands/prime.zig` reads `@embedFile("../../docs/prime.md")`, trims trailing whitespace, writes the bytes plus exactly one `\n` to `deps.stdout`, and returns 0. Never writes to `deps.stderr`. Works outside a `tk init`'d repo.
+   - `src/testing/script.zig` ships a minimal txtar runner: parse sections, tokenize each `-- script --` line testscript-style, build a `Deps` with `ArrayList(u8)`-backed writers, dispatch through `runArgv`, byte-exact compare against `expected/stdout`/`expected/stderr`/`expected/exit`. `TK_UPDATE=1` rewrites the `expected/*` sections in place.
+   - First fixture lives next to the test that loads it via `@embedFile`. One in-process scenario covers `tk prime`; one subprocess smoke test confirms the linked binary runs.
 
 2. `tk init`
    - Create the Repository Store.
