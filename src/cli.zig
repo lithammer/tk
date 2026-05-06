@@ -24,6 +24,11 @@ const top_parsers = .{ .command = clap.parsers.enumeration(SubCommand) };
 
 pub fn runArgv(deps: Deps, args_iter: anytype) !u8 {
     var diag: clap.Diagnostic = .{};
+    // Treat every clap parse error as exit 2. The contract pins
+    // error.OutOfMemory as exit 3, but Zig 0.16 with clap v0.12.0 and our
+    // `enumeration` + `terminating_positional` config has OOM compiled out
+    // of the inferred error set; if a future command's parser becomes able
+    // to allocate fallibly, this catch must be split to let OOM propagate.
     var res = clap.parseEx(clap.Help, &top_params, top_parsers, args_iter, .{
         .diagnostic = &diag,
         .allocator = deps.gpa,

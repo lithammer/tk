@@ -14,11 +14,13 @@ pub fn main(init: std.process.Init) !void {
         .gpa = init.gpa,
     };
 
-    const code = run(deps, init) catch |err| blk: {
+    var code = run(deps, init) catch |err| blk: {
         deps.stderr.print("internal error: {s}\n", .{@errorName(err)}) catch {};
         break :blk @as(u8, 3);
     };
-    stdout.interface.flush() catch {};
+    stdout.interface.flush() catch {
+        if (code == 0) code = 3;
+    };
     stderr.interface.flush() catch {};
     std.process.exit(code);
 }

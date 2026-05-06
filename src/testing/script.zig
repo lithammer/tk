@@ -242,6 +242,7 @@ fn compareAndReport(
     sections: []const Section,
     result: ScriptResult,
     work_path: []const u8,
+    quiet: bool,
 ) !void {
     var expected_stdout: []const u8 = "";
     var expected_stderr: []const u8 = "";
@@ -262,41 +263,57 @@ fn compareAndReport(
     var fail = false;
 
     if (!std.mem.eql(u8, result.stdout.items, expected_stdout)) {
-        printMismatch(allocator, "stdout", expected_stdout, result.stdout.items, work_path);
+        if (!quiet) printMismatch(allocator, "stdout", expected_stdout, result.stdout.items, work_path);
         fail = true;
     }
 
     if (!std.mem.eql(u8, result.stderr.items, expected_stderr)) {
-        printMismatch(allocator, "stderr", expected_stderr, result.stderr.items, work_path);
+        if (!quiet) printMismatch(allocator, "stderr", expected_stderr, result.stderr.items, work_path);
         fail = true;
     }
 
     if (result.last_exit != expected_exit) {
-        std.debug.print("\n--- exit code mismatch: expected {d}, got {d} ---\n", .{ expected_exit, result.last_exit });
+        if (!quiet) std.debug.print("\n--- exit code mismatch: expected {d}, got {d} ---\n", .{ expected_exit, result.last_exit });
         fail = true;
     }
 
     if (fail) return error.ScenarioFailed;
 }
 
+pub const RunOptions = struct {
+    update: bool = false,
+    keep_work: bool = false,
+    quiet: bool = false,
+};
+
 pub fn runScenario(
     allocator: std.mem.Allocator,
     fixture_path: ?[]const u8,
     txtar_bytes: []const u8,
 ) !void {
-    const updating = getEnvFlag("TK_UPDATE");
-    const keep_work = getEnvFlag("TK_TESTWORK");
+    return runScenarioWith(allocator, fixture_path, txtar_bytes, .{
+        .update = getEnvFlag("TK_UPDATE"),
+        .keep_work = getEnvFlag("TK_TESTWORK"),
+        .quiet = false,
+    });
+}
 
+pub fn runScenarioWith(
+    allocator: std.mem.Allocator,
+    fixture_path: ?[]const u8,
+    txtar_bytes: []const u8,
+    opts: RunOptions,
+) !void {
     const sections = try txtar.parse(allocator, txtar_bytes);
     defer allocator.free(sections);
 
     var tmp = std.testing.tmpDir(.{});
-    defer if (!keep_work) tmp.cleanup();
+    defer if (!opts.keep_work) tmp.cleanup();
 
     const work_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(work_path);
 
-    if (keep_work) {
+    if (opts.keep_work) {
         std.debug.print("WORK={s}\n", .{work_path});
     }
 
@@ -309,7 +326,7 @@ pub fn runScenario(
     var result = try executeScript(allocator, sections, env);
     defer result.deinit(allocator);
 
-    if (updating) {
+    if (opts.update) {
         const rewritten = try rewriteSections(allocator, sections, result);
         defer allocator.free(rewritten);
 
@@ -322,7 +339,7 @@ pub fn runScenario(
         return;
     }
 
-    try compareAndReport(allocator, sections, result, work_path);
+    try compareAndReport(allocator, sections, result, work_path, opts.quiet);
 }
 
 pub fn rewriteScenarioBytes(allocator: std.mem.Allocator, txtar_bytes: []const u8) ![]u8 {
@@ -529,7 +546,10 @@ test "runScenario: detects stdout mismatch" {
         \\0
         \\
     ;
-    try std.testing.expectError(error.ScenarioFailed, runScenario(allocator, null, fixture));
+    try std.testing.expectError(
+        error.ScenarioFailed,
+        runScenarioWith(allocator, null, fixture, .{ .quiet = true }),
+    );
 }
 
 test "runScenario: detects exit-code mismatch" {
@@ -548,7 +568,10 @@ test "runScenario: detects exit-code mismatch" {
     , .{prime_body});
     defer allocator.free(fixture);
 
-    try std.testing.expectError(error.ScenarioFailed, runScenario(allocator, null, fixture));
+    try std.testing.expectError(
+        error.ScenarioFailed,
+        runScenarioWith(allocator, null, fixture, .{ .quiet = true }),
+    );
 }
 
 test "validateInputPath: rejects parent escapes and absolute paths" {
