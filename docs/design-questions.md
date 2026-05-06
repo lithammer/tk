@@ -35,7 +35,7 @@ This file tracks unresolved design work before `tk` exists. Resolved questions s
 ### DQ-004: How should sync failures and conflicts be handled?
 
 **Status**: resolved
-**Decision**: Run Backend Pull before applying pending Mutations in v1. Apply pending Mutations in global Mutation Sequence order and stop on the first failed Mutation. Failed Mutations keep a structured failure and are retried by the next sync. A failed Mutation may be skipped through `tk sync --skip <mutation-id>`, and sync output warns when skipped Mutations exist. Conflicts are adapter-detected Mutation Failures only; v1 has no automatic merge or local conflict resolution model. Mutation Log inspection is handled by `tk sync log`.
+**Decision**: Run Backend Pull before applying pending Mutations in v1. Apply pending Mutations in global Mutation Sequence order and stop on the first failed Mutation. Failed Mutations keep a structured failure and are retried by the next sync. A failed Mutation may be skipped through `tk sync --skip <mutation-id>`, and sync output warns when skipped Mutations exist. Conflicts are adapter-detected Mutation Failures only; v1 has no automatic merge, local conflict resolution model, or force-apply mode. Mutation Log inspection is handled by `tk sync log`.
 **Recorded in**: CONTEXT.md.
 **Rationale**: Global ordering and stop-on-failure keep sync behavior simple and safe for v1. Pull-before-apply gives adapters fresh backend state before writing. Explicit skip prevents one permanent failure from blocking sync forever while making divergence visible.
 

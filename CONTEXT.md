@@ -263,6 +263,7 @@ _Avoid_: ticket, tickets
 - A failed **Mutation** may become a **Skipped Mutation** only through **Sync Skip**.
 - Sync output warns when **Skipped Mutations** exist.
 - **Sync Log** inspects pending, failed, skipped, and applied **Mutations**.
+- Force-applying conflicting **Mutations** is deferred from v1.
 - **Backend Adapters** use injectable subprocess runners for external CLIs such as `gh` and `acli`.
 - A repository may have zero or one **Primary Backend**.
 - A **Ticket** has exactly one **Origin**.
@@ -402,6 +403,7 @@ _Avoid_: ticket, tickets
 - "facade", "provider", and "connector" were considered for integrations — resolved: **Backend Adapter** maps domain concepts to a **Backend**.
 - "backend" was considered for the CLI command — resolved: **Remote** is the CLI-facing name for backend configuration.
 - Backend orchestration inside adapters was considered — resolved: the sync engine owns orchestration, and **Backend Adapters** expose **Backend Pull** and **Mutation Apply**.
+- Force sync was considered for conflicts — resolved: v1 does not force-apply conflicting **Mutations**.
 - "memory" and "note" were considered for agent follow-ups — resolved: follow-ups are **Local Tickets**.
 - "publish" and "export" were considered for moving local work to a backend — resolved: **Promotion** converts a **Local Ticket** or **Local Epic** into a backend-backed object.
 - Keeping local IDs as visible IDs after **Promotion** was considered — resolved: **Promotion** replaces the **Display ID** and preserves the old local ID as an **Alias**.
