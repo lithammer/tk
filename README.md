@@ -43,6 +43,7 @@ The project glossary lives in [CONTEXT.md](./CONTEXT.md). Keep design documents 
 Important distinctions:
 
 - **Epic membership** groups work. **Dependency** describes blocking order.
+- **Priority** is local-only in v1 and sorts `P0` before `P4`.
 - **Ticket Status** is `open`, `active`, `blocked`, or `done`.
 - **Epic Status** is `open`, `active`, or `done`.
 - `active` means current work. **Assignee** is tracked separately.
@@ -72,9 +73,14 @@ tk add -m "Update README"               # creates a task Ticket
 tk add --bug -F bug-report.md           # creates a bug Ticket
 tk add --epic -m "Jira backend"         # creates an Epic
 tk add --bug -F - < rich-bug-report.md  # reads message from stdin
+tk add --priority P1 -F -               # creates a higher-priority local Ticket
 ```
 
 `tk add` uses git-commit-style message input: repeatable `-m/--message`, `-F/--file`, `-F -` for stdin, or editor mode when no message/file is provided. The first paragraph becomes the title and later paragraphs become the body. `--bug` and `--epic` are mutually exclusive. `Epic` is not a Ticket Kind.
+
+`tk next` selects the ready Ticket with the lowest local-only Priority, then oldest creation order, within the active Workspace Scope. The default Priority is `P2`.
+
+Priority is set with `tk add --priority P0..P4` or `tk update [id] --priority P0..P4`; v1 does not have a top-level priority command.
 
 Ticket's default command paths should let agents manage local work safely. Commands that affect upstream state or sync repair, such as `promote` and `sync`, stay explicit and visible.
 

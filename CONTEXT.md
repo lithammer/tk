@@ -24,6 +24,14 @@ _Avoid_: Old ID
 The category of a **Ticket**: `task` or `bug`.
 _Avoid_: Type
 
+**Local Field**:
+A field stored in the **Repository Store** that is not applied to a **Backend** in v1.
+_Avoid_: Unsynced Field, Sync Excluded Field
+
+**Priority**:
+A local-only ranking for a **Ticket**: `P0`, `P1`, `P2`, `P3`, or `P4`.
+_Avoid_: Severity
+
 **Epic**:
 A backend-agnostic grouping of related **Tickets** that can be tracked and worked as one unit.
 _Avoid_: Batch, Ticket Group, Umbrella
@@ -214,6 +222,10 @@ _Avoid_: ticket, tickets
 - The v1 **Parent Argument** must resolve to an **Epic**.
 - Future versions may allow the **Parent Argument** to resolve to a **Ticket** if subtickets are introduced.
 - A **Ticket** has exactly one **Ticket Kind**.
+- A **Ticket** has exactly one **Priority**.
+- **Priority** is a **Local Field** in v1.
+- The default **Priority** is `P2`.
+- Lower **Priority** numbers sort before higher **Priority** numbers.
 - A **Ticket** has exactly one **Ticket Status**.
 - A **Ticket** may have zero or more **Assignees**.
 - `active` **Ticket Status** means the **Ticket** is currently being worked and does not imply assignment.
@@ -296,6 +308,7 @@ _Avoid_: ticket, tickets
 - A **Mutation Failure** belongs to one **Mutation**.
 - The **Repository Store** keeps current **Ticket** and **Epic** state.
 - The **Mutation Log** records replayable backend intent and is not the primary read model.
+- **`tk next`** selects the ready **Ticket** with the lowest **Priority**, then oldest creation order, within the active **Workspace Scope**.
 
 ## Example dialogue
 
@@ -377,6 +390,9 @@ _Avoid_: ticket, tickets
 > **Dev:** "Is an **Epic** a type of **Ticket**?"
 > **Domain expert:** "No — **Epic** is separate from **Ticket**; only **Tickets** have **Ticket Kind**."
 >
+> **Dev:** "How can **`tk next`** choose work without guessing?"
+> **Domain expert:** "It uses local **Priority** first, then creation order, within the active **Workspace Scope**."
+>
 > **Dev:** "If every **Ticket** in an **Epic** is done, should the **Epic** close automatically?"
 > **Domain expert:** "No — **Epic** closure is explicit because completion criteria may exist outside the current child tickets."
 >
@@ -388,6 +404,7 @@ _Avoid_: ticket, tickets
 - "ticket" and "tickets" were both considered for the project name — resolved: **Ticket** is the canonical project name, and **`tk`** is the executable.
 - "issue" and "task" were considered for the core work-item object — resolved: **Ticket** is the canonical backend-agnostic object.
 - "type" was considered for ticket category — resolved: **Ticket Kind** is the canonical term, and `task` is a kind rather than the work-item object.
+- Backend priority mapping was considered for v1 — resolved: **Priority** is a local-only **Local Field**.
 - "group", "batch", and "umbrella" were considered for related work — resolved: **Epic** is the canonical backend-agnostic grouping term.
 - "parent" and "child" were considered for blocking relationships — resolved: **Dependency** links a **Blocking Item** to a **Blocked Item**.
 - "worktree" was considered for local checkout scope — resolved: **Workspace** is the domain term because git worktrees are the main implementation, not the concept itself.
