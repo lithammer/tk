@@ -19,10 +19,14 @@ The goal is similar in spirit to Beads: make work visible to humans and agents f
 - The Repository Store uses SQLite.
 - **Workspace Scope** is local-only and lets `tk` default reads to the current Ticket or Epic, usually from a git worktree context.
 - Workspace Scope is stored in git worktree config for v1, with read-only branch-name inference as a fallback.
-- `tk start <id> [path]` creates a Ticket branch and scoped git worktree, defaulting to a sibling worktree path.
+- `tk start [id]` marks work active; `tk stop [id]` moves active work back to open.
+- `tk worktree start <id> [path]` creates a Ticket branch and scoped git worktree, defaulting to a sibling worktree path.
+- `tk worktree` reports or changes the current Workspace Scope stored in git worktree config.
+- `tk prime` should generate scope-aware agent briefing output for new or compacted sessions.
 - **Mutations** record durable local intent as named domain operations so they can be synced by Backend Adapters.
 - Sync pulls backend state before applying pending Mutations, applies Mutations in global sequence order, and stops on the first failure.
-- Failed Mutations retry on the next sync; explicit skip requires a reason and remains visible.
+- Failed Mutations retry on the next sync; explicit `tk sync --skip <mutation-id>` remains visible.
+- `tk sync log` inspects pending, failed, skipped, and applied Mutations.
 
 ## Resolved ADRs
 
@@ -64,9 +68,20 @@ The CLI scenario runner should support multi-step command tests, expected stdout
 Creation should keep the common path short:
 
 ```sh
-tk add "Update README"           # creates a task Ticket
-tk add --bug "Fix login timeout" # creates a bug Ticket
-tk add --epic "Jira backend"     # creates an Epic
+tk add -m "Update README"               # creates a task Ticket
+tk add --bug -F bug-report.md           # creates a bug Ticket
+tk add --epic -m "Jira backend"         # creates an Epic
+tk add --bug -F - < rich-bug-report.md  # reads message from stdin
 ```
 
-`--bug` and `--epic` are mutually exclusive. `Epic` is not a Ticket Kind.
+`tk add` uses git-commit-style message input: repeatable `-m/--message`, `-F/--file`, `-F -` for stdin, or editor mode when no message/file is provided. The first paragraph becomes the title and later paragraphs become the body. `--bug` and `--epic` are mutually exclusive. `Epic` is not a Ticket Kind.
+
+Ticket's default command paths should let agents manage local work safely. Commands that affect upstream state or sync repair, such as `promote` and `sync`, stay explicit and visible.
+
+The CLI uses `remote` for backend configuration and filters:
+
+```sh
+tk remote
+tk remote set <kind>
+tk list --remote
+```

@@ -28,6 +28,10 @@ _Avoid_: Type
 A backend-agnostic grouping of related **Tickets** that can be tracked and worked as one unit.
 _Avoid_: Batch, Ticket Group, Umbrella
 
+**Parent Argument**:
+CLI shorthand for placing a **Ticket** under a containing item.
+_Avoid_: Parent Domain Model
+
 **Ticket Status**:
 The lifecycle state of a **Ticket**: `open`, `active`, `blocked`, or `done`.
 _Avoid_: Todo, In Progress, Closed
@@ -73,12 +77,20 @@ A git branch created or recognized by **`tk`** using the pattern `tk/<display-id
 _Avoid_: Work Branch
 
 **Start**:
-The **`tk`** command intent for beginning work on a **Ticket** or **Epic** in a scoped git worktree.
-_Avoid_: Workspace New, Worktree Create
+The **`tk`** command intent for marking a **Ticket** or **Epic** active.
+_Avoid_: Claim
 
-**Scope Source**:
+**Stop**:
+The **`tk`** command intent for moving an active **Ticket** or **Epic** back to `open`.
+_Avoid_: Reopen, Pause
+
+**Prime**:
+The **`tk`** command intent for generating scope-aware agent briefing output.
+_Avoid_: Memory Dump
+
+**Workspace Scope Source**:
 The way **`tk`** determined the active **Workspace Scope**: configured, inferred, or none.
-_Avoid_: Binding Source
+_Avoid_: Binding Source, Scope Source
 
 **Repository Store**:
 The shared SQLite-backed local state for **Ticket Project** within one version-control repository.
@@ -87,6 +99,10 @@ _Avoid_: Workspace Store, Global Store
 **Backend**:
 A system that can store or retrieve **Tickets**, **Epics**, and **Mutations**.
 _Avoid_: Provider, Connector
+
+**Remote**:
+The CLI-facing name for a configured **Backend**.
+_Avoid_: Backend Command
 
 **Primary Backend**:
 The single active **Backend** a repository syncs with by default.
@@ -172,6 +188,14 @@ _Avoid_: Error Log
 A **Mutation** explicitly bypassed during sync without being applied to a **Backend**.
 _Avoid_: Ignored Mutation
 
+**Sync Skip**:
+The **`tk sync`** mode that marks one failed **Mutation** as skipped and continues sync.
+_Avoid_: Skip Command
+
+**Sync Log**:
+The **`tk sync log`** view of the **Mutation Log**.
+_Avoid_: App Log, Ticket Log
+
 **Sync Conflict**:
 A **Mutation Failure** where a **Backend Adapter** refuses to apply a **Mutation** because backend state changed or the target is unavailable.
 _Avoid_: Merge Conflict
@@ -187,6 +211,8 @@ _Avoid_: ticket, tickets
 - An **Epic** contains zero or more **Tickets**.
 - An **Epic** does not contain other **Epics** in v1.
 - A **Ticket** may belong to zero or one **Epic** in v1.
+- The v1 **Parent Argument** must resolve to an **Epic**.
+- Future versions may allow the **Parent Argument** to resolve to a **Ticket** if subtickets are introduced.
 - A **Ticket** has exactly one **Ticket Kind**.
 - A **Ticket** has exactly one **Ticket Status**.
 - A **Ticket** may have zero or more **Assignees**.
@@ -209,18 +235,22 @@ _Avoid_: ticket, tickets
 - **Inferred Workspace Scope** is read-only and may come from branch names containing a **Display ID** or **Alias**.
 - A **Ticket Branch** includes a **Display ID** so **Workspace Scope** can be inferred.
 - **Aliases** keep old **Ticket Branches** inferable after **Promotion** replaces the **Display ID**.
-- **Start** creates a **Ticket Branch**, creates a git worktree, stores **Workspace Scope**, and marks the scoped item `active` by default.
-- **Start** accepts an optional positional path for the worktree.
-- Without an explicit path, **Start** creates a sibling worktree by default.
+- **Start** sets a **Ticket** or **Epic** to `active`.
+- **Stop** moves an active **Ticket** or **Epic** back to `open`.
+- **`tk worktree start`** creates a **Ticket Branch**, creates a git worktree, stores **Workspace Scope**, and marks the scoped item `active` by default.
+- **`tk worktree start`** accepts an optional positional path for the worktree.
+- Without an explicit path, **`tk worktree start`** creates a sibling worktree by default.
 - Configurable worktree layout is deferred from v1.
-- **`tk scope`** reports the current **Workspace Scope** and **Scope Source**.
-- **`tk scope set <id>`** writes **Workspace Scope** to **Worktree Config**.
-- **`tk scope clear`** removes configured **Workspace Scope** without disabling **Inferred Workspace Scope**.
+- **`tk worktree`** reports the current **Workspace Scope** and **Workspace Scope Source**.
+- **`tk worktree set <id>`** writes **Workspace Scope** to **Worktree Config**.
+- **`tk worktree clear`** removes configured **Workspace Scope** without disabling **Inferred Workspace Scope**.
+- **Prime** reports current scope, ready work, active work, blocked work, sync health, and close-out reminders.
 - Scoped **`tk`** command output identifies the active **Workspace Scope**.
 - A **Repository Store** is shared by all **Workspaces** for the same version-control repository.
 - A **Workspace Scope** belongs to one **Workspace**, not the **Repository Store**.
 - A **Repository Store** is untracked local state by default.
 - A **Backend Adapter** maps **Tickets**, **Epics**, and **Mutations** to one **Backend**.
+- **Remote** is the CLI-facing name for **Backend** configuration.
 - A **Backend Adapter** exposes **Backend Pull** and **Mutation Apply** operations.
 - Sync runs **Backend Pull** before applying pending **Mutations** in v1.
 - A **Mutation Apply** returns a **Mutation Receipt** or a failure.
@@ -230,8 +260,9 @@ _Avoid_: ticket, tickets
 - A failed **Mutation** keeps a **Mutation Failure** and is retried by the next sync.
 - A **Sync Conflict** is a kind of **Mutation Failure**.
 - v1 has no automatic merge or local conflict resolution model.
-- A failed **Mutation** may become a **Skipped Mutation** only through an explicit command with a reason.
+- A failed **Mutation** may become a **Skipped Mutation** only through **Sync Skip**.
 - Sync output warns when **Skipped Mutations** exist.
+- **Sync Log** inspects pending, failed, skipped, and applied **Mutations**.
 - **Backend Adapters** use injectable subprocess runners for external CLIs such as `gh` and `acli`.
 - A repository may have zero or one **Primary Backend**.
 - A **Ticket** has exactly one **Origin**.
@@ -294,10 +325,13 @@ _Avoid_: ticket, tickets
 > **Domain expert:** "Use `tk/<display-id>-<slug>` so the branch is recognizable and scope can be inferred."
 >
 > **Dev:** "What should **`tk start TK-123`** do?"
-> **Domain expert:** "It should create a **Ticket Branch**, create a scoped git worktree, and mark the item `active` unless status updates are disabled."
+> **Domain expert:** "It should mark **TK-123** `active`; **`tk worktree start TK-123`** creates a scoped git worktree."
 >
 > **Dev:** "How should an agent know whether scope was configured or inferred?"
-> **Domain expert:** "**`tk scope`** reports the **Workspace Scope** and **Scope Source**."
+> **Domain expert:** "**`tk worktree`** reports the **Workspace Scope** and **Workspace Scope Source**."
+>
+> **Dev:** "How should an agent recover context after compaction or a new session?"
+> **Domain expert:** "Run **Prime** to get scope-aware work, blocking, and sync context."
 >
 > **Dev:** "How does an agent know whether **`tk list`** returned global or scoped results?"
 > **Domain expert:** "Scoped output identifies the active **Workspace Scope**, and global output is requested explicitly."
@@ -310,6 +344,9 @@ _Avoid_: ticket, tickets
 >
 > **Dev:** "Is Jira a facade or a backend?"
 > **Domain expert:** "Jira is a **Backend**; the Jira integration is a **Backend Adapter**."
+>
+> **Dev:** "Should the CLI command be `tk backend`?"
+> **Domain expert:** "No — the domain term is **Backend**, but the CLI-facing command is **Remote**."
 >
 > **Dev:** "Should the GitHub adapter decide which pending **Mutations** to apply next?"
 > **Domain expert:** "No — the sync engine owns ordering and cursors; the **Backend Adapter** applies one **Mutation** at a time."
@@ -332,6 +369,9 @@ _Avoid_: ticket, tickets
 > **Dev:** "If **TK-12** belongs to **EP-3**, does that mean **TK-12** is blocked by **EP-3**?"
 > **Domain expert:** "No — **Epic** membership groups work, while a **Dependency** says one item cannot progress until another is done."
 >
+> **Dev:** "Does `--parent EP-3` introduce a parent-child domain model?"
+> **Domain expert:** "No — in v1, the **Parent Argument** is CLI shorthand for **Epic** membership."
+>
 > **Dev:** "Is an **Epic** a type of **Ticket**?"
 > **Domain expert:** "No — **Epic** is separate from **Ticket**; only **Tickets** have **Ticket Kind**."
 >
@@ -353,12 +393,14 @@ _Avoid_: ticket, tickets
 - Working-tree files were considered for **Workspace Scope** storage — resolved: v1 uses **Worktree Config** and defers non-git storage.
 - Implicit branch scope was considered — resolved: **Inferred Workspace Scope** is read-only and lower precedence than **Worktree Config**.
 - Branch names without a Ticket-specific prefix were considered — resolved: **Ticket Branches** use `tk/<display-id>-<slug>`.
-- Low-level worktree creation as the primary UX was considered — resolved: **Start** is the intent command for beginning scoped work.
-- Configurable worktree root and layout were considered for v1 — resolved: **Start** supports default sibling worktrees and explicit paths only.
-- Hiding scope origin was considered — resolved: **`tk scope`** reports **Scope Source**.
+- Combining status changes and worktree creation in **Start** was considered — resolved: **Start** marks work active, while **`tk worktree start`** creates scoped git worktrees.
+- Static agent workflow dumps were considered — resolved: **Prime** generates scope-aware briefing output from current repository state.
+- Configurable worktree root and layout were considered for v1 — resolved: **`tk worktree start`** supports default sibling worktrees and explicit paths only.
+- Hiding scope origin was considered — resolved: **`tk worktree`** reports **Workspace Scope Source**.
 - "workspace store" and "global store" were considered for local state — resolved: a **Repository Store** is shared across all **Workspaces** for one repository.
 - Checked-in ticket state was considered for portability — resolved: the **Repository Store** is untracked local state by default.
 - "facade", "provider", and "connector" were considered for integrations — resolved: **Backend Adapter** maps domain concepts to a **Backend**.
+- "backend" was considered for the CLI command — resolved: **Remote** is the CLI-facing name for backend configuration.
 - Backend orchestration inside adapters was considered — resolved: the sync engine owns orchestration, and **Backend Adapters** expose **Backend Pull** and **Mutation Apply**.
 - "memory" and "note" were considered for agent follow-ups — resolved: follow-ups are **Local Tickets**.
 - "publish" and "export" were considered for moving local work to a backend — resolved: **Promotion** converts a **Local Ticket** or **Local Epic** into a backend-backed object.
