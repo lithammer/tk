@@ -21,13 +21,34 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
     defer res.deinit();
 
     if (res.args.help != 0) {
-        clap.help(deps.stdout, clap.Help, &params, .{}) catch {};
+        writeHelp(deps) catch {};
         return 0;
     }
 
     const trimmed = std.mem.trimEnd(u8, prime_md_bytes, " \t\r\n");
     try deps.stdout.print("{s}\n", .{trimmed});
     return 0;
+}
+
+fn writeHelp(deps: cli.Deps) !void {
+    try deps.stdout.writeAll(
+        \\tk prime - print agent workflow context
+        \\
+        \\Prints the embedded workflow briefing to stdout. Designed to be invoked by
+        \\an agent harness (e.g. Claude Code's SessionStart hook) at session start.
+        \\
+        \\Usage:
+        \\  tk prime [options]
+        \\
+        \\Options:
+        \\
+    );
+    try clap.help(deps.stdout, clap.Help, &params, .{
+        .description_on_new_line = false,
+        .description_indent = 2,
+        .indent = 2,
+        .spacing_between_parameters = 0,
+    });
 }
 
 test "prime writes embedded markdown with one trailing newline" {
@@ -116,7 +137,10 @@ test "prime --help prints help to stdout, exits 0" {
 
     const code = try run(deps, &iter);
 
+    const out = stdout_buf.written();
     try std.testing.expectEqual(@as(u8, 0), code);
-    try std.testing.expect(stdout_buf.written().len > 0);
+    try std.testing.expect(std.mem.indexOf(u8, out, "tk prime") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Usage:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Options:") != null);
     try std.testing.expectEqualStrings("", stderr_buf.written());
 }

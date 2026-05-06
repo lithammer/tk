@@ -14,6 +14,11 @@ pub const SubCommand = enum { prime };
 
 const VERSION = "v0.0.1";
 
+const top_flags = clap.parseParamsComptime(
+    \\-h, --help     Display this help and exit.
+    \\-v, --version  Print version and exit.
+    \\
+);
 const top_params = clap.parseParamsComptime(
     \\-h, --help     Display this help and exit.
     \\-v, --version  Print version and exit.
@@ -21,6 +26,13 @@ const top_params = clap.parseParamsComptime(
     \\
 );
 const top_parsers = .{ .command = clap.parsers.enumeration(SubCommand) };
+
+const help_options: clap.HelpOptions = .{
+    .description_on_new_line = false,
+    .description_indent = 2,
+    .indent = 2,
+    .spacing_between_parameters = 0,
+};
 
 pub fn runArgv(deps: Deps, args_iter: anytype) !u8 {
     var diag: clap.Diagnostic = .{};
@@ -40,7 +52,7 @@ pub fn runArgv(deps: Deps, args_iter: anytype) !u8 {
     defer res.deinit();
 
     if (res.args.help != 0) {
-        clap.help(deps.stdout, clap.Help, &top_params, .{}) catch {};
+        writeTopLevelHelp(deps) catch {};
         return 0;
     }
     if (res.args.version != 0) {
@@ -55,6 +67,42 @@ pub fn runArgv(deps: Deps, args_iter: anytype) !u8 {
 
     return switch (subcmd) {
         .prime => commands.prime.run(deps, args_iter),
+    };
+}
+
+fn writeTopLevelHelp(deps: Deps) !void {
+    try deps.stdout.writeAll(
+        \\tk - an agent-first CLI for tracking work items
+        \\
+        \\Usage:
+        \\  tk <command> [options]
+        \\  tk [-h | --help]
+        \\  tk [-v | --version]
+        \\
+        \\Commands:
+        \\
+    );
+    inline for (@typeInfo(SubCommand).@"enum".fields) |field| {
+        const cmd: SubCommand = @field(SubCommand, field.name);
+        const desc = subcommandDescription(cmd);
+        try deps.stdout.print("  {s:<10} {s}\n", .{ field.name, desc });
+    }
+    try deps.stdout.writeAll(
+        \\
+        \\Options:
+        \\
+    );
+    try clap.help(deps.stdout, clap.Help, &top_flags, help_options);
+    try deps.stdout.writeAll(
+        \\
+        \\Run 'tk <command> --help' for command-specific help.
+        \\
+    );
+}
+
+fn subcommandDescription(cmd: SubCommand) []const u8 {
+    return switch (cmd) {
+        .prime => "Print agent workflow context to stdout",
     };
 }
 
@@ -153,7 +201,11 @@ test "runArgv prints help" {
     var iter = SliceArgIter{ .items = &.{"--help"} };
     const code = try runArgv(deps, &iter);
 
+    const out = stdout_buf.written();
     try std.testing.expectEqual(@as(u8, 0), code);
-    try std.testing.expect(stdout_buf.written().len > 0);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Usage:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Commands:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "prime") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "--version") != null);
     try std.testing.expectEqualStrings("", stderr_buf.written());
 }
