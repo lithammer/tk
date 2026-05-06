@@ -4,6 +4,11 @@ const cli = @import("../cli.zig");
 
 const prime_md_bytes = @embedFile("prime_md");
 
+pub const meta: cli.CommandMeta = .{
+    .name = "prime",
+    .description = "Print agent workflow context to stdout",
+};
+
 const params = clap.parseParamsComptime(
     \\-h, --help  Display this help and exit.
     \\

@@ -1,8 +1,5 @@
 const std = @import("std");
 const clap = @import("clap");
-const commands = struct {
-    const prime = @import("commands/prime.zig");
-};
 
 pub const Deps = struct {
     stdout: *std.Io.Writer,
@@ -10,18 +7,35 @@ pub const Deps = struct {
     gpa: std.mem.Allocator,
 };
 
-pub const SubCommand = enum { prime };
+pub const CommandMeta = struct {
+    name: [:0]const u8,
+    description: []const u8,
+};
+
+const all_commands = .{
+    @import("commands/prime.zig"),
+};
+
+pub const SubCommand = blk: {
+    const Tag = std.math.IntFittingRange(0, all_commands.len -| 1);
+    var names: [all_commands.len][]const u8 = undefined;
+    var values: [all_commands.len]Tag = undefined;
+    for (all_commands, 0..) |cmd, i| {
+        names[i] = cmd.meta.name;
+        values[i] = @intCast(i);
+    }
+    break :blk @Enum(Tag, .exhaustive, &names, &values);
+};
 
 const VERSION = "v0.0.1";
 
-const top_flags = clap.parseParamsComptime(
+const top_flag_text =
     \\-h, --help     Display this help and exit.
     \\-v, --version  Print version and exit.
     \\
-);
-const top_params = clap.parseParamsComptime(
-    \\-h, --help     Display this help and exit.
-    \\-v, --version  Print version and exit.
+;
+const top_flags = clap.parseParamsComptime(top_flag_text);
+const top_params = clap.parseParamsComptime(top_flag_text ++
     \\<command>
     \\
 );
@@ -66,7 +80,14 @@ pub fn runArgv(deps: Deps, args_iter: anytype) !u8 {
     };
 
     return switch (subcmd) {
-        .prime => commands.prime.run(deps, args_iter),
+        inline else => |tag| blk: {
+            inline for (all_commands) |cmd| {
+                if (comptime std.mem.eql(u8, cmd.meta.name, @tagName(tag))) {
+                    break :blk cmd.run(deps, args_iter);
+                }
+            }
+            unreachable;
+        },
     };
 }
 
@@ -82,10 +103,8 @@ fn writeTopLevelHelp(deps: Deps) !void {
         \\Commands:
         \\
     );
-    inline for (@typeInfo(SubCommand).@"enum".fields) |field| {
-        const cmd: SubCommand = @field(SubCommand, field.name);
-        const desc = subcommandDescription(cmd);
-        try deps.stdout.print("  {s:<10} {s}\n", .{ field.name, desc });
+    inline for (all_commands) |cmd| {
+        try deps.stdout.print("  {s:<10} {s}\n", .{ cmd.meta.name, cmd.meta.description });
     }
     try deps.stdout.writeAll(
         \\
@@ -98,12 +117,6 @@ fn writeTopLevelHelp(deps: Deps) !void {
         \\Run 'tk <command> --help' for command-specific help.
         \\
     );
-}
-
-fn subcommandDescription(cmd: SubCommand) []const u8 {
-    return switch (cmd) {
-        .prime => "Print agent workflow context to stdout",
-    };
 }
 
 const SliceArgIter = @import("testing/arg_iter.zig").SliceArgIter;
