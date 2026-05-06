@@ -86,6 +86,8 @@ Priority is set with `tk add --priority P0..P4` or `tk update [id] --priority P0
 
 Ticket's default command paths should let agents manage local work safely. Commands that affect upstream state or sync repair, such as `promote` and `sync`, stay explicit and visible.
 
+`tk promote <id>` promotes only the target. `tk promote <epic-id> --children` also promotes directly contained Local Tickets; it does not follow Dependencies.
+
 The CLI uses `remote` for backend configuration and filters:
 
 ```sh

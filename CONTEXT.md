@@ -156,6 +156,10 @@ _Avoid_: Remote Epic, Synced Epic
 The act of converting a **Local Ticket** or **Local Epic** into a backend-backed object through the **Primary Backend**.
 _Avoid_: Publish, Export
 
+**Promotion Children**:
+The directly contained local items included by `tk promote <id> --children`.
+_Avoid_: Recursive Promotion
+
 **Mutation**:
 A durable local intent to modify **Ticket Project** domain state.
 _Avoid_: Change, Audit Entry
@@ -299,6 +303,9 @@ _Avoid_: ticket, tickets
 - **Promotion** changes a **Local Ticket** or **Local Epic** into a backend-backed object in place.
 - **Promotion** replaces a local **Display ID** with the backend **Display ID**.
 - The replaced local **Display ID** remains an **Alias**.
+- **Promotion** does not include contained **Tickets** unless `--children` is used.
+- v1 **Promotion Children** are directly contained **Local Tickets** only.
+- **Promotion Children** do not follow **Dependencies**.
 - Newly created **Tickets** and **Epics** are local by default, even when a **Primary Backend** exists.
 - Default ticket views include both **Local Tickets** and **Backend Tickets**.
 - Ticket views identify each **Ticket's** **Origin**.
@@ -388,6 +395,9 @@ _Avoid_: ticket, tickets
 > **Dev:** "After **Promotion**, should the local follow-up and the backend issue appear as separate tickets?"
 > **Domain expert:** "No — **Promotion** converts the same **Ticket** in place."
 >
+> **Dev:** "Should promoting an **Epic** automatically promote every local **Ticket** in it?"
+> **Domain expert:** "No — use `--children` to include directly contained **Local Tickets** explicitly."
+>
 > **Dev:** "After promoting **TK-123** to GitHub issue **GH-456**, which ID should users see?"
 > **Domain expert:** "They should see **GH-456** as the **Display ID**, while **TK-123** remains an **Alias** for lookup and structured references."
 >
@@ -445,6 +455,7 @@ _Avoid_: ticket, tickets
 - "memory" and "note" were considered for agent follow-ups — resolved: follow-ups are **Local Tickets**.
 - "publish" and "export" were considered for moving local work to a backend — resolved: **Promotion** converts a **Local Ticket** or **Local Epic** into a backend-backed object.
 - Keeping local IDs as visible IDs after **Promotion** was considered — resolved: **Promotion** replaces the **Display ID** and preserves the old local ID as an **Alias**.
+- Recursive promotion was considered — resolved: `--children` includes direct **Promotion Children** only in v1.
 - Backend-intended creation by default was considered when a **Primary Backend** exists — resolved: new **Tickets** and **Epics** are local by default to avoid upstream tracker noise.
 - "change log" and "audit log" were considered for replayable local intent — resolved: **Mutation Log** stores **Mutations**.
 - Generic field patches were considered for **Mutations** — resolved: **Mutations** use named domain operations.
