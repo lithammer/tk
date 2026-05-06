@@ -5,6 +5,19 @@ pub const Section = struct {
     body: []const u8,
 };
 
+pub const section_script = "script";
+pub const section_expected_stdout = "expected/stdout";
+pub const section_expected_stderr = "expected/stderr";
+pub const section_expected_exit = "expected/exit";
+pub const section_input_prefix = "input/";
+
+pub fn findSection(sections: []const Section, name: []const u8) ?*const Section {
+    for (sections) |*sec| {
+        if (std.mem.eql(u8, sec.name, name)) return sec;
+    }
+    return null;
+}
+
 const PRELUDE = "";
 
 pub fn parse(allocator: std.mem.Allocator, data: []const u8) ![]Section {

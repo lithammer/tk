@@ -119,106 +119,55 @@ fn writeTopLevelHelp(deps: Deps) !void {
     );
 }
 
-const SliceArgIter = @import("testing/arg_iter.zig").SliceArgIter;
+const Harness = @import("testing/test_cli.zig").Harness;
 
 test "runArgv routes prime" {
-    var stdout_buf: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer stdout_buf.deinit();
-    var stderr_buf: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer stderr_buf.deinit();
+    var h = Harness.init(std.testing.allocator, &.{"prime"});
+    defer h.deinit();
 
-    const deps = Deps{
-        .stdout = &stdout_buf.writer,
-        .stderr = &stderr_buf.writer,
-        .gpa = std.testing.allocator,
-    };
-
-    var iter = SliceArgIter{ .items = &.{"prime"} };
-    const code = try runArgv(deps, &iter);
-
+    const code = try runArgv(h.deps(), &h.iter);
     try std.testing.expectEqual(@as(u8, 0), code);
-    try std.testing.expect(stdout_buf.written().len > 0);
-    try std.testing.expectEqualStrings("", stderr_buf.written());
+    try std.testing.expect(h.stdout().len > 0);
+    try std.testing.expectEqualStrings("", h.stderr());
 }
 
 test "runArgv returns 2 on unknown subcommand" {
-    var stdout_buf: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer stdout_buf.deinit();
-    var stderr_buf: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer stderr_buf.deinit();
+    var h = Harness.init(std.testing.allocator, &.{"bogus"});
+    defer h.deinit();
 
-    const deps = Deps{
-        .stdout = &stdout_buf.writer,
-        .stderr = &stderr_buf.writer,
-        .gpa = std.testing.allocator,
-    };
-
-    var iter = SliceArgIter{ .items = &.{"bogus"} };
-    const code = try runArgv(deps, &iter);
-
+    const code = try runArgv(h.deps(), &h.iter);
     try std.testing.expectEqual(@as(u8, 2), code);
-    try std.testing.expect(stderr_buf.written().len > 0);
+    try std.testing.expect(h.stderr().len > 0);
 }
 
 test "runArgv returns 2 on missing subcommand" {
-    var stdout_buf: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer stdout_buf.deinit();
-    var stderr_buf: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer stderr_buf.deinit();
+    var h = Harness.init(std.testing.allocator, &.{});
+    defer h.deinit();
 
-    const deps = Deps{
-        .stdout = &stdout_buf.writer,
-        .stderr = &stderr_buf.writer,
-        .gpa = std.testing.allocator,
-    };
-
-    var iter = SliceArgIter{ .items = &.{} };
-    const code = try runArgv(deps, &iter);
-
+    const code = try runArgv(h.deps(), &h.iter);
     try std.testing.expectEqual(@as(u8, 2), code);
-    try std.testing.expect(stderr_buf.written().len > 0);
+    try std.testing.expect(h.stderr().len > 0);
 }
 
 test "runArgv prints version" {
-    var stdout_buf: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer stdout_buf.deinit();
-    var stderr_buf: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer stderr_buf.deinit();
+    var h = Harness.init(std.testing.allocator, &.{"--version"});
+    defer h.deinit();
 
-    const deps = Deps{
-        .stdout = &stdout_buf.writer,
-        .stderr = &stderr_buf.writer,
-        .gpa = std.testing.allocator,
-    };
-
-    var iter = SliceArgIter{ .items = &.{"--version"} };
-    const code = try runArgv(deps, &iter);
-
+    const code = try runArgv(h.deps(), &h.iter);
     try std.testing.expectEqual(@as(u8, 0), code);
-    try std.testing.expectEqualStrings("v0.0.1\n", stdout_buf.written());
-    try std.testing.expectEqualStrings("", stderr_buf.written());
+    try std.testing.expectEqualStrings("v0.0.1\n", h.stdout());
+    try std.testing.expectEqualStrings("", h.stderr());
 }
 
 test "runArgv prints help" {
-    var stdout_buf: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer stdout_buf.deinit();
-    var stderr_buf: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer stderr_buf.deinit();
+    var h = Harness.init(std.testing.allocator, &.{"--help"});
+    defer h.deinit();
 
-    const deps = Deps{
-        .stdout = &stdout_buf.writer,
-        .stderr = &stderr_buf.writer,
-        .gpa = std.testing.allocator,
-    };
-
-    var iter = SliceArgIter{ .items = &.{"--help"} };
-    const code = try runArgv(deps, &iter);
-
-    const out = stdout_buf.written();
+    const code = try runArgv(h.deps(), &h.iter);
     try std.testing.expectEqual(@as(u8, 0), code);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Usage:") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Commands:") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "prime") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "--version") != null);
-    try std.testing.expectEqualStrings("", stderr_buf.written());
+    try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "Usage:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "Commands:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "prime") != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "--version") != null);
+    try std.testing.expectEqualStrings("", h.stderr());
 }

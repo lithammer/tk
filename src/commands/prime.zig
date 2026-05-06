@@ -3,6 +3,7 @@ const clap = @import("clap");
 const cli = @import("../cli.zig");
 
 const prime_md_bytes = @embedFile("prime_md");
+const prime_output: []const u8 = std.mem.trimEnd(u8, prime_md_bytes, " \t\r\n") ++ "\n";
 
 pub const meta: cli.CommandMeta = .{
     .name = "prime",
@@ -30,8 +31,7 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
         return 0;
     }
 
-    const trimmed = std.mem.trimEnd(u8, prime_md_bytes, " \t\r\n");
-    try deps.stdout.print("{s}\n", .{trimmed});
+    try deps.stdout.writeAll(prime_output);
     return 0;
 }
 
@@ -56,96 +56,44 @@ fn writeHelp(deps: cli.Deps) !void {
     });
 }
 
+const Harness = @import("../testing/test_cli.zig").Harness;
+
 test "prime writes embedded markdown with one trailing newline" {
-    const expected_trimmed = std.mem.trimEnd(u8, prime_md_bytes, " \t\r\n");
+    var h = Harness.init(std.testing.allocator, &.{});
+    defer h.deinit();
 
-    var stdout_buf: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer stdout_buf.deinit();
-    var stderr_buf: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer stderr_buf.deinit();
-
-    const deps = cli.Deps{
-        .stdout = &stdout_buf.writer,
-        .stderr = &stderr_buf.writer,
-        .gpa = std.testing.allocator,
-    };
-
-    const SliceArgIter = @import("../testing/arg_iter.zig").SliceArgIter;
-    var iter = SliceArgIter{ .items = &.{} };
-
-    const code = try run(deps, &iter);
-
+    const code = try run(h.deps(), &h.iter);
     try std.testing.expectEqual(@as(u8, 0), code);
-    const written = stdout_buf.written();
-    try std.testing.expect(written.len > 0);
-    try std.testing.expectEqualStrings(expected_trimmed, written[0 .. written.len - 1]);
-    try std.testing.expectEqual('\n', written[written.len - 1]);
-    try std.testing.expectEqualStrings("", stderr_buf.written());
+    try std.testing.expectEqualStrings(prime_output, h.stdout());
+    try std.testing.expectEqualStrings("", h.stderr());
 }
 
 test "prime rejects unknown flag" {
-    var stdout_buf: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer stdout_buf.deinit();
-    var stderr_buf: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer stderr_buf.deinit();
+    var h = Harness.init(std.testing.allocator, &.{"--bad-flag"});
+    defer h.deinit();
 
-    const deps = cli.Deps{
-        .stdout = &stdout_buf.writer,
-        .stderr = &stderr_buf.writer,
-        .gpa = std.testing.allocator,
-    };
-
-    const SliceArgIter = @import("../testing/arg_iter.zig").SliceArgIter;
-    var iter = SliceArgIter{ .items = &.{"--bad-flag"} };
-
-    const code = try run(deps, &iter);
-
+    const code = try run(h.deps(), &h.iter);
     try std.testing.expectEqual(@as(u8, 2), code);
-    try std.testing.expect(stderr_buf.written().len > 0);
+    try std.testing.expect(h.stderr().len > 0);
 }
 
 test "prime rejects extra positional" {
-    var stdout_buf: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer stdout_buf.deinit();
-    var stderr_buf: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer stderr_buf.deinit();
+    var h = Harness.init(std.testing.allocator, &.{"unexpected"});
+    defer h.deinit();
 
-    const deps = cli.Deps{
-        .stdout = &stdout_buf.writer,
-        .stderr = &stderr_buf.writer,
-        .gpa = std.testing.allocator,
-    };
-
-    const SliceArgIter = @import("../testing/arg_iter.zig").SliceArgIter;
-    var iter = SliceArgIter{ .items = &.{"unexpected"} };
-
-    const code = try run(deps, &iter);
-
+    const code = try run(h.deps(), &h.iter);
     try std.testing.expectEqual(@as(u8, 2), code);
-    try std.testing.expect(stderr_buf.written().len > 0);
+    try std.testing.expect(h.stderr().len > 0);
 }
 
 test "prime --help prints help to stdout, exits 0" {
-    var stdout_buf: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer stdout_buf.deinit();
-    var stderr_buf: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer stderr_buf.deinit();
+    var h = Harness.init(std.testing.allocator, &.{"--help"});
+    defer h.deinit();
 
-    const deps = cli.Deps{
-        .stdout = &stdout_buf.writer,
-        .stderr = &stderr_buf.writer,
-        .gpa = std.testing.allocator,
-    };
-
-    const SliceArgIter = @import("../testing/arg_iter.zig").SliceArgIter;
-    var iter = SliceArgIter{ .items = &.{"--help"} };
-
-    const code = try run(deps, &iter);
-
-    const out = stdout_buf.written();
+    const code = try run(h.deps(), &h.iter);
     try std.testing.expectEqual(@as(u8, 0), code);
-    try std.testing.expect(std.mem.indexOf(u8, out, "tk prime") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Usage:") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Options:") != null);
-    try std.testing.expectEqualStrings("", stderr_buf.written());
+    try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "tk prime") != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "Usage:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "Options:") != null);
+    try std.testing.expectEqualStrings("", h.stderr());
 }

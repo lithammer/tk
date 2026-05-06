@@ -5,6 +5,11 @@ const SliceArgIter = @import("arg_iter.zig").SliceArgIter;
 
 const Section = txtar.Section;
 
+pub fn freeTokens(allocator: std.mem.Allocator, tokens: []const []const u8) void {
+    for (tokens) |t| allocator.free(t);
+    allocator.free(tokens);
+}
+
 pub fn tokenizeLine(
     allocator: std.mem.Allocator,
     line: []const u8,
@@ -69,7 +74,7 @@ pub fn tokenizeLine(
                     }
                     if (i < line.len) i += 1;
                 } else {
-                    while (i < line.len and isVarChar(line[i])) {
+                    while (i < line.len and (std.ascii.isAlphanumeric(line[i]) or line[i] == '_')) {
                         try name_buf.append(allocator, line[i]);
                         i += 1;
                     }
@@ -95,10 +100,6 @@ pub fn tokenizeLine(
     return tokens.toOwnedSlice(allocator);
 }
 
-fn isVarChar(c: u8) bool {
-    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_';
-}
-
 fn getEnvFlag(name: []const u8) bool {
     const val = std.testing.environ.getPosix(name) orelse return false;
     return std.mem.eql(u8, val, "1");
@@ -107,7 +108,10 @@ fn getEnvFlag(name: []const u8) bool {
 const ScriptResult = struct {
     stdout: std.ArrayList(u8),
     stderr: std.ArrayList(u8),
-    last_exit: u8,
+    /// Exit code of the last `tk` command in the script. Intermediate non-zero
+    /// exits are intentionally not surfaced; golden-file fixtures pin the
+    /// final command's status, mirroring how a shell pipeline's `$?` works.
+    final_exit: u8,
 
     fn deinit(self: *ScriptResult, allocator: std.mem.Allocator) void {
         self.stdout.deinit(allocator);
@@ -126,8 +130,8 @@ fn validateInputPath(rel: []const u8) !void {
 
 fn materializeInputs(tmp_dir: std.Io.Dir, sections: []const Section) !void {
     for (sections) |sec| {
-        if (!std.mem.startsWith(u8, sec.name, "input/")) continue;
-        const rel = sec.name["input/".len..];
+        if (!std.mem.startsWith(u8, sec.name, txtar.section_input_prefix)) continue;
+        const rel = sec.name[txtar.section_input_prefix.len..];
         try validateInputPath(rel);
         if (std.fs.path.dirname(rel)) |dir| {
             try tmp_dir.createDirPath(std.testing.io, dir);
@@ -141,18 +145,12 @@ fn executeScript(
     sections: []const Section,
     env: std.StringHashMap([]const u8),
 ) !ScriptResult {
-    var script_body: []const u8 = "";
-    for (sections) |sec| {
-        if (std.mem.eql(u8, sec.name, "script")) {
-            script_body = sec.body;
-            break;
-        }
-    }
+    const script_body = if (txtar.findSection(sections, txtar.section_script)) |sec| sec.body else "";
 
     var result = ScriptResult{
         .stdout = .empty,
         .stderr = .empty,
-        .last_exit = 0,
+        .final_exit = 0,
     };
     errdefer result.deinit(allocator);
 
@@ -160,10 +158,7 @@ fn executeScript(
     while (line_it.next()) |line| {
         const trimmed = std.mem.trimEnd(u8, line, "\r");
         const argv = try tokenizeLine(allocator, trimmed, env);
-        defer {
-            for (argv) |arg| allocator.free(arg);
-            allocator.free(argv);
-        }
+        defer freeTokens(allocator, argv);
 
         if (argv.len == 0 or !std.mem.eql(u8, argv[0], "tk")) continue;
 
@@ -179,7 +174,7 @@ fn executeScript(
         };
 
         var iter = SliceArgIter{ .items = argv[1..] };
-        result.last_exit = cli.runArgv(deps, &iter) catch |err| blk: {
+        result.final_exit = cli.runArgv(deps, &iter) catch |err| blk: {
             try result.stderr.appendSlice(allocator, "internal error: ");
             try result.stderr.appendSlice(allocator, @errorName(err));
             try result.stderr.append(allocator, '\n');
@@ -198,22 +193,22 @@ fn rewriteSections(
     sections: []const Section,
     result: ScriptResult,
 ) ![]u8 {
-    const new_exit = try std.fmt.allocPrint(allocator, "{d}\n", .{result.last_exit});
+    const new_exit = try std.fmt.allocPrint(allocator, "{d}\n", .{result.final_exit});
     defer allocator.free(new_exit);
 
     var new_sections: std.ArrayList(Section) = .empty;
     defer new_sections.deinit(allocator);
 
     for (sections) |sec| {
-        if (std.mem.eql(u8, sec.name, "expected/stdout")) {
-            try new_sections.append(allocator, .{ .name = sec.name, .body = result.stdout.items });
-        } else if (std.mem.eql(u8, sec.name, "expected/stderr")) {
-            try new_sections.append(allocator, .{ .name = sec.name, .body = result.stderr.items });
-        } else if (std.mem.eql(u8, sec.name, "expected/exit")) {
-            try new_sections.append(allocator, .{ .name = sec.name, .body = new_exit });
-        } else {
-            try new_sections.append(allocator, sec);
-        }
+        const body = if (std.mem.eql(u8, sec.name, txtar.section_expected_stdout))
+            result.stdout.items
+        else if (std.mem.eql(u8, sec.name, txtar.section_expected_stderr))
+            result.stderr.items
+        else if (std.mem.eql(u8, sec.name, txtar.section_expected_exit))
+            new_exit
+        else
+            sec.body;
+        try new_sections.append(allocator, .{ .name = sec.name, .body = body });
     }
 
     return txtar.serialize(allocator, new_sections.items);
@@ -244,19 +239,9 @@ fn compareAndReport(
     work_path: []const u8,
     quiet: bool,
 ) !void {
-    var expected_stdout: []const u8 = "";
-    var expected_stderr: []const u8 = "";
-    var expected_exit_str: []const u8 = "0\n";
-
-    for (sections) |sec| {
-        if (std.mem.eql(u8, sec.name, "expected/stdout")) {
-            expected_stdout = sec.body;
-        } else if (std.mem.eql(u8, sec.name, "expected/stderr")) {
-            expected_stderr = sec.body;
-        } else if (std.mem.eql(u8, sec.name, "expected/exit")) {
-            expected_exit_str = sec.body;
-        }
-    }
+    const expected_stdout = if (txtar.findSection(sections, txtar.section_expected_stdout)) |s| s.body else "";
+    const expected_stderr = if (txtar.findSection(sections, txtar.section_expected_stderr)) |s| s.body else "";
+    const expected_exit_str = if (txtar.findSection(sections, txtar.section_expected_exit)) |s| s.body else "0\n";
 
     const expected_exit = try std.fmt.parseInt(u8, std.mem.trimEnd(u8, expected_exit_str, " \t\r\n"), 10);
 
@@ -272,8 +257,8 @@ fn compareAndReport(
         fail = true;
     }
 
-    if (result.last_exit != expected_exit) {
-        if (!quiet) std.debug.print("\n--- exit code mismatch: expected {d}, got {d} ---\n", .{ expected_exit, result.last_exit });
+    if (result.final_exit != expected_exit) {
+        if (!quiet) std.debug.print("\n--- exit code mismatch: expected {d}, got {d} ---\n", .{ expected_exit, result.final_exit });
         fail = true;
     }
 
@@ -298,24 +283,29 @@ pub fn runScenario(
     });
 }
 
-pub fn runScenarioWith(
-    allocator: std.mem.Allocator,
-    fixture_path: ?[]const u8,
-    txtar_bytes: []const u8,
-    opts: RunOptions,
-) !void {
+const Staged = struct {
+    sections: []Section,
+    work_path: [:0]const u8,
+    tmp: std.testing.TmpDir,
+    result: ScriptResult,
+
+    fn deinit(self: *Staged, allocator: std.mem.Allocator, keep_work: bool) void {
+        self.result.deinit(allocator);
+        allocator.free(self.work_path);
+        allocator.free(self.sections);
+        if (!keep_work) self.tmp.cleanup();
+    }
+};
+
+fn stage(allocator: std.mem.Allocator, txtar_bytes: []const u8) !Staged {
     const sections = try txtar.parse(allocator, txtar_bytes);
-    defer allocator.free(sections);
+    errdefer allocator.free(sections);
 
     var tmp = std.testing.tmpDir(.{});
-    defer if (!opts.keep_work) tmp.cleanup();
+    errdefer tmp.cleanup();
 
     const work_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
-    defer allocator.free(work_path);
-
-    if (opts.keep_work) {
-        std.debug.print("WORK={s}\n", .{work_path});
-    }
+    errdefer allocator.free(work_path);
 
     var env = std.StringHashMap([]const u8).init(allocator);
     defer env.deinit();
@@ -323,11 +313,23 @@ pub fn runScenarioWith(
 
     try materializeInputs(tmp.dir, sections);
 
-    var result = try executeScript(allocator, sections, env);
-    defer result.deinit(allocator);
+    const result = try executeScript(allocator, sections, env);
+    return .{ .sections = sections, .work_path = work_path, .tmp = tmp, .result = result };
+}
+
+pub fn runScenarioWith(
+    allocator: std.mem.Allocator,
+    fixture_path: ?[]const u8,
+    txtar_bytes: []const u8,
+    opts: RunOptions,
+) !void {
+    var staged = try stage(allocator, txtar_bytes);
+    defer staged.deinit(allocator, opts.keep_work);
+
+    if (opts.keep_work) std.debug.print("WORK={s}\n", .{staged.work_path});
 
     if (opts.update) {
-        const rewritten = try rewriteSections(allocator, sections, result);
+        const rewritten = try rewriteSections(allocator, staged.sections, staged.result);
         defer allocator.free(rewritten);
 
         const path = fixture_path orelse {
@@ -339,28 +341,13 @@ pub fn runScenarioWith(
         return;
     }
 
-    try compareAndReport(allocator, sections, result, work_path, opts.quiet);
+    try compareAndReport(allocator, staged.sections, staged.result, staged.work_path, opts.quiet);
 }
 
 pub fn rewriteScenarioBytes(allocator: std.mem.Allocator, txtar_bytes: []const u8) ![]u8 {
-    const sections = try txtar.parse(allocator, txtar_bytes);
-    defer allocator.free(sections);
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const work_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
-    defer allocator.free(work_path);
-
-    var env = std.StringHashMap([]const u8).init(allocator);
-    defer env.deinit();
-    try env.put("WORK", work_path);
-
-    try materializeInputs(tmp.dir, sections);
-
-    var result = try executeScript(allocator, sections, env);
-    defer result.deinit(allocator);
-
-    return rewriteSections(allocator, sections, result);
+    var staged = try stage(allocator, txtar_bytes);
+    defer staged.deinit(allocator, false);
+    return rewriteSections(allocator, staged.sections, staged.result);
 }
 
 test "tokenizer: basic words" {
@@ -369,10 +356,7 @@ test "tokenizer: basic words" {
     defer env.deinit();
 
     const result = try tokenizeLine(allocator, "tk prime", env);
-    defer {
-        for (result) |t| allocator.free(t);
-        allocator.free(result);
-    }
+    defer freeTokens(allocator, result);
     try std.testing.expectEqual(@as(usize, 2), result.len);
     try std.testing.expectEqualStrings("tk", result[0]);
     try std.testing.expectEqualStrings("prime", result[1]);
@@ -384,10 +368,7 @@ test "tokenizer: single quotes" {
     defer env.deinit();
 
     const result = try tokenizeLine(allocator, "tk add -m 'first paragraph'", env);
-    defer {
-        for (result) |t| allocator.free(t);
-        allocator.free(result);
-    }
+    defer freeTokens(allocator, result);
     try std.testing.expectEqual(@as(usize, 4), result.len);
     try std.testing.expectEqualStrings("first paragraph", result[3]);
 }
@@ -398,10 +379,7 @@ test "tokenizer: doubled quote escape" {
     defer env.deinit();
 
     const result = try tokenizeLine(allocator, "tk add -m 'don''t forget'", env);
-    defer {
-        for (result) |t| allocator.free(t);
-        allocator.free(result);
-    }
+    defer freeTokens(allocator, result);
     try std.testing.expectEqual(@as(usize, 4), result.len);
     try std.testing.expectEqualStrings("don't forget", result[3]);
 }
@@ -412,10 +390,7 @@ test "tokenizer: comment" {
     defer env.deinit();
 
     const result = try tokenizeLine(allocator, "tk x #comment", env);
-    defer {
-        for (result) |t| allocator.free(t);
-        allocator.free(result);
-    }
+    defer freeTokens(allocator, result);
     try std.testing.expectEqual(@as(usize, 2), result.len);
 }
 
@@ -426,10 +401,7 @@ test "tokenizer: env expansion" {
     try env.put("WORK", "/tmp/test-work");
 
     const result = try tokenizeLine(allocator, "tk $WORK/file", env);
-    defer {
-        for (result) |t| allocator.free(t);
-        allocator.free(result);
-    }
+    defer freeTokens(allocator, result);
     try std.testing.expectEqual(@as(usize, 2), result.len);
     try std.testing.expectEqualStrings("/tmp/test-work/file", result[1]);
 }
@@ -441,10 +413,7 @@ test "tokenizer: brace form expansion" {
     try env.put("WORK", "/tmp/test-work");
 
     const result = try tokenizeLine(allocator, "tk ${WORK}/file", env);
-    defer {
-        for (result) |t| allocator.free(t);
-        allocator.free(result);
-    }
+    defer freeTokens(allocator, result);
     try std.testing.expectEqual(@as(usize, 2), result.len);
     try std.testing.expectEqualStrings("/tmp/test-work/file", result[1]);
 }
@@ -455,10 +424,7 @@ test "tokenizer: undefined variable preserved" {
     defer env.deinit();
 
     const result = try tokenizeLine(allocator, "tk $NOPE/file", env);
-    defer {
-        for (result) |t| allocator.free(t);
-        allocator.free(result);
-    }
+    defer freeTokens(allocator, result);
     try std.testing.expectEqual(@as(usize, 2), result.len);
     try std.testing.expectEqualStrings("$NOPE/file", result[1]);
 }
@@ -469,17 +435,11 @@ test "tokenizer: empty and comment-only lines return zero tokens" {
     defer env.deinit();
 
     const empty = try tokenizeLine(allocator, "", env);
-    defer {
-        for (empty) |t| allocator.free(t);
-        allocator.free(empty);
-    }
+    defer freeTokens(allocator, empty);
     try std.testing.expectEqual(@as(usize, 0), empty.len);
 
     const comment = try tokenizeLine(allocator, "# only a comment", env);
-    defer {
-        for (comment) |t| allocator.free(t);
-        allocator.free(comment);
-    }
+    defer freeTokens(allocator, comment);
     try std.testing.expectEqual(@as(usize, 0), comment.len);
 }
 
