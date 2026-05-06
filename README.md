@@ -22,7 +22,7 @@ The goal is similar in spirit to Beads: make work visible to humans and agents f
 - `tk start [id]` marks work active; `tk stop [id]` moves active work back to open.
 - `tk worktree start <id> [path]` creates a Ticket branch and scoped git worktree, defaulting to a sibling worktree path.
 - `tk worktree` reports or changes the current Workspace Scope stored in git worktree config.
-- `tk prime` should generate scope-aware agent briefing output for new or compacted sessions.
+- `tk prime` prints static Markdown embedded from [docs/prime.md](./docs/prime.md) for new or compacted sessions.
 - **Mutations** record durable local intent as named domain operations so they can be synced by Backend Adapters.
 - Sync pulls backend state before applying pending Mutations, applies Mutations in global sequence order, and stops on the first failure.
 - Failed Mutations retry on the next sync; explicit `tk sync --skip <mutation-id>` remains visible.

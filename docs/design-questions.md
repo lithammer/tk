@@ -10,12 +10,6 @@ This file tracks unresolved design work before `tk` exists. Resolved questions s
 **Current recommendation**: Keep intent commands short, with `tk add` creating task Tickets by default, `--bug` for bug Tickets, `--epic` for Epics, and `--parent <epic-id>` for Epic membership. `tk add` uses git-commit-style message input: repeatable `-m/--message`, `-F/--file`, `-F -` for stdin, or editor mode when no message/file is provided. Use lifecycle verbs `tk start [id]`, `tk stop [id]`, and `tk done [id]` instead of `tk status`. Use positional `tk block <blocked-id> <blocking-id>` and `tk unblock <blocked-id> <blocking-id>`. Use `tk sync --skip <mutation-id>` for skipped Mutations and `tk sync log` for Mutation Log inspection. Use CLI `remote` and `--remote` for backend-backed items. Use `tk worktree` rather than `tk scope` or `tk workspace` for v1 Workspace Scope inspection and control, with git worktree creation under `tk worktree start <id> [path] [--no-status]`. Any item ID argument should resolve a Display ID or Alias.
 **Decision needed**: Finalize the v1 commands for reads, promotion, sync inspection, remote configuration, and worktree handling.
 
-### DQ-008: Should Ticket provide an agent briefing command?
-
-**Status**: open
-**Current recommendation**: Add `tk prime` to generate scope-aware agent briefing output after compaction, clear, or a new session.
-**Decision needed**: Define what `tk prime` includes and whether it is part of v1.
-
 ## Resolved
 
 ### DQ-001: What storage backend should the Repository Store use?
@@ -59,6 +53,13 @@ This file tracks unresolved design work before `tk` exists. Resolved questions s
 **Decision**: Use Zig unit tests for domain and command-handler behavior, inline snapshots for small rendered outputs, fake subprocess runners for adapters, and txtar-based CLI scenario fixtures with a small script runner inspired by `rsc.io/script` and Rust's `trycmd`.
 **Recorded in**: README.md.
 **Rationale**: txtar keeps multi-file CLI scenarios reviewable as one text fixture, the script runner supports multi-step command behavior, and trycmd-style output comparison plus update mode gives useful CLI snapshot tests without introducing a TOML schema first.
+
+### DQ-008: Should Ticket provide an agent briefing command?
+
+**Status**: resolved
+**Decision**: Include `tk prime` in v1. It prints static Markdown embedded from `docs/prime.md` with Zig `@embedFile`.
+**Recorded in**: CONTEXT.md and docs/prime.md.
+**Rationale**: A static embedded briefing is easy to review, simple to implement, and still gives agents a consistent context recovery workflow. Dynamic repository state can be added later without changing the command shape.
 
 ### DQ-000: What language should the first implementation use?
 

@@ -244,7 +244,8 @@ _Avoid_: ticket, tickets
 - **`tk worktree`** reports the current **Workspace Scope** and **Workspace Scope Source**.
 - **`tk worktree set <id>`** writes **Workspace Scope** to **Worktree Config**.
 - **`tk worktree clear`** removes configured **Workspace Scope** without disabling **Inferred Workspace Scope**.
-- **Prime** reports current scope, ready work, active work, blocked work, sync health, and close-out reminders.
+- **Prime** provides agent workflow guidance, essential commands, and close-out reminders.
+- v1 **Prime** prints static Markdown embedded from `docs/prime.md` with Zig `@embedFile`.
 - Scoped **`tk`** command output identifies the active **Workspace Scope**.
 - A **Repository Store** is shared by all **Workspaces** for the same version-control repository.
 - A **Workspace Scope** belongs to one **Workspace**, not the **Repository Store**.
@@ -331,8 +332,8 @@ _Avoid_: ticket, tickets
 > **Dev:** "How should an agent know whether scope was configured or inferred?"
 > **Domain expert:** "**`tk worktree`** reports the **Workspace Scope** and **Workspace Scope Source**."
 >
-> **Dev:** "How should an agent recover context after compaction or a new session?"
-> **Domain expert:** "Run **Prime** to get scope-aware work, blocking, and sync context."
+> **Dev:** "How should an agent recover workflow context after compaction or a new session?"
+> **Domain expert:** "Run **Prime** to get Ticket's agent workflow guidance and essential commands."
 >
 > **Dev:** "How does an agent know whether **`tk list`** returned global or scoped results?"
 > **Domain expert:** "Scoped output identifies the active **Workspace Scope**, and global output is requested explicitly."
@@ -395,7 +396,8 @@ _Avoid_: ticket, tickets
 - Implicit branch scope was considered — resolved: **Inferred Workspace Scope** is read-only and lower precedence than **Worktree Config**.
 - Branch names without a Ticket-specific prefix were considered — resolved: **Ticket Branches** use `tk/<display-id>-<slug>`.
 - Combining status changes and worktree creation in **Start** was considered — resolved: **Start** marks work active, while **`tk worktree start`** creates scoped git worktrees.
-- Static agent workflow dumps were considered — resolved: **Prime** generates scope-aware briefing output from current repository state.
+- Static agent workflow dumps were considered — resolved: v1 **Prime** prints reviewed project-specific workflow guidance.
+- Dynamic **Prime** output was considered for v1 — resolved: v1 prints static Markdown from `docs/prime.md`.
 - Configurable worktree root and layout were considered for v1 — resolved: **`tk worktree start`** supports default sibling worktrees and explicit paths only.
 - Hiding scope origin was considered — resolved: **`tk worktree`** reports **Workspace Scope Source**.
 - "workspace store" and "global store" were considered for local state — resolved: a **Repository Store** is shared across all **Workspaces** for one repository.
