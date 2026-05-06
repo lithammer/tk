@@ -1,72 +1,9 @@
 const std = @import("std");
 const cli = @import("../cli.zig");
+const txtar = @import("txtar.zig");
 const SliceArgIter = @import("arg_iter.zig").SliceArgIter;
 
-pub const Section = struct {
-    name: []const u8,
-    body: []const u8,
-};
-
-const PRELUDE = "";
-
-pub fn parseTxtar(allocator: std.mem.Allocator, data: []const u8) ![]Section {
-    var sections: std.ArrayList(Section) = .empty;
-    errdefer sections.deinit(allocator);
-
-    var pos: usize = 0;
-    var current_name: ?[]const u8 = PRELUDE;
-    var current_start: usize = 0;
-
-    while (pos < data.len) {
-        const line_end = std.mem.indexOfScalarPos(u8, data, pos, '\n') orelse data.len;
-        const line = data[pos..line_end];
-        const after_line = if (line_end < data.len) line_end + 1 else data.len;
-
-        if (isSectionHeader(line)) |name| {
-            if (current_name) |cn| {
-                if (cn.len > 0 or pos > 0) {
-                    try sections.append(allocator, .{ .name = cn, .body = data[current_start..pos] });
-                }
-            }
-            current_name = name;
-            current_start = after_line;
-        }
-        pos = after_line;
-    }
-
-    if (current_name) |cn| {
-        if (cn.len > 0 or current_start < data.len) {
-            try sections.append(allocator, .{ .name = cn, .body = data[current_start..] });
-        }
-    }
-
-    return sections.toOwnedSlice(allocator);
-}
-
-fn isSectionHeader(line: []const u8) ?[]const u8 {
-    const trimmed = std.mem.trimEnd(u8, line, " \t\r");
-    if (trimmed.len < 7) return null;
-    if (!std.mem.startsWith(u8, trimmed, "-- ")) return null;
-    if (!std.mem.endsWith(u8, trimmed, " --")) return null;
-    return trimmed[3 .. trimmed.len - 3];
-}
-
-pub fn serializeTxtar(allocator: std.mem.Allocator, sections: []const Section) ![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
-    for (sections) |sec| {
-        if (sec.name.len == 0) {
-            try buf.appendSlice(allocator, sec.body);
-            continue;
-        }
-        try buf.print(allocator, "-- {s} --\n", .{sec.name});
-        try buf.appendSlice(allocator, sec.body);
-        if (sec.body.len > 0 and sec.body[sec.body.len - 1] != '\n') {
-            try buf.append(allocator, '\n');
-        }
-    }
-    return buf.toOwnedSlice(allocator);
-}
+const Section = txtar.Section;
 
 pub fn tokenizeLine(
     allocator: std.mem.Allocator,
@@ -279,7 +216,7 @@ fn rewriteSections(
         }
     }
 
-    return serializeTxtar(allocator, new_sections.items);
+    return txtar.serialize(allocator, new_sections.items);
 }
 
 fn replaceWork(allocator: std.mem.Allocator, text: []const u8, work_path: []const u8) ![]u8 {
@@ -350,7 +287,7 @@ pub fn runScenario(
     const updating = getEnvFlag("TK_UPDATE");
     const keep_work = getEnvFlag("TK_TESTWORK");
 
-    const sections = try parseTxtar(allocator, txtar_bytes);
+    const sections = try txtar.parse(allocator, txtar_bytes);
     defer allocator.free(sections);
 
     var tmp = std.testing.tmpDir(.{});
@@ -389,7 +326,7 @@ pub fn runScenario(
 }
 
 pub fn rewriteScenarioBytes(allocator: std.mem.Allocator, txtar_bytes: []const u8) ![]u8 {
-    const sections = try parseTxtar(allocator, txtar_bytes);
+    const sections = try txtar.parse(allocator, txtar_bytes);
     defer allocator.free(sections);
 
     var tmp = std.testing.tmpDir(.{});
@@ -529,85 +466,7 @@ test "tokenizer: empty and comment-only lines return zero tokens" {
     try std.testing.expectEqual(@as(usize, 0), comment.len);
 }
 
-test "txtar: parse two sections" {
-    const allocator = std.testing.allocator;
-    const input =
-        \\-- script --
-        \\tk prime
-        \\-- expected/stdout --
-        \\hello
-        \\
-    ;
-
-    const sections = try parseTxtar(allocator, input);
-    defer allocator.free(sections);
-
-    try std.testing.expectEqual(@as(usize, 2), sections.len);
-    try std.testing.expectEqualStrings("script", sections[0].name);
-    try std.testing.expectEqualStrings("tk prime\n", sections[0].body);
-    try std.testing.expectEqualStrings("expected/stdout", sections[1].name);
-    try std.testing.expectEqualStrings("hello\n", sections[1].body);
-}
-
-test "txtar: serialize round-trip" {
-    const allocator = std.testing.allocator;
-    const input =
-        \\-- script --
-        \\tk prime
-        \\-- expected/stdout --
-        \\hello
-        \\-- expected/exit --
-        \\0
-        \\
-    ;
-
-    const sections1 = try parseTxtar(allocator, input);
-    defer allocator.free(sections1);
-    const serialized = try serializeTxtar(allocator, sections1);
-    defer allocator.free(serialized);
-    try std.testing.expectEqualStrings(input, serialized);
-
-    const sections2 = try parseTxtar(allocator, serialized);
-    defer allocator.free(sections2);
-    try std.testing.expectEqual(sections1.len, sections2.len);
-    for (sections1, sections2) |a, b| {
-        try std.testing.expectEqualStrings(a.name, b.name);
-        try std.testing.expectEqualStrings(a.body, b.body);
-    }
-}
-
-test "txtar: serializer ensures trailing newline on each body" {
-    const allocator = std.testing.allocator;
-    const sections = [_]Section{
-        .{ .name = "a", .body = "no-newline" },
-        .{ .name = "b", .body = "ends-with\n" },
-    };
-    const out = try serializeTxtar(allocator, &sections);
-    defer allocator.free(out);
-    try std.testing.expectEqualStrings("-- a --\nno-newline\n-- b --\nends-with\n", out);
-
-    const reparsed = try parseTxtar(allocator, out);
-    defer allocator.free(reparsed);
-    try std.testing.expectEqual(@as(usize, 2), reparsed.len);
-    try std.testing.expectEqualStrings("a", reparsed[0].name);
-    try std.testing.expectEqualStrings("b", reparsed[1].name);
-}
-
-test "txtar: header `-- --` is not a section header" {
-    const allocator = std.testing.allocator;
-    const input =
-        \\-- script --
-        \\-- --
-        \\tk prime
-        \\
-    ;
-    const sections = try parseTxtar(allocator, input);
-    defer allocator.free(sections);
-    try std.testing.expectEqual(@as(usize, 1), sections.len);
-    try std.testing.expectEqualStrings("script", sections[0].name);
-}
-
-test "txtar: TK_UPDATE preserves section order" {
+test "TK_UPDATE preserves section order" {
     const allocator = std.testing.allocator;
 
     const prime_body = std.mem.trimEnd(u8, @embedFile("prime_md"), " \t\r\n");
@@ -632,7 +491,7 @@ test "txtar: TK_UPDATE preserves section order" {
     , .{});
     defer allocator.free(fixture);
 
-    const sections_before = try parseTxtar(allocator, fixture);
+    const sections_before = try txtar.parse(allocator, fixture);
     defer allocator.free(sections_before);
 
     try std.testing.expectEqualStrings("input/notes.md", sections_before[1].name);
@@ -640,7 +499,7 @@ test "txtar: TK_UPDATE preserves section order" {
     const rewritten = try rewriteScenarioBytes(allocator, fixture);
     defer allocator.free(rewritten);
 
-    const sections_after = try parseTxtar(allocator, rewritten);
+    const sections_after = try txtar.parse(allocator, rewritten);
     defer allocator.free(sections_after);
 
     try std.testing.expectEqual(sections_before.len, sections_after.len);
