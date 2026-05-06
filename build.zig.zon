@@ -1,0 +1,18 @@
+.{
+    .name = .ticket,
+    .version = "0.0.1",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0x97a0ada3d6c0b286,
+    .paths = .{
+        "src",
+        "docs",
+        "build.zig",
+        "build.zig.zon",
+    },
+    .dependencies = .{
+        .clap = .{
+            .url = "https://github.com/Hejsil/zig-clap/archive/refs/tags/0.12.0.tar.gz",
+            .hash = "clap-0.12.0-oBajB7foAQDqlSwaSG5g0yq7xGbQARUsBk5T64gAOqP5",
+        },
+    },
+}

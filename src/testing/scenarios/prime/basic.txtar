@@ -1,0 +1,101 @@
+-- script --
+tk prime
+-- expected/stdout --
+# Ticket Workflow Context
+
+Run `tk prime` after compaction, clear, or a new agent session.
+
+## Core Rules
+
+- Use Ticket for repository-local work tracking.
+- New Tickets and Epics are local by default.
+- Use `tk add -F -` for self-contained local Tickets with enough context for a fresh agent session.
+- Promotion and sync are explicit, human-visible operations.
+- Use `tk next` to choose agent work.
+- Use `tk worktree` to inspect the current Workspace Scope.
+- Use `tk sync log` to inspect pending, failed, skipped, and applied Mutations.
+
+## Session Start
+
+```sh
+tk prime
+tk worktree
+tk next
+```
+
+## Session Close
+
+Before saying work is complete:
+
+```sh
+tk done <id>
+tk add -F -
+tk sync log
+```
+
+Use `tk done <id>` for completed work. Use `tk add -F -` for follow-ups, deferred decisions, or context that should survive a fresh session. Use `tk sync log` to check whether local sync state needs human attention.
+
+## Essential Commands
+
+### Find Work
+
+```sh
+tk next
+tk list
+tk list --ready
+tk show <id>
+```
+
+### Create Work
+
+```sh
+tk add -F -
+tk add --bug -F -
+tk add --epic -F -
+tk add --parent <epic-id> -F -
+```
+
+`tk add` uses git-commit-style message input. The first paragraph becomes the title. Later paragraphs become the body.
+
+### Update Work
+
+```sh
+tk update <id> -F -
+tk start <id>
+tk stop <id>
+tk done <id>
+```
+
+### Blocking
+
+```sh
+tk block <blocked-id> <blocking-id>
+tk unblock <blocked-id> <blocking-id>
+```
+
+Blocking affects `tk next` and `tk list --ready`.
+
+### Worktrees
+
+```sh
+tk worktree
+tk worktree start <id>
+tk worktree set <id>
+tk worktree clear
+```
+
+`tk worktree start <id>` creates a Ticket branch and scoped git worktree. `tk worktree` reports whether Workspace Scope is configured, inferred, or absent.
+
+### Human Curation
+
+```sh
+tk promote <id>
+tk sync
+tk sync --skip <mutation-id>
+tk remote
+```
+
+Agents should surface promotion, sync failures, and skipped Mutations rather than quietly repairing upstream state.
+-- expected/stderr --
+-- expected/exit --
+0
