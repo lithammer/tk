@@ -55,6 +55,8 @@ Open design work is tracked in [docs/design-questions.md](./docs/design-question
 
 The v1 CLI surface is documented in [docs/cli.md](./docs/cli.md).
 
+The first implementation plan is documented in [docs/implementation.md](./docs/implementation.md).
+
 ## Testing Direction
 
 Ticket should use layered tests from the start:
