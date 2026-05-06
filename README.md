@@ -78,9 +78,11 @@ tk add --priority P1 -F -               # creates a higher-priority local Ticket
 
 `tk add` uses git-commit-style message input: repeatable `-m/--message`, `-F/--file`, `-F -` for stdin, or editor mode when no message/file is provided. The first paragraph becomes the title and later paragraphs become the body. `--bug` and `--epic` are mutually exclusive. `Epic` is not a Ticket Kind.
 
-`tk next` selects the ready Ticket with the lowest local-only Priority, then oldest creation order, within the active Workspace Scope. The default Priority is `P2`.
+`tk next` selects the ready Ticket with the lowest local-only Priority, then oldest creation order, within the active Workspace Scope. It does not select Epics. The default Priority is `P2`.
 
 Priority is set with `tk add --priority P0..P4` or `tk update [id] --priority P0..P4`; v1 does not have a top-level priority command.
+
+`tk list` defaults to a tree view: Epics are top-level rows, child Tickets are nested under their Epic, and unparented Tickets are top-level rows. `tk list --ready` keeps the tree shape and includes non-empty Epics as containers for ready child Tickets. Rows use compact status, priority, and kind markers.
 
 Ticket's default command paths should let agents manage local work safely. Commands that affect upstream state or sync repair, such as `promote` and `sync`, stay explicit and visible.
 

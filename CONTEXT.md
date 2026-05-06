@@ -32,6 +32,10 @@ _Avoid_: Unsynced Field, Sync Excluded Field
 A local-only ranking for a **Ticket**: `P0`, `P1`, `P2`, `P3`, or `P4`.
 _Avoid_: Severity
 
+**List Tree**:
+The default **`tk list`** view that renders **Epics** and their child **Tickets** as a tree.
+_Avoid_: Flat List
+
 **Epic**:
 A backend-agnostic grouping of related **Tickets** that can be tracked and worked as one unit.
 _Avoid_: Batch, Ticket Group, Umbrella
@@ -309,6 +313,10 @@ _Avoid_: ticket, tickets
 - The **Repository Store** keeps current **Ticket** and **Epic** state.
 - The **Mutation Log** records replayable backend intent and is not the primary read model.
 - **`tk next`** selects the ready **Ticket** with the lowest **Priority**, then oldest creation order, within the active **Workspace Scope**.
+- **List Tree** renders **Epics** as top-level rows, child **Tickets** nested under their **Epic**, and unparented **Tickets** as top-level rows.
+- **List Tree** uses compact status, priority, and kind markers.
+- **`tk next`** does not select **Epics**.
+- **`tk list --ready`** keeps the **List Tree** shape and includes non-empty **Epics** as containers for ready child **Tickets**.
 
 ## Example dialogue
 
@@ -392,6 +400,9 @@ _Avoid_: ticket, tickets
 >
 > **Dev:** "How can **`tk next`** choose work without guessing?"
 > **Domain expert:** "It uses local **Priority** first, then creation order, within the active **Workspace Scope**."
+>
+> **Dev:** "Should **`tk list`** be a flat table?"
+> **Domain expert:** "No — **`tk list`** uses a **List Tree** so **Epics** and child **Tickets** are visible together."
 >
 > **Dev:** "If every **Ticket** in an **Epic** is done, should the **Epic** close automatically?"
 > **Domain expert:** "No — **Epic** closure is explicit because completion criteria may exist outside the current child tickets."
