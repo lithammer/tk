@@ -28,9 +28,6 @@ pub const OpenFlags = struct {
 
 pub const Db = struct {
     handle: ?*c.sqlite3,
-    /// Buffer for the most recent SQLite error message. Borrowed from the
-    /// SQLite handle; valid until the next API call that mutates handle state.
-    last_error: []const u8 = "",
 
     pub fn open(path_z: [:0]const u8, flags: OpenFlags) Error!Db {
         var raw: ?*c.sqlite3 = null;
@@ -59,20 +56,9 @@ pub const Db = struct {
         var err_msg: [*c]u8 = null;
         const rc = c.sqlite3_exec(self.handle, sql.ptr, null, null, &err_msg);
         if (rc != c.SQLITE_OK) {
-            if (err_msg != null) {
-                self.last_error = std.mem.sliceTo(err_msg, 0);
-                // Note: we leak this message to the buffer; SQLite owns it
-                // until the next mutation. Caller should copy if they need
-                // ownership.
-            }
-            // Free the SQLite-owned message after we've sliced it for diag.
             if (err_msg != null) c.sqlite3_free(err_msg);
             return error.ExecFailed;
         }
-    }
-
-    pub fn execMulti(self: *Db, sql: [:0]const u8) Error!void {
-        return self.exec(sql);
     }
 
     pub fn errorMessage(self: *Db) []const u8 {
