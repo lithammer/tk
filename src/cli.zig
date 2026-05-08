@@ -7,6 +7,9 @@ pub const Deps = struct {
     stdout: *std.Io.Writer,
     stderr: *std.Io.Writer,
     gpa: std.mem.Allocator,
+    /// I/O implementation handle, threaded through filesystem and subprocess
+    /// calls. Tests use `std.testing.io`; main uses the runtime's init.io.
+    io: std.Io,
     /// User's working directory at invocation time. Used as the cwd for
     /// subprocess discovery (e.g. `git rev-parse`) and for resolving relative
     /// paths such as the Repository Store location. Required from slice 2.

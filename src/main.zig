@@ -17,6 +17,7 @@ pub fn main(init: std.process.Init) !void {
         .stdout = &stdout.interface,
         .stderr = &stderr.interface,
         .gpa = init.gpa,
+        .io = io,
         .cwd = std.Io.Dir.cwd(),
         .runner = real_runner.runner(),
         .clock = real_clock.clock(),

@@ -47,6 +47,7 @@ pub const Harness = struct {
             .stdout = &self.stdout_buf.writer,
             .stderr = &self.stderr_buf.writer,
             .gpa = self.gpa,
+            .io = std.testing.io,
             .cwd = self.cwd_override orelse std.Io.Dir.cwd(),
             .runner = self.fake_runner.runner(),
             .clock = self.fake_clock.clock(),

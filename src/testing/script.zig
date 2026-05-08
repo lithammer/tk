@@ -177,6 +177,7 @@ fn executeScript(
             .stdout = &stdout_buf.writer,
             .stderr = &stderr_buf.writer,
             .gpa = allocator,
+            .io = std.testing.io,
             .cwd = cwd,
             .runner = real_runner.runner(),
             .clock = fake_clock.clock(),
