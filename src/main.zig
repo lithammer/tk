@@ -1,5 +1,7 @@
 const std = @import("std");
 const cli = @import("cli.zig");
+const proc = @import("proc/runner.zig");
+const clock_mod = @import("clock.zig");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -8,10 +10,16 @@ pub fn main(init: std.process.Init) !void {
     var stdout = std.Io.File.stdout().writer(io, &stdout_buf);
     var stderr = std.Io.File.stderr().writer(io, &stderr_buf);
 
+    var real_runner = proc.RealRunner.init(io);
+    var real_clock = clock_mod.RealClock.init(io);
+
     const deps = cli.Deps{
         .stdout = &stdout.interface,
         .stderr = &stderr.interface,
         .gpa = init.gpa,
+        .cwd = std.Io.Dir.cwd(),
+        .runner = real_runner.runner(),
+        .clock = real_clock.clock(),
     };
 
     var code = run(deps, init) catch |err| blk: {

@@ -1,10 +1,22 @@
 const std = @import("std");
 const clap = @import("clap");
+const proc = @import("proc/runner.zig");
+const clock_mod = @import("clock.zig");
 
 pub const Deps = struct {
     stdout: *std.Io.Writer,
     stderr: *std.Io.Writer,
     gpa: std.mem.Allocator,
+    /// User's working directory at invocation time. Used as the cwd for
+    /// subprocess discovery (e.g. `git rev-parse`) and for resolving relative
+    /// paths such as the Repository Store location. Required from slice 2.
+    cwd: std.Io.Dir,
+    /// Captured-output subprocess runner. Real impl wraps `std.process.run`;
+    /// tests inject a `FakeRunner`.
+    runner: proc.Runner,
+    /// UTC millisecond clock. Tests inject a `FakeClock` so timestamps stay
+    /// deterministic.
+    clock: clock_mod.Clock,
 };
 
 pub const CommandMeta = struct {
@@ -13,6 +25,7 @@ pub const CommandMeta = struct {
 };
 
 const all_commands = .{
+    @import("commands/init.zig"),
     @import("commands/prime.zig"),
 };
 

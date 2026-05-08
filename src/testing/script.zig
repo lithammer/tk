@@ -1,5 +1,7 @@
 const std = @import("std");
 const cli = @import("../cli.zig");
+const proc = @import("../proc/runner.zig");
+const clock_mod = @import("../clock.zig");
 const txtar = @import("txtar.zig");
 const SliceArgIter = @import("arg_iter.zig").SliceArgIter;
 
@@ -144,6 +146,7 @@ fn executeScript(
     allocator: std.mem.Allocator,
     sections: []const Section,
     env: std.StringHashMap([]const u8),
+    cwd: std.Io.Dir,
 ) !ScriptResult {
     const script_body = if (txtar.findSection(sections, txtar.section_script)) |sec| sec.body else "";
 
@@ -153,6 +156,9 @@ fn executeScript(
         .final_exit = 0,
     };
     errdefer result.deinit(allocator);
+
+    var real_runner = proc.RealRunner.init(std.testing.io);
+    var fake_clock = clock_mod.FakeClock.init(0);
 
     var line_it = std.mem.splitScalar(u8, script_body, '\n');
     while (line_it.next()) |line| {
@@ -171,6 +177,9 @@ fn executeScript(
             .stdout = &stdout_buf.writer,
             .stderr = &stderr_buf.writer,
             .gpa = allocator,
+            .cwd = cwd,
+            .runner = real_runner.runner(),
+            .clock = fake_clock.clock(),
         };
 
         var iter = SliceArgIter{ .items = argv[1..] };
@@ -313,7 +322,7 @@ fn stage(allocator: std.mem.Allocator, txtar_bytes: []const u8) !Staged {
 
     try materializeInputs(tmp.dir, sections);
 
-    const result = try executeScript(allocator, sections, env);
+    const result = try executeScript(allocator, sections, env, tmp.dir);
     return .{ .sections = sections, .work_path = work_path, .tmp = tmp, .result = result };
 }
 
