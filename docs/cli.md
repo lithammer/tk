@@ -59,9 +59,9 @@ tk show [id]
 - Child Tickets are nested under their Epic.
 - Unparented Tickets are top-level rows.
 - `tk list` defaults to open and active items. `--all` includes done items.
-- `--ready` shows only ready Tickets, keeping the tree shape and including non-empty Epics as containers.
-- `--blocked` shows only Tickets with at least one unresolved blocking Dependency.
-- `--active` shows only items with status active.
+- `--ready` shows only open Tickets with no unresolved Dependencies or External Blockers, keeping the tree shape and including non-empty Epics as containers.
+- `--blocked` shows only blocked Tickets, keeping the tree shape and including non-empty Epics as containers. Epics are not selected as blocked work in v1.
+- `--active` shows active Tickets and Epics, keeping the tree shape and including Epics as containers for active child Tickets.
 - `--ready`, `--blocked`, and `--active` are mutually exclusive.
 - `--local` shows only Local Tickets and Local Epics.
 - `--remote` shows only items that have been promoted.
@@ -105,9 +105,11 @@ tk block <blocked-id> <blocking-id>
 tk unblock <blocked-id> <blocking-id>
 ```
 
-Blocking affects `tk next` and `tk list --ready`.
+Blocking affects `tk next`, `tk list --ready`, and `tk list --blocked`.
 
 Dependencies may connect Tickets and Epics in any blocking or blocked combination, but cycles are rejected.
+
+External Blocker CLI is deferred from the initial blocking command surface, but the Repository Store models External Blockers separately from Dependencies.
 
 ## Promotion
 

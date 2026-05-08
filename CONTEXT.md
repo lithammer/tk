@@ -44,21 +44,25 @@ _Avoid_: Batch, Ticket Group, Umbrella
 CLI shorthand for placing a **Ticket** under a containing item.
 _Avoid_: Parent Domain Model
 
-**Ticket Status**:
-The lifecycle state of a **Ticket**: `open`, `active`, `blocked`, or `done`.
-_Avoid_: Todo, In Progress, Closed
+**Item Status**:
+The lifecycle state of a **Ticket** or **Epic**: `open`, `active`, or `done`.
+_Avoid_: Todo, In Progress, Closed, Blocked
 
 **Assignee**:
 A person or agent expected to work on a **Ticket**.
 _Avoid_: Owner
 
-**Epic Status**:
-The lifecycle state of an **Epic**: `open`, `active`, or `done`.
-_Avoid_: Closed, Blocked
+**Label**:
+A descriptive facet for loose filtering or grouping, such as `python`, `ci`, or `docs`.
+_Avoid_: Priority, Ticket Kind, Epic Membership, Status, Blocker
 
 **Dependency**:
 A relationship where one **Ticket** or **Epic** cannot progress until another **Ticket** or **Epic** is done.
 _Avoid_: Parent, Child
+
+**External Blocker**:
+A blocker with a human-readable reason that is not modeled as another **Ticket** or **Epic**.
+_Avoid_: Blocked Status
 
 **Blocking Item**:
 The **Ticket** or **Epic** that must be done before another item can progress.
@@ -177,7 +181,7 @@ A named domain operation that describes the intent of a **Mutation**.
 _Avoid_: Field Patch, JSON Patch
 
 **V1 Mutation Type**:
-A **Mutation Type** supported by the first implementation: `create_ticket`, `update_ticket`, `set_ticket_status`, `create_epic`, `update_epic`, `set_epic_status`, `add_ticket_to_epic`, `remove_ticket_from_epic`, `add_dependency`, `remove_dependency`, `promote_ticket`, or `promote_epic`.
+A **Mutation Type** supported by the first implementation: `create_ticket`, `update_ticket`, `create_epic`, `update_epic`, `set_item_status`, `add_ticket_to_epic`, `remove_ticket_from_epic`, `add_dependency`, `remove_dependency`, `add_external_blocker`, `resolve_external_blocker`, `promote_ticket`, or `promote_epic`.
 _Avoid_: Comment Mutation, Label Mutation, Assignee Mutation
 
 **Mutation Log**:
@@ -234,10 +238,12 @@ _Avoid_: ticket, tickets
 - **Priority** is a **Local Field** in v1.
 - The default **Priority** is `P2`.
 - Lower **Priority** numbers sort before higher **Priority** numbers.
-- A **Ticket** has exactly one **Ticket Status**.
+- **Labels** are descriptive facets and do not replace **Priority**, **Ticket Kind**, **Epic** membership, **Item Status**, **Dependencies**, or **External Blockers**.
+- **Labels** are deferred from v1.
+- A **Ticket** has exactly one **Item Status**.
 - A **Ticket** may have zero or more **Assignees**.
-- `active` **Ticket Status** means the **Ticket** is currently being worked and does not imply assignment.
-- An **Epic** has exactly one **Epic Status**.
+- `active` **Item Status** means the **Ticket** or **Epic** is currently being worked and does not imply assignment.
+- An **Epic** has exactly one **Item Status**.
 - An **Epic** is only `done` after explicit closure.
 - Child **Ticket** completion may suggest closing an **Epic**, but does not close it automatically.
 - A **Dependency** has exactly one **Blocking Item** and one **Blocked Item**.
@@ -245,6 +251,8 @@ _Avoid_: ticket, tickets
 - **Dependencies** may connect **Tickets** and **Epics** in any blocking or blocked combination.
 - **Dependencies** must not form cycles.
 - **Dependency** is distinct from **Epic** membership.
+- A **Ticket** or **Epic** may have zero or more **External Blockers**.
+- A **Ticket** is ready only when its **Item Status** is `open`, it has no unresolved **Dependencies**, and it has no **External Blockers**.
 - A **Workspace** may have zero or one **Workspace Scope**.
 - A **Workspace Scope** references exactly one **Ticket** or **Epic**.
 - **`tk`** commands inside a scoped **Workspace** default to the current **Ticket** or **Epic**.
@@ -255,6 +263,8 @@ _Avoid_: ticket, tickets
 - **Inferred Workspace Scope** is read-only and may come from branch names containing a **Display ID** or **Alias**.
 - A **Ticket Branch** includes a **Display ID** so **Workspace Scope** can be inferred.
 - **Aliases** keep old **Ticket Branches** inferable after **Promotion** replaces the **Display ID**.
+- **Display IDs** are globally unique across **Tickets** and **Epics**.
+- **Aliases** are globally unique across **Tickets** and **Epics**.
 - **Start** sets a **Ticket** or **Epic** to `active`.
 - **Stop** moves an active **Ticket** or **Epic** back to `open`.
 - **`tk worktree start`** creates a **Ticket Branch**, creates a git worktree, stores **Workspace Scope**, and marks the scoped item `active` by default.
@@ -353,14 +363,14 @@ _Avoid_: ticket, tickets
 > **Dev:** "Should **Workspace Scope** be stored in an untracked file in every worktree?"
 > **Domain expert:** "No — v1 stores **Workspace Scope** in **Worktree Config** to avoid working-tree litter."
 >
-> **Dev:** "If a branch is named `tk/TK-123-fix-login`, should **`tk`** infer scope?"
+> **Dev:** "If a branch is named `tk/src-123-fix-login`, should **`tk`** infer scope?"
 > **Domain expert:** "Yes — if **Worktree Config** has no scope, **`tk`** may use **Inferred Workspace Scope** from the branch name."
 >
 > **Dev:** "What should a **Ticket Branch** look like?"
 > **Domain expert:** "Use `tk/<display-id>-<slug>` so the branch is recognizable and scope can be inferred."
 >
-> **Dev:** "What should **`tk start TK-123`** do?"
-> **Domain expert:** "It should mark **TK-123** `active`; **`tk worktree start TK-123`** creates a scoped git worktree."
+> **Dev:** "What should **`tk start src-123`** do?"
+> **Domain expert:** "It should mark **src-123** `active`; **`tk worktree start src-123`** creates a scoped git worktree."
 >
 > **Dev:** "How should an agent know whether scope was configured or inferred?"
 > **Domain expert:** "**`tk worktree`** reports the **Workspace Scope** and **Workspace Scope Source**."
@@ -398,8 +408,8 @@ _Avoid_: ticket, tickets
 > **Dev:** "Should promoting an **Epic** automatically promote every local **Ticket** in it?"
 > **Domain expert:** "No — use `--children` to include directly contained **Local Tickets** explicitly."
 >
-> **Dev:** "After promoting **TK-123** to GitHub issue **GH-456**, which ID should users see?"
-> **Domain expert:** "They should see **GH-456** as the **Display ID**, while **TK-123** remains an **Alias** for lookup and structured references."
+> **Dev:** "After promoting **src-123** to GitHub issue **GH-456**, which ID should users see?"
+> **Domain expert:** "They should see **GH-456** as the **Display ID**, while **src-123** remains an **Alias** for lookup and structured references."
 >
 > **Dev:** "Should an agent creating a short-lived follow-up automatically create a GitHub or Jira issue?"
 > **Domain expert:** "No — newly created **Tickets** and **Epics** are local by default and require explicit **Promotion** before they reach the **Primary Backend**."
@@ -407,10 +417,10 @@ _Avoid_: ticket, tickets
 > **Dev:** "Should **`tk list`** hide **Local Tickets** when a **Primary Backend** exists?"
 > **Domain expert:** "No — default ticket views include both **Local Tickets** and **Backend Tickets**, and each row identifies its **Origin**."
 >
-> **Dev:** "If **TK-12** belongs to **EP-3**, does that mean **TK-12** is blocked by **EP-3**?"
+> **Dev:** "If **src-12** belongs to **src-3**, does that mean **src-12** is blocked by **src-3**?"
 > **Domain expert:** "No — **Epic** membership groups work, while a **Dependency** says one item cannot progress until another is done."
 >
-> **Dev:** "Does `--parent EP-3` introduce a parent-child domain model?"
+> **Dev:** "Does `--parent src-3` introduce a parent-child domain model?"
 > **Domain expert:** "No — in v1, the **Parent Argument** is CLI shorthand for **Epic** membership."
 >
 > **Dev:** "Is an **Epic** a type of **Ticket**?"

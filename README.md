@@ -44,8 +44,9 @@ Important distinctions:
 
 - **Epic membership** groups work. **Dependency** describes blocking order.
 - **Priority** is local-only in v1 and sorts `P0` before `P4`.
-- **Ticket Status** is `open`, `active`, `blocked`, or `done`.
-- **Epic Status** is `open`, `active`, or `done`.
+- **Item Status** is `open`, `active`, or `done` for both Tickets and Epics.
+- Blocking is separate from Item Status: Dependencies point at blocking items,
+  and External Blockers capture outside blockers.
 - `active` means current work. **Assignee** is tracked separately.
 - **Workspace Scope** is local-only and is not synced to backends.
 
