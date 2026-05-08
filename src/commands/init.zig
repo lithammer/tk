@@ -51,7 +51,7 @@ fn execute(deps: cli.Deps) !u8 {
     };
     // Best-effort tighten permissions on POSIX. If chmod fails or the dir
     // already exists with broader permissions, leave it as-is.
-    chmod0700(tk_dir_path) catch {};
+    chmod0700(deps.gpa, tk_dir_path) catch {};
 
     const db_path = try std.fs.path.joinZ(deps.gpa, &.{ tk_dir_path, "ticket.db" });
     defer deps.gpa.free(db_path);
@@ -139,7 +139,15 @@ fn discoverPaths(deps: cli.Deps) !?DiscoveredPaths {
     defer run_result.deinit(deps.gpa);
 
     if (run_result.exit_code != 0) {
-        deps.stderr.writeAll("tk init: not in a git repository\n") catch {};
+        // git's stderr already explains "not a git repository", "must be run
+        // in a work tree" (bare repos), etc. Reuse it rather than fabricate a
+        // generic message that loses detail.
+        const trimmed = std.mem.trim(u8, run_result.stderr, " \t\r\n");
+        if (trimmed.len > 0) {
+            deps.stderr.print("tk init: {s}\n", .{trimmed}) catch {};
+        } else {
+            deps.stderr.writeAll("tk init: not in a git repository\n") catch {};
+        }
         return null;
     }
 
@@ -149,7 +157,9 @@ fn discoverPaths(deps: cli.Deps) !?DiscoveredPaths {
         return null;
     };
     const toplevel = lines.next() orelse {
-        deps.stderr.writeAll("tk init: bare repositories are not supported\n") catch {};
+        // git rev-parse with --show-toplevel inside a worktree always emits
+        // both lines together; this branch is unreachable in practice.
+        deps.stderr.writeAll("tk init: git did not report a working tree\n") catch {};
         return null;
     };
 
@@ -191,11 +201,11 @@ fn seedDisplayPrefix(deps: cli.Deps, db: *sqlite.Db, toplevel: []const u8) !void
     try db.exec(sql);
 }
 
-fn chmod0700(path: []const u8) !void {
+fn chmod0700(gpa: std.mem.Allocator, path: []const u8) !void {
     const builtin = @import("builtin");
     if (builtin.os.tag == .windows) return;
-    const path_z = try std.heap.page_allocator.dupeZ(u8, path);
-    defer std.heap.page_allocator.free(path_z);
+    const path_z = try gpa.dupeZ(u8, path);
+    defer gpa.free(path_z);
     _ = std.posix.system.chmod(path_z, 0o700);
 }
 
@@ -250,6 +260,15 @@ test "init: --help prints to stdout, exits 0" {
     try std.testing.expectEqualStrings("", h.stderr());
 }
 
+test "init: rejects unexpected positional" {
+    var h = Harness.init(std.testing.allocator, &.{"unexpected"});
+    defer h.deinit();
+
+    const code = try run(h.deps(), &h.iter);
+    try std.testing.expectEqual(@as(u8, 2), code);
+    try std.testing.expect(h.stderr().len > 0);
+}
+
 // ---- End-to-end tests using a temp dir as the simulated Git common dir ----
 
 const TmpStore = struct {
@@ -258,23 +277,25 @@ const TmpStore = struct {
     toplevel_path: []u8,
     db_path: [:0]u8,
 
-    fn init(gpa: std.mem.Allocator) !TmpStore {
+    /// `basename` is the directory name simulated as the repository toplevel
+    /// — display_prefix derivation is fed `std.fs.path.basename(toplevel)`,
+    /// so picking a known basename lets tests pin the seeded prefix.
+    fn init(gpa: std.mem.Allocator, basename: []const u8) !TmpStore {
         var tmp = std.testing.tmpDir(.{});
         errdefer tmp.cleanup();
-        const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", gpa);
-        errdefer gpa.free(root);
+        const tmp_root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", gpa);
+        defer gpa.free(tmp_root);
 
-        // Pretend the temp dir is the git toplevel; common_dir is a `.git`
-        // child mkdir'd under it. tk init will create .git/tk/ticket.db.
-        const toplevel = try gpa.dupe(u8, root);
+        const toplevel = try std.fs.path.join(gpa, &.{ tmp_root, basename });
         errdefer gpa.free(toplevel);
-        const common_dir = try std.fs.path.join(gpa, &.{ root, ".git" });
+        try std.Io.Dir.cwd().createDirPath(std.testing.io, toplevel);
+
+        const common_dir = try std.fs.path.join(gpa, &.{ toplevel, ".git" });
         errdefer gpa.free(common_dir);
         try std.Io.Dir.cwd().createDirPath(std.testing.io, common_dir);
 
         const db_path = try std.fs.path.joinZ(gpa, &.{ common_dir, "tk", "ticket.db" });
 
-        gpa.free(root);
         return .{
             .tmp = tmp,
             .common_dir_path = common_dir,
@@ -297,7 +318,7 @@ const TmpStore = struct {
 
 test "init: success creates store, applies migration, seeds prefix" {
     const gpa = std.testing.allocator;
-    var store = try TmpStore.init(gpa);
+    var store = try TmpStore.init(gpa, "my-test-repo");
     defer store.deinit(gpa);
 
     var h = Harness.init(gpa, &.{});
@@ -331,13 +352,14 @@ test "init: success creates store, applies migration, seeds prefix" {
 
     const prefix = try db.queryOneText(gpa, "select value from store_config where key='display_prefix'");
     defer if (prefix) |p| gpa.free(p);
-    try std.testing.expect(prefix != null);
-    try std.testing.expect(prefix.?.len > 0);
+    // Pinning the basename through TmpStore.init guarantees init reads
+    // --show-toplevel (not --git-common-dir) when deriving the prefix.
+    try std.testing.expectEqualStrings("my-test-repo", prefix.?);
 }
 
 test "init: idempotent on second run" {
     const gpa = std.testing.allocator;
-    var store = try TmpStore.init(gpa);
+    var store = try TmpStore.init(gpa, "my-test-repo");
     defer store.deinit(gpa);
 
     const stdout_payload = try store.gitRevParseStdout(gpa);
@@ -369,7 +391,7 @@ test "init: idempotent on second run" {
 
 test "init: refuses to overwrite a non-Ticket SQLite file" {
     const gpa = std.testing.allocator;
-    var store = try TmpStore.init(gpa);
+    var store = try TmpStore.init(gpa, "my-test-repo");
     defer store.deinit(gpa);
 
     // Pre-create the tk/ dir and put a plain SQLite file at ticket.db.
@@ -402,7 +424,7 @@ test "init: refuses to overwrite a non-Ticket SQLite file" {
 
 test "init: rejects a store created by a future Ticket version" {
     const gpa = std.testing.allocator;
-    var store = try TmpStore.init(gpa);
+    var store = try TmpStore.init(gpa, "my-test-repo");
     defer store.deinit(gpa);
 
     // Initialize once normally.
