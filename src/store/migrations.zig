@@ -190,7 +190,21 @@ pub const QueryError = zqlite.Error || error{MultipleStatements};
 
 pub const ApplyError = QueryError || error{StoreFromFutureVersion};
 
+/// Last SQLite error message captured by `applyAll`. zqlite's `rollback`
+/// runs a successful `rollback` statement, which clears the per-connection
+/// `sqlite3_errmsg`; capture it here before that happens so callers reading
+/// `migrations.lastError()` see the original migration failure rather than
+/// the post-rollback empty string.
+var last_error_buf: [256]u8 = undefined;
+var last_error_len: usize = 0;
+
+pub fn lastError() []const u8 {
+    return last_error_buf[0..last_error_len];
+}
+
 pub fn applyAll(conn: Conn, now_iso: []const u8) ApplyError!void {
+    last_error_len = 0;
+
     const recorded_version: i64 = if (try schemaMigrationsExists(conn))
         (try queryOptionalInt(conn, "select coalesce(max(version), 0) from schema_migrations")) orelse 0
     else
@@ -200,31 +214,44 @@ pub fn applyAll(conn: Conn, now_iso: []const u8) ApplyError!void {
 
     for (all_migrations) |mig| {
         if (mig.version <= recorded_version) continue;
-
-        try conn.transaction();
-        errdefer conn.rollback();
-
-        try conn.execNoArgs(mig.sql);
-
-        // application_id and user_version pragmas don't accept `?` parameters.
-        // The values are a compile-time `i32` constant and a `u32` from the
-        // hardcoded migration list, so the buffer is statically oversized and
-        // bufPrintZ's NoSpaceLeft is unreachable.
-        var buf: [128]u8 = undefined;
-        const pragma_sql = std.fmt.bufPrintZ(
-            &buf,
-            "pragma application_id = {d}; pragma user_version = {d};",
-            .{ application_id, mig.version },
-        ) catch unreachable;
-        try conn.execNoArgs(pragma_sql);
-
-        try conn.exec(
-            "insert into schema_migrations(version, applied_at) values (?1, ?2)",
-            .{ @as(i64, @intCast(mig.version)), now_iso },
-        );
-
-        try conn.commit();
+        applyOne(conn, mig, now_iso) catch |err| {
+            captureError(conn);
+            conn.rollback();
+            return err;
+        };
     }
+}
+
+fn applyOne(conn: Conn, mig: Migration, now_iso: []const u8) ApplyError!void {
+    try conn.transaction();
+
+    try conn.execNoArgs(mig.sql);
+
+    // application_id and user_version pragmas don't accept `?` parameters.
+    // The values are a compile-time `i32` constant and a `u32` from the
+    // hardcoded migration list, so the buffer is statically oversized and
+    // bufPrintZ's NoSpaceLeft is unreachable.
+    var buf: [128]u8 = undefined;
+    const pragma_sql = std.fmt.bufPrintZ(
+        &buf,
+        "pragma application_id = {d}; pragma user_version = {d};",
+        .{ application_id, mig.version },
+    ) catch unreachable;
+    try conn.execNoArgs(pragma_sql);
+
+    try conn.exec(
+        "insert into schema_migrations(version, applied_at) values (?1, ?2)",
+        .{ @as(i64, @intCast(mig.version)), now_iso },
+    );
+
+    try conn.commit();
+}
+
+fn captureError(conn: Conn) void {
+    const msg = std.mem.span(conn.lastError());
+    const n = @min(msg.len, last_error_buf.len);
+    @memcpy(last_error_buf[0..n], msg[0..n]);
+    last_error_len = n;
 }
 
 pub fn currentVersion(conn: Conn) QueryError!u32 {
@@ -312,6 +339,23 @@ test "applyAll rejects future version" {
         error.StoreFromFutureVersion,
         applyAll(conn, "2026-05-09T00:00:00.000Z"),
     );
+}
+
+test "applyAll captures sqlite error message before rollback clears it" {
+    const conn = try openMemoryDb();
+    defer conn.close();
+
+    // Pre-create one of the tables migration_1 creates so the migration's
+    // `create table items` fails. The errdefer rollback would otherwise
+    // clear sqlite3_errmsg before applyAll returns; lastError() must still
+    // expose the original "table items already exists" message.
+    try conn.execNoArgs("create table items (x integer)");
+
+    const result = applyAll(conn, "2026-05-09T00:00:00.000Z");
+    try std.testing.expectError(error.Error, result);
+    const msg = lastError();
+    try std.testing.expect(msg.len > 0);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "items") != null);
 }
 
 test "applyAll records applied_at from the caller-supplied clock" {

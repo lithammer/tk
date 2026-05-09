@@ -98,7 +98,7 @@ fn execute(deps: cli.Deps) !u8 {
         else => {
             deps.stderr.print(
                 "tk init: migration failed: {s}: {s}\n",
-                .{ @errorName(err), std.mem.span(conn.lastError()) },
+                .{ @errorName(err), migrations.lastError() },
             ) catch {};
             return 1;
         },
