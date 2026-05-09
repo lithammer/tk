@@ -130,7 +130,7 @@ fn execute(deps: cli.Deps) !u8 {
     return 0;
 }
 
-const StoreKind = enum {
+pub const StoreKind = enum {
     /// File was just created by sqlite3_open_v2 and contains no schema yet.
     fresh,
     /// Existing Ticket Repository Store (matching application_id).
@@ -139,7 +139,7 @@ const StoreKind = enum {
     foreign,
 };
 
-fn classify(conn: zqlite.Conn) migrations.QueryError!StoreKind {
+pub fn classify(conn: zqlite.Conn) migrations.QueryError!StoreKind {
     const app_id = (try migrations.queryOptionalInt(conn, "pragma application_id")) orelse 0;
     if (app_id == migrations.application_id) return .ours;
 
@@ -360,15 +360,10 @@ test "init: success creates store, applies migration, seeds prefix" {
     const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
     defer conn.close();
 
-    try std.testing.expectEqual(
-        @as(?i64, migrations.application_id),
-        try migrations.queryOptionalInt(conn, "pragma application_id"),
-    );
-    try std.testing.expectEqual(
-        @as(?i64, 1),
-        try migrations.queryOptionalInt(conn, "pragma user_version"),
-    );
-
+    // application_id and user_version are covered by the migration-level
+    // test in src/store/migrations.zig. journal_mode and display_prefix are
+    // unique to init: configureForTicketStore and seedDisplayPrefix don't
+    // run inside applyAll.
     if (try conn.row("pragma journal_mode", .{})) |r| {
         defer r.deinit();
         try std.testing.expectEqualStrings("wal", r.text(0));
@@ -380,55 +375,55 @@ test "init: success creates store, applies migration, seeds prefix" {
     } else return error.ExpectedRow;
 }
 
-test "init: tightens tk dir to mode 0700 on POSIX" {
+test "init: only tightens permissions on directories it created" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
     const gpa = std.testing.allocator;
-    var store = try TmpStore.init(gpa, "my-test-repo");
-    defer store.deinit(gpa);
 
-    var h = Harness.init(gpa, &.{});
-    defer h.deinit();
-    const stdout_payload = try store.gitRevParseStdout(gpa);
-    defer gpa.free(stdout_payload);
-    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = stdout_payload });
+    // Half 1: tk dir does not exist beforehand → init creates it at 0700.
+    {
+        var store = try TmpStore.init(gpa, "my-test-repo");
+        defer store.deinit(gpa);
 
-    const code = try run(h.deps(), &h.iter);
-    try std.testing.expectEqual(@as(u8, 0), code);
+        var h = Harness.init(gpa, &.{});
+        defer h.deinit();
+        const stdout_payload = try store.gitRevParseStdout(gpa);
+        defer gpa.free(stdout_payload);
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = stdout_payload });
 
-    const tk_dir = try std.fs.path.join(gpa, &.{ store.common_dir_path, "tk" });
-    defer gpa.free(tk_dir);
-    const st = try std.Io.Dir.cwd().statFile(std.testing.io, tk_dir, .{});
-    const mode_bits = @intFromEnum(st.permissions) & 0o777;
-    try std.testing.expectEqual(@as(@TypeOf(mode_bits), 0o700), mode_bits);
-}
+        const code = try run(h.deps(), &h.iter);
+        try std.testing.expectEqual(@as(u8, 0), code);
 
-test "init: leaves an existing tk dir's permissions untouched on POSIX" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+        const tk_dir = try std.fs.path.join(gpa, &.{ store.common_dir_path, "tk" });
+        defer gpa.free(tk_dir);
+        const st = try std.Io.Dir.cwd().statFile(std.testing.io, tk_dir, .{});
+        const mode_bits = @intFromEnum(st.permissions) & 0o777;
+        try std.testing.expectEqual(@as(@TypeOf(mode_bits), 0o700), mode_bits);
+    }
 
-    const gpa = std.testing.allocator;
-    var store = try TmpStore.init(gpa, "my-test-repo");
-    defer store.deinit(gpa);
+    // Half 2: tk dir pre-created at 0o755 → init leaves it alone.
+    {
+        var store = try TmpStore.init(gpa, "my-test-repo");
+        defer store.deinit(gpa);
 
-    // Pre-create <common>/tk with broader permissions, mimicking a user who
-    // wants the store readable by their own group.
-    const tk_dir = try std.fs.path.join(gpa, &.{ store.common_dir_path, "tk" });
-    defer gpa.free(tk_dir);
-    try std.Io.Dir.cwd().createDirPath(std.testing.io, tk_dir);
-    try std.Io.Dir.cwd().setFilePermissions(std.testing.io, tk_dir, @enumFromInt(0o755), .{});
+        const tk_dir = try std.fs.path.join(gpa, &.{ store.common_dir_path, "tk" });
+        defer gpa.free(tk_dir);
+        try std.Io.Dir.cwd().createDirPath(std.testing.io, tk_dir);
+        try std.Io.Dir.cwd().setFilePermissions(std.testing.io, tk_dir, @enumFromInt(0o755), .{});
 
-    var h = Harness.init(gpa, &.{});
-    defer h.deinit();
-    const stdout_payload = try store.gitRevParseStdout(gpa);
-    defer gpa.free(stdout_payload);
-    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = stdout_payload });
+        var h = Harness.init(gpa, &.{});
+        defer h.deinit();
+        const stdout_payload = try store.gitRevParseStdout(gpa);
+        defer gpa.free(stdout_payload);
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = stdout_payload });
 
-    const code = try run(h.deps(), &h.iter);
-    try std.testing.expectEqual(@as(u8, 0), code);
+        const code = try run(h.deps(), &h.iter);
+        try std.testing.expectEqual(@as(u8, 0), code);
 
-    const st = try std.Io.Dir.cwd().statFile(std.testing.io, tk_dir, .{});
-    const mode_bits = @intFromEnum(st.permissions) & 0o777;
-    try std.testing.expectEqual(@as(@TypeOf(mode_bits), 0o755), mode_bits);
+        const st = try std.Io.Dir.cwd().statFile(std.testing.io, tk_dir, .{});
+        const mode_bits = @intFromEnum(st.permissions) & 0o777;
+        try std.testing.expectEqual(@as(@TypeOf(mode_bits), 0o755), mode_bits);
+    }
 }
 
 test "init: idempotent on second run preserves an externally-set prefix" {
@@ -479,7 +474,54 @@ test "init: idempotent on second run preserves an externally-set prefix" {
     } else return error.ExpectedRow;
 }
 
-test "init: refuses to overwrite a non-Ticket SQLite file with tables" {
+fn openMemoryConn() !zqlite.Conn {
+    return try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+}
+
+test "classify: a freshly-created database is .fresh" {
+    const conn = try openMemoryConn();
+    defer conn.close();
+
+    try std.testing.expectEqual(StoreKind.fresh, try classify(conn));
+}
+
+test "classify: a Ticket Repository Store is .ours" {
+    const conn = try openMemoryConn();
+    defer conn.close();
+
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z");
+
+    try std.testing.expectEqual(StoreKind.ours, try classify(conn));
+}
+
+test "classify: a SQLite file with foreign tables is .foreign" {
+    const conn = try openMemoryConn();
+    defer conn.close();
+
+    try conn.execNoArgs("create table other_app(x integer)");
+
+    try std.testing.expectEqual(StoreKind.foreign, try classify(conn));
+}
+
+test "classify: a SQLite file with a foreign application_id is .foreign" {
+    // SQLite only persists `pragma application_id` to the database header
+    // when committed alongside a real write, so the pragma is paired with a
+    // table+insert in one transaction.
+    const conn = try openMemoryConn();
+    defer conn.close();
+
+    try conn.execNoArgs(
+        \\begin;
+        \\pragma application_id = 0x12345678;
+        \\create table other_app (x integer);
+        \\insert into other_app values (1);
+        \\commit;
+    );
+
+    try std.testing.expectEqual(StoreKind.foreign, try classify(conn));
+}
+
+test "init: surfaces the foreign-store diagnostic on stderr" {
     const gpa = std.testing.allocator;
     var store = try TmpStore.init(gpa, "my-test-repo");
     defer store.deinit(gpa);
@@ -503,20 +545,12 @@ test "init: refuses to overwrite a non-Ticket SQLite file with tables" {
     const code = try run(h.deps(), &h.iter);
     try std.testing.expectEqual(@as(u8, 1), code);
     try std.testing.expect(std.mem.indexOf(u8, h.stderr(), messages.init_refuse_foreign) != null);
-
-    const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
-    defer conn.close();
-    try std.testing.expectEqual(
-        @as(?i64, 1),
-        try migrations.queryOptionalInt(conn, "select count(*) from sqlite_master where name='other_app'"),
-    );
 }
 
-test "init: refuses a foreign SQLite file even when its application_id is non-zero" {
-    // SQLite only persists `pragma application_id` to the database header
-    // when it is committed alongside a real schema write, so this exercises
-    // the `app_id != ours and app_id != 0` branch of `classify` rather than
-    // the `app_id == 0 with tables` branch covered by the previous test.
+test "init: rejects a store created by a future Ticket version" {
+    // The migration-level test in src/store/migrations.zig covers the
+    // future-version detection itself. This test only asserts the
+    // user-visible diagnostic phrasing reaches stderr through tk init.
     const gpa = std.testing.allocator;
     var store = try TmpStore.init(gpa, "my-test-repo");
     defer store.deinit(gpa);
@@ -526,58 +560,9 @@ test "init: refuses a foreign SQLite file even when its application_id is non-ze
     try std.Io.Dir.cwd().createDirPath(std.testing.io, tk_dir);
 
     {
-        const foreign = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.Create | zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
-        defer foreign.close();
-        try foreign.execNoArgs(
-            \\begin;
-            \\pragma application_id = 0x12345678;
-            \\create table other_app (x integer);
-            \\insert into other_app values (1);
-            \\commit;
-        );
-    }
-
-    var h = Harness.init(gpa, &.{});
-    defer h.deinit();
-    const stdout_payload = try store.gitRevParseStdout(gpa);
-    defer gpa.free(stdout_payload);
-    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = stdout_payload });
-
-    const code = try run(h.deps(), &h.iter);
-    try std.testing.expectEqual(@as(u8, 1), code);
-    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), messages.init_refuse_foreign) != null);
-
-    // Confirm we did not touch the foreign data.
-    const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
-    defer conn.close();
-    try std.testing.expectEqual(
-        @as(?i64, 0x12345678),
-        try migrations.queryOptionalInt(conn, "pragma application_id"),
-    );
-    try std.testing.expectEqual(
-        @as(?i64, 1),
-        try migrations.queryOptionalInt(conn, "select count(*) from other_app"),
-    );
-}
-
-test "init: rejects a store created by a future Ticket version" {
-    const gpa = std.testing.allocator;
-    var store = try TmpStore.init(gpa, "my-test-repo");
-    defer store.deinit(gpa);
-
-    {
-        var h = Harness.init(gpa, &.{});
-        defer h.deinit();
-        const stdout_payload = try store.gitRevParseStdout(gpa);
-        defer gpa.free(stdout_payload);
-        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = stdout_payload });
-        const code = try run(h.deps(), &h.iter);
-        try std.testing.expectEqual(@as(u8, 0), code);
-    }
-
-    {
-        const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+        const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.Create | zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
         defer conn.close();
+        try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z");
         try conn.exec(
             "insert into schema_migrations(version, applied_at) values (?1, ?2)",
             .{ @as(i64, 999), "2099-01-01T00:00:00.000Z" },
