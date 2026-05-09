@@ -77,15 +77,6 @@ test "prime rejects unknown flag" {
     try std.testing.expect(h.stderr().len > 0);
 }
 
-test "prime rejects extra positional" {
-    var h = Harness.init(std.testing.allocator, &.{"unexpected"});
-    defer h.deinit();
-
-    const code = try run(h.deps(), &h.iter);
-    try std.testing.expectEqual(@as(u8, 2), code);
-    try std.testing.expect(h.stderr().len > 0);
-}
-
 test "prime --help prints help to stdout, exits 0" {
     var h = Harness.init(std.testing.allocator, &.{"--help"});
     defer h.deinit();

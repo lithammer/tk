@@ -159,6 +159,19 @@ test "runArgv returns 2 on unknown subcommand" {
     try std.testing.expect(h.stderr().len > 0);
 }
 
+test "runArgv returns 2 on extra positional after a subcommand" {
+    // Trailing positionals after a known subcommand surface through the
+    // subcommand parser; this test pins the dispatcher contract once
+    // (exit 2 + non-empty stderr) so individual commands don't each have
+    // to retest it.
+    var h = Harness.init(std.testing.allocator, &.{ "prime", "unexpected" });
+    defer h.deinit();
+
+    const code = try runArgv(h.deps(), &h.iter);
+    try std.testing.expectEqual(@as(u8, 2), code);
+    try std.testing.expect(h.stderr().len > 0);
+}
+
 test "runArgv returns 2 on missing subcommand" {
     var h = Harness.init(std.testing.allocator, &.{});
     defer h.deinit();

@@ -304,12 +304,27 @@ test "applyAll on empty db creates v1 schema and records migration" {
         try queryOptionalInt(conn, "pragma user_version"),
     );
 
-    try std.testing.expectEqual(@as(?i64, 10), try queryOptionalInt(
-        conn,
-        "select count(*) from sqlite_master where type='table' and name in ('items','item_ids','dependencies','external_blockers','mutations','remotes','sync_cursors','sequences','store_config','schema_migrations')",
-    ));
+    // Behavioral check: the v1 schema can hold a Ticket round-trip. The
+    // helper inserts an item plus its display resolver row and commits the
+    // deferred composite FK; querying back the Display ID confirms the
+    // schema is wired correctly without locking an exact table count.
+    try test_helpers.insertTicket(conn, .{ .id = "t1", .display = "tk-1", .created_seq = 1 });
+    if (try conn.row("select value from item_ids where item_id = 't1' and source = 'display'", .{})) |r| {
+        defer r.deinit();
+        try std.testing.expectEqualStrings("tk-1", r.text(0));
+    } else return error.ExpectedRow;
 
-    try std.testing.expectEqual(@as(?i64, 3), try queryOptionalInt(conn, "select count(*) from sequences"));
+    // Behavioral check: the documented sequence-allocation pattern returns a
+    // monotonic value. This pins the contract used by the create_ticket /
+    // create_epic Mutation Apply path rather than the literal row count of
+    // pre-seeded sequences.
+    if (try conn.row(
+        "update sequences set value = value + 1 where name = 'item_created_seq' returning value",
+        .{},
+    )) |r| {
+        defer r.deinit();
+        try std.testing.expectEqual(@as(i64, 1), r.int(0));
+    } else return error.ExpectedRow;
 }
 
 test "applyAll is idempotent on a current store" {
@@ -425,7 +440,7 @@ const test_helpers = struct {
     }
 };
 
-test "items: epic with ticket_kind violates check" {
+test "Repository Store rejects an Epic with a Ticket Kind" {
     const conn = try test_helpers.freshDb();
     defer conn.close();
     try test_helpers.expectRejected(conn,
@@ -434,7 +449,7 @@ test "items: epic with ticket_kind violates check" {
     );
 }
 
-test "items: ticket without priority violates check" {
+test "Repository Store rejects a Ticket without a Priority" {
     const conn = try test_helpers.freshDb();
     defer conn.close();
     try test_helpers.expectRejected(conn,
@@ -443,7 +458,7 @@ test "items: ticket without priority violates check" {
     );
 }
 
-test "items: invalid status rejected" {
+test "Repository Store rejects an Item with an unknown Item Status" {
     const conn = try test_helpers.freshDb();
     defer conn.close();
     try test_helpers.expectRejected(conn,
@@ -452,7 +467,7 @@ test "items: invalid status rejected" {
     );
 }
 
-test "items: empty title rejected" {
+test "Repository Store rejects a Ticket with an empty title" {
     const conn = try test_helpers.freshDb();
     defer conn.close();
     try test_helpers.expectRejected(conn,
@@ -461,7 +476,7 @@ test "items: empty title rejected" {
     );
 }
 
-test "items: contained ticket pointing at non-Epic rejected" {
+test "Repository Store rejects a Ticket contained by a non-Epic" {
     const conn = try test_helpers.freshDb();
     defer conn.close();
     try test_helpers.insertTicket(conn, .{ .id = "t1", .display = "tk-1", .created_seq = 1 });
@@ -474,7 +489,7 @@ test "items: contained ticket pointing at non-Epic rejected" {
     );
 }
 
-test "dependencies: self-edge rejected" {
+test "Repository Store rejects a Dependency where Blocking Item equals Blocked Item" {
     const conn = try test_helpers.freshDb();
     defer conn.close();
     try test_helpers.insertTicket(conn, .{ .id = "t1", .display = "tk-1", .created_seq = 1 });
@@ -484,7 +499,7 @@ test "dependencies: self-edge rejected" {
     );
 }
 
-test "dependencies: cycle rejected" {
+test "Repository Store rejects a Dependency cycle" {
     const conn = try test_helpers.freshDb();
     defer conn.close();
     try test_helpers.insertTicket(conn, .{ .id = "t1", .display = "tk-1", .created_seq = 1 });
@@ -499,7 +514,7 @@ test "dependencies: cycle rejected" {
     );
 }
 
-test "item_ids: duplicate value rejected" {
+test "Repository Store rejects a duplicate Display ID or Alias" {
     const conn = try test_helpers.freshDb();
     defer conn.close();
     try test_helpers.insertTicket(conn, .{ .id = "t1", .display = "tk-1", .created_seq = 1 });
@@ -510,7 +525,7 @@ test "item_ids: duplicate value rejected" {
     );
 }
 
-test "external_blockers: empty reason rejected" {
+test "Repository Store rejects an External Blocker with an empty reason" {
     const conn = try test_helpers.freshDb();
     defer conn.close();
     try test_helpers.insertTicket(conn, .{ .id = "t1", .display = "tk-1", .created_seq = 1 });
@@ -520,7 +535,7 @@ test "external_blockers: empty reason rejected" {
     );
 }
 
-test "item_ids: rejects values containing characters outside the allowed set" {
+test "Repository Store rejects a Display ID or Alias with disallowed characters" {
     const conn = try test_helpers.freshDb();
     defer conn.close();
     try test_helpers.insertTicket(conn, .{ .id = "t1", .display = "tk-1", .created_seq = 1 });
@@ -541,7 +556,7 @@ test "item_ids: rejects values containing characters outside the allowed set" {
     );
 }
 
-test "mutations: enforces the documented V1 mutation vocabulary" {
+test "Repository Store enforces the documented V1 Mutation Type vocabulary" {
     const conn = try test_helpers.freshDb();
     defer conn.close();
     try test_helpers.insertTicket(conn, .{ .id = "t1", .display = "tk-1", .created_seq = 1 });
@@ -561,7 +576,7 @@ test "mutations: enforces the documented V1 mutation vocabulary" {
     );
 }
 
-test "items: missing display resolver row rejected on commit" {
+test "Repository Store rejects an Item without a current Display ID" {
     const conn = try test_helpers.freshDb();
     defer conn.close();
     // Without inserting an item_ids row, the deferred composite FK

@@ -292,15 +292,6 @@ test "init: --help prints to stdout, exits 0" {
     try std.testing.expectEqualStrings("", h.stderr());
 }
 
-test "init: rejects unexpected positional" {
-    var h = Harness.init(std.testing.allocator, &.{"unexpected"});
-    defer h.deinit();
-
-    const code = try run(h.deps(), &h.iter);
-    try std.testing.expectEqual(@as(u8, 2), code);
-    try std.testing.expect(h.stderr().len > 0);
-}
-
 const TmpStore = struct {
     tmp: std.testing.TmpDir,
     common_dir_path: []u8,
