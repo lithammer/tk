@@ -209,20 +209,19 @@ pub fn applyAll(db: *Db, now_iso: []const u8) ApplyError!void {
 
         try db.exec(mig.sql);
 
-        var insert_buf: [256]u8 = undefined;
-        const insert_sql = std.fmt.bufPrintZ(&insert_buf,
-            "insert into schema_migrations(version, applied_at) values ({d}, '{s}')",
-            .{ mig.version, now_iso },
-        ) catch return error.OutOfMemory;
-        try db.exec(insert_sql);
-
-        var pragma_buf: [128]u8 = undefined;
-        const app_id_sql = std.fmt.bufPrintZ(&pragma_buf, "pragma application_id = {d}", .{application_id}) catch return error.OutOfMemory;
-        try db.exec(app_id_sql);
-
-        var version_buf: [64]u8 = undefined;
-        const user_version_sql = std.fmt.bufPrintZ(&version_buf, "pragma user_version = {d}", .{mig.version}) catch return error.OutOfMemory;
-        try db.exec(user_version_sql);
+        // Buffer is oversized for these three statements; bufPrintZ
+        // returning NoSpaceLeft would mean an unreachable program bug, not
+        // an OOM, so an unreachable lets the assertion catch it in debug.
+        var buf: [512]u8 = undefined;
+        const tail_sql = std.fmt.bufPrintZ(
+            &buf,
+            \\insert into schema_migrations(version, applied_at) values ({d}, '{s}');
+            \\pragma application_id = {d};
+            \\pragma user_version = {d};
+            ,
+            .{ mig.version, now_iso, application_id, mig.version },
+        ) catch unreachable;
+        try db.exec(tail_sql);
 
         try db.exec("commit");
     }
@@ -244,8 +243,6 @@ fn schemaMigrationsExists(db: *Db) sqlite.Error!bool {
 test "applyAll on empty db creates v1 schema and records migration" {
     var db = try Db.open(":memory:", .{});
     defer db.close();
-
-    try db.exec("pragma foreign_keys = on");
 
     try applyAll(&db, "2026-05-09T00:00:00.000Z");
 
@@ -270,7 +267,6 @@ test "applyAll on empty db creates v1 schema and records migration" {
 test "applyAll is idempotent on a current store" {
     var db = try Db.open(":memory:", .{});
     defer db.close();
-    try db.exec("pragma foreign_keys = on");
 
     try applyAll(&db, "2026-05-09T00:00:00.000Z");
     try applyAll(&db, "2026-05-09T00:00:01.000Z");
@@ -282,7 +278,6 @@ test "applyAll is idempotent on a current store" {
 test "applyAll rejects future version" {
     var db = try Db.open(":memory:", .{});
     defer db.close();
-    try db.exec("pragma foreign_keys = on");
 
     try applyAll(&db, "2026-05-09T00:00:00.000Z");
     try db.exec("insert into schema_migrations(version, applied_at) values (999, '2099-01-01T00:00:00.000Z')");
@@ -294,7 +289,6 @@ const test_helpers = struct {
     fn freshDb() !Db {
         var db = try Db.open(":memory:", .{});
         errdefer db.close();
-        try db.exec("pragma foreign_keys = on");
         try applyAll(&db, "2026-05-09T00:00:00.000Z");
         return db;
     }

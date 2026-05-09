@@ -22,21 +22,9 @@ const Expectation = struct {
 pub const FakeRunner = struct {
     gpa: Allocator,
     expectations: std.ArrayList(Expectation),
-    /// If true, an unmatched call returns a synthesized failure (exit 127,
-    /// stderr noting the missing expectation). If false, the call returns the
-    /// `default` response.
-    strict: bool = true,
-    default: Response = .{ .exit_code = 127, .stderr = "FakeRunner: no expectation matched\n" },
-    /// Recorded calls, in order. Useful for asserting the runner saw the
-    /// argv we expected.
-    calls: std.ArrayList([]const []const u8),
 
     pub fn init(gpa: Allocator) FakeRunner {
-        return .{
-            .gpa = gpa,
-            .expectations = .empty,
-            .calls = .empty,
-        };
+        return .{ .gpa = gpa, .expectations = .empty };
     }
 
     pub fn deinit(self: *FakeRunner) void {
@@ -45,12 +33,6 @@ pub const FakeRunner = struct {
             self.gpa.free(exp.argv_prefix);
         }
         self.expectations.deinit(self.gpa);
-
-        for (self.calls.items) |call| {
-            for (call) |s| self.gpa.free(s);
-            self.gpa.free(call);
-        }
-        self.calls.deinit(self.gpa);
     }
 
     pub fn expect(self: *FakeRunner, argv_prefix: []const []const u8, response: Response) !void {
@@ -73,35 +55,22 @@ pub const FakeRunner = struct {
     fn runImpl(context: *anyopaque, gpa: Allocator, options: Options) runner_mod.Error!Result {
         const self: *FakeRunner = @ptrCast(@alignCast(context));
 
-        const recorded = gpa.alloc([]const u8, options.argv.len) catch return error.OutOfMemory;
-        var rec_i: usize = 0;
-        errdefer {
-            for (recorded[0..rec_i]) |s| gpa.free(s);
-            gpa.free(recorded);
-        }
-        while (rec_i < options.argv.len) : (rec_i += 1) {
-            recorded[rec_i] = gpa.dupe(u8, options.argv[rec_i]) catch return error.OutOfMemory;
-        }
-        self.calls.append(self.gpa, recorded) catch return error.OutOfMemory;
-
-        const response: Response = matchPrefix: {
-            for (self.expectations.items) |exp| {
-                if (matchesPrefix(options.argv, exp.argv_prefix)) break :matchPrefix exp.response;
+        for (self.expectations.items) |exp| {
+            if (matchesPrefix(options.argv, exp.argv_prefix)) {
+                const stdout = gpa.dupe(u8, exp.response.stdout) catch return error.OutOfMemory;
+                errdefer gpa.free(stdout);
+                const stderr = gpa.dupe(u8, exp.response.stderr) catch return error.OutOfMemory;
+                return .{ .exit_code = exp.response.exit_code, .stdout = stdout, .stderr = stderr };
             }
-            if (self.strict) {
-                break :matchPrefix self.default;
-            }
-            break :matchPrefix self.default;
-        };
+        }
 
-        const stdout = gpa.dupe(u8, response.stdout) catch return error.OutOfMemory;
-        errdefer gpa.free(stdout);
-        const stderr = gpa.dupe(u8, response.stderr) catch return error.OutOfMemory;
-        return .{
-            .exit_code = response.exit_code,
-            .stdout = stdout,
-            .stderr = stderr,
-        };
+        // Strict mode: an unmatched call is a test bug, not a runtime
+        // condition. Panic loudly so the offending test fails immediately
+        // instead of silently receiving exit 127.
+        std.debug.print("FakeRunner: no expectation matched argv:", .{});
+        for (options.argv) |arg| std.debug.print(" {s}", .{arg});
+        std.debug.print("\n", .{});
+        @panic("FakeRunner: unexpected subprocess call");
     }
 
     fn matchesPrefix(argv: []const []const u8, prefix: []const []const u8) bool {

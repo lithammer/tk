@@ -51,25 +51,10 @@ fn execute(deps: cli.Deps) !u8 {
     };
     // Best-effort tighten permissions on POSIX. If chmod fails or the dir
     // already exists with broader permissions, leave it as-is.
-    chmod0700(deps.gpa, tk_dir_path) catch {};
+    setDirMode0700(deps, tk_dir_path) catch {};
 
     const db_path = try std.fs.path.joinZ(deps.gpa, &.{ tk_dir_path, "ticket.db" });
     defer deps.gpa.free(db_path);
-
-    const exists = blk: {
-        std.Io.Dir.cwd().access(deps.io, db_path, .{}) catch break :blk false;
-        break :blk true;
-    };
-
-    if (exists) {
-        if (!isTicketStore(db_path)) {
-            deps.stderr.print(
-                "tk init: {s} exists but is not a Ticket Repository Store\n",
-                .{db_path},
-            ) catch {};
-            return 1;
-        }
-    }
 
     var db = sqlite.Db.open(db_path, .{}) catch |err| {
         deps.stderr.print("tk init: failed to open {s}: {s}\n", .{ db_path, @errorName(err) }) catch {};
@@ -77,12 +62,20 @@ fn execute(deps: cli.Deps) !u8 {
     };
     defer db.close();
 
-    db.exec("pragma journal_mode = wal") catch {};
-    db.exec("pragma foreign_keys = on") catch |err| {
-        deps.stderr.print("tk init: pragma foreign_keys failed: {s}\n", .{@errorName(err)}) catch {};
+    // Classify the file we just opened. application_id is 0 on a fresh
+    // database, and `sqlite_master` is empty there too; anything else with
+    // a non-Ticket application_id or non-empty schema is a foreign file we
+    // must refuse to overwrite. One open, one classification — no TOCTOU.
+    const app_id_raw = (db.queryOneInt("pragma application_id") catch 0) orelse 0;
+    const table_count = (db.queryOneInt("select count(*) from sqlite_master") catch 0) orelse 0;
+    const existing = app_id_raw == migrations.application_id;
+    if (!existing and (app_id_raw != 0 or table_count != 0)) {
+        deps.stderr.print(
+            "tk init: {s} exists but is not a Ticket Repository Store\n",
+            .{db_path},
+        ) catch {};
         return 1;
-    };
-    db.exec("pragma busy_timeout = 5000") catch {};
+    }
 
     var iso_buf: [24]u8 = undefined;
     const now_iso = deps.clock.nowIso(&iso_buf);
@@ -112,7 +105,7 @@ fn execute(deps: cli.Deps) !u8 {
         return 1;
     };
 
-    if (exists) {
+    if (existing) {
         deps.stdout.print("Repository Store already initialized at {s}\n", .{db_path}) catch {};
     } else {
         deps.stdout.print("Initialized Repository Store at {s}\n", .{db_path}) catch {};
@@ -171,14 +164,6 @@ fn discoverPaths(deps: cli.Deps) !?DiscoveredPaths {
     return .{ .git_common_dir = common_owned, .toplevel = toplevel_owned };
 }
 
-fn isTicketStore(db_path: [:0]const u8) bool {
-    var db = sqlite.Db.open(db_path, .{ .create = false }) catch return false;
-    defer db.close();
-    const id = db.queryOneInt("pragma application_id") catch return false;
-    if (id) |v| return v == migrations.application_id;
-    return false;
-}
-
 fn seedDisplayPrefix(deps: cli.Deps, db: *sqlite.Db, toplevel: []const u8) !void {
     const existing = try db.queryOneText(
         deps.gpa,
@@ -192,6 +177,14 @@ fn seedDisplayPrefix(deps: cli.Deps, db: *sqlite.Db, toplevel: []const u8) !void
     const prefix = try display_prefix.derive(deps.gpa, basename);
     defer deps.gpa.free(prefix);
 
+    // Inline-format defense: derive() is supposed to return only lowercase
+    // alphanumerics and `-`. Reject anything else so a future regression
+    // there can't smuggle SQL through this exec. Once sqlite.Db grows a
+    // bind API, this validate-then-format dance can become a `?` parameter.
+    for (prefix) |b| {
+        if (!std.ascii.isAlphanumeric(b) and b != '-') return error.InvalidDisplayPrefix;
+    }
+
     var buf: [256]u8 = undefined;
     const sql = try std.fmt.bufPrintZ(
         &buf,
@@ -201,12 +194,10 @@ fn seedDisplayPrefix(deps: cli.Deps, db: *sqlite.Db, toplevel: []const u8) !void
     try db.exec(sql);
 }
 
-fn chmod0700(gpa: std.mem.Allocator, path: []const u8) !void {
+fn setDirMode0700(deps: cli.Deps, path: []const u8) !void {
     const builtin = @import("builtin");
     if (builtin.os.tag == .windows) return;
-    const path_z = try gpa.dupeZ(u8, path);
-    defer gpa.free(path_z);
-    _ = std.posix.system.chmod(path_z, 0o700);
+    try std.Io.Dir.cwd().setFilePermissions(deps.io, path, @enumFromInt(0o700), .{});
 }
 
 fn writeHelp(deps: cli.Deps) !void {
@@ -336,7 +327,6 @@ test "init: success creates store, applies migration, seeds prefix" {
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "Initialized Repository Store at") != null);
     try std.testing.expectEqualStrings("", h.stderr());
 
-    // Open the DB and assert state.
     var db = try sqlite.Db.open(store.db_path, .{ .create = false });
     defer db.close();
 
@@ -352,8 +342,6 @@ test "init: success creates store, applies migration, seeds prefix" {
 
     const prefix = try db.queryOneText(gpa, "select value from store_config where key='display_prefix'");
     defer if (prefix) |p| gpa.free(p);
-    // Pinning the basename through TmpStore.init guarantees init reads
-    // --show-toplevel (not --git-common-dir) when deriving the prefix.
     try std.testing.expectEqualStrings("my-test-repo", prefix.?);
 }
 
@@ -394,7 +382,6 @@ test "init: refuses to overwrite a non-Ticket SQLite file" {
     var store = try TmpStore.init(gpa, "my-test-repo");
     defer store.deinit(gpa);
 
-    // Pre-create the tk/ dir and put a plain SQLite file at ticket.db.
     const tk_dir = try std.fs.path.join(gpa, &.{ store.common_dir_path, "tk" });
     defer gpa.free(tk_dir);
     try std.Io.Dir.cwd().createDirPath(std.testing.io, tk_dir);
@@ -415,7 +402,6 @@ test "init: refuses to overwrite a non-Ticket SQLite file" {
     try std.testing.expectEqual(@as(u8, 1), code);
     try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "not a Ticket Repository Store") != null);
 
-    // The pre-existing table must still be there (we did not replace the file).
     var db = try sqlite.Db.open(store.db_path, .{ .create = false });
     defer db.close();
     const exists = (try db.queryOneInt("select count(*) from sqlite_master where name='other_app'")).?;
@@ -427,7 +413,6 @@ test "init: rejects a store created by a future Ticket version" {
     var store = try TmpStore.init(gpa, "my-test-repo");
     defer store.deinit(gpa);
 
-    // Initialize once normally.
     {
         var h = Harness.init(gpa, &.{});
         defer h.deinit();
@@ -438,7 +423,6 @@ test "init: rejects a store created by a future Ticket version" {
         try std.testing.expectEqual(@as(u8, 0), code);
     }
 
-    // Forge a future-version migration row.
     {
         var db = try sqlite.Db.open(store.db_path, .{ .create = false });
         defer db.close();

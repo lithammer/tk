@@ -31,18 +31,25 @@ pub const Db = struct {
 
     pub fn open(path_z: [:0]const u8, flags: OpenFlags) Error!Db {
         var raw: ?*c.sqlite3 = null;
-        var c_flags: c_int = 0;
+        var c_flags: c_int = c.SQLITE_OPEN_NOMUTEX;
         if (flags.create) c_flags |= c.SQLITE_OPEN_CREATE;
         if (flags.readwrite) c_flags |= c.SQLITE_OPEN_READWRITE;
-        c_flags |= c.SQLITE_OPEN_NOMUTEX; // single-threaded use per connection
         const rc = c.sqlite3_open_v2(path_z.ptr, &raw, c_flags, null);
         if (rc != c.SQLITE_OK) {
-            // Even on failure SQLite may allocate a handle so we can extract
-            // an error message. Free it before returning.
             if (raw) |h| _ = c.sqlite3_close(h);
             return error.OpenFailed;
         }
-        return .{ .handle = raw };
+        var db: Db = .{ .handle = raw };
+        // Per-connection pragmas every Repository Store connection needs.
+        // journal_mode persists in the file header; foreign_keys and
+        // busy_timeout are connection-scoped and have to be set every open.
+        db.exec("pragma journal_mode = wal") catch {};
+        db.exec("pragma busy_timeout = 5000") catch {};
+        db.exec("pragma foreign_keys = on") catch |err| {
+            db.close();
+            return err;
+        };
+        return db;
     }
 
     pub fn close(self: *Db) void {
