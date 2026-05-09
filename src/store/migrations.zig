@@ -96,7 +96,7 @@ pub const migration_1: Migration = .{
     \\    source text not null check(source in ('display','alias')),
     \\    item_id text not null references items(id) on delete restrict deferrable initially deferred,
     \\    created_at text not null,
-    \\    check (length(value) > 0 and value glob '[A-Za-z0-9._/:#-]*')
+    \\    check (length(value) > 0 and not (value glob '*[^A-Za-z0-9._/:#-]*'))
     \\) strict, without rowid;
     \\create unique index item_ids_value_id_source on item_ids(value, item_id, source);
     \\create unique index item_ids_one_display_per_item on item_ids(item_id) where source = 'display';
@@ -125,10 +125,10 @@ pub const migration_1: Migration = .{
     \\    mutation_type text not null check(mutation_type in (
     \\        'create_ticket','create_epic',
     \\        'update_ticket','update_epic',
+    \\        'set_item_status',
     \\        'add_ticket_to_epic','remove_ticket_from_epic',
     \\        'add_dependency','remove_dependency',
     \\        'add_external_blocker','resolve_external_blocker',
-    \\        'transition_status','set_priority',
     \\        'promote_ticket','promote_epic'
     \\    )),
     \\    item_id text not null,
@@ -517,6 +517,47 @@ test "external_blockers: empty reason rejected" {
     try test_helpers.expectRejected(conn,
         \\insert into external_blockers(id, item_id, reason, created_at)
         \\values ('eb1', 't1', '', '2026-05-09T00:00:00.000Z')
+    );
+}
+
+test "item_ids: rejects values containing characters outside the allowed set" {
+    const conn = try test_helpers.freshDb();
+    defer conn.close();
+    try test_helpers.insertTicket(conn, .{ .id = "t1", .display = "tk-1", .created_seq = 1 });
+    // Trailing characters outside [A-Za-z0-9._/:#-] must be rejected. SQLite
+    // GLOB's leading-anchor behavior makes `glob '[class]*'` validate only
+    // the first byte; the schema must use a negative-class match instead.
+    try test_helpers.expectRejected(conn,
+        \\insert into item_ids(value, source, item_id, created_at)
+        \\values ('tk-1!', 'alias', 't1', '2026-05-09T00:00:00.000Z')
+    );
+    try test_helpers.expectRejected(conn,
+        \\insert into item_ids(value, source, item_id, created_at)
+        \\values ('a b', 'alias', 't1', '2026-05-09T00:00:00.000Z')
+    );
+    try test_helpers.expectRejected(conn,
+        \\insert into item_ids(value, source, item_id, created_at)
+        \\values ('a;drop', 'alias', 't1', '2026-05-09T00:00:00.000Z')
+    );
+}
+
+test "mutations: enforces the documented V1 mutation vocabulary" {
+    const conn = try test_helpers.freshDb();
+    defer conn.close();
+    try test_helpers.insertTicket(conn, .{ .id = "t1", .display = "tk-1", .created_seq = 1 });
+
+    // set_item_status is the canonical name per CONTEXT.md V1 Mutation Type.
+    try conn.exec(
+        \\insert into mutations(sequence, mutation_type, item_id, item_class, payload_json, state, created_at, state_changed_at)
+        \\values (?1, 'set_item_status', 't1', 'ticket', '{}', 'pending', ?2, ?2)
+    , .{ @as(i64, 1), "2026-05-09T00:00:00.000Z" });
+
+    // transition_status was an interim name that never appeared in the spec;
+    // accepting it here would let a future regression smuggle the wrong
+    // vocabulary into the mutation log.
+    try test_helpers.expectRejected(conn,
+        \\insert into mutations(sequence, mutation_type, item_id, item_class, payload_json, state, created_at, state_changed_at)
+        \\values (2, 'transition_status', 't1', 'ticket', '{}', 'pending', '2026-05-09T00:00:00.000Z', '2026-05-09T00:00:00.000Z')
     );
 }
 

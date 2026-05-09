@@ -46,15 +46,20 @@ fn execute(deps: cli.Deps) !u8 {
 
     const tk_dir_path = try std.fs.path.join(deps.gpa, &.{ paths.git_common_dir, "tk" });
     defer deps.gpa.free(tk_dir_path);
-    std.Io.Dir.cwd().createDirPath(deps.io, tk_dir_path) catch |err| {
+    const dir_status = std.Io.Dir.cwd().createDirPathStatus(
+        deps.io,
+        tk_dir_path,
+        @enumFromInt(0o700),
+    ) catch |err| {
         deps.stderr.print("tk init: failed to create {s}: {s}\n", .{ tk_dir_path, @errorName(err) }) catch {};
         return 1;
     };
-    // Best-effort tighten permissions on POSIX. If chmod fails or the dir
-    // already exists with broader permissions, leave it as-is.
+    // Per docs/implementation.md: when the directory already exists with
+    // broader permissions, slice 2 uses it as-is and does not chmod it.
+    // Only tighten when we're the ones who just created it.
     // TODO(followups): "Surface a stderr warning when tk init can't tighten
     // store permissions" — docs/followups.md.
-    setDirMode0700(deps, tk_dir_path) catch {};
+    if (dir_status == .created) setDirMode0700(deps, tk_dir_path) catch {};
 
     const db_path = try std.fs.path.joinZ(deps.gpa, &.{ tk_dir_path, "ticket.db" });
     defer deps.gpa.free(db_path);
@@ -404,6 +409,34 @@ test "init: tightens tk dir to mode 0700 on POSIX" {
     const st = try std.Io.Dir.cwd().statFile(std.testing.io, tk_dir, .{});
     const mode_bits = @intFromEnum(st.permissions) & 0o777;
     try std.testing.expectEqual(@as(@TypeOf(mode_bits), 0o700), mode_bits);
+}
+
+test "init: leaves an existing tk dir's permissions untouched on POSIX" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const gpa = std.testing.allocator;
+    var store = try TmpStore.init(gpa, "my-test-repo");
+    defer store.deinit(gpa);
+
+    // Pre-create <common>/tk with broader permissions, mimicking a user who
+    // wants the store readable by their own group.
+    const tk_dir = try std.fs.path.join(gpa, &.{ store.common_dir_path, "tk" });
+    defer gpa.free(tk_dir);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, tk_dir);
+    try std.Io.Dir.cwd().setFilePermissions(std.testing.io, tk_dir, @enumFromInt(0o755), .{});
+
+    var h = Harness.init(gpa, &.{});
+    defer h.deinit();
+    const stdout_payload = try store.gitRevParseStdout(gpa);
+    defer gpa.free(stdout_payload);
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = stdout_payload });
+
+    const code = try run(h.deps(), &h.iter);
+    try std.testing.expectEqual(@as(u8, 0), code);
+
+    const st = try std.Io.Dir.cwd().statFile(std.testing.io, tk_dir, .{});
+    const mode_bits = @intFromEnum(st.permissions) & 0o777;
+    try std.testing.expectEqual(@as(@TypeOf(mode_bits), 0o755), mode_bits);
 }
 
 test "init: idempotent on second run preserves an externally-set prefix" {
