@@ -14,7 +14,8 @@ Run `tk prime` after compaction, clear, or a new agent session.
 
 - Use Ticket for repository-local work tracking.
 - New Tickets and Epics are local by default.
-- Use `tk add -F -` for self-contained local Tickets with enough context for a fresh agent session.
+- Use `tk add -F -` for self-contained local Tickets with enough context for
+  a fresh agent session.
 - Promotion and sync are explicit, human-visible operations.
 - Use `tk next` to choose agent work.
 - Use `tk worktree` to inspect the current Workspace Scope.
@@ -38,7 +39,9 @@ tk add -F -
 tk sync log
 ```
 
-Use `tk done <id>` for completed work. Use `tk add -F -` for follow-ups, deferred decisions, or context that should survive a fresh session. Use `tk sync log` to check whether local sync state needs human attention.
+Use `tk done <id>` for completed work. Use `tk add -F -` for follow-ups,
+deferred decisions, or context that should survive a fresh session. Use `tk
+sync log` to check whether local sync state needs human attention.
 
 ## Essential Commands
 
@@ -60,7 +63,8 @@ tk add --epic -F -
 tk add --parent <epic-id> -F -
 ```
 
-`tk add` uses git-commit-style message input. The first paragraph becomes the title. Later paragraphs become the body.
+`tk add` uses git-commit-style message input. The first paragraph becomes the
+title. Later paragraphs become the body.
 
 ### Update Work
 
@@ -89,7 +93,8 @@ tk worktree set <id>
 tk worktree clear
 ```
 
-`tk worktree start <id>` creates a Ticket branch and scoped git worktree. `tk worktree` reports whether Workspace Scope is configured, inferred, or absent.
+`tk worktree start <id>` creates a Ticket branch and scoped git worktree. `tk
+worktree` reports whether Workspace Scope is configured, inferred, or absent.
 
 ### Human Curation
 
@@ -100,7 +105,8 @@ tk sync --skip <mutation-id>
 tk remote
 ```
 
-Agents should surface promotion, sync failures, and skipped Mutations rather than quietly repairing upstream state.
+Agents should surface promotion, sync failures, and skipped Mutations rather
+than quietly repairing upstream state.
 -- expected/stderr --
 -- expected/exit --
 0

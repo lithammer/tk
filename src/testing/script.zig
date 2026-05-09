@@ -477,13 +477,9 @@ test "tokenizer: empty and comment-only lines return zero tokens" {
 test "TK_UPDATE preserves section order" {
     const allocator = std.testing.allocator;
 
-    const prime_body = std.mem.trimEnd(u8, @embedFile("prime_md"), " \t\r\n");
-    const expected_stdout = try std.fmt.allocPrint(allocator, "{s}\n", .{prime_body});
-    defer allocator.free(expected_stdout);
-
     const fixture = try std.fmt.allocPrint(allocator,
         \\-- script --
-        \\tk prime
+        \\tk --version
         \\
         \\-- input/notes.md --
         \\This file must survive a TK_UPDATE rewrite unchanged
@@ -517,7 +513,7 @@ test "TK_UPDATE preserves section order" {
     var found_stdout = false;
     for (sections_after) |sec| {
         if (std.mem.eql(u8, sec.name, "expected/stdout")) {
-            try std.testing.expectEqualStrings(expected_stdout, sec.body);
+            try std.testing.expectEqualStrings("v0.0.1\n", sec.body);
             found_stdout = true;
         }
     }
@@ -545,19 +541,17 @@ test "runScenario: detects stdout mismatch" {
 
 test "runScenario: detects exit-code mismatch" {
     const allocator = std.testing.allocator;
-    const prime_body = std.mem.trimEnd(u8, @embedFile("prime_md"), " \t\r\n");
-    const fixture = try std.fmt.allocPrint(allocator,
+    const fixture =
         \\-- script --
-        \\tk prime
+        \\tk --version
         \\-- expected/stdout --
-        \\{s}
+        \\v0.0.1
         \\-- expected/stderr --
         \\
         \\-- expected/exit --
         \\1
         \\
-    , .{prime_body});
-    defer allocator.free(fixture);
+    ;
 
     try std.testing.expectError(
         error.ScenarioFailed,

@@ -2,7 +2,7 @@ const std = @import("std");
 const clap = @import("clap");
 const cli = @import("../cli.zig");
 
-const prime_md_bytes = @embedFile("prime_md");
+const prime_md_bytes = @embedFile("prime.md");
 const prime_output: []const u8 = std.mem.trimEnd(u8, prime_md_bytes, " \t\r\n") ++ "\n";
 
 /// Dispatcher metadata for `tk prime`.

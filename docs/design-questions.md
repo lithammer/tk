@@ -60,8 +60,8 @@ No open design questions.
 ### DQ-008: Should Ticket provide an agent briefing command?
 
 **Status**: resolved
-**Decision**: Include `tk prime` in v1. It prints static Markdown embedded from `docs/prime.md` with Zig `@embedFile`.
-**Recorded in**: CONTEXT.md and docs/prime.md.
+**Decision**: Include `tk prime` in v1. It prints static command-owned Markdown embedded from `src/commands/prime.md` with Zig `@embedFile`.
+**Recorded in**: CONTEXT.md and src/commands/prime.md.
 **Rationale**: A static embedded briefing is easy to review, simple to implement, and still gives agents a consistent context recovery workflow. Dynamic repository state can be added later without changing the command shape.
 
 ### DQ-000: What language should the first implementation use?

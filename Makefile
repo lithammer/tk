@@ -6,7 +6,7 @@ ZIG ?= zig
 ZIGFLAGS ?= --summary all
 BIN := zig-out/bin/tk
 EMBED := $(wildcard src/store/migrations/*.sql) \
-	docs/prime.md
+	src/commands/prime.md
 SRC := $(shell find src -name '*.zig') \
 	build.zig \
 	build.zig.zon

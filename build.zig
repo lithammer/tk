@@ -2,9 +2,8 @@ const std = @import("std");
 
 /// Build the `tk` executable and the unified test binary.
 ///
-/// Static assets such as `docs/prime.md` are registered as anonymous imports
-/// so command modules can embed them by name while still failing at build time
-/// if the source file disappears.
+/// Command-owned static assets are embedded by relative path from their owning
+/// Zig module, so missing assets fail at build time without extra build wiring.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -40,7 +39,6 @@ pub fn build(b: *std.Build) void {
     });
     root_mod.addImport("clap", clap.module("clap"));
     root_mod.addImport("zqlite", zqlite_module);
-    root_mod.addAnonymousImport("prime_md", .{ .root_source_file = b.path("docs/prime.md") });
 
     const exe = b.addExecutable(.{
         .name = "tk",
@@ -64,7 +62,6 @@ pub fn build(b: *std.Build) void {
     });
     test_mod.addImport("clap", clap.module("clap"));
     test_mod.addImport("zqlite", zqlite_module);
-    test_mod.addAnonymousImport("prime_md", .{ .root_source_file = b.path("docs/prime.md") });
 
     const test_options = b.addOptions();
     test_options.addOptionPath("tk_exe_path", exe.getEmittedBin());

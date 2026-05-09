@@ -27,7 +27,7 @@ User-observable diagnostic and status substrings (for example, `Initialized Repo
 tk prime
 ```
 
-Prints static Markdown embedded from `docs/prime.md`.
+Prints static command-owned Markdown embedded from `src/commands/prime.md`.
 
 ## Create
 

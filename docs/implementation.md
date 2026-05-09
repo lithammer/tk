@@ -8,7 +8,7 @@ This document bridges the design docs to the first Zig implementation. It should
 - CLI surface: [cli.md](./cli.md)
 - Design decisions: [adr/](./adr/)
 - Resolved questions: [design-questions.md](./design-questions.md)
-- Prime template: [prime.md](./prime.md)
+- Prime command output: [../src/commands/prime.md](../src/commands/prime.md)
 
 ## Code Shape
 
@@ -417,10 +417,10 @@ Each scenario gets a fresh per-script work directory exposed as `$WORK` in the e
 Implement in small vertical slices:
 
 1. `tk prime`
-   - `build.zig` declares the `tk` exe, fetches zig-clap, and registers `docs/prime.md` via `b.addAnonymousImport("prime_md", .{ .root_source_file = b.path("docs/prime.md") })` so `@embedFile("prime_md")` reads its bytes. Single `zig build test` target.
+   - `build.zig` declares the `tk` exe and fetches zig-clap. `commands/prime.zig` embeds its command-owned static output by relative path, so no anonymous import wiring is needed for Prime. Single `zig build test` target.
    - `main.zig` implements `pub fn main(init: std.process.Init) !void`, builds `Deps { stdout, stderr, gpa }` from `init.io` and `init.gpa`, iterates argv via `init.minimal.args.iterateAllocator(init.gpa)` (skipping argv[0]), calls `runArgv`, catches any propagated error and translates it to exit 3, then translates the returned `u8` into the process exit code.
    - `cli.zig` exports `runArgv(deps, args_iter: anytype) !u8` with one `SubCommand` arm, plus top-level `--help` (stdout, exit 0) and `--version` (stdout, exit 0; `const VERSION = "v0.0.1";` lives here). Unknown subcommand and zig-clap parse failure return exit 2 with the clap diagnostic on stderr. Inline test verifies routing + exit 2.
-   - `commands/prime.zig` reads `@embedFile("prime_md")`, trims trailing whitespace via `std.mem.trimEnd`, writes the bytes plus exactly one `\n` to `deps.stdout`, and returns 0. Never writes to `deps.stderr`. Works outside a `tk init`'d repo. Inline test captures output via `std.Io.Writer.Allocating`.
+   - `commands/prime.zig` reads `@embedFile("prime.md")`, trims trailing whitespace via `std.mem.trimEnd`, writes the bytes plus exactly one `\n` to `deps.stdout`, and returns 0. Never writes to `deps.stderr`. Works outside a `tk init`'d repo. Inline test captures output via `std.Io.Writer.Allocating`.
    - `src/testing/script.zig` ships a minimal txtar runner: parse sections, tokenize each `-- script --` line testscript-style, build a `Deps` with `std.Io.Writer.Allocating`-backed writers, dispatch through `runArgv`, byte-exact compare against `expected/stdout`/`expected/stderr`/`expected/exit`. `TK_UPDATE=1` rewrites the `expected/*` sections in place, preserving section order.
    - One fixture (`scenarios/prime/basic.txtar`) covers `tk prime` end-to-end. A second fixture (`scenarios/_harness/preserve_sections.txtar`) exercises `TK_UPDATE`'s order-preservation property by including a non-`expected/*` section that must survive a rewrite. No subprocess smoke test in slice #1 — deferred to slice #2.
 
