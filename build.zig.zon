@@ -6,7 +6,6 @@
     .paths = .{
         "src",
         "docs",
-        "vendor",
         "build.zig",
         "build.zig.zon",
     },
@@ -14,6 +13,10 @@
         .clap = .{
             .url = "https://github.com/Hejsil/zig-clap/archive/refs/tags/0.12.0.tar.gz",
             .hash = "clap-0.12.0-oBajB7foAQDqlSwaSG5g0yq7xGbQARUsBk5T64gAOqP5",
+        },
+        .zqlite = .{
+            .url = "git+https://github.com/karlseguin/zqlite.zig#5ac4cabe95a6d7faa7baf0da8057a8e6e8a227a1",
+            .hash = "zqlite-0.0.1-RWLaY64xnAAxsD2YNT8QqPMJUuaFv2GOzFRR4aGypJv3",
         },
     },
 }

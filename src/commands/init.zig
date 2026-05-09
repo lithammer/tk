@@ -1,13 +1,12 @@
 //! `tk init` — create the Repository Store at `<git-common-dir>/tk/ticket.db`.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const clap = @import("clap");
+const zqlite = @import("zqlite");
 const cli = @import("../cli.zig");
-const proc = @import("../proc/runner.zig");
-const sqlite = @import("../store/sqlite.zig");
 const migrations = @import("../store/migrations.zig");
 const display_prefix = @import("../domain/display_prefix.zig");
-const clock_mod = @import("../clock.zig");
 
 pub const meta: cli.CommandMeta = .{
     .name = "init",
@@ -56,31 +55,39 @@ fn execute(deps: cli.Deps) !u8 {
     const db_path = try std.fs.path.joinZ(deps.gpa, &.{ tk_dir_path, "ticket.db" });
     defer deps.gpa.free(db_path);
 
-    var db = sqlite.Db.open(db_path, .{}) catch |err| {
+    const conn = zqlite.open(db_path.ptr, zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode) catch |err| {
         deps.stderr.print("tk init: failed to open {s}: {s}\n", .{ db_path, @errorName(err) }) catch {};
         return 1;
     };
-    defer db.close();
+    defer conn.close();
 
-    // Classify the file we just opened. application_id is 0 on a fresh
-    // database, and `sqlite_master` is empty there too; anything else with
-    // a non-Ticket application_id or non-empty schema is a foreign file we
-    // must refuse to overwrite. One open, one classification — no TOCTOU.
-    const app_id_raw = (db.queryOneInt("pragma application_id") catch 0) orelse 0;
-    const table_count = (db.queryOneInt("select count(*) from sqlite_master") catch 0) orelse 0;
-    const existing = app_id_raw == migrations.application_id;
-    if (!existing and (app_id_raw != 0 or table_count != 0)) {
+    // Classify *before* enabling WAL or any other pragma that would mutate the
+    // file. A foreign rollback-journal SQLite file at this path must stay
+    // exactly as we found it when we refuse.
+    const kind = classify(conn) catch |err| {
         deps.stderr.print(
-            "tk init: {s} exists but is not a Ticket Repository Store\n",
-            .{db_path},
+            "tk init: failed to inspect {s}: {s}: {s}\n",
+            .{ db_path, @errorName(err), std.mem.span(conn.lastError()) },
         ) catch {};
         return 1;
+    };
+    switch (kind) {
+        .foreign => {
+            deps.stderr.print(
+                "tk init: {s} exists but is not a Ticket Repository Store\n",
+                .{db_path},
+            ) catch {};
+            return 1;
+        },
+        .fresh, .ours => {},
     }
+
+    try configureForTicketStore(conn);
 
     var iso_buf: [24]u8 = undefined;
     const now_iso = deps.clock.nowIso(&iso_buf);
 
-    migrations.applyAll(&db, now_iso) catch |err| switch (err) {
+    migrations.applyAll(conn, now_iso) catch |err| switch (err) {
         error.StoreFromFutureVersion => {
             deps.stderr.print(
                 "tk init: {s} was created by a newer Ticket version\n",
@@ -91,26 +98,52 @@ fn execute(deps: cli.Deps) !u8 {
         else => {
             deps.stderr.print(
                 "tk init: migration failed: {s}: {s}\n",
-                .{ @errorName(err), db.errorMessage() },
+                .{ @errorName(err), std.mem.span(conn.lastError()) },
             ) catch {};
             return 1;
         },
     };
 
-    seedDisplayPrefix(deps, &db, paths.toplevel) catch |err| {
+    seedDisplayPrefix(deps, conn, paths.toplevel) catch |err| {
         deps.stderr.print(
             "tk init: failed to seed display_prefix: {s}: {s}\n",
-            .{ @errorName(err), db.errorMessage() },
+            .{ @errorName(err), std.mem.span(conn.lastError()) },
         ) catch {};
         return 1;
     };
 
-    if (existing) {
-        deps.stdout.print("Repository Store already initialized at {s}\n", .{db_path}) catch {};
-    } else {
-        deps.stdout.print("Initialized Repository Store at {s}\n", .{db_path}) catch {};
+    switch (kind) {
+        .ours => deps.stdout.print("Repository Store already initialized at {s}\n", .{db_path}) catch {},
+        .fresh => deps.stdout.print("Initialized Repository Store at {s}\n", .{db_path}) catch {},
+        .foreign => unreachable,
     }
     return 0;
+}
+
+const StoreKind = enum {
+    /// File was just created by sqlite3_open_v2 and contains no schema yet.
+    fresh,
+    /// Existing Ticket Repository Store (matching application_id).
+    ours,
+    /// Existing SQLite file written by something else.
+    foreign,
+};
+
+fn classify(conn: zqlite.Conn) migrations.QueryError!StoreKind {
+    const app_id = (try migrations.queryOptionalInt(conn, "pragma application_id")) orelse 0;
+    if (app_id == migrations.application_id) return .ours;
+
+    const table_count = (try migrations.queryOptionalInt(conn, "select count(*) from sqlite_master")) orelse 0;
+    if (app_id == 0 and table_count == 0) return .fresh;
+    return .foreign;
+}
+
+fn configureForTicketStore(conn: zqlite.Conn) zqlite.Error!void {
+    // journal_mode persists in the file header; foreign_keys and
+    // busy_timeout are connection-scoped and have to be set every open.
+    try conn.execNoArgs("pragma journal_mode = wal");
+    try conn.busyTimeout(5000);
+    try conn.execNoArgs("pragma foreign_keys = on");
 }
 
 const DiscoveredPaths = struct {
@@ -124,6 +157,10 @@ fn discoverPaths(deps: cli.Deps) !?DiscoveredPaths {
         .cwd = deps.cwd,
     }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.ExecutableNotFound => {
+            deps.stderr.writeAll("tk init: git not found on PATH\n") catch {};
+            return null;
+        },
         error.SpawnFailed => {
             deps.stderr.writeAll("tk init: failed to invoke git\n") catch {};
             return null;
@@ -164,38 +201,22 @@ fn discoverPaths(deps: cli.Deps) !?DiscoveredPaths {
     return .{ .git_common_dir = common_owned, .toplevel = toplevel_owned };
 }
 
-fn seedDisplayPrefix(deps: cli.Deps, db: *sqlite.Db, toplevel: []const u8) !void {
-    const existing = try db.queryOneText(
-        deps.gpa,
-        "select value from store_config where key = 'display_prefix'",
-    );
-    if (existing) |val| {
-        deps.gpa.free(val);
+fn seedDisplayPrefix(deps: cli.Deps, conn: zqlite.Conn, toplevel: []const u8) !void {
+    if (try conn.row("select 1 from store_config where key = 'display_prefix'", .{})) |existing| {
+        existing.deinit();
         return;
     }
     const basename = std.fs.path.basename(toplevel);
     const prefix = try display_prefix.derive(deps.gpa, basename);
     defer deps.gpa.free(prefix);
 
-    // Inline-format defense: derive() is supposed to return only lowercase
-    // alphanumerics and `-`. Reject anything else so a future regression
-    // there can't smuggle SQL through this exec. Once sqlite.Db grows a
-    // bind API, this validate-then-format dance can become a `?` parameter.
-    for (prefix) |b| {
-        if (!std.ascii.isAlphanumeric(b) and b != '-') return error.InvalidDisplayPrefix;
-    }
-
-    var buf: [256]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(
-        &buf,
-        "insert into store_config(key, value) values ('display_prefix', '{s}')",
+    try conn.exec(
+        "insert into store_config(key, value) values ('display_prefix', ?1)",
         .{prefix},
     );
-    try db.exec(sql);
 }
 
 fn setDirMode0700(deps: cli.Deps, path: []const u8) !void {
-    const builtin = @import("builtin");
     if (builtin.os.tag == .windows) return;
     try std.Io.Dir.cwd().setFilePermissions(deps.io, path, @enumFromInt(0o700), .{});
 }
@@ -223,7 +244,6 @@ fn writeHelp(deps: cli.Deps) !void {
 }
 
 const Harness = @import("../testing/test_cli.zig").Harness;
-const FakeRunner = @import("../proc/fake.zig").FakeRunner;
 
 test "init: returns exit 1 with diagnostic when not in a git repo" {
     var h = Harness.init(std.testing.allocator, &.{});
@@ -238,6 +258,17 @@ test "init: returns exit 1 with diagnostic when not in a git repo" {
     try std.testing.expectEqual(@as(u8, 1), code);
     try std.testing.expectEqualStrings("", h.stdout());
     try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "git repository") != null);
+}
+
+test "init: empty-stderr git failure falls back to default diagnostic" {
+    var h = Harness.init(std.testing.allocator, &.{});
+    defer h.deinit();
+
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 128, .stderr = "" });
+
+    const code = try run(h.deps(), &h.iter);
+    try std.testing.expectEqual(@as(u8, 1), code);
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "not in a git repository") != null);
 }
 
 test "init: --help prints to stdout, exits 0" {
@@ -259,8 +290,6 @@ test "init: rejects unexpected positional" {
     try std.testing.expectEqual(@as(u8, 2), code);
     try std.testing.expect(h.stderr().len > 0);
 }
-
-// ---- End-to-end tests using a temp dir as the simulated Git common dir ----
 
 const TmpStore = struct {
     tmp: std.testing.TmpDir,
@@ -327,25 +356,53 @@ test "init: success creates store, applies migration, seeds prefix" {
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "Initialized Repository Store at") != null);
     try std.testing.expectEqualStrings("", h.stderr());
 
-    var db = try sqlite.Db.open(store.db_path, .{ .create = false });
-    defer db.close();
+    const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
 
-    const app_id = (try db.queryOneInt("pragma application_id")).?;
-    try std.testing.expectEqual(@as(i64, migrations.application_id), app_id);
+    try std.testing.expectEqual(
+        @as(?i64, migrations.application_id),
+        try migrations.queryOptionalInt(conn, "pragma application_id"),
+    );
+    try std.testing.expectEqual(
+        @as(?i64, 1),
+        try migrations.queryOptionalInt(conn, "pragma user_version"),
+    );
 
-    const user_v = (try db.queryOneInt("pragma user_version")).?;
-    try std.testing.expectEqual(@as(i64, 1), user_v);
+    if (try conn.row("pragma journal_mode", .{})) |r| {
+        defer r.deinit();
+        try std.testing.expectEqualStrings("wal", r.text(0));
+    } else return error.ExpectedRow;
 
-    const journal = try db.queryOneText(gpa, "pragma journal_mode");
-    defer if (journal) |j| gpa.free(j);
-    try std.testing.expectEqualStrings("wal", journal.?);
-
-    const prefix = try db.queryOneText(gpa, "select value from store_config where key='display_prefix'");
-    defer if (prefix) |p| gpa.free(p);
-    try std.testing.expectEqualStrings("my-test-repo", prefix.?);
+    if (try conn.row("select value from store_config where key = 'display_prefix'", .{})) |r| {
+        defer r.deinit();
+        try std.testing.expectEqualStrings("my-test-repo", r.text(0));
+    } else return error.ExpectedRow;
 }
 
-test "init: idempotent on second run" {
+test "init: tightens tk dir to mode 0700 on POSIX" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const gpa = std.testing.allocator;
+    var store = try TmpStore.init(gpa, "my-test-repo");
+    defer store.deinit(gpa);
+
+    var h = Harness.init(gpa, &.{});
+    defer h.deinit();
+    const stdout_payload = try store.gitRevParseStdout(gpa);
+    defer gpa.free(stdout_payload);
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = stdout_payload });
+
+    const code = try run(h.deps(), &h.iter);
+    try std.testing.expectEqual(@as(u8, 0), code);
+
+    const tk_dir = try std.fs.path.join(gpa, &.{ store.common_dir_path, "tk" });
+    defer gpa.free(tk_dir);
+    const st = try std.Io.Dir.cwd().statFile(std.testing.io, tk_dir, .{});
+    const mode_bits = @intFromEnum(st.permissions) & 0o777;
+    try std.testing.expectEqual(@as(@TypeOf(mode_bits), 0o700), mode_bits);
+}
+
+test "init: idempotent on second run preserves an externally-set prefix" {
     const gpa = std.testing.allocator;
     var store = try TmpStore.init(gpa, "my-test-repo");
     defer store.deinit(gpa);
@@ -361,6 +418,17 @@ test "init: idempotent on second run" {
         try std.testing.expectEqual(@as(u8, 0), code);
     }
 
+    // Overwrite the seeded prefix between runs. A regression that recomputes
+    // on every init (instead of skipping when present) would clobber this.
+    {
+        const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+        defer conn.close();
+        try conn.exec(
+            "update store_config set value = ?1 where key = 'display_prefix'",
+            .{"sentinel-value"},
+        );
+    }
+
     {
         var h = Harness.init(gpa, &.{});
         defer h.deinit();
@@ -370,14 +438,19 @@ test "init: idempotent on second run" {
         try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "already initialized") != null);
     }
 
-    // schema_migrations should still have exactly one row.
-    var db = try sqlite.Db.open(store.db_path, .{ .create = false });
-    defer db.close();
-    const count = (try db.queryOneInt("select count(*) from schema_migrations")).?;
-    try std.testing.expectEqual(@as(i64, 1), count);
+    const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try std.testing.expectEqual(
+        @as(?i64, 1),
+        try migrations.queryOptionalInt(conn, "select count(*) from schema_migrations"),
+    );
+    if (try conn.row("select value from store_config where key = 'display_prefix'", .{})) |r| {
+        defer r.deinit();
+        try std.testing.expectEqualStrings("sentinel-value", r.text(0));
+    } else return error.ExpectedRow;
 }
 
-test "init: refuses to overwrite a non-Ticket SQLite file" {
+test "init: refuses to overwrite a non-Ticket SQLite file with tables" {
     const gpa = std.testing.allocator;
     var store = try TmpStore.init(gpa, "my-test-repo");
     defer store.deinit(gpa);
@@ -387,9 +460,9 @@ test "init: refuses to overwrite a non-Ticket SQLite file" {
     try std.Io.Dir.cwd().createDirPath(std.testing.io, tk_dir);
 
     {
-        var foreign = try sqlite.Db.open(store.db_path, .{});
+        const foreign = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.Create | zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
         defer foreign.close();
-        try foreign.exec("create table other_app(x integer)");
+        try foreign.execNoArgs("create table other_app(x integer)");
     }
 
     var h = Harness.init(gpa, &.{});
@@ -402,10 +475,60 @@ test "init: refuses to overwrite a non-Ticket SQLite file" {
     try std.testing.expectEqual(@as(u8, 1), code);
     try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "not a Ticket Repository Store") != null);
 
-    var db = try sqlite.Db.open(store.db_path, .{ .create = false });
-    defer db.close();
-    const exists = (try db.queryOneInt("select count(*) from sqlite_master where name='other_app'")).?;
-    try std.testing.expectEqual(@as(i64, 1), exists);
+    const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try std.testing.expectEqual(
+        @as(?i64, 1),
+        try migrations.queryOptionalInt(conn, "select count(*) from sqlite_master where name='other_app'"),
+    );
+}
+
+test "init: refuses a foreign SQLite file even when its application_id is non-zero" {
+    // SQLite only persists `pragma application_id` to the database header
+    // when it is committed alongside a real schema write, so this exercises
+    // the `app_id != ours and app_id != 0` branch of `classify` rather than
+    // the `app_id == 0 with tables` branch covered by the previous test.
+    const gpa = std.testing.allocator;
+    var store = try TmpStore.init(gpa, "my-test-repo");
+    defer store.deinit(gpa);
+
+    const tk_dir = try std.fs.path.join(gpa, &.{ store.common_dir_path, "tk" });
+    defer gpa.free(tk_dir);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, tk_dir);
+
+    {
+        const foreign = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.Create | zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+        defer foreign.close();
+        try foreign.execNoArgs(
+            \\begin;
+            \\pragma application_id = 0x12345678;
+            \\create table other_app (x integer);
+            \\insert into other_app values (1);
+            \\commit;
+        );
+    }
+
+    var h = Harness.init(gpa, &.{});
+    defer h.deinit();
+    const stdout_payload = try store.gitRevParseStdout(gpa);
+    defer gpa.free(stdout_payload);
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = stdout_payload });
+
+    const code = try run(h.deps(), &h.iter);
+    try std.testing.expectEqual(@as(u8, 1), code);
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "not a Ticket Repository Store") != null);
+
+    // Confirm we did not touch the foreign data.
+    const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try std.testing.expectEqual(
+        @as(?i64, 0x12345678),
+        try migrations.queryOptionalInt(conn, "pragma application_id"),
+    );
+    try std.testing.expectEqual(
+        @as(?i64, 1),
+        try migrations.queryOptionalInt(conn, "select count(*) from other_app"),
+    );
 }
 
 test "init: rejects a store created by a future Ticket version" {
@@ -424,9 +547,12 @@ test "init: rejects a store created by a future Ticket version" {
     }
 
     {
-        var db = try sqlite.Db.open(store.db_path, .{ .create = false });
-        defer db.close();
-        try db.exec("insert into schema_migrations(version, applied_at) values (999, '2099-01-01T00:00:00.000Z')");
+        const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+        defer conn.close();
+        try conn.exec(
+            "insert into schema_migrations(version, applied_at) values (?1, ?2)",
+            .{ @as(i64, 999), "2099-01-01T00:00:00.000Z" },
+        );
     }
 
     var h = Harness.init(gpa, &.{});

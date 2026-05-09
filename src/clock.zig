@@ -1,5 +1,5 @@
-//! Injectable monotonic-ish clock returning UTC milliseconds since the Unix
-//! epoch. Tests substitute a fake clock so timestamps stay deterministic.
+//! Injectable wall clock returning UTC milliseconds since the Unix epoch.
+//! Tests substitute a fake clock so timestamps stay deterministic.
 
 const std = @import("std");
 

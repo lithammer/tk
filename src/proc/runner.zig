@@ -27,6 +27,11 @@ pub const Options = struct {
 };
 
 pub const Error = error{
+    /// argv[0] could not be located on PATH or at the absolute path given.
+    /// Distinguished from generic spawn failures so commands can render an
+    /// install-this-tool diagnostic instead of a retry hint.
+    ExecutableNotFound,
+    /// Catch-all for any other failure to spawn or wait for the child.
     SpawnFailed,
     OutOfMemory,
 };
@@ -67,6 +72,7 @@ pub const RealRunner = struct {
             .cwd = cwd,
         }) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.FileNotFound => return error.ExecutableNotFound,
             else => return error.SpawnFailed,
         };
 

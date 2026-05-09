@@ -10,9 +10,9 @@ pub const Deps = struct {
     /// I/O implementation handle, threaded through filesystem and subprocess
     /// calls. Tests use `std.testing.io`; main uses the runtime's init.io.
     io: std.Io,
-    /// User's working directory at invocation time. Used as the cwd for
-    /// subprocess discovery (e.g. `git rev-parse`) and for resolving relative
-    /// paths such as the Repository Store location. Required from slice 2.
+    /// User's working directory at invocation time. Passed as the cwd for
+    /// subprocess discovery (e.g. `git rev-parse`); filesystem operations on
+    /// absolute paths (the Repository Store location) bypass it.
     cwd: std.Io.Dir,
     /// Captured-output subprocess runner. Real impl wraps `std.process.run`;
     /// tests inject a `FakeRunner`.

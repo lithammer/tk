@@ -1,6 +1,5 @@
 const std = @import("std");
 const cli = @import("../cli.zig");
-const proc = @import("../proc/runner.zig");
 const fake_proc = @import("../proc/fake.zig");
 const clock_mod = @import("../clock.zig");
 const SliceArgIter = @import("arg_iter.zig").SliceArgIter;
@@ -22,7 +21,6 @@ pub const Harness = struct {
     gpa: std.mem.Allocator,
     fake_runner: fake_proc.FakeRunner,
     fake_clock: clock_mod.FakeClock,
-    cwd_override: ?std.Io.Dir,
 
     pub fn init(allocator: std.mem.Allocator, args: []const []const u8) Harness {
         return .{
@@ -32,7 +30,6 @@ pub const Harness = struct {
             .gpa = allocator,
             .fake_runner = fake_proc.FakeRunner.init(allocator),
             .fake_clock = clock_mod.FakeClock.init(default_fake_now_ms),
-            .cwd_override = null,
         };
     }
 
@@ -48,7 +45,7 @@ pub const Harness = struct {
             .stderr = &self.stderr_buf.writer,
             .gpa = self.gpa,
             .io = std.testing.io,
-            .cwd = self.cwd_override orelse std.Io.Dir.cwd(),
+            .cwd = std.Io.Dir.cwd(),
             .runner = self.fake_runner.runner(),
             .clock = self.fake_clock.clock(),
         };

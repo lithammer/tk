@@ -1,29 +1,27 @@
 //! Repository Store schema migrations.
 //!
-//! Slice 2 ships exactly one migration: the v1 skeleton. Migration 1
-//! creates every table later slices populate (items, dependencies,
-//! external_blockers, mutations, remotes, sync_cursors, sequences,
-//! store_config, item_ids, schema_migrations) plus the indexes tied to
-//! known v1 query paths.
+//! Migration 1 creates the v1 schema skeleton: items, item_ids, dependencies,
+//! external_blockers, mutations, sequences, store_config, remotes,
+//! sync_cursors, and schema_migrations, plus the indexes tied to known v1
+//! query paths.
 //!
-//! Migrations are applied inside a single transaction per migration. The
-//! caller (currently `tk init`) handles connection setup (`PRAGMA
-//! journal_mode = wal`, `PRAGMA foreign_keys = on`, `PRAGMA busy_timeout =
-//! 5000`) before invoking `applyAll`.
+//! Each migration runs inside its own transaction. The caller is responsible
+//! for connection-level setup (foreign_keys, busy_timeout, journal_mode)
+//! before invoking `applyAll`.
 
 const std = @import("std");
-const sqlite = @import("sqlite.zig");
+const zqlite = @import("zqlite");
 
-pub const Db = sqlite.Db;
+pub const Conn = zqlite.Conn;
 
-/// Application ID written to `PRAGMA application_id` so an existing SQLite
+/// Application ID written to `pragma application_id` so an existing SQLite
 /// file can be identified as a Ticket Repository Store. Spelled `TKDB` in
 /// big-endian ASCII (`0x54 0x4B 0x44 0x42`).
 pub const application_id: i32 = 0x544B4442;
 
 pub const Migration = struct {
     version: u32,
-    sql: [:0]const u8,
+    sql: [*:0]const u8,
 };
 
 pub const migration_1: Migration = .{
@@ -184,119 +182,163 @@ pub const migration_1: Migration = .{
 
 pub const all_migrations: []const Migration = &.{migration_1};
 
-pub const ApplyError = sqlite.Error || error{
-    StoreFromFutureVersion,
-};
+/// Errors that the SQL helpers in this module can return. zqlite's
+/// `prepare` (used internally by `exec` and `row`) adds `MultipleStatements`
+/// in debug builds when a non-first SQL statement is passed to a single-shot
+/// API; bubble it up rather than mask it.
+pub const QueryError = zqlite.Error || error{MultipleStatements};
 
-/// Apply any migrations not yet recorded in `schema_migrations`. Each
-/// migration runs inside its own transaction. The application_id and
-/// user_version pragmas are kept in sync with the highest applied version.
-pub fn applyAll(db: *Db, now_iso: []const u8) ApplyError!void {
-    const has_migrations_table = try schemaMigrationsExists(db);
-    const recorded_version: i64 = if (has_migrations_table)
-        try db.queryOneInt("select coalesce(max(version), 0) from schema_migrations") orelse 0
+pub const ApplyError = QueryError || error{StoreFromFutureVersion};
+
+pub fn applyAll(conn: Conn, now_iso: []const u8) ApplyError!void {
+    const recorded_version: i64 = if (try schemaMigrationsExists(conn))
+        (try queryOptionalInt(conn, "select coalesce(max(version), 0) from schema_migrations")) orelse 0
     else
         0;
     const max_known: i64 = @intCast(all_migrations[all_migrations.len - 1].version);
-
     if (recorded_version > max_known) return error.StoreFromFutureVersion;
 
     for (all_migrations) |mig| {
         if (mig.version <= recorded_version) continue;
 
-        try db.exec("begin");
-        errdefer db.exec("rollback") catch {};
+        try conn.transaction();
+        errdefer conn.rollback();
 
-        try db.exec(mig.sql);
+        try conn.execNoArgs(mig.sql);
 
-        // Buffer is oversized for these three statements; bufPrintZ
-        // returning NoSpaceLeft would mean an unreachable program bug, not
-        // an OOM, so an unreachable lets the assertion catch it in debug.
-        var buf: [512]u8 = undefined;
-        const tail_sql = std.fmt.bufPrintZ(
+        // application_id and user_version pragmas don't accept `?` parameters.
+        // The values are a compile-time `i32` constant and a `u32` from the
+        // hardcoded migration list, so the buffer is statically oversized and
+        // bufPrintZ's NoSpaceLeft is unreachable.
+        var buf: [128]u8 = undefined;
+        const pragma_sql = std.fmt.bufPrintZ(
             &buf,
-            \\insert into schema_migrations(version, applied_at) values ({d}, '{s}');
-            \\pragma application_id = {d};
-            \\pragma user_version = {d};
-            ,
-            .{ mig.version, now_iso, application_id, mig.version },
+            "pragma application_id = {d}; pragma user_version = {d};",
+            .{ application_id, mig.version },
         ) catch unreachable;
-        try db.exec(tail_sql);
+        try conn.execNoArgs(pragma_sql);
 
-        try db.exec("commit");
+        try conn.exec(
+            "insert into schema_migrations(version, applied_at) values (?1, ?2)",
+            .{ @as(i64, @intCast(mig.version)), now_iso },
+        );
+
+        try conn.commit();
     }
 }
 
-pub fn currentVersion(db: *Db) sqlite.Error!u32 {
-    if (!try schemaMigrationsExists(db)) return 0;
-    const recorded = try db.queryOneInt("select coalesce(max(version), 0) from schema_migrations") orelse 0;
+pub fn currentVersion(conn: Conn) QueryError!u32 {
+    if (!try schemaMigrationsExists(conn)) return 0;
+    const recorded = (try queryOptionalInt(conn, "select coalesce(max(version), 0) from schema_migrations")) orelse 0;
     return @intCast(recorded);
 }
 
-fn schemaMigrationsExists(db: *Db) sqlite.Error!bool {
-    const present = try db.queryOneInt(
+fn schemaMigrationsExists(conn: Conn) QueryError!bool {
+    const present = try queryOptionalInt(
+        conn,
         "select 1 from sqlite_master where type='table' and name='schema_migrations'",
     );
     return present != null;
 }
 
+/// Returns the first integer column of the first row, or null if no row.
+pub fn queryOptionalInt(conn: Conn, sql: []const u8) QueryError!?i64 {
+    if (try conn.row(sql, .{})) |r| {
+        defer r.deinit();
+        return r.int(0);
+    }
+    return null;
+}
+
+// ---- Tests ---------------------------------------------------------------
+
+fn openMemoryDb() !Conn {
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    errdefer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    return conn;
+}
+
 test "applyAll on empty db creates v1 schema and records migration" {
-    var db = try Db.open(":memory:", .{});
-    defer db.close();
+    const conn = try openMemoryDb();
+    defer conn.close();
 
-    try applyAll(&db, "2026-05-09T00:00:00.000Z");
+    try applyAll(conn, "2026-05-09T00:00:00.000Z");
 
-    const v = try currentVersion(&db);
-    try std.testing.expectEqual(@as(u32, 1), v);
+    try std.testing.expectEqual(@as(u32, 1), try currentVersion(conn));
 
-    const app_id = (try db.queryOneInt("pragma application_id")).?;
-    try std.testing.expectEqual(@as(i64, application_id), app_id);
+    try std.testing.expectEqual(
+        @as(?i64, application_id),
+        try queryOptionalInt(conn, "pragma application_id"),
+    );
 
-    const user_v = (try db.queryOneInt("pragma user_version")).?;
-    try std.testing.expectEqual(@as(i64, 1), user_v);
+    try std.testing.expectEqual(
+        @as(?i64, 1),
+        try queryOptionalInt(conn, "pragma user_version"),
+    );
 
-    const tables = (try db.queryOneInt(
+    try std.testing.expectEqual(@as(?i64, 10), try queryOptionalInt(
+        conn,
         "select count(*) from sqlite_master where type='table' and name in ('items','item_ids','dependencies','external_blockers','mutations','remotes','sync_cursors','sequences','store_config','schema_migrations')",
-    )).?;
-    try std.testing.expectEqual(@as(i64, 10), tables);
+    ));
 
-    const seq_count = (try db.queryOneInt("select count(*) from sequences")).?;
-    try std.testing.expectEqual(@as(i64, 3), seq_count);
+    try std.testing.expectEqual(@as(?i64, 3), try queryOptionalInt(conn, "select count(*) from sequences"));
 }
 
 test "applyAll is idempotent on a current store" {
-    var db = try Db.open(":memory:", .{});
-    defer db.close();
+    const conn = try openMemoryDb();
+    defer conn.close();
 
-    try applyAll(&db, "2026-05-09T00:00:00.000Z");
-    try applyAll(&db, "2026-05-09T00:00:01.000Z");
+    try applyAll(conn, "2026-05-09T00:00:00.000Z");
+    try applyAll(conn, "2026-05-09T00:00:01.000Z");
 
-    const count = (try db.queryOneInt("select count(*) from schema_migrations")).?;
-    try std.testing.expectEqual(@as(i64, 1), count);
+    try std.testing.expectEqual(
+        @as(?i64, 1),
+        try queryOptionalInt(conn, "select count(*) from schema_migrations"),
+    );
 }
 
 test "applyAll rejects future version" {
-    var db = try Db.open(":memory:", .{});
-    defer db.close();
+    const conn = try openMemoryDb();
+    defer conn.close();
 
-    try applyAll(&db, "2026-05-09T00:00:00.000Z");
-    try db.exec("insert into schema_migrations(version, applied_at) values (999, '2099-01-01T00:00:00.000Z')");
+    try applyAll(conn, "2026-05-09T00:00:00.000Z");
+    try conn.exec(
+        "insert into schema_migrations(version, applied_at) values (?1, ?2)",
+        .{ @as(i64, 999), "2099-01-01T00:00:00.000Z" },
+    );
 
-    try std.testing.expectError(error.StoreFromFutureVersion, applyAll(&db, "2026-05-09T00:00:00.000Z"));
+    try std.testing.expectError(
+        error.StoreFromFutureVersion,
+        applyAll(conn, "2026-05-09T00:00:00.000Z"),
+    );
+}
+
+test "applyAll records applied_at from the caller-supplied clock" {
+    const conn = try openMemoryDb();
+    defer conn.close();
+    const fixed = "2026-05-09T12:34:56.789Z";
+
+    try applyAll(conn, fixed);
+
+    if (try conn.row("select applied_at from schema_migrations where version = 1", .{})) |r| {
+        defer r.deinit();
+        try std.testing.expectEqualStrings(fixed, r.text(0));
+    } else return error.ExpectedRow;
 }
 
 const test_helpers = struct {
-    fn freshDb() !Db {
-        var db = try Db.open(":memory:", .{});
-        errdefer db.close();
-        try applyAll(&db, "2026-05-09T00:00:00.000Z");
-        return db;
+    fn freshDb() !Conn {
+        const conn = try openMemoryDb();
+        errdefer conn.close();
+        try applyAll(conn, "2026-05-09T00:00:00.000Z");
+        return conn;
     }
 
     /// Inserts a Display ID resolver row and an item, in one deferred-FK
     /// transaction. Items must have a matching `source = 'display'` row in
     /// `item_ids` to satisfy the deferred composite foreign key.
-    fn insertTicket(db: *Db, args: struct {
+    fn insertTicket(conn: Conn, args: struct {
         id: []const u8,
         display: []const u8,
         title: []const u8 = "title",
@@ -305,136 +347,145 @@ const test_helpers = struct {
         status: []const u8 = "open",
         created_seq: i64 = 1,
     }) !void {
-        var buf: [2048]u8 = undefined;
-        const sql = try std.fmt.bufPrintZ(&buf,
-            \\begin;
+        try conn.transaction();
+        errdefer conn.rollback();
+        try conn.exec(
             \\insert into items(id, display_value, item_class, ticket_kind, priority, title, body, origin, status, created_seq, created_at, updated_at)
-            \\values ('{s}', '{s}', 'ticket', '{s}', '{s}', '{s}', '', 'local', '{s}', {d}, '2026-05-09T00:00:00.000Z', '2026-05-09T00:00:00.000Z');
-            \\insert into item_ids(value, source, item_id, created_at)
-            \\values ('{s}', 'display', '{s}', '2026-05-09T00:00:00.000Z');
-            \\commit;
+            \\values (?1, ?2, 'ticket', ?3, ?4, ?5, '', 'local', ?6, ?7, '2026-05-09T00:00:00.000Z', '2026-05-09T00:00:00.000Z')
         ,
-            .{ args.id, args.display, args.kind, args.priority, args.title, args.status, args.created_seq, args.display, args.id },
+            .{ args.id, args.display, args.kind, args.priority, args.title, args.status, args.created_seq },
         );
-        try db.exec(sql);
+        try conn.exec(
+            "insert into item_ids(value, source, item_id, created_at) values (?1, 'display', ?2, '2026-05-09T00:00:00.000Z')",
+            .{ args.display, args.id },
+        );
+        try conn.commit();
+    }
+
+    fn expectRejected(conn: Conn, sql: [*:0]const u8) !void {
+        const result = conn.execNoArgs(sql);
+        if (result) |_| {
+            std.debug.print("expected SQL to fail but it succeeded:\n{s}\n", .{sql});
+            return error.ExpectedConstraintFailure;
+        } else |err| switch (err) {
+            error.Constraint,
+            error.ConstraintCheck,
+            error.ConstraintForeignKey,
+            error.ConstraintNotNull,
+            error.ConstraintPrimaryKey,
+            error.ConstraintTrigger,
+            error.ConstraintUnique,
+            => {},
+            else => return err,
+        }
     }
 };
 
 test "items: epic with ticket_kind violates check" {
-    var db = try test_helpers.freshDb();
-    defer db.close();
-    const sql: [:0]const u8 =
+    const conn = try test_helpers.freshDb();
+    defer conn.close();
+    try test_helpers.expectRejected(conn,
         \\insert into items(id, display_value, item_class, ticket_kind, priority, title, body, origin, status, created_seq, created_at, updated_at)
         \\values ('e1', 'tk-1', 'epic', 'task', null, 'epic', '', 'local', 'open', 1, '2026-05-09T00:00:00.000Z', '2026-05-09T00:00:00.000Z')
-    ;
-    try std.testing.expectError(error.ExecFailed, db.exec(sql));
+    );
 }
 
 test "items: ticket without priority violates check" {
-    var db = try test_helpers.freshDb();
-    defer db.close();
-    const sql: [:0]const u8 =
+    const conn = try test_helpers.freshDb();
+    defer conn.close();
+    try test_helpers.expectRejected(conn,
         \\insert into items(id, display_value, item_class, ticket_kind, priority, title, body, origin, status, created_seq, created_at, updated_at)
         \\values ('t1', 'tk-1', 'ticket', 'task', null, 'title', '', 'local', 'open', 1, '2026-05-09T00:00:00.000Z', '2026-05-09T00:00:00.000Z')
-    ;
-    try std.testing.expectError(error.ExecFailed, db.exec(sql));
+    );
 }
 
 test "items: invalid status rejected" {
-    var db = try test_helpers.freshDb();
-    defer db.close();
-    const sql: [:0]const u8 =
+    const conn = try test_helpers.freshDb();
+    defer conn.close();
+    try test_helpers.expectRejected(conn,
         \\insert into items(id, display_value, item_class, ticket_kind, priority, title, body, origin, status, created_seq, created_at, updated_at)
         \\values ('t1', 'tk-1', 'ticket', 'task', 'P2', 'title', '', 'local', 'blocked', 1, '2026-05-09T00:00:00.000Z', '2026-05-09T00:00:00.000Z')
-    ;
-    try std.testing.expectError(error.ExecFailed, db.exec(sql));
+    );
 }
 
 test "items: empty title rejected" {
-    var db = try test_helpers.freshDb();
-    defer db.close();
-    const sql: [:0]const u8 =
+    const conn = try test_helpers.freshDb();
+    defer conn.close();
+    try test_helpers.expectRejected(conn,
         \\insert into items(id, display_value, item_class, ticket_kind, priority, title, body, origin, status, created_seq, created_at, updated_at)
         \\values ('t1', 'tk-1', 'ticket', 'task', 'P2', '', '', 'local', 'open', 1, '2026-05-09T00:00:00.000Z', '2026-05-09T00:00:00.000Z')
-    ;
-    try std.testing.expectError(error.ExecFailed, db.exec(sql));
+    );
 }
 
 test "items: contained ticket pointing at non-Epic rejected" {
-    var db = try test_helpers.freshDb();
-    defer db.close();
-    try test_helpers.insertTicket(&db, .{ .id = "t1", .display = "tk-1", .created_seq = 1 });
-    const sql: [:0]const u8 =
+    const conn = try test_helpers.freshDb();
+    defer conn.close();
+    try test_helpers.insertTicket(conn, .{ .id = "t1", .display = "tk-1", .created_seq = 1 });
+    try test_helpers.expectRejected(conn,
         \\begin;
         \\insert into items(id, display_value, item_class, ticket_kind, priority, title, body, origin, status, container_id, container_class, created_seq, created_at, updated_at)
         \\values ('t2', 'tk-2', 'ticket', 'task', 'P2', 'child', '', 'local', 'open', 't1', 'ticket', 2, '2026-05-09T00:00:00.000Z', '2026-05-09T00:00:00.000Z');
         \\insert into item_ids(value, source, item_id, created_at) values ('tk-2', 'display', 't2', '2026-05-09T00:00:00.000Z');
         \\commit;
-    ;
-    try std.testing.expectError(error.ExecFailed, db.exec(sql));
+    );
 }
 
 test "dependencies: self-edge rejected" {
-    var db = try test_helpers.freshDb();
-    defer db.close();
-    try test_helpers.insertTicket(&db, .{ .id = "t1", .display = "tk-1", .created_seq = 1 });
-    const sql: [:0]const u8 =
+    const conn = try test_helpers.freshDb();
+    defer conn.close();
+    try test_helpers.insertTicket(conn, .{ .id = "t1", .display = "tk-1", .created_seq = 1 });
+    try test_helpers.expectRejected(conn,
         \\insert into dependencies(blocking_id, blocked_id, created_at)
         \\values ('t1', 't1', '2026-05-09T00:00:00.000Z')
-    ;
-    try std.testing.expectError(error.ExecFailed, db.exec(sql));
+    );
 }
 
 test "dependencies: cycle rejected" {
-    var db = try test_helpers.freshDb();
-    defer db.close();
-    try test_helpers.insertTicket(&db, .{ .id = "t1", .display = "tk-1", .created_seq = 1 });
-    try test_helpers.insertTicket(&db, .{ .id = "t2", .display = "tk-2", .created_seq = 2 });
-    try db.exec(
+    const conn = try test_helpers.freshDb();
+    defer conn.close();
+    try test_helpers.insertTicket(conn, .{ .id = "t1", .display = "tk-1", .created_seq = 1 });
+    try test_helpers.insertTicket(conn, .{ .id = "t2", .display = "tk-2", .created_seq = 2 });
+    try conn.execNoArgs(
         \\insert into dependencies(blocking_id, blocked_id, created_at)
         \\values ('t1', 't2', '2026-05-09T00:00:00.000Z')
     );
-    const sql: [:0]const u8 =
+    try test_helpers.expectRejected(conn,
         \\insert into dependencies(blocking_id, blocked_id, created_at)
         \\values ('t2', 't1', '2026-05-09T00:00:00.000Z')
-    ;
-    try std.testing.expectError(error.ExecFailed, db.exec(sql));
+    );
 }
 
 test "item_ids: duplicate value rejected" {
-    var db = try test_helpers.freshDb();
-    defer db.close();
-    try test_helpers.insertTicket(&db, .{ .id = "t1", .display = "tk-1", .created_seq = 1 });
-    try test_helpers.insertTicket(&db, .{ .id = "t2", .display = "tk-2", .created_seq = 2 });
-    const sql: [:0]const u8 =
+    const conn = try test_helpers.freshDb();
+    defer conn.close();
+    try test_helpers.insertTicket(conn, .{ .id = "t1", .display = "tk-1", .created_seq = 1 });
+    try test_helpers.insertTicket(conn, .{ .id = "t2", .display = "tk-2", .created_seq = 2 });
+    try test_helpers.expectRejected(conn,
         \\insert into item_ids(value, source, item_id, created_at)
         \\values ('tk-1', 'alias', 't2', '2026-05-09T00:00:00.000Z')
-    ;
-    try std.testing.expectError(error.ExecFailed, db.exec(sql));
+    );
 }
 
 test "external_blockers: empty reason rejected" {
-    var db = try test_helpers.freshDb();
-    defer db.close();
-    try test_helpers.insertTicket(&db, .{ .id = "t1", .display = "tk-1", .created_seq = 1 });
-    const sql: [:0]const u8 =
+    const conn = try test_helpers.freshDb();
+    defer conn.close();
+    try test_helpers.insertTicket(conn, .{ .id = "t1", .display = "tk-1", .created_seq = 1 });
+    try test_helpers.expectRejected(conn,
         \\insert into external_blockers(id, item_id, reason, created_at)
         \\values ('eb1', 't1', '', '2026-05-09T00:00:00.000Z')
-    ;
-    try std.testing.expectError(error.ExecFailed, db.exec(sql));
+    );
 }
 
 test "items: missing display resolver row rejected on commit" {
-    var db = try test_helpers.freshDb();
-    defer db.close();
+    const conn = try test_helpers.freshDb();
+    defer conn.close();
     // Without inserting an item_ids row, the deferred composite FK
     // (display_value, id, 'display') -> item_ids(value, item_id, source)
     // must fail at commit time.
-    const sql: [:0]const u8 =
+    try test_helpers.expectRejected(conn,
         \\begin;
         \\insert into items(id, display_value, item_class, ticket_kind, priority, title, body, origin, status, created_seq, created_at, updated_at)
         \\values ('t1', 'tk-1', 'ticket', 'task', 'P2', 'title', '', 'local', 'open', 1, '2026-05-09T00:00:00.000Z', '2026-05-09T00:00:00.000Z');
         \\commit;
-    ;
-    try std.testing.expectError(error.ExecFailed, db.exec(sql));
+    );
 }

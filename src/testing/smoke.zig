@@ -79,5 +79,5 @@ test "smoke: tk init in a real git repo creates the store" {
 // outside-git path. It is exercised by the unit test in commands/init.zig
 // (which uses the fake runner), and engineering a reliably git-free temp
 // directory inside a checkout is awkward. The real-git success path here
-// is the integration check the slice 2 spec asks for: argv plumbing, Git
-// subprocess discovery, filesystem writes, and SQLite linkage all in one.
+// is the only check that exercises argv plumbing, Git subprocess discovery,
+// filesystem writes, and SQLite linkage end-to-end.
