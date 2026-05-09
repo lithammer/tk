@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const build_options = @import("build_options");
+const messages = @import("../messages.zig");
 
 const tk_exe_path: []const u8 = build_options.tk_exe_path;
 
@@ -59,7 +60,7 @@ test "smoke: tk init in a real git repo creates the store" {
         std.debug.print("\ntk init unexpected exit {any}\nstdout:\n{s}\nstderr:\n{s}\n", .{ tk_init.term, tk_init.stdout, tk_init.stderr });
         return error.SmokeInitFailed;
     }
-    try std.testing.expect(std.mem.indexOf(u8, tk_init.stdout, "Initialized Repository Store at") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tk_init.stdout, messages.init_success_fresh) != null);
 
     // Verify the file is on disk and looks like a SQLite database.
     const db_path = try std.fs.path.joinZ(gpa, &.{ root, ".git", "tk", "ticket.db" });

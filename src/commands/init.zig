@@ -5,6 +5,7 @@ const builtin = @import("builtin");
 const clap = @import("clap");
 const zqlite = @import("zqlite");
 const cli = @import("../cli.zig");
+const messages = @import("../messages.zig");
 const migrations = @import("../store/migrations.zig");
 const display_prefix = @import("../domain/display_prefix.zig");
 
@@ -83,7 +84,7 @@ fn execute(deps: cli.Deps) !u8 {
     switch (kind) {
         .foreign => {
             deps.stderr.print(
-                "tk init: {s} exists but is not a Ticket Repository Store\n",
+                "tk init: {s} exists but is " ++ messages.init_refuse_foreign ++ "\n",
                 .{db_path},
             ) catch {};
             return 1;
@@ -99,7 +100,7 @@ fn execute(deps: cli.Deps) !u8 {
     migrations.applyAll(conn, now_iso) catch |err| switch (err) {
         error.StoreFromFutureVersion => {
             deps.stderr.print(
-                "tk init: {s} was created by a newer Ticket version\n",
+                "tk init: {s} was created by a " ++ messages.init_refuse_future_version ++ "\n",
                 .{db_path},
             ) catch {};
             return 1;
@@ -122,8 +123,8 @@ fn execute(deps: cli.Deps) !u8 {
     };
 
     switch (kind) {
-        .ours => deps.stdout.print("Repository Store already initialized at {s}\n", .{db_path}) catch {},
-        .fresh => deps.stdout.print("Initialized Repository Store at {s}\n", .{db_path}) catch {},
+        .ours => deps.stdout.print(messages.init_success_existing ++ "{s}\n", .{db_path}) catch {},
+        .fresh => deps.stdout.print(messages.init_success_fresh ++ "{s}\n", .{db_path}) catch {},
         .foreign => unreachable,
     }
     return 0;
@@ -167,11 +168,11 @@ fn discoverPaths(deps: cli.Deps) !?DiscoveredPaths {
     }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.ExecutableNotFound => {
-            deps.stderr.writeAll("tk init: git not found on PATH\n") catch {};
+            deps.stderr.writeAll("tk init: " ++ messages.init_git_missing ++ "\n") catch {};
             return null;
         },
         error.SpawnFailed => {
-            deps.stderr.writeAll("tk init: failed to invoke git\n") catch {};
+            deps.stderr.writeAll("tk init: " ++ messages.init_git_spawn_failed ++ "\n") catch {};
             return null;
         },
     };
@@ -185,7 +186,7 @@ fn discoverPaths(deps: cli.Deps) !?DiscoveredPaths {
         if (trimmed.len > 0) {
             deps.stderr.print("tk init: {s}\n", .{trimmed}) catch {};
         } else {
-            deps.stderr.writeAll("tk init: not in a git repository\n") catch {};
+            deps.stderr.writeAll("tk init: " ++ messages.init_outside_git_default ++ "\n") catch {};
         }
         return null;
     }
@@ -277,7 +278,7 @@ test "init: empty-stderr git failure falls back to default diagnostic" {
 
     const code = try run(h.deps(), &h.iter);
     try std.testing.expectEqual(@as(u8, 1), code);
-    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "not in a git repository") != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), messages.init_outside_git_default) != null);
 }
 
 test "init: --help prints to stdout, exits 0" {
@@ -362,7 +363,7 @@ test "init: success creates store, applies migration, seeds prefix" {
 
     const code = try run(h.deps(), &h.iter);
     try std.testing.expectEqual(@as(u8, 0), code);
-    try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "Initialized Repository Store at") != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stdout(), messages.init_success_fresh) != null);
     try std.testing.expectEqualStrings("", h.stderr());
 
     const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
@@ -472,7 +473,7 @@ test "init: idempotent on second run preserves an externally-set prefix" {
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = stdout_payload });
         const code = try run(h.deps(), &h.iter);
         try std.testing.expectEqual(@as(u8, 0), code);
-        try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "already initialized") != null);
+        try std.testing.expect(std.mem.indexOf(u8, h.stdout(), messages.init_success_existing) != null);
     }
 
     const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
@@ -510,7 +511,7 @@ test "init: refuses to overwrite a non-Ticket SQLite file with tables" {
 
     const code = try run(h.deps(), &h.iter);
     try std.testing.expectEqual(@as(u8, 1), code);
-    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "not a Ticket Repository Store") != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), messages.init_refuse_foreign) != null);
 
     const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
     defer conn.close();
@@ -553,7 +554,7 @@ test "init: refuses a foreign SQLite file even when its application_id is non-ze
 
     const code = try run(h.deps(), &h.iter);
     try std.testing.expectEqual(@as(u8, 1), code);
-    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "not a Ticket Repository Store") != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), messages.init_refuse_foreign) != null);
 
     // Confirm we did not touch the foreign data.
     const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
@@ -600,5 +601,5 @@ test "init: rejects a store created by a future Ticket version" {
 
     const code = try run(h.deps(), &h.iter);
     try std.testing.expectEqual(@as(u8, 1), code);
-    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "newer Ticket version") != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), messages.init_refuse_future_version) != null);
 }

@@ -17,6 +17,10 @@ tk init
 
 Initializes the Repository Store.
 
+## User-Observable Phrasing
+
+User-observable diagnostic and status substrings (for example, `Initialized Repository Store at `, `not a Ticket Repository Store`, `newer Ticket version`) are canonicalised in `src/messages.zig`. Source-side call sites build their format strings by `++`-concatenating those constants with the formatting suffix they need, and tests reference the same constants via `messages.<name>`. Any new user-visible phrasing should be added there rather than hardcoded at the call site.
+
 ## Agent Briefing
 
 ```sh
