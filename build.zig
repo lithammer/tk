@@ -1,5 +1,10 @@
 const std = @import("std");
 
+/// Build the `tk` executable and the unified test binary.
+///
+/// Static assets such as `docs/prime.md` are registered as anonymous imports
+/// so command modules can embed them by name while still failing at build time
+/// if the source file disappears.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});

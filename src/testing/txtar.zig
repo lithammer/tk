@@ -1,16 +1,25 @@
 const std = @import("std");
 
+/// One parsed txtar section.
 pub const Section = struct {
+    /// Section name between `-- ` and ` --`; empty for a prelude.
     name: []const u8,
+    /// Section body bytes, borrowed from the original txtar input.
     body: []const u8,
 };
 
+/// Scenario section containing testscript-style commands.
 pub const section_script = "script";
+/// Expected aggregate stdout from all `tk` commands in the script.
 pub const section_expected_stdout = "expected/stdout";
+/// Expected aggregate stderr from all `tk` commands in the script.
 pub const section_expected_stderr = "expected/stderr";
+/// Expected exit code from the final `tk` command in the script.
 pub const section_expected_exit = "expected/exit";
+/// Prefix for fixture files materialized under `$WORK`.
 pub const section_input_prefix = "input/";
 
+/// Return the first section with `name`, or null when absent.
 pub fn findSection(sections: []const Section, name: []const u8) ?*const Section {
     for (sections) |*sec| {
         if (std.mem.eql(u8, sec.name, name)) return sec;
@@ -20,6 +29,11 @@ pub fn findSection(sections: []const Section, name: []const u8) ?*const Section 
 
 const PRELUDE = "";
 
+/// Parse txtar bytes into borrowed sections.
+///
+/// The returned slice is owned by `allocator`, while section names and bodies
+/// point into `data`; callers must keep `data` alive for as long as they use
+/// the parsed sections.
 pub fn parse(allocator: std.mem.Allocator, data: []const u8) ![]Section {
     var sections: std.ArrayList(Section) = .empty;
     errdefer sections.deinit(allocator);
@@ -62,6 +76,8 @@ fn isSectionHeader(line: []const u8) ?[]const u8 {
     return trimmed[3 .. trimmed.len - 3];
 }
 
+/// Serialize sections back to txtar bytes, adding a trailing newline to each
+/// non-empty section body when needed.
 pub fn serialize(allocator: std.mem.Allocator, sections: []const Section) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);

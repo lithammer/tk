@@ -3,14 +3,19 @@
 
 const std = @import("std");
 
+/// Type-erased clock used by commands that need Repository Store timestamps.
 pub const Clock = struct {
+    /// Implementation-owned pointer passed back to the vtable.
     context: *anyopaque,
+    /// Clock operations for the concrete implementation behind `context`.
     vtable: *const VTable,
 
+    /// Clock implementation hooks.
     pub const VTable = struct {
         nowMs: *const fn (context: *anyopaque) i64,
     };
 
+    /// Return UTC milliseconds since the Unix epoch.
     pub fn nowMs(self: Clock) i64 {
         return self.vtable.nowMs(self.context);
     }
@@ -21,13 +26,16 @@ pub const Clock = struct {
     }
 };
 
+/// Runtime clock backed by `std.Io.Clock.real`.
 pub const RealClock = struct {
     io: std.Io,
 
+    /// Bind the clock to the process I/O handle supplied by Zig's main.
     pub fn init(io: std.Io) RealClock {
         return .{ .io = io };
     }
 
+    /// Return the type-erased clock view passed through `cli.Deps`.
     pub fn clock(self: *RealClock) Clock {
         return .{ .context = self, .vtable = &vtable };
     }
@@ -40,18 +48,22 @@ pub const RealClock = struct {
     }
 };
 
+/// Mutable deterministic clock for command-handler tests.
 pub const FakeClock = struct {
     /// Mutable so tests can advance the clock between calls.
     current_ms: i64,
 
+    /// Start the fake clock at a fixed millisecond timestamp.
     pub fn init(start_ms: i64) FakeClock {
         return .{ .current_ms = start_ms };
     }
 
+    /// Move the fake clock forward or backward by `delta_ms`.
     pub fn advance(self: *FakeClock, delta_ms: i64) void {
         self.current_ms += delta_ms;
     }
 
+    /// Return the type-erased clock view passed through `cli.Deps`.
     pub fn clock(self: *FakeClock) Clock {
         return .{ .context = self, .vtable = &vtable };
     }

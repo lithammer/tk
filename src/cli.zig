@@ -3,9 +3,17 @@ const clap = @import("clap");
 const proc = @import("proc/runner.zig");
 const clock_mod = @import("clock.zig");
 
+/// Runtime services available to command handlers.
+///
+/// Commands receive these explicitly instead of reaching for process globals so
+/// unit tests and txtar scenarios can substitute writers, clocks, working
+/// directories, and subprocess runners.
 pub const Deps = struct {
+    /// Primary command output. Commands write user data here.
     stdout: *std.Io.Writer,
+    /// Diagnostics and usage errors. Commands avoid writing normal output here.
     stderr: *std.Io.Writer,
+    /// Allocator used for parsing and short-lived command work.
     gpa: std.mem.Allocator,
     /// I/O implementation handle, threaded through filesystem and subprocess
     /// calls. Tests use `std.testing.io`; main uses the runtime's init.io.
@@ -22,8 +30,11 @@ pub const Deps = struct {
     clock: clock_mod.Clock,
 };
 
+/// Metadata every command module exports for dispatcher registration and help.
 pub const CommandMeta = struct {
+    /// CLI spelling, also used as the generated `SubCommand` tag name.
     name: [:0]const u8,
+    /// One-line description shown in `tk --help`.
     description: []const u8,
 };
 
@@ -32,6 +43,11 @@ const all_commands = .{
     @import("commands/prime.zig"),
 };
 
+/// Top-level subcommand enum generated from `all_commands`.
+///
+/// Adding a command module to `all_commands` is the only dispatcher touchpoint:
+/// the enum, zig-clap parser, help listing, and dispatch switch all derive from
+/// this compile-time tuple.
 pub const SubCommand = blk: {
     const Tag = std.math.IntFittingRange(0, all_commands.len -| 1);
     var names: [all_commands.len][]const u8 = undefined;
@@ -64,6 +80,11 @@ const help_options: clap.HelpOptions = .{
     .spacing_between_parameters = 0,
 };
 
+/// Parse top-level args and dispatch to a command handler.
+///
+/// Returns Ticket's process exit code contract: 0 success, 1 logical failure,
+/// 2 usage error, and propagated unexpected errors for `main.zig` to translate
+/// to exit 3.
 pub fn runArgv(deps: Deps, args_iter: anytype) !u8 {
     var diag: clap.Diagnostic = .{};
     // Treat every clap parse error as exit 2. The contract pins

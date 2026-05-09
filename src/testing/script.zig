@@ -7,11 +7,18 @@ const SliceArgIter = @import("arg_iter.zig").SliceArgIter;
 
 const Section = txtar.Section;
 
+/// Free a token slice returned by `tokenizeLine`.
 pub fn freeTokens(allocator: std.mem.Allocator, tokens: []const []const u8) void {
     for (tokens) |t| allocator.free(t);
     allocator.free(tokens);
 }
 
+/// Tokenize one `-- script --` line using the repo's testscript subset.
+///
+/// Whitespace separates args, single quotes preserve literal chunks, doubled
+/// quotes inside single quotes produce a literal quote, `#` starts a comment,
+/// and `$NAME` / `${NAME}` expand from `env`. Undefined variables are preserved
+/// with their leading `$`.
 pub fn tokenizeLine(
     allocator: std.mem.Allocator,
     line: []const u8,
@@ -278,12 +285,17 @@ fn compareAndReport(
     if (fail) return error.ScenarioFailed;
 }
 
+/// Scenario execution knobs used by tests and snapshot-update mode.
 pub const RunOptions = struct {
+    /// Rewrite expected sections from actual output.
     update: bool = false,
+    /// Preserve the temporary `$WORK` directory for debugging.
     keep_work: bool = false,
+    /// Suppress mismatch printing, useful for tests expecting failure.
     quiet: bool = false,
 };
 
+/// Run a txtar scenario using `TK_UPDATE` and `TK_TESTWORK` environment flags.
 pub fn runScenario(
     allocator: std.mem.Allocator,
     fixture_path: ?[]const u8,
@@ -330,6 +342,10 @@ fn stage(allocator: std.mem.Allocator, txtar_bytes: []const u8) !Staged {
     return .{ .sections = sections, .work_path = work_path, .tmp = tmp, .result = result };
 }
 
+/// Run a txtar scenario with explicit options.
+///
+/// Scenarios execute in-process against `cli.runArgv`, aggregate stdout/stderr
+/// from every `tk` command, and compare the final command's exit code.
 pub fn runScenarioWith(
     allocator: std.mem.Allocator,
     fixture_path: ?[]const u8,
@@ -357,6 +373,8 @@ pub fn runScenarioWith(
     try compareAndReport(allocator, staged.sections, staged.result, staged.work_path, opts.quiet);
 }
 
+/// Return a rewritten txtar fixture with expected sections updated from an
+/// in-process scenario run.
 pub fn rewriteScenarioBytes(allocator: std.mem.Allocator, txtar_bytes: []const u8) ![]u8 {
     var staged = try stage(allocator, txtar_bytes);
     defer staged.deinit(allocator, false);

@@ -15,14 +15,22 @@ pub const default_fake_now_ms: i64 = 1778330096789;
 /// call. Tests that exercise commands invoking subprocesses must register
 /// expectations on `harness.fake_runner` before calling the command.
 pub const Harness = struct {
+    /// Captured command stdout.
     stdout_buf: std.Io.Writer.Allocating,
+    /// Captured command stderr.
     stderr_buf: std.Io.Writer.Allocating,
+    /// Slice-backed iterator over command args.
     iter: SliceArgIter,
+    /// Allocator threaded into `cli.Deps`.
     gpa: std.mem.Allocator,
+    /// Strict fake subprocess runner used by default.
     fake_runner: fake_proc.FakeRunner,
+    /// Deterministic clock used by default.
     fake_clock: clock_mod.FakeClock,
+    /// Optional cwd override for commands that resolve paths.
     cwd_override: ?std.Io.Dir,
 
+    /// Optional harness overrides.
     pub const Options = struct {
         /// Overrides `deps.cwd`. Slice 3+ commands resolve paths relative to
         /// `deps.cwd`; tests that exercise that resolution must pass an
@@ -31,10 +39,12 @@ pub const Harness = struct {
         cwd: ?std.Io.Dir = null,
     };
 
+    /// Create a harness with default options.
     pub fn init(allocator: std.mem.Allocator, args: []const []const u8) Harness {
         return initWith(allocator, args, .{});
     }
 
+    /// Create a harness with an optional cwd override.
     pub fn initWith(allocator: std.mem.Allocator, args: []const []const u8, opts: Options) Harness {
         return .{
             .stdout_buf = .init(allocator),
@@ -47,12 +57,14 @@ pub const Harness = struct {
         };
     }
 
+    /// Free captured output buffers and fake-runner expectations.
     pub fn deinit(self: *Harness) void {
         self.stdout_buf.deinit();
         self.stderr_buf.deinit();
         self.fake_runner.deinit();
     }
 
+    /// Build the `cli.Deps` value to pass into a command under test.
     pub fn deps(self: *Harness) cli.Deps {
         return .{
             .stdout = &self.stdout_buf.writer,
@@ -65,10 +77,12 @@ pub const Harness = struct {
         };
     }
 
+    /// Captured stdout bytes written by the command.
     pub fn stdout(self: *Harness) []const u8 {
         return self.stdout_buf.written();
     }
 
+    /// Captured stderr bytes written by the command.
     pub fn stderr(self: *Harness) []const u8 {
         return self.stderr_buf.written();
     }

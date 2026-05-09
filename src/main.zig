@@ -3,6 +3,11 @@ const cli = @import("cli.zig");
 const proc = @import("proc/runner.zig");
 const clock_mod = @import("clock.zig");
 
+/// Process entrypoint for `tk`.
+///
+/// The executable owns real stdout/stderr buffers, the real subprocess runner,
+/// and the real clock. Everything after argv setup is delegated to `cli.runArgv`
+/// so command behavior stays testable without spawning a process.
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     var stdout_buf: [4096]u8 = undefined;

@@ -15,6 +15,7 @@
 
 const std = @import("std");
 
+/// Maximum length of the stored local Display ID prefix.
 pub const max_prefix_len: usize = 12;
 
 const separators = "-_./:# \t";

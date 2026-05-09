@@ -7,6 +7,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+/// Captured result of an external CLI invocation.
 pub const Result = struct {
     /// 0..255 for processes that exited normally; 255 for signal/unknown.
     exit_code: u8,
@@ -15,17 +16,22 @@ pub const Result = struct {
     /// Captured stderr. Owned by `gpa` from the call to `run`.
     stderr: []u8,
 
+    /// Free captured stdout and stderr with the allocator passed to `run`.
     pub fn deinit(self: *Result, gpa: Allocator) void {
         gpa.free(self.stdout);
         gpa.free(self.stderr);
     }
 };
 
+/// Subprocess request issued by a command handler.
 pub const Options = struct {
+    /// Full argv, including the executable name at index 0.
     argv: []const []const u8,
+    /// Optional working directory for the child process.
     cwd: ?std.Io.Dir = null,
 };
 
+/// Error set exposed to command handlers by any runner implementation.
 pub const Error = error{
     /// argv[0] could not be located on PATH or at the absolute path given.
     /// Distinguished from generic spawn failures so commands can render an
@@ -36,14 +42,22 @@ pub const Error = error{
     OutOfMemory,
 };
 
+/// Type-erased subprocess runner.
+///
+/// Commands use this through `cli.Deps` so tests can script subprocess output
+/// while production code still uses `RealRunner`.
 pub const Runner = struct {
+    /// Implementation-owned pointer passed back to the vtable.
     context: *anyopaque,
+    /// Runner operations for the concrete implementation behind `context`.
     vtable: *const VTable,
 
+    /// Runner implementation hooks.
     pub const VTable = struct {
         run: *const fn (context: *anyopaque, gpa: Allocator, options: Options) Error!Result,
     };
 
+    /// Run a subprocess and capture stdout/stderr.
     pub fn run(self: Runner, gpa: Allocator, options: Options) Error!Result {
         return self.vtable.run(self.context, gpa, options);
     }
@@ -53,10 +67,12 @@ pub const Runner = struct {
 pub const RealRunner = struct {
     io: std.Io,
 
+    /// Bind the runner to the process I/O handle supplied by Zig's main.
     pub fn init(io: std.Io) RealRunner {
         return .{ .io = io };
     }
 
+    /// Return the type-erased runner view passed through `cli.Deps`.
     pub fn runner(self: *RealRunner) Runner {
         return .{ .context = self, .vtable = &vtable };
     }

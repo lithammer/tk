@@ -9,6 +9,7 @@ const messages = @import("../messages.zig");
 const migrations = @import("../store/migrations.zig");
 const display_prefix = @import("../domain/display_prefix.zig");
 
+/// Dispatcher metadata for `tk init`.
 pub const meta: cli.CommandMeta = .{
     .name = "init",
     .description = "Initialize the Repository Store in the current Git repository",
@@ -19,6 +20,11 @@ const params = clap.parseParamsComptime(
     \\
 );
 
+/// Parse `tk init` flags and create or migrate the Repository Store.
+///
+/// This command is intentionally flagless in slice 2 except for `--help`.
+/// Store discovery is tied to Git's common directory so linked worktrees share
+/// one untracked Repository Store.
 pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
     var diag: clap.Diagnostic = .{};
     var res = clap.parseEx(clap.Help, &params, clap.parsers.default, args_iter, .{
@@ -40,6 +46,8 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
     return execute(deps);
 }
 
+/// Execute Repository Store discovery, classification, migration, and prefix
+/// seeding after command-line parsing has succeeded.
 fn execute(deps: cli.Deps) !u8 {
     const paths = (try discoverPaths(deps)) orelse return 1;
     defer deps.gpa.free(paths.git_common_dir);
@@ -130,6 +138,10 @@ fn execute(deps: cli.Deps) !u8 {
     return 0;
 }
 
+/// Classification of the SQLite file at `<git-common-dir>/tk/ticket.db`.
+///
+/// `tk init` inspects before mutating so a foreign SQLite file can be refused
+/// without changing its journal mode or application_id.
 pub const StoreKind = enum {
     /// File was just created by sqlite3_open_v2 and contains no schema yet.
     fresh,
@@ -139,6 +151,7 @@ pub const StoreKind = enum {
     foreign,
 };
 
+/// Classify an opened SQLite connection as fresh, ours, or foreign.
 pub fn classify(conn: zqlite.Conn) migrations.QueryError!StoreKind {
     const app_id = (try migrations.queryOptionalInt(conn, "pragma application_id")) orelse 0;
     if (app_id == migrations.application_id) return .ours;
@@ -148,6 +161,7 @@ pub fn classify(conn: zqlite.Conn) migrations.QueryError!StoreKind {
     return .foreign;
 }
 
+/// Apply connection and file pragmas required by the Repository Store.
 fn configureForTicketStore(conn: zqlite.Conn) zqlite.Error!void {
     // journal_mode persists in the file header; foreign_keys and
     // busy_timeout are connection-scoped and have to be set every open.
@@ -156,11 +170,16 @@ fn configureForTicketStore(conn: zqlite.Conn) zqlite.Error!void {
     try conn.execNoArgs("pragma foreign_keys = on");
 }
 
+/// Paths reported by Git for the current repository.
 const DiscoveredPaths = struct {
+    /// Shared Git common directory; used as the parent of the untracked store.
     git_common_dir: []u8,
+    /// Repository working-tree root; used only for display_prefix derivation.
     toplevel: []u8,
 };
 
+/// Ask Git for the common directory and toplevel, rendering user-facing
+/// diagnostics for missing Git or non-worktree invocations.
 fn discoverPaths(deps: cli.Deps) !?DiscoveredPaths {
     var run_result = deps.runner.run(deps.gpa, .{
         .argv = &.{ "git", "rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel" },
@@ -211,6 +230,8 @@ fn discoverPaths(deps: cli.Deps) !?DiscoveredPaths {
     return .{ .git_common_dir = common_owned, .toplevel = toplevel_owned };
 }
 
+/// Seed `store_config.display_prefix` from the repository basename when the
+/// store does not already carry an explicit prefix.
 fn seedDisplayPrefix(deps: cli.Deps, conn: zqlite.Conn, toplevel: []const u8) !void {
     if (try conn.row("select 1 from store_config where key = 'display_prefix'", .{})) |existing| {
         existing.deinit();
@@ -226,6 +247,8 @@ fn seedDisplayPrefix(deps: cli.Deps, conn: zqlite.Conn, toplevel: []const u8) !v
     );
 }
 
+/// Tighten a freshly-created Repository Store directory on platforms that
+/// expose Unix-style permissions.
 fn setDirMode0700(deps: cli.Deps, path: []const u8) !void {
     if (builtin.os.tag == .windows) return;
     try std.Io.Dir.cwd().setFilePermissions(deps.io, path, @enumFromInt(0o700), .{});

@@ -8,9 +8,13 @@ const Runner = runner_mod.Runner;
 const Options = runner_mod.Options;
 const Result = runner_mod.Result;
 
+/// Scripted subprocess response returned by `FakeRunner`.
 pub const Response = struct {
+    /// Process exit code reported to the command under test.
     exit_code: u8 = 0,
+    /// Captured stdout payload.
     stdout: []const u8 = "",
+    /// Captured stderr payload.
     stderr: []const u8 = "",
 };
 
@@ -19,14 +23,21 @@ const Expectation = struct {
     response: Response,
 };
 
+/// Strict fake subprocess runner for command-handler tests.
+///
+/// Expectations match argv prefixes in insertion order. An unmatched call
+/// panics because it means the test forgot to declare an expected subprocess
+/// interaction.
 pub const FakeRunner = struct {
     gpa: Allocator,
     expectations: std.ArrayList(Expectation),
 
+    /// Create an empty fake runner.
     pub fn init(gpa: Allocator) FakeRunner {
         return .{ .gpa = gpa, .expectations = .empty };
     }
 
+    /// Free copied expectation argv prefixes.
     pub fn deinit(self: *FakeRunner) void {
         for (self.expectations.items) |exp| {
             for (exp.argv_prefix) |s| self.gpa.free(s);
@@ -35,6 +46,7 @@ pub const FakeRunner = struct {
         self.expectations.deinit(self.gpa);
     }
 
+    /// Add an argv-prefix expectation and its response.
     pub fn expect(self: *FakeRunner, argv_prefix: []const []const u8, response: Response) !void {
         const owned_prefix = try self.gpa.alloc([]const u8, argv_prefix.len);
         errdefer self.gpa.free(owned_prefix);
@@ -46,6 +58,7 @@ pub const FakeRunner = struct {
         try self.expectations.append(self.gpa, .{ .argv_prefix = owned_prefix, .response = response });
     }
 
+    /// Return the type-erased runner view passed through `cli.Deps`.
     pub fn runner(self: *FakeRunner) Runner {
         return .{ .context = self, .vtable = &vtable };
     }

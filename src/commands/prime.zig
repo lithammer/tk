@@ -5,6 +5,7 @@ const cli = @import("../cli.zig");
 const prime_md_bytes = @embedFile("prime_md");
 const prime_output: []const u8 = std.mem.trimEnd(u8, prime_md_bytes, " \t\r\n") ++ "\n";
 
+/// Dispatcher metadata for `tk prime`.
 pub const meta: cli.CommandMeta = .{
     .name = "prime",
     .description = "Print agent workflow context to stdout",
@@ -15,6 +16,10 @@ const params = clap.parseParamsComptime(
     \\
 );
 
+/// Print the embedded agent briefing with exactly one trailing newline.
+///
+/// `tk prime` deliberately has no Repository Store precondition; it is safe for
+/// agent session-start hooks before `tk init` has run.
 pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
     var diag: clap.Diagnostic = .{};
     var res = clap.parseEx(clap.Help, &params, clap.parsers.default, args_iter, .{

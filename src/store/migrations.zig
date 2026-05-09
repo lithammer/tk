@@ -12,6 +12,7 @@
 const std = @import("std");
 const zqlite = @import("zqlite");
 
+/// Repository Store SQLite connection type used by migration helpers.
 pub const Conn = zqlite.Conn;
 
 /// Application ID written to `pragma application_id` so an existing SQLite
@@ -19,16 +20,22 @@ pub const Conn = zqlite.Conn;
 /// big-endian ASCII (`0x54 0x4B 0x44 0x42`).
 pub const application_id: i32 = 0x544B4442;
 
+/// One schema migration in the ordered Repository Store migration list.
 pub const Migration = struct {
+    /// Monotonic schema version recorded in `schema_migrations` and
+    /// mirrored to `pragma user_version`.
     version: u32,
+    /// Null-terminated SQL batch executed inside the migration transaction.
     sql: [*:0]const u8,
 };
 
+/// V1 Repository Store schema skeleton.
 pub const migration_1: Migration = .{
     .version = 1,
     .sql = @embedFile("migrations/001_repository_store.sql"),
 };
 
+/// Ordered migration list applied by `applyAll`.
 pub const all_migrations: []const Migration = &.{migration_1};
 
 /// Errors that the SQL helpers in this module can return. zqlite's
@@ -37,6 +44,7 @@ pub const all_migrations: []const Migration = &.{migration_1};
 /// API; bubble it up rather than mask it.
 pub const QueryError = zqlite.Error || error{MultipleStatements};
 
+/// Errors returned while applying migrations.
 pub const ApplyError = QueryError || error{StoreFromFutureVersion};
 
 /// Last SQLite error message captured by `applyAll`. zqlite's `rollback`
@@ -47,10 +55,19 @@ pub const ApplyError = QueryError || error{StoreFromFutureVersion};
 var last_error_buf: [256]u8 = undefined;
 var last_error_len: usize = 0;
 
+/// Return the most recent SQLite error captured during `applyAll`.
+///
+/// The returned slice is overwritten by the next `applyAll` call.
 pub fn lastError() []const u8 {
     return last_error_buf[0..last_error_len];
 }
 
+/// Apply every migration missing from the opened Repository Store.
+///
+/// Each migration runs in its own transaction. `now_iso` is supplied by the
+/// caller's injectable clock and recorded in `schema_migrations.applied_at`.
+/// Stores with a recorded version newer than this binary return
+/// `error.StoreFromFutureVersion` instead of attempting a downgrade.
 pub fn applyAll(conn: Conn, now_iso: []const u8) ApplyError!void {
     last_error_len = 0;
 
@@ -103,6 +120,7 @@ fn captureError(conn: Conn) void {
     last_error_len = n;
 }
 
+/// Return the highest applied schema migration version, or zero for no store.
 pub fn currentVersion(conn: Conn) QueryError!u32 {
     if (!try schemaMigrationsExists(conn)) return 0;
     const recorded = (try queryOptionalInt(conn, "select coalesce(max(version), 0) from schema_migrations")) orelse 0;
