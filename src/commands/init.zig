@@ -24,6 +24,8 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
         .diagnostic = &diag,
         .allocator = deps.gpa,
     }) catch |err| {
+        // TODO(followups): "Prefix tk init clap diagnostics with the command
+        // name" — docs/followups.md.
         diag.report(deps.stderr, err) catch {};
         return 2;
     };
@@ -50,6 +52,8 @@ fn execute(deps: cli.Deps) !u8 {
     };
     // Best-effort tighten permissions on POSIX. If chmod fails or the dir
     // already exists with broader permissions, leave it as-is.
+    // TODO(followups): "Surface a stderr warning when tk init can't tighten
+    // store permissions" — docs/followups.md.
     setDirMode0700(deps, tk_dir_path) catch {};
 
     const db_path = try std.fs.path.joinZ(deps.gpa, &.{ tk_dir_path, "ticket.db" });

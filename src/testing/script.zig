@@ -157,6 +157,9 @@ fn executeScript(
     };
     errdefer result.deinit(allocator);
 
+    // TODO(followups): "Decide the script runner's fakeability stance" —
+    // mixing a real subprocess runner with a fake clock will bite the moment
+    // a tk init / tk worktree scenario lands. See docs/followups.md.
     var real_runner = proc.RealRunner.init(std.testing.io);
     var fake_clock = clock_mod.FakeClock.init(0);
 
