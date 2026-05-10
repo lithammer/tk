@@ -29,21 +29,34 @@ src/
     mutation.zig
     priority.zig
     status.zig
+  git/
+    discovery.zig
+  proc/
+    runner.zig
+    fake.zig
   store/
-    sqlite.zig
+    diagnostic.zig
     migrations.zig
   sync/
     engine.zig
   remote/
-    runner.zig
     github.zig
   worktree/
-    git.zig
   testing/
     snapshot.zig
     txtar.zig
     script.zig
 ```
+
+`src/git/` is a thin façade over Git subprocess invocations (`rev-parse`
+path discovery is the first user; `tk worktree` will reuse it). It does
+not own command-specific worktree logic — that belongs in `worktree/`
+when those commands land. `src/proc/` houses the subprocess runner
+abstraction and its test fakes (`FakeRunner` for scripted responses,
+`ErrorInjectingRunner` for runner-error mapping). `src/store/` houses
+both the Repository Store schema (migrations.zig) and the small
+`Diagnostic` scratch buffer used to capture transient SQLite errors
+across rollback boundaries.
 
 Only add files when the slice needs them. The layout is a direction, not a scaffolding checklist.
 
