@@ -130,16 +130,15 @@ test "discoverPaths: returns .ok with both paths on success" {
         .stdout = "/repo/.git\n/repo\n",
     });
 
-    var outcome = try discoverPaths(gpa, fake.runner(), std.Io.Dir.cwd());
-    defer outcome.deinit(gpa);
-    switch (outcome) {
-        .ok => |*paths| {
-            defer @constCast(paths).deinit(gpa);
-            try std.testing.expectEqualStrings("/repo/.git", paths.git_common_dir);
-            try std.testing.expectEqualStrings("/repo", paths.toplevel);
-        },
-        else => return error.UnexpectedOutcome,
-    }
+    // Mirror the production caller's idiom: extract DiscoveredPaths from
+    // the .ok arm and free it directly, since Outcome.deinit is a no-op
+    // for that arm.
+    const outcome = try discoverPaths(gpa, fake.runner(), std.Io.Dir.cwd());
+    if (outcome != .ok) return error.UnexpectedOutcome;
+    var paths = outcome.ok;
+    defer paths.deinit(gpa);
+    try std.testing.expectEqualStrings("/repo/.git", paths.git_common_dir);
+    try std.testing.expectEqualStrings("/repo", paths.toplevel);
 }
 
 test "discoverPaths: returns .git_rejected with trimmed stderr on exit 128" {
@@ -156,8 +155,12 @@ test "discoverPaths: returns .git_rejected with trimmed stderr on exit 128" {
     switch (outcome) {
         .git_rejected => |maybe_msg| {
             const msg = maybe_msg orelse return error.ExpectedNonNullMessage;
-            try std.testing.expect(std.mem.indexOf(u8, msg, "not a git repository") != null);
-            try std.testing.expectEqual(@as(usize, std.mem.indexOfScalar(u8, msg, '\n') orelse msg.len), msg.len);
+            // Pin the exact trimmed value: trailing newline stripped, no
+            // other modifications. Drift in trim semantics fails here.
+            try std.testing.expectEqualStrings(
+                "fatal: not a git repository (or any of the parent directories): .git",
+                msg,
+            );
         },
         else => return error.UnexpectedOutcome,
     }

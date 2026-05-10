@@ -50,8 +50,6 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
 /// Execute Repository Store discovery, classification, migration, and prefix
 /// seeding after command-line parsing has succeeded.
 fn execute(deps: cli.Deps) !u8 {
-    // Outcome.deinit only frees error-arm payloads; on the .ok arm we
-    // extract the inner DiscoveredPaths and free it ourselves below.
     const discovery_outcome = try discovery.discoverPaths(deps.gpa, deps.runner, deps.cwd);
     switch (discovery_outcome) {
         .git_missing => {
@@ -569,4 +567,60 @@ test "init: rejects a store created by a future Ticket version" {
     const code = try run(h.deps(), &h.iter);
     try std.testing.expectEqual(@as(u8, 1), code);
     try std.testing.expect(std.mem.indexOf(u8, h.stderr(), messages.init_refuse_future_version) != null);
+}
+
+test "init: surfaces SQLite error when migration fails" {
+    // Pin the user-visible behavior of migrations.Diagnostic flowing through
+    // tk init: a Ticket-classified store whose schema conflicts with
+    // migration 1 must produce a stderr line that includes the SQLite errmsg
+    // ("items"), not just the literal "migration failed:" prefix. A
+    // regression that drops `&migration_diag` (passes null) or reorders the
+    // format args would not be caught by migration-level tests alone.
+    const gpa = std.testing.allocator;
+    var store = try TmpStore.init(gpa, "my-test-repo");
+    defer store.deinit(gpa);
+
+    const tk_dir = try std.fs.path.join(gpa, &.{ store.common_dir_path, "tk" });
+    defer gpa.free(tk_dir);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, tk_dir);
+
+    {
+        // Set application_id so classify returns .ours, but leave
+        // schema_migrations empty and pre-create `items` so migration 1's
+        // `create table items` fails inside applyAll's transaction.
+        const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.Create | zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+        defer conn.close();
+        var pragma_buf: [128]u8 = undefined;
+        const pragma_sql = std.fmt.bufPrintZ(
+            &pragma_buf,
+            "begin; pragma application_id = {d}; create table items(x integer); commit;",
+            .{migrations.application_id},
+        ) catch unreachable;
+        try conn.execNoArgs(pragma_sql);
+    }
+
+    var h = Harness.init(gpa, &.{});
+    defer h.deinit();
+    const stdout_payload = try store.gitRevParseStdout(gpa);
+    defer gpa.free(stdout_payload);
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = stdout_payload });
+
+    const code = try run(h.deps(), &h.iter);
+    try std.testing.expectEqual(@as(u8, 1), code);
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "migration failed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "items") != null);
+}
+
+test "init: surfaces unparseable rev-parse output" {
+    // Pin that the .git_output_unparseable arm of the discovery switch
+    // routes to messages.init_git_unparseable. The variant itself is
+    // unit-tested in src/git/discovery.zig; this test covers the wiring.
+    const gpa = std.testing.allocator;
+    var h = Harness.init(gpa, &.{});
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = "" });
+
+    const code = try run(h.deps(), &h.iter);
+    try std.testing.expectEqual(@as(u8, 1), code);
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), messages.init_git_unparseable) != null);
 }

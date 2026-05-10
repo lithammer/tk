@@ -14,8 +14,17 @@
 
 const std = @import("std");
 
+/// Stack-allocated, single-producer scratch buffer for capturing one
+/// transient error string. Callers declare a Diagnostic on the stack,
+/// pass `?*Diagnostic` into the fallible operation, and read back via
+/// `.message()` after observing the error union.
 pub const Diagnostic = struct {
+    /// Fixed-size scratch storage. Bytes beyond the buffer length are
+    /// truncated by `capture` without indication. Sized to fit a
+    /// SQLite errmsg (typically under ~120 ASCII bytes in practice).
     buf: [256]u8 = undefined,
+    /// Number of bytes captured by the most recent `capture` call.
+    /// Zero before any capture and after `capture("")`.
     len: usize = 0,
 
     /// Bytes captured by the most recent `capture` call.
@@ -25,7 +34,8 @@ pub const Diagnostic = struct {
     }
 
     /// Copy `text` into the internal buffer, truncating if longer than
-    /// the buffer can hold. Overwrites any previous capture.
+    /// the buffer can hold. Overwrites any previous capture, including
+    /// resetting to empty when `text` is empty.
     pub fn capture(self: *Diagnostic, text: []const u8) void {
         const n = @min(text.len, self.buf.len);
         @memcpy(self.buf[0..n], text[0..n]);
@@ -57,4 +67,11 @@ test "Diagnostic: capture overwrites previous capture" {
     d.capture("first");
     d.capture("second");
     try std.testing.expectEqualStrings("second", d.message());
+}
+
+test "Diagnostic: capture(empty) clears previous capture" {
+    var d: Diagnostic = .{};
+    d.capture("first");
+    d.capture("");
+    try std.testing.expectEqualStrings("", d.message());
 }

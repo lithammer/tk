@@ -99,6 +99,11 @@ fn applyOne(conn: Conn, mig: Migration, now_iso: []const u8) ApplyError!void {
     try conn.commit();
 }
 
+/// Copy the current `sqlite3_errmsg` into the caller-supplied Diagnostic
+/// before `conn.rollback()` runs. zqlite's rollback issues a successful
+/// `rollback` statement, which clears the per-connection errmsg; without
+/// this capture the original migration failure would be unrecoverable
+/// after the rollback. No-op when `diag` is null.
 fn captureError(conn: Conn, diag: ?*Diagnostic) void {
     const d = diag orelse return;
     d.capture(std.mem.span(conn.lastError()));
