@@ -11,6 +11,9 @@
 
 const std = @import("std");
 const zqlite = @import("zqlite");
+const diagnostic = @import("diagnostic.zig");
+
+pub const Diagnostic = diagnostic.Diagnostic;
 
 /// Repository Store SQLite connection type used by migration helpers.
 pub const Conn = zqlite.Conn;
@@ -47,30 +50,13 @@ pub const QueryError = zqlite.Error || error{MultipleStatements};
 /// Errors returned while applying migrations.
 pub const ApplyError = QueryError || error{StoreFromFutureVersion};
 
-/// Last SQLite error message captured by `applyAll`. zqlite's `rollback`
-/// runs a successful `rollback` statement, which clears the per-connection
-/// `sqlite3_errmsg`; capture it here before that happens so callers reading
-/// `migrations.lastError()` see the original migration failure rather than
-/// the post-rollback empty string.
-var last_error_buf: [256]u8 = undefined;
-var last_error_len: usize = 0;
-
-/// Return the most recent SQLite error captured during `applyAll`.
-///
-/// The returned slice is overwritten by the next `applyAll` call.
-pub fn lastError() []const u8 {
-    return last_error_buf[0..last_error_len];
-}
-
 /// Apply every migration missing from the opened Repository Store.
 ///
 /// Each migration runs in its own transaction. `now_iso` is supplied by the
 /// caller's injectable clock and recorded in `schema_migrations.applied_at`.
 /// Stores with a recorded version newer than this binary return
 /// `error.StoreFromFutureVersion` instead of attempting a downgrade.
-pub fn applyAll(conn: Conn, now_iso: []const u8) ApplyError!void {
-    last_error_len = 0;
-
+pub fn applyAll(conn: Conn, now_iso: []const u8, diag: ?*Diagnostic) ApplyError!void {
     const recorded_version: i64 = if (try schemaMigrationsExists(conn))
         (try queryOptionalInt(conn, "select coalesce(max(version), 0) from schema_migrations")) orelse 0
     else
@@ -81,7 +67,7 @@ pub fn applyAll(conn: Conn, now_iso: []const u8) ApplyError!void {
     for (all_migrations) |mig| {
         if (mig.version <= recorded_version) continue;
         applyOne(conn, mig, now_iso) catch |err| {
-            captureError(conn);
+            captureError(conn, diag);
             conn.rollback();
             return err;
         };
@@ -113,11 +99,9 @@ fn applyOne(conn: Conn, mig: Migration, now_iso: []const u8) ApplyError!void {
     try conn.commit();
 }
 
-fn captureError(conn: Conn) void {
-    const msg = std.mem.span(conn.lastError());
-    const n = @min(msg.len, last_error_buf.len);
-    @memcpy(last_error_buf[0..n], msg[0..n]);
-    last_error_len = n;
+fn captureError(conn: Conn, diag: ?*Diagnostic) void {
+    const d = diag orelse return;
+    d.capture(std.mem.span(conn.lastError()));
 }
 
 /// Return the highest applied schema migration version, or zero for no store.
@@ -157,7 +141,7 @@ test "applyAll on empty db creates v1 schema and records migration" {
     const conn = try openMemoryDb();
     defer conn.close();
 
-    try applyAll(conn, "2026-05-09T00:00:00.000Z");
+    try applyAll(conn, "2026-05-09T00:00:00.000Z", null);
 
     try std.testing.expectEqual(@as(u32, 1), try currentVersion(conn));
 
@@ -198,8 +182,8 @@ test "applyAll is idempotent on a current store" {
     const conn = try openMemoryDb();
     defer conn.close();
 
-    try applyAll(conn, "2026-05-09T00:00:00.000Z");
-    try applyAll(conn, "2026-05-09T00:00:01.000Z");
+    try applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    try applyAll(conn, "2026-05-09T00:00:01.000Z", null);
 
     try std.testing.expectEqual(
         @as(?i64, 1),
@@ -211,7 +195,7 @@ test "applyAll rejects future version" {
     const conn = try openMemoryDb();
     defer conn.close();
 
-    try applyAll(conn, "2026-05-09T00:00:00.000Z");
+    try applyAll(conn, "2026-05-09T00:00:00.000Z", null);
     try conn.exec(
         "insert into schema_migrations(version, applied_at) values (?1, ?2)",
         .{ @as(i64, 999), "2099-01-01T00:00:00.000Z" },
@@ -219,25 +203,33 @@ test "applyAll rejects future version" {
 
     try std.testing.expectError(
         error.StoreFromFutureVersion,
-        applyAll(conn, "2026-05-09T00:00:00.000Z"),
+        applyAll(conn, "2026-05-09T00:00:00.000Z", null),
     );
 }
 
-test "applyAll captures sqlite error message before rollback clears it" {
+test "applyAll captures sqlite error into the provided Diagnostic" {
     const conn = try openMemoryDb();
     defer conn.close();
 
     // Pre-create one of the tables migration_1 creates so the migration's
-    // `create table items` fails. The errdefer rollback would otherwise
-    // clear sqlite3_errmsg before applyAll returns; lastError() must still
-    // expose the original "table items already exists" message.
+    // `create table items` fails. The rollback that follows would otherwise
+    // clear sqlite3_errmsg before applyAll returns; the Diagnostic captures
+    // the message before that happens.
     try conn.execNoArgs("create table items (x integer)");
 
-    const result = applyAll(conn, "2026-05-09T00:00:00.000Z");
-    try std.testing.expectError(error.Error, result);
-    const msg = lastError();
-    try std.testing.expect(msg.len > 0);
-    try std.testing.expect(std.mem.indexOf(u8, msg, "items") != null);
+    var diag: Diagnostic = .{};
+    try std.testing.expectError(error.Error, applyAll(conn, "2026-05-09T00:00:00.000Z", &diag));
+    try std.testing.expect(diag.message().len > 0);
+    try std.testing.expect(std.mem.indexOf(u8, diag.message(), "items") != null);
+}
+
+test "applyAll without a diagnostic returns the same error" {
+    const conn = try openMemoryDb();
+    defer conn.close();
+
+    try conn.execNoArgs("create table items (x integer)");
+
+    try std.testing.expectError(error.Error, applyAll(conn, "2026-05-09T00:00:00.000Z", null));
 }
 
 test "applyAll records applied_at from the caller-supplied clock" {
@@ -245,7 +237,7 @@ test "applyAll records applied_at from the caller-supplied clock" {
     defer conn.close();
     const fixed = "2026-05-09T12:34:56.789Z";
 
-    try applyAll(conn, fixed);
+    try applyAll(conn, fixed, null);
 
     if (try conn.row("select applied_at from schema_migrations where version = 1", .{})) |r| {
         defer r.deinit();
@@ -257,7 +249,7 @@ const test_helpers = struct {
     fn freshDb() !Conn {
         const conn = try openMemoryDb();
         errdefer conn.close();
-        try applyAll(conn, "2026-05-09T00:00:00.000Z");
+        try applyAll(conn, "2026-05-09T00:00:00.000Z", null);
         return conn;
     }
 

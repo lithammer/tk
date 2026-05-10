@@ -6,6 +6,7 @@ test {
     _ = @import("proc/runner.zig");
     _ = @import("proc/fake.zig");
     _ = @import("domain/display_prefix.zig");
+    _ = @import("store/diagnostic.zig");
     _ = @import("store/migrations.zig");
     _ = @import("testing/script.zig");
     _ = @import("testing/scenarios.zig");

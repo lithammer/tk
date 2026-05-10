@@ -105,7 +105,8 @@ fn execute(deps: cli.Deps) !u8 {
     var iso_buf: [24]u8 = undefined;
     const now_iso = deps.clock.nowIso(&iso_buf);
 
-    migrations.applyAll(conn, now_iso) catch |err| switch (err) {
+    var migration_diag: migrations.Diagnostic = .{};
+    migrations.applyAll(conn, now_iso, &migration_diag) catch |err| switch (err) {
         error.StoreFromFutureVersion => {
             deps.stderr.print(
                 "tk init: {s} was created by a " ++ messages.init_refuse_future_version ++ "\n",
@@ -116,7 +117,7 @@ fn execute(deps: cli.Deps) !u8 {
         else => {
             deps.stderr.print(
                 "tk init: migration failed: {s}: {s}\n",
-                .{ @errorName(err), migrations.lastError() },
+                .{ @errorName(err), migration_diag.message() },
             ) catch {};
             return 1;
         },
@@ -512,7 +513,7 @@ test "classify: a Ticket Repository Store is .ours" {
     const conn = try openMemoryConn();
     defer conn.close();
 
-    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
 
     try std.testing.expectEqual(StoreKind.ours, try classify(conn));
 }
@@ -585,7 +586,7 @@ test "init: rejects a store created by a future Ticket version" {
     {
         const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.Create | zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
         defer conn.close();
-        try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z");
+        try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
         try conn.exec(
             "insert into schema_migrations(version, applied_at) values (?1, ?2)",
             .{ @as(i64, 999), "2099-01-01T00:00:00.000Z" },
