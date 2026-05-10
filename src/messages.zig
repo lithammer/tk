@@ -42,3 +42,7 @@ pub const init_git_missing = "git not found on PATH";
 /// Stderr line when spawning `git` failed for a reason other than the binary
 /// being missing (permission, fork failure, etc.).
 pub const init_git_spawn_failed = "failed to invoke git";
+
+/// Stderr line when `git rev-parse` exits zero but stdout cannot be parsed
+/// into the expected `(common-dir, toplevel)` line pair.
+pub const init_git_unparseable = "git produced unexpected rev-parse output";

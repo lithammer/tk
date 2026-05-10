@@ -8,6 +8,7 @@ const cli = @import("../cli.zig");
 const messages = @import("../messages.zig");
 const migrations = @import("../store/migrations.zig");
 const display_prefix = @import("../domain/display_prefix.zig");
+const discovery = @import("../git/discovery.zig");
 
 /// Dispatcher metadata for `tk init`.
 pub const meta: cli.CommandMeta = .{
@@ -49,9 +50,35 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
 /// Execute Repository Store discovery, classification, migration, and prefix
 /// seeding after command-line parsing has succeeded.
 fn execute(deps: cli.Deps) !u8 {
-    const paths = (try discoverPaths(deps)) orelse return 1;
-    defer deps.gpa.free(paths.git_common_dir);
-    defer deps.gpa.free(paths.toplevel);
+    // Outcome.deinit only frees error-arm payloads; on the .ok arm we
+    // extract the inner DiscoveredPaths and free it ourselves below.
+    const discovery_outcome = try discovery.discoverPaths(deps.gpa, deps.runner, deps.cwd);
+    switch (discovery_outcome) {
+        .git_missing => {
+            deps.stderr.writeAll("tk init: " ++ messages.init_git_missing ++ "\n") catch {};
+            return 1;
+        },
+        .spawn_failed => {
+            deps.stderr.writeAll("tk init: " ++ messages.init_git_spawn_failed ++ "\n") catch {};
+            return 1;
+        },
+        .git_rejected => |maybe_msg| {
+            if (maybe_msg) |msg| {
+                defer deps.gpa.free(msg);
+                deps.stderr.print("tk init: {s}\n", .{msg}) catch {};
+            } else {
+                deps.stderr.writeAll("tk init: " ++ messages.init_outside_git_default ++ "\n") catch {};
+            }
+            return 1;
+        },
+        .git_output_unparseable => {
+            deps.stderr.writeAll("tk init: " ++ messages.init_git_unparseable ++ "\n") catch {};
+            return 1;
+        },
+        .ok => {},
+    }
+    var paths = discovery_outcome.ok;
+    defer paths.deinit(deps.gpa);
 
     const tk_dir_path = try std.fs.path.join(deps.gpa, &.{ paths.git_common_dir, "tk" });
     defer deps.gpa.free(tk_dir_path);
@@ -169,66 +196,6 @@ fn configureForTicketStore(conn: zqlite.Conn) zqlite.Error!void {
     try conn.execNoArgs("pragma journal_mode = wal");
     try conn.busyTimeout(5000);
     try conn.execNoArgs("pragma foreign_keys = on");
-}
-
-/// Paths reported by Git for the current repository.
-const DiscoveredPaths = struct {
-    /// Shared Git common directory; used as the parent of the untracked store.
-    git_common_dir: []u8,
-    /// Repository working-tree root; used only for display_prefix derivation.
-    toplevel: []u8,
-};
-
-/// Ask Git for the common directory and toplevel, rendering user-facing
-/// diagnostics for missing Git or non-worktree invocations.
-fn discoverPaths(deps: cli.Deps) !?DiscoveredPaths {
-    var run_result = deps.runner.run(deps.gpa, .{
-        .argv = &.{ "git", "rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel" },
-        .cwd = deps.cwd,
-    }) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.ExecutableNotFound => {
-            deps.stderr.writeAll("tk init: " ++ messages.init_git_missing ++ "\n") catch {};
-            return null;
-        },
-        error.SpawnFailed => {
-            deps.stderr.writeAll("tk init: " ++ messages.init_git_spawn_failed ++ "\n") catch {};
-            return null;
-        },
-    };
-    defer run_result.deinit(deps.gpa);
-
-    if (run_result.exit_code != 0) {
-        // git's stderr already explains "not a git repository", "must be run
-        // in a work tree" (bare repos), etc. Reuse it rather than fabricate a
-        // generic message that loses detail.
-        const trimmed = std.mem.trim(u8, run_result.stderr, " \t\r\n");
-        if (trimmed.len > 0) {
-            deps.stderr.print("tk init: {s}\n", .{trimmed}) catch {};
-        } else {
-            deps.stderr.writeAll("tk init: " ++ messages.init_outside_git_default ++ "\n") catch {};
-        }
-        return null;
-    }
-
-    var lines = std.mem.tokenizeScalar(u8, run_result.stdout, '\n');
-    const common = lines.next() orelse {
-        deps.stderr.writeAll("tk init: git did not report a common directory\n") catch {};
-        return null;
-    };
-    const toplevel = lines.next() orelse {
-        // git rev-parse with --show-toplevel inside a worktree always emits
-        // both lines together; this branch is unreachable in practice.
-        deps.stderr.writeAll("tk init: git did not report a working tree\n") catch {};
-        return null;
-    };
-
-    const common_owned = try deps.gpa.dupe(u8, std.mem.trim(u8, common, " \t\r\n"));
-    errdefer deps.gpa.free(common_owned);
-    const toplevel_owned = try deps.gpa.dupe(u8, std.mem.trim(u8, toplevel, " \t\r\n"));
-    errdefer deps.gpa.free(toplevel_owned);
-
-    return .{ .git_common_dir = common_owned, .toplevel = toplevel_owned };
 }
 
 /// Seed `store_config.display_prefix` from the repository basename when the
