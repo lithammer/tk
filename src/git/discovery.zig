@@ -14,9 +14,8 @@ const Allocator = std.mem.Allocator;
 /// Paths reported by Git for the current repository.
 ///
 /// Both fields are heap-allocated by `discoverPaths` from the caller-supplied
-/// allocator. Callers that destructure `Outcome.ok` take ownership of this
-/// `DiscoveredPaths` value and must call `deinit` themselves; `Outcome.deinit`
-/// is a no-op for the `.ok` arm so the values survive the switch.
+/// allocator. Callers extract this from `Outcome.ok` and free it via
+/// `DiscoveredPaths.deinit`.
 pub const DiscoveredPaths = struct {
     /// Shared Git common directory; used as the parent of the Repository Store.
     git_common_dir: []u8,
@@ -32,9 +31,13 @@ pub const DiscoveredPaths = struct {
 /// Outcome of `discoverPaths`. Each variant maps to a stable, caller-rendered
 /// stderr message; this module never writes to stderr itself.
 ///
-/// Ownership: `Outcome.deinit` frees only the error-arm payloads. On the
-/// `.ok` arm the caller takes ownership of the inner `DiscoveredPaths` and
-/// must call `DiscoveredPaths.deinit` themselves after extracting it.
+/// Ownership: each switch arm frees its own payload. `.ok` carries a
+/// `DiscoveredPaths` whose two slices live on the caller's allocator and
+/// must be released via `DiscoveredPaths.deinit`. `.git_rejected` may carry
+/// an owned trimmed-stderr slice (also on the caller's allocator) which the
+/// caller must `gpa.free` after rendering. The remaining variants carry no
+/// payload. There is no `Outcome.deinit`; per-arm freeing keeps test and
+/// production call sites identical.
 pub const Outcome = union(enum) {
     ok: DiscoveredPaths,
     /// `git` is not on PATH (proc.Runner returned ExecutableNotFound).
@@ -42,8 +45,9 @@ pub const Outcome = union(enum) {
     /// `git` could not be spawned for a reason other than missing binary.
     spawn_failed,
     /// `git rev-parse` exited non-zero. Payload is the trimmed stderr if Git
-    /// produced any (caller renders it verbatim); null means Git failed
-    /// silently and the caller should render the default not-in-repo message.
+    /// produced any (caller renders it verbatim and frees the slice); null
+    /// means Git failed silently and the caller should render the default
+    /// not-in-repo message.
     git_rejected: ?[]u8,
     /// `git rev-parse` exited zero but the stdout did not contain both
     /// expected lines. The "missing toplevel" sub-case is unreachable in
@@ -51,14 +55,6 @@ pub const Outcome = union(enum) {
     /// `--git-common-dir` when the repo is a worktree; the variant covers
     /// the missing-common-dir branch and serves as a defensive fallback.
     git_output_unparseable,
-
-    pub fn deinit(self: *Outcome, gpa: Allocator) void {
-        switch (self.*) {
-            .ok => {}, // caller owns the DiscoveredPaths; see doc comment.
-            .git_rejected => |maybe_msg| if (maybe_msg) |m| gpa.free(m),
-            .git_missing, .spawn_failed, .git_output_unparseable => {},
-        }
-    }
 };
 
 /// Errors returned by `discoverPaths` itself. Runner errors are mapped to
@@ -101,26 +97,6 @@ pub fn discoverPaths(gpa: Allocator, runner: proc.Runner, cwd: std.Io.Dir) Error
 
 const fake_proc = @import("../proc/fake.zig");
 
-/// Minimal hand-rolled runner used to exercise the runner-error branches that
-/// `FakeRunner` cannot return today. The argv is ignored; the runner returns
-/// the configured error on every call.
-const ErrorInjectingRunner = struct {
-    err: proc.Error,
-
-    fn runner(self: *ErrorInjectingRunner) proc.Runner {
-        return .{ .context = self, .vtable = &vtable };
-    }
-
-    const vtable: proc.Runner.VTable = .{ .run = runImpl };
-
-    fn runImpl(context: *anyopaque, gpa: Allocator, options: proc.Options) proc.Error!proc.Result {
-        _ = gpa;
-        _ = options;
-        const self: *ErrorInjectingRunner = @ptrCast(@alignCast(context));
-        return self.err;
-    }
-};
-
 test "discoverPaths: returns .ok with both paths on success" {
     const gpa = std.testing.allocator;
     var fake = fake_proc.FakeRunner.init(gpa);
@@ -130,9 +106,6 @@ test "discoverPaths: returns .ok with both paths on success" {
         .stdout = "/repo/.git\n/repo\n",
     });
 
-    // Mirror the production caller's idiom: extract DiscoveredPaths from
-    // the .ok arm and free it directly, since Outcome.deinit is a no-op
-    // for that arm.
     const outcome = try discoverPaths(gpa, fake.runner(), std.Io.Dir.cwd());
     if (outcome != .ok) return error.UnexpectedOutcome;
     var paths = outcome.ok;
@@ -150,11 +123,11 @@ test "discoverPaths: returns .git_rejected with trimmed stderr on exit 128" {
         .stderr = "fatal: not a git repository (or any of the parent directories): .git\n",
     });
 
-    var outcome = try discoverPaths(gpa, fake.runner(), std.Io.Dir.cwd());
-    defer outcome.deinit(gpa);
+    const outcome = try discoverPaths(gpa, fake.runner(), std.Io.Dir.cwd());
     switch (outcome) {
         .git_rejected => |maybe_msg| {
             const msg = maybe_msg orelse return error.ExpectedNonNullMessage;
+            defer gpa.free(msg);
             // Pin the exact trimmed value: trailing newline stripped, no
             // other modifications. Drift in trim semantics fails here.
             try std.testing.expectEqualStrings(
@@ -172,8 +145,7 @@ test "discoverPaths: returns .git_rejected with null payload when stderr is whit
     defer fake.deinit();
     try fake.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 128, .stderr = "  \r\n  " });
 
-    var outcome = try discoverPaths(gpa, fake.runner(), std.Io.Dir.cwd());
-    defer outcome.deinit(gpa);
+    const outcome = try discoverPaths(gpa, fake.runner(), std.Io.Dir.cwd());
     switch (outcome) {
         .git_rejected => |maybe_msg| try std.testing.expect(maybe_msg == null),
         else => return error.UnexpectedOutcome,
@@ -186,8 +158,7 @@ test "discoverPaths: returns .git_output_unparseable when stdout has no lines" {
     defer fake.deinit();
     try fake.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = "" });
 
-    var outcome = try discoverPaths(gpa, fake.runner(), std.Io.Dir.cwd());
-    defer outcome.deinit(gpa);
+    const outcome = try discoverPaths(gpa, fake.runner(), std.Io.Dir.cwd());
     try std.testing.expect(outcome == .git_output_unparseable);
 }
 
@@ -197,31 +168,28 @@ test "discoverPaths: returns .git_output_unparseable when stdout has only one li
     defer fake.deinit();
     try fake.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = "/repo/.git\n" });
 
-    var outcome = try discoverPaths(gpa, fake.runner(), std.Io.Dir.cwd());
-    defer outcome.deinit(gpa);
+    const outcome = try discoverPaths(gpa, fake.runner(), std.Io.Dir.cwd());
     try std.testing.expect(outcome == .git_output_unparseable);
 }
 
 test "discoverPaths: maps ExecutableNotFound to .git_missing" {
     const gpa = std.testing.allocator;
-    var injector = ErrorInjectingRunner{ .err = error.ExecutableNotFound };
+    var injector = fake_proc.ErrorInjectingRunner{ .err = error.ExecutableNotFound };
 
-    var outcome = try discoverPaths(gpa, injector.runner(), std.Io.Dir.cwd());
-    defer outcome.deinit(gpa);
+    const outcome = try discoverPaths(gpa, injector.runner(), std.Io.Dir.cwd());
     try std.testing.expect(outcome == .git_missing);
 }
 
 test "discoverPaths: maps SpawnFailed to .spawn_failed" {
     const gpa = std.testing.allocator;
-    var injector = ErrorInjectingRunner{ .err = error.SpawnFailed };
+    var injector = fake_proc.ErrorInjectingRunner{ .err = error.SpawnFailed };
 
-    var outcome = try discoverPaths(gpa, injector.runner(), std.Io.Dir.cwd());
-    defer outcome.deinit(gpa);
+    const outcome = try discoverPaths(gpa, injector.runner(), std.Io.Dir.cwd());
     try std.testing.expect(outcome == .spawn_failed);
 }
 
 test "discoverPaths: propagates OutOfMemory from runner" {
-    var injector = ErrorInjectingRunner{ .err = error.OutOfMemory };
+    var injector = fake_proc.ErrorInjectingRunner{ .err = error.OutOfMemory };
 
     try std.testing.expectError(
         error.OutOfMemory,

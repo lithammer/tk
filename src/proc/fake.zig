@@ -94,3 +94,28 @@ pub const FakeRunner = struct {
         return true;
     }
 };
+
+/// Hand-rolled subprocess runner that returns a fixed `runner.Error` on every
+/// call. Companion to `FakeRunner`, which can only return `Result`-shaped
+/// responses; this helper covers tests that need to exercise the
+/// runner-error mapping (`ExecutableNotFound`, `SpawnFailed`, `OutOfMemory`).
+/// Argv and cwd are ignored.
+pub const ErrorInjectingRunner = struct {
+    /// Error returned by every `run` invocation.
+    err: runner_mod.Error,
+
+    /// Return the type-erased runner view passed through `cli.Deps` or to
+    /// callees that take a `proc.Runner` directly.
+    pub fn runner(self: *ErrorInjectingRunner) Runner {
+        return .{ .context = self, .vtable = &error_vtable };
+    }
+
+    const error_vtable: Runner.VTable = .{ .run = errorRunImpl };
+
+    fn errorRunImpl(context: *anyopaque, gpa: Allocator, options: Options) runner_mod.Error!Result {
+        _ = gpa;
+        _ = options;
+        const self: *ErrorInjectingRunner = @ptrCast(@alignCast(context));
+        return self.err;
+    }
+};

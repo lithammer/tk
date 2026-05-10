@@ -7,6 +7,7 @@ const zqlite = @import("zqlite");
 const cli = @import("../cli.zig");
 const messages = @import("../messages.zig");
 const migrations = @import("../store/migrations.zig");
+const Diagnostic = @import("../store/diagnostic.zig").Diagnostic;
 const display_prefix = @import("../domain/display_prefix.zig");
 const discovery = @import("../git/discovery.zig");
 
@@ -130,7 +131,7 @@ fn execute(deps: cli.Deps) !u8 {
     var iso_buf: [24]u8 = undefined;
     const now_iso = deps.clock.nowIso(&iso_buf);
 
-    var migration_diag: migrations.Diagnostic = .{};
+    var migration_diag: Diagnostic = .{};
     migrations.applyAll(conn, now_iso, &migration_diag) catch |err| switch (err) {
         error.StoreFromFutureVersion => {
             deps.stderr.print(
