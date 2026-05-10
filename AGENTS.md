@@ -40,7 +40,11 @@ shapes; pick the one that matches the call site:
   across multiple stable rendering branches. Each switch arm frees its
   own payload — do **not** add an `Outcome.deinit` that handles some
   arms but not others. Canonical use: `git.discovery.Outcome` in
-  `src/git/discovery.zig`.
+  `src/git/discovery.zig`. Validated against the Zig compiler itself:
+  `Compilation.CreateDiagnostic` in `src/Compilation.zig` is the same
+  shape — typed tagged union out-param paired with a single error tag
+  (`error.CreateFail`), called as `var diag: CreateDiagnostic =
+  undefined; create(..., &diag, ...)`.
 
 A fourth shape — a **Mutation Failure** record (per CONTEXT.md) —
 arrives with slice 9 Backend Adapters. It is persisted JSON with a
@@ -58,7 +62,12 @@ reintroduced without a concrete forcing constraint:
 - **`null`-or-empty-as-sentinel return** where the sentinel encodes
   "I already wrote stderr." Mixes a control-flow signal into a returned
   value; surface the failure as a typed `Outcome` so the caller owns
-  stderr.
+  stderr. The Zig compiler's Sema reinforces this rule: its
+  `error.AnalysisFail` is documented (`src/Zcu.zig`) as *"When this is
+  returned, the compile error for the failure has already been
+  recorded"* — the bare error tag is the "already recorded" signal and
+  the structured payload lives out-of-band in `zcu.failed_analysis`.
+  Nothing about stderr is implied by the tag itself.
 - **Asymmetric `Outcome.deinit`** that no-ops on some arms but frees on
   others. Per-variant cleanup pushes ownership tracking onto every
   caller and requires a comment at every call site. Have each switch

@@ -146,6 +146,16 @@ sub-concept of Mutation Failure (the architecture review during the
 slice-3 error-handling refactor specifically flagged this as the
 right moment for a glossary addition).
 
+Reference shapes worth studying when designing this: the Zig
+compiler's `Zcu.ErrorMsg` heap graph (`src/Zcu.zig`) and the packed-
+arena `std.zig.ErrorBundle` (`lib/std/zig/ErrorBundle.zig`). Both
+exist because the compiler has the same pressures slice 9 will face —
+multiple structured failures, stable shape across processes — and
+the patterns are language-team-vetted. Don't import them wholesale
+(the compiler's machinery is justified by IPC and incremental cache
+that Ticket does not have), but use them as a known-good
+counterweight when slice 9 designs the variant set.
+
 Touches `src/store/migrations.zig` schema, future
 `src/remote/<adapter>.zig`, future `src/sync/engine.zig`,
 `CONTEXT.md`.
