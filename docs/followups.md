@@ -115,3 +115,58 @@ this before slice 3 adds another command file and the inconsistency
 spreads.
 
 Touches `src/commands/prime.zig`.
+
+---
+
+## Design the Mutation Failure / Adapter Failure record shape
+
+Slice 9 (Backend Adapter sync skeleton) needs the structured failure
+type backing `mutations.failure_json` (per CONTEXT.md, Mutation
+Failure). It must carry retry classification (rate-limited,
+validation, sync-conflict, auth, transient-network) plus enough
+context for the sync engine to schedule retries and for `tk sync log`
+to render a human-readable summary.
+
+This is *not* the `Diagnostic` type in `src/store/diagnostic.zig`.
+Diagnostic is an ephemeral 256-byte ASCII scratch buffer for capturing
+transient SQLite errmsg across rollback boundaries. Mutation Failure
+is persisted JSON with a stable schema, returned to the user days
+later by `tk sync log`. Don't reuse the type; lifetimes and audiences
+are different.
+
+Likely shape: `union(enum) { rate_limited: { retry_after_s,
+endpoint }, validation_failed: { field, reason }, sync_conflict: { ...
+}, auth_failed, transient: { detail } }` serialized via `std.json`
+into the existing `failure_json text check(json_valid(...))` column.
+Pick the variant set when the first concrete adapter (GitHub or Jira)
+makes real failure modes visible; don't design from imagination.
+
+When this lands, also extend CONTEXT.md with Adapter Failure as a
+sub-concept of Mutation Failure (the architecture review during the
+slice-3 error-handling refactor specifically flagged this as the
+right moment for a glossary addition).
+
+Touches `src/store/migrations.zig` schema, future
+`src/remote/<adapter>.zig`, future `src/sync/engine.zig`,
+`CONTEXT.md`.
+
+---
+
+## UTF-8-safe truncation in Diagnostic.capture
+
+`Diagnostic.capture` byte-truncates oversize input at 256 bytes
+without aligning to a UTF-8 boundary. For the current consumer
+(SQLite errmsg rendered with `{s}` to stderr) this is fine — SQLite
+errmsg is mostly ASCII and byte-truncation produces valid output.
+
+When a non-stderr consumer materializes (a structured log encoder,
+JSON serializer, or network-frame transport that validates UTF-8),
+the partial code point at the tail will be rejected. Walk back from
+`n` to the start of the last well-formed UTF-8 code point before
+storing `len`, e.g. via `std.unicode.utf8ByteSequenceLength` on the
+lead byte at the truncation point.
+
+Defer until a structured consumer exists; the current single
+consumer never sees the failure mode.
+
+Touches `src/store/diagnostic.zig`.
