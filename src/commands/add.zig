@@ -5,6 +5,7 @@ const clap = @import("clap");
 const cli = @import("../cli.zig");
 const messages = @import("../messages.zig");
 const message = @import("message.zig");
+const discovery = @import("../git/discovery.zig");
 const repository = @import("../store/repository.zig");
 const Priority = @import("../domain/priority.zig").Priority;
 const TicketKind = @import("../domain/ticket_kind.zig").TicketKind;
@@ -72,25 +73,8 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
     };
     const store = switch (open_outcome) {
         .ok => |store| store,
-        .git_missing => {
-            deps.stderr.writeAll("tk add: " ++ messages.init_git_missing ++ "\n") catch {};
-            return 1;
-        },
-        .spawn_failed => {
-            deps.stderr.writeAll("tk add: " ++ messages.init_git_spawn_failed ++ "\n") catch {};
-            return 1;
-        },
-        .git_rejected => |maybe_msg| {
-            if (maybe_msg) |msg| {
-                defer deps.gpa.free(msg);
-                deps.stderr.print("tk add: {s}\n", .{msg}) catch {};
-            } else {
-                deps.stderr.writeAll("tk add: " ++ messages.init_outside_git_default ++ "\n") catch {};
-            }
-            return 1;
-        },
-        .git_output_unparseable => {
-            deps.stderr.writeAll("tk add: " ++ messages.init_git_unparseable ++ "\n") catch {};
+        .discovery_failed => |outcome| {
+            discovery.renderFailure(deps.stderr, deps.gpa, "add", outcome);
             return 1;
         },
         .store_missing => {
@@ -151,48 +135,7 @@ const zqlite = @import("zqlite");
 const init_command = @import("init.zig");
 const migrations = @import("../store/migrations.zig");
 const Harness = @import("../testing/test_cli.zig").Harness;
-
-const TmpStore = struct {
-    tmp: std.testing.TmpDir,
-    common_dir_path: []u8,
-    toplevel_path: []u8,
-    db_path: [:0]u8,
-
-    fn init(gpa: std.mem.Allocator, basename: []const u8) !TmpStore {
-        var tmp = std.testing.tmpDir(.{});
-        errdefer tmp.cleanup();
-        const tmp_root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", gpa);
-        defer gpa.free(tmp_root);
-
-        const toplevel = try std.fs.path.join(gpa, &.{ tmp_root, basename });
-        errdefer gpa.free(toplevel);
-        try std.Io.Dir.cwd().createDirPath(std.testing.io, toplevel);
-
-        const common_dir = try std.fs.path.join(gpa, &.{ toplevel, ".git" });
-        errdefer gpa.free(common_dir);
-        try std.Io.Dir.cwd().createDirPath(std.testing.io, common_dir);
-
-        const db_path = try std.fs.path.joinZ(gpa, &.{ common_dir, "tk", "ticket.db" });
-
-        return .{
-            .tmp = tmp,
-            .common_dir_path = common_dir,
-            .toplevel_path = toplevel,
-            .db_path = db_path,
-        };
-    }
-
-    fn deinit(self: *TmpStore, gpa: std.mem.Allocator) void {
-        gpa.free(self.common_dir_path);
-        gpa.free(self.toplevel_path);
-        gpa.free(self.db_path);
-        self.tmp.cleanup();
-    }
-
-    fn gitRevParseStdout(self: TmpStore, gpa: std.mem.Allocator) ![]u8 {
-        return std.fmt.allocPrint(gpa, "{s}\n{s}\n", .{ self.common_dir_path, self.toplevel_path });
-    }
-};
+const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
 
 test "add: creates current local Ticket state without a Mutation" {
     const gpa = std.testing.allocator;

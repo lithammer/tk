@@ -50,15 +50,14 @@ pub const CreateLocalTicketInput = struct {
 
 /// Outcome of opening an existing Repository Store.
 ///
-/// `.git_rejected` may carry an allocator-owned trimmed stderr slice from Git;
-/// the caller renders and frees it. `.ok` owns an open connection that must be
-/// closed through `Store.close`.
+/// `discovery_failed` wraps a `discovery.Outcome` whose inner tag is one of
+/// the failure variants (never `.ok`); render it with `discovery.renderFailure`
+/// so the four shared Git-failure shapes stay in one place across commands.
+/// The three store-specific arms carry no payload. `.ok` owns an open
+/// connection that must be closed through `Store.close`.
 pub const OpenOutcome = union(enum) {
     ok: Store,
-    git_missing,
-    spawn_failed,
-    git_rejected: ?[]u8,
-    git_output_unparseable,
+    discovery_failed: discovery.Outcome,
     store_missing,
     not_ticket_store,
     store_from_future_version,
@@ -69,14 +68,10 @@ pub const OpenError = discovery.Error || migrations.QueryError || zqlite.Error |
 /// Open the existing Repository Store for the current Git repository.
 pub fn openExisting(gpa: std.mem.Allocator, runner: proc.Runner, cwd: std.Io.Dir) OpenError!OpenOutcome {
     const outcome = try discovery.discoverPaths(gpa, runner, cwd);
-    switch (outcome) {
-        .git_missing => return .git_missing,
-        .spawn_failed => return .spawn_failed,
-        .git_rejected => |maybe_msg| return .{ .git_rejected = maybe_msg },
-        .git_output_unparseable => return .git_output_unparseable,
-        .ok => {},
-    }
-    var paths = outcome.ok;
+    var paths = switch (outcome) {
+        .ok => |ok| ok,
+        else => return .{ .discovery_failed = outcome },
+    };
     defer paths.deinit(gpa);
 
     const db_path = try std.fs.path.joinZ(gpa, &.{ paths.git_common_dir, "tk", "ticket.db" });

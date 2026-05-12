@@ -52,31 +52,13 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
 /// seeding after command-line parsing has succeeded.
 fn execute(deps: cli.Deps) !u8 {
     const discovery_outcome = try discovery.discoverPaths(deps.gpa, deps.runner, deps.cwd);
-    switch (discovery_outcome) {
-        .git_missing => {
-            deps.stderr.writeAll("tk init: " ++ messages.init_git_missing ++ "\n") catch {};
+    var paths = switch (discovery_outcome) {
+        .ok => |ok| ok,
+        else => {
+            discovery.renderFailure(deps.stderr, deps.gpa, "init", discovery_outcome);
             return 1;
         },
-        .spawn_failed => {
-            deps.stderr.writeAll("tk init: " ++ messages.init_git_spawn_failed ++ "\n") catch {};
-            return 1;
-        },
-        .git_rejected => |maybe_msg| {
-            if (maybe_msg) |msg| {
-                defer deps.gpa.free(msg);
-                deps.stderr.print("tk init: {s}\n", .{msg}) catch {};
-            } else {
-                deps.stderr.writeAll("tk init: " ++ messages.init_outside_git_default ++ "\n") catch {};
-            }
-            return 1;
-        },
-        .git_output_unparseable => {
-            deps.stderr.writeAll("tk init: " ++ messages.init_git_unparseable ++ "\n") catch {};
-            return 1;
-        },
-        .ok => {},
-    }
-    var paths = discovery_outcome.ok;
+    };
     defer paths.deinit(deps.gpa);
 
     const tk_dir_path = try std.fs.path.join(deps.gpa, &.{ paths.git_common_dir, "tk" });
@@ -244,6 +226,7 @@ fn writeHelp(deps: cli.Deps) !void {
 }
 
 const Harness = @import("../testing/test_cli.zig").Harness;
+const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
 
 test "init: returns exit 1 with diagnostic when not in a git repo" {
     var h = Harness.init(std.testing.allocator, &.{});
@@ -281,51 +264,6 @@ test "init: --help prints to stdout, exits 0" {
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "Repository Store") != null);
     try std.testing.expectEqualStrings("", h.stderr());
 }
-
-const TmpStore = struct {
-    tmp: std.testing.TmpDir,
-    common_dir_path: []u8,
-    toplevel_path: []u8,
-    db_path: [:0]u8,
-
-    /// `basename` is the directory name simulated as the repository toplevel
-    /// — display_prefix derivation is fed `std.fs.path.basename(toplevel)`,
-    /// so picking a known basename lets tests pin the seeded prefix.
-    fn init(gpa: std.mem.Allocator, basename: []const u8) !TmpStore {
-        var tmp = std.testing.tmpDir(.{});
-        errdefer tmp.cleanup();
-        const tmp_root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", gpa);
-        defer gpa.free(tmp_root);
-
-        const toplevel = try std.fs.path.join(gpa, &.{ tmp_root, basename });
-        errdefer gpa.free(toplevel);
-        try std.Io.Dir.cwd().createDirPath(std.testing.io, toplevel);
-
-        const common_dir = try std.fs.path.join(gpa, &.{ toplevel, ".git" });
-        errdefer gpa.free(common_dir);
-        try std.Io.Dir.cwd().createDirPath(std.testing.io, common_dir);
-
-        const db_path = try std.fs.path.joinZ(gpa, &.{ common_dir, "tk", "ticket.db" });
-
-        return .{
-            .tmp = tmp,
-            .common_dir_path = common_dir,
-            .toplevel_path = toplevel,
-            .db_path = db_path,
-        };
-    }
-
-    fn deinit(self: *TmpStore, gpa: std.mem.Allocator) void {
-        gpa.free(self.common_dir_path);
-        gpa.free(self.toplevel_path);
-        gpa.free(self.db_path);
-        self.tmp.cleanup();
-    }
-
-    fn gitRevParseStdout(self: TmpStore, gpa: std.mem.Allocator) ![]u8 {
-        return std.fmt.allocPrint(gpa, "{s}\n{s}\n", .{ self.common_dir_path, self.toplevel_path });
-    }
-};
 
 test "init: success creates store, applies migration, seeds prefix" {
     const gpa = std.testing.allocator;

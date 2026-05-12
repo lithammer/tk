@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const proc = @import("../proc/runner.zig");
+const messages = @import("../messages.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -91,6 +92,35 @@ pub fn discoverPaths(gpa: Allocator, runner: proc.Runner, cwd: std.Io.Dir) Error
     errdefer gpa.free(toplevel_owned);
 
     return .{ .ok = .{ .git_common_dir = common_owned, .toplevel = toplevel_owned } };
+}
+
+/// Render an Outcome failure to stderr with a `tk <command>: ` prefix and free
+/// any heap-owned payload it carries. Callers branch on `.ok` themselves
+/// before delegating here; this helper exists to keep the four discovery
+/// failure arms identical across every command that opens a Repository Store.
+///
+/// `command` is the bare subcommand name (`"init"`, `"add"`), without the `tk`
+/// or the trailing colon — those are formatted in.
+pub fn renderFailure(
+    stderr: *std.Io.Writer,
+    gpa: Allocator,
+    command: []const u8,
+    outcome: Outcome,
+) void {
+    switch (outcome) {
+        .ok => unreachable,
+        .git_missing => stderr.print("tk {s}: {s}\n", .{ command, messages.init_git_missing }) catch {},
+        .spawn_failed => stderr.print("tk {s}: {s}\n", .{ command, messages.init_git_spawn_failed }) catch {},
+        .git_rejected => |maybe_msg| {
+            if (maybe_msg) |msg| {
+                defer gpa.free(msg);
+                stderr.print("tk {s}: {s}\n", .{ command, msg }) catch {};
+            } else {
+                stderr.print("tk {s}: {s}\n", .{ command, messages.init_outside_git_default }) catch {};
+            }
+        },
+        .git_output_unparseable => stderr.print("tk {s}: {s}\n", .{ command, messages.init_git_unparseable }) catch {},
+    }
 }
 
 // ---- Tests ---------------------------------------------------------------
@@ -195,4 +225,38 @@ test "discoverPaths: propagates OutOfMemory from runner" {
         error.OutOfMemory,
         discoverPaths(std.testing.allocator, injector.runner(), std.Io.Dir.cwd()),
     );
+}
+
+test "renderFailure: formats `tk <command>: <fragment>` for each failure arm" {
+    const gpa = std.testing.allocator;
+    var buf: std.Io.Writer.Allocating = .init(gpa);
+    defer buf.deinit();
+
+    renderFailure(&buf.writer, gpa, "init", .git_missing);
+    try std.testing.expectEqualStrings("tk init: " ++ messages.init_git_missing ++ "\n", buf.written());
+
+    buf.clearRetainingCapacity();
+    renderFailure(&buf.writer, gpa, "add", .spawn_failed);
+    try std.testing.expectEqualStrings("tk add: " ++ messages.init_git_spawn_failed ++ "\n", buf.written());
+
+    buf.clearRetainingCapacity();
+    renderFailure(&buf.writer, gpa, "init", .git_output_unparseable);
+    try std.testing.expectEqualStrings("tk init: " ++ messages.init_git_unparseable ++ "\n", buf.written());
+
+    buf.clearRetainingCapacity();
+    renderFailure(&buf.writer, gpa, "init", .{ .git_rejected = null });
+    try std.testing.expectEqualStrings("tk init: " ++ messages.init_outside_git_default ++ "\n", buf.written());
+}
+
+test "renderFailure: frees the git_rejected payload it was handed" {
+    // The testing allocator detects leaks, so if renderFailure forgets to
+    // free the owned message slice this test fails. The test also pins that
+    // the payload is rendered verbatim with the command prefix.
+    const gpa = std.testing.allocator;
+    var buf: std.Io.Writer.Allocating = .init(gpa);
+    defer buf.deinit();
+
+    const owned = try gpa.dupe(u8, "fatal: not a git repository");
+    renderFailure(&buf.writer, gpa, "add", .{ .git_rejected = owned });
+    try std.testing.expectEqualStrings("tk add: fatal: not a git repository\n", buf.written());
 }
