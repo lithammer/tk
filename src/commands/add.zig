@@ -68,7 +68,7 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
     defer parsed.deinit(deps.gpa);
 
     const open_outcome = repository.openExisting(deps.gpa, deps.runner, deps.cwd) catch |err| {
-        deps.stderr.print(messages.add_create_failed_retry ++ "\n{s}\n", .{@errorName(err)}) catch {};
+        renderStorageError(deps, err);
         return 1;
     };
     const store = switch (open_outcome) {
@@ -98,7 +98,7 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
         .title = parsed.title,
         .body = parsed.body,
     }) catch |err| {
-        deps.stderr.print(messages.add_create_failed_retry ++ "\n{s}\n", .{@errorName(err)}) catch {};
+        renderStorageError(deps, err);
         return 1;
     };
     defer created.deinit(deps.gpa);
@@ -129,6 +129,28 @@ fn writeHelp(deps: cli.Deps) !void {
         \\  -F, --file <file | ->  Read the message from a file, or '-' for stdin.
         \\
     );
+}
+
+fn renderStorageError(deps: cli.Deps, err: anyerror) void {
+    if (isStoreBusyError(err)) {
+        deps.stderr.writeAll(messages.add_store_busy_retry ++ "\n") catch {};
+        return;
+    }
+    deps.stderr.print(messages.add_create_failed_retry ++ "\n{s}\n", .{@errorName(err)}) catch {};
+}
+
+fn isStoreBusyError(err: anyerror) bool {
+    return switch (err) {
+        error.Busy,
+        error.BusyRecovery,
+        error.BusySnapshot,
+        error.BusyTimeout,
+        error.Locked,
+        error.LockedSharedCache,
+        error.LockedVTab,
+        => true,
+        else => false,
+    };
 }
 
 const zqlite = @import("zqlite");
@@ -343,6 +365,18 @@ test "add: validates message input before git discovery" {
     try std.testing.expectEqual(@as(u8, 1), try run(h.deps(), &h.iter));
     try std.testing.expectEqualStrings("", h.stdout());
     try std.testing.expectEqualStrings(messages.add_empty_message ++ "\n", h.stderr());
+}
+
+test "add: maps busy and locked storage errors to retry diagnostic" {
+    var busy = Harness.init(std.testing.allocator, &.{});
+    defer busy.deinit();
+    renderStorageError(busy.deps(), error.Busy);
+    try std.testing.expectEqualStrings(messages.add_store_busy_retry ++ "\n", busy.stderr());
+
+    var locked = Harness.init(std.testing.allocator, &.{});
+    defer locked.deinit();
+    renderStorageError(locked.deps(), error.LockedSharedCache);
+    try std.testing.expectEqualStrings(messages.add_store_busy_retry ++ "\n", locked.stderr());
 }
 
 test "add: rejects repeated file flags as a usage error" {
