@@ -13,6 +13,9 @@ pub const Deps = struct {
     stdout: *std.Io.Writer,
     /// Diagnostics and usage errors. Commands avoid writing normal output here.
     stderr: *std.Io.Writer,
+    /// Primary command input. Commands read this only when their contract
+    /// explicitly accepts stdin, such as `tk add -F -`.
+    stdin: *std.Io.Reader,
     /// Allocator used for parsing and short-lived command work.
     gpa: std.mem.Allocator,
     /// I/O implementation handle, threaded through filesystem and subprocess
@@ -28,6 +31,8 @@ pub const Deps = struct {
     /// UTC millisecond clock. Tests inject a `FakeClock` so timestamps stay
     /// deterministic.
     clock: clock_mod.Clock,
+    /// Random source used for opaque internal IDs.
+    random: std.Random,
 };
 
 /// Metadata every command module exports for dispatcher registration and help.
@@ -40,6 +45,7 @@ pub const CommandMeta = struct {
 
 const all_commands = .{
     @import("commands/init.zig"),
+    @import("commands/add.zig"),
     @import("commands/prime.zig"),
 };
 
@@ -220,6 +226,8 @@ test "runArgv prints help" {
     try std.testing.expectEqual(@as(u8, 0), code);
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "Usage:") != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "Commands:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "init") != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "add") != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "prime") != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "--version") != null);
     try std.testing.expectEqualStrings("", h.stderr());

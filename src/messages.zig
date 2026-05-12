@@ -46,3 +46,38 @@ pub const init_git_spawn_failed = "failed to invoke git";
 /// Stderr line when `git rev-parse` exits zero but stdout cannot be parsed
 /// into the expected `(common-dir, toplevel)` line pair.
 pub const init_git_unparseable = "git produced unexpected rev-parse output";
+
+// `tk add` — local Ticket creation.
+
+/// Stderr line when message input has no title after normalization.
+pub const add_empty_message = "tk add: Aborting add due to empty message.";
+
+/// Stderr line when message input contains a NUL byte.
+pub const add_nul_message = "tk add: message contains NUL byte";
+
+/// Stderr line when no Repository Store exists for the current repository.
+pub const add_missing_store = "tk add: Repository Store not initialized; run 'tk init'";
+
+/// Stderr prefix for message file read failures. Callers append
+/// `"{s}: {s}\n"` for the user-typed path and error name.
+pub const add_file_read_prefix = "tk add: could not read message file ";
+
+/// Stderr prefix for stdin read failures. Callers append `"{s}\n"` for the
+/// error name.
+pub const add_stdin_read_prefix = "tk add: could not read message from stdin: ";
+
+/// Stderr line for unexpected Repository Store write failures.
+pub const add_create_failed_retry = "tk add: failed to create Ticket; retry the command";
+
+/// Stderr line for busy/locked Repository Store writes.
+pub const add_store_busy_retry = "tk add: Repository Store is busy; retry the command";
+
+/// Stdout prefix for successful Ticket creation. Callers append
+/// `"{s} - {s}\n"` for Display ID and title.
+pub const add_created_ticket_prefix = "Created Ticket: ";
+
+/// Stdout label for the created Ticket's Priority.
+pub const add_priority_label = "Priority: ";
+
+/// Stdout label for the created Ticket's Item Status.
+pub const add_status_label = "Status: ";

@@ -19,6 +19,8 @@ pub const Harness = struct {
     stdout_buf: std.Io.Writer.Allocating,
     /// Captured command stderr.
     stderr_buf: std.Io.Writer.Allocating,
+    /// Fixed stdin supplied to commands that read `deps.stdin`.
+    stdin_reader: std.Io.Reader,
     /// Slice-backed iterator over command args.
     iter: SliceArgIter,
     /// Allocator threaded into `cli.Deps`.
@@ -27,6 +29,8 @@ pub const Harness = struct {
     fake_runner: fake_proc.FakeRunner,
     /// Deterministic clock used by default.
     fake_clock: clock_mod.FakeClock,
+    /// Deterministic PRNG used for opaque internal IDs in command tests.
+    prng: std.Random.DefaultPrng,
     /// Optional cwd override for commands that resolve paths.
     cwd_override: ?std.Io.Dir,
 
@@ -37,6 +41,8 @@ pub const Harness = struct {
         /// explicit value rather than letting the test runner's cwd leak in.
         /// Slice 2 callers may leave this null and get `std.Io.Dir.cwd()`.
         cwd: ?std.Io.Dir = null,
+        /// Bytes exposed through `deps.stdin`.
+        stdin: []const u8 = "",
     };
 
     /// Create a harness with default options.
@@ -49,10 +55,12 @@ pub const Harness = struct {
         return .{
             .stdout_buf = .init(allocator),
             .stderr_buf = .init(allocator),
+            .stdin_reader = .fixed(opts.stdin),
             .iter = .{ .items = args },
             .gpa = allocator,
             .fake_runner = fake_proc.FakeRunner.init(allocator),
             .fake_clock = clock_mod.FakeClock.init(default_fake_now_ms),
+            .prng = std.Random.DefaultPrng.init(0),
             .cwd_override = opts.cwd,
         };
     }
@@ -69,11 +77,13 @@ pub const Harness = struct {
         return .{
             .stdout = &self.stdout_buf.writer,
             .stderr = &self.stderr_buf.writer,
+            .stdin = &self.stdin_reader,
             .gpa = self.gpa,
             .io = std.testing.io,
             .cwd = self.cwd_override orelse std.Io.Dir.cwd(),
             .runner = self.fake_runner.runner(),
             .clock = self.fake_clock.clock(),
+            .random = self.prng.random(),
         };
     }
 

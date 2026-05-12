@@ -149,6 +149,48 @@ fn materializeInputs(tmp_dir: std.Io.Dir, sections: []const Section) !void {
     }
 }
 
+fn appendScriptError(
+    allocator: std.mem.Allocator,
+    result: *ScriptResult,
+    comptime fmt: []const u8,
+    args: anytype,
+) !void {
+    const msg = try std.fmt.allocPrint(allocator, fmt ++ "\n", args);
+    defer allocator.free(msg);
+    try result.stderr.appendSlice(allocator, msg);
+    result.final_exit = 3;
+}
+
+fn loadStdinSource(
+    allocator: std.mem.Allocator,
+    cwd: std.Io.Dir,
+    source: []const u8,
+    result: *ScriptResult,
+) !?[]u8 {
+    if (std.mem.eql(u8, source, "stdout")) {
+        return try allocator.dupe(u8, result.stdout.items);
+    }
+    if (std.mem.eql(u8, source, "stderr")) {
+        return try allocator.dupe(u8, result.stderr.items);
+    }
+
+    validateInputPath(source) catch {
+        try appendScriptError(allocator, result, "script: invalid stdin source: {s}", .{source});
+        return null;
+    };
+
+    return cwd.readFileAlloc(std.testing.io, source, allocator, .unlimited) catch |err| switch (err) {
+        error.FileNotFound => {
+            try appendScriptError(allocator, result, "script: stdin source not found: {s}", .{source});
+            return null;
+        },
+        else => {
+            try appendScriptError(allocator, result, "script: stdin source read failed: {s}: {s}", .{ source, @errorName(err) });
+            return null;
+        },
+    };
+}
+
 fn executeScript(
     allocator: std.mem.Allocator,
     sections: []const Section,
@@ -169,6 +211,9 @@ fn executeScript(
     // a tk init / tk worktree scenario lands. See docs/followups.md.
     var real_runner = proc.RealRunner.init(std.testing.io);
     var fake_clock = clock_mod.FakeClock.init(0);
+    var prng = std.Random.DefaultPrng.init(0);
+    var pending_stdin: ?[]u8 = null;
+    defer if (pending_stdin) |bytes| allocator.free(bytes);
 
     var line_it = std.mem.splitScalar(u8, script_body, '\n');
     while (line_it.next()) |line| {
@@ -176,21 +221,42 @@ fn executeScript(
         const argv = try tokenizeLine(allocator, trimmed, env);
         defer freeTokens(allocator, argv);
 
-        if (argv.len == 0 or !std.mem.eql(u8, argv[0], "tk")) continue;
+        if (argv.len == 0) continue;
+
+        if (std.mem.eql(u8, argv[0], "stdin")) {
+            if (pending_stdin != null) {
+                try appendScriptError(allocator, &result, "script: stdin already set", .{});
+                return result;
+            }
+            if (argv.len != 2) {
+                try appendScriptError(allocator, &result, "script: stdin requires exactly one source", .{});
+                return result;
+            }
+            pending_stdin = (try loadStdinSource(allocator, cwd, argv[1], &result)) orelse return result;
+            continue;
+        }
+
+        if (!std.mem.eql(u8, argv[0], "tk")) continue;
 
         var stdout_buf: std.Io.Writer.Allocating = .init(allocator);
         defer stdout_buf.deinit();
         var stderr_buf: std.Io.Writer.Allocating = .init(allocator);
         defer stderr_buf.deinit();
+        const stdin_bytes = pending_stdin;
+        pending_stdin = null;
+        defer if (stdin_bytes) |bytes| allocator.free(bytes);
+        var stdin_reader: std.Io.Reader = .fixed(stdin_bytes orelse "");
 
         const deps = cli.Deps{
             .stdout = &stdout_buf.writer,
             .stderr = &stderr_buf.writer,
+            .stdin = &stdin_reader,
             .gpa = allocator,
             .io = std.testing.io,
             .cwd = cwd,
             .runner = real_runner.runner(),
             .clock = fake_clock.clock(),
+            .random = prng.random(),
         };
 
         var iter = SliceArgIter{ .items = argv[1..] };
@@ -203,6 +269,11 @@ fn executeScript(
 
         try result.stdout.appendSlice(allocator, stdout_buf.written());
         try result.stderr.appendSlice(allocator, stderr_buf.written());
+    }
+
+    if (pending_stdin != null) {
+        try appendScriptError(allocator, &result, "script: stdin set but no tk command consumed it", .{});
+        return result;
     }
 
     return result;
@@ -557,6 +628,107 @@ test "runScenario: detects exit-code mismatch" {
         error.ScenarioFailed,
         runScenarioWith(allocator, null, fixture, .{ .quiet = true }),
     );
+}
+
+test "runScenario: fails when stdin directive is not consumed" {
+    const allocator = std.testing.allocator;
+    const fixture =
+        \\-- script --
+        \\stdin message.md
+        \\
+        \\-- input/message.md --
+        \\Title
+        \\
+        \\-- expected/stdout --
+        \\-- expected/stderr --
+        \\script: stdin set but no tk command consumed it
+        \\-- expected/exit --
+        \\3
+        \\
+    ;
+
+    try runScenarioWith(allocator, null, fixture, .{ .quiet = true });
+}
+
+test "runScenario: fails when stdin source is missing" {
+    const allocator = std.testing.allocator;
+    const fixture =
+        \\-- script --
+        \\stdin missing.md
+        \\
+        \\-- expected/stdout --
+        \\-- expected/stderr --
+        \\script: stdin source not found: missing.md
+        \\-- expected/exit --
+        \\3
+        \\
+    ;
+
+    try runScenarioWith(allocator, null, fixture, .{ .quiet = true });
+}
+
+test "runScenario: fails when stdin is set twice before a tk command" {
+    const allocator = std.testing.allocator;
+    const fixture =
+        \\-- script --
+        \\stdin first.md
+        \\stdin second.md
+        \\
+        \\-- input/first.md --
+        \\first
+        \\-- input/second.md --
+        \\second
+        \\
+        \\-- expected/stdout --
+        \\-- expected/stderr --
+        \\script: stdin already set
+        \\-- expected/exit --
+        \\3
+        \\
+    ;
+
+    try runScenarioWith(allocator, null, fixture, .{ .quiet = true });
+}
+
+test "stdin source can use aggregate stdout and stderr" {
+    const allocator = std.testing.allocator;
+    var result = ScriptResult{
+        .stdout = .empty,
+        .stderr = .empty,
+        .final_exit = 0,
+    };
+    defer result.deinit(allocator);
+
+    try result.stdout.appendSlice(allocator, "first stdout\n");
+    try result.stderr.appendSlice(allocator, "first stderr\n");
+
+    const from_stdout = (try loadStdinSource(allocator, std.Io.Dir.cwd(), "stdout", &result)).?;
+    defer allocator.free(from_stdout);
+    const from_stderr = (try loadStdinSource(allocator, std.Io.Dir.cwd(), "stderr", &result)).?;
+    defer allocator.free(from_stderr);
+
+    try std.testing.expectEqualStrings("first stdout\n", from_stdout);
+    try std.testing.expectEqualStrings("first stderr\n", from_stderr);
+}
+
+test "runScenario: stdin stdout is consumed by the next tk command" {
+    const allocator = std.testing.allocator;
+    const fixture =
+        \\-- script --
+        \\tk --version
+        \\stdin stdout
+        \\tk --version
+        \\
+        \\-- expected/stdout --
+        \\v0.0.1
+        \\v0.0.1
+        \\-- expected/stderr --
+        \\-- expected/exit --
+        \\0
+        \\
+    ;
+
+    try runScenarioWith(allocator, null, fixture, .{ .quiet = true });
 }
 
 test "validateInputPath: rejects parent escapes and absolute paths" {

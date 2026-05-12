@@ -76,6 +76,50 @@ test "smoke: tk init in a real git repo creates the store" {
     try std.testing.expectEqualStrings("SQLite format 3\x00", &header);
 }
 
+test "smoke: tk add creates a local Ticket from a message file" {
+    const gpa = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(std.testing.io, "project");
+    var project = try tmp.dir.openDir(std.testing.io, "project", .{});
+    defer project.close(std.testing.io);
+
+    const tk_abs = try absoluteTkPath(gpa);
+    defer gpa.free(tk_abs);
+
+    const git_init = try runProcess(gpa, &.{ "git", "init", "-q" }, project);
+    defer freeRunResult(gpa, git_init);
+    try std.testing.expectEqual(@as(std.process.Child.Term, .{ .exited = 0 }), git_init.term);
+
+    const tk_init = try runProcess(gpa, &.{ tk_abs, "init" }, project);
+    defer freeRunResult(gpa, tk_init);
+    try std.testing.expectEqual(@as(std.process.Child.Term, .{ .exited = 0 }), tk_init.term);
+
+    try project.writeFile(std.testing.io, .{
+        .sub_path = "followup.md",
+        .data =
+        \\Investigate flaky login retry
+        \\
+        \\Repro is intermittent on the staging cluster.
+        \\First seen 2026-04-30.
+        \\
+        ,
+    });
+
+    const tk_add = try runProcess(gpa, &.{ tk_abs, "add", "-F", "followup.md" }, project);
+    defer freeRunResult(gpa, tk_add);
+    if (!std.meta.eql(tk_add.term, std.process.Child.Term{ .exited = 0 })) {
+        std.debug.print("\ntk add unexpected exit {any}\nstdout:\n{s}\nstderr:\n{s}\n", .{ tk_add.term, tk_add.stdout, tk_add.stderr });
+        return error.SmokeAddFailed;
+    }
+    try std.testing.expect(std.mem.indexOf(u8, tk_add.stdout, "Created Ticket: project-1 - Investigate flaky login retry\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tk_add.stdout, "Priority: P2\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tk_add.stdout, "Status: open\n") != null);
+    try std.testing.expectEqualStrings("", tk_add.stderr);
+}
+
 // Note: we intentionally do not have a subprocess smoke test for the
 // outside-git path. It is exercised by the unit test in commands/init.zig
 // (which uses the fake runner), and engineering a reliably git-free temp
