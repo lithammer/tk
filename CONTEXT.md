@@ -165,15 +165,15 @@ The directly contained local items included by `tk promote <id> --children`.
 _Avoid_: Recursive Promotion
 
 **Mutation**:
-A durable local intent to modify **Ticket Project** domain state.
-_Avoid_: Change, Audit Entry
+A durable local intent to modify backend-backed **Ticket Project** domain state through a **Backend**.
+_Avoid_: Local Edit, Change, Audit Entry
 
 **Ticket Mutation**:
-A **Mutation** that modifies exactly one **Ticket**.
+A **Mutation** that modifies exactly one **Backend Ticket**.
 _Avoid_: Ticket Change, Change, Audit Entry
 
 **Epic Mutation**:
-A **Mutation** that modifies exactly one **Epic** or its ticket membership.
+A **Mutation** that modifies exactly one **Backend Epic** or its ticket membership.
 _Avoid_: Epic Change, Change, Audit Entry
 
 **Mutation Type**:
@@ -181,12 +181,12 @@ A named domain operation that describes the intent of a **Mutation**.
 _Avoid_: Field Patch, JSON Patch
 
 **V1 Mutation Type**:
-A **Mutation Type** supported by the first implementation: `create_ticket`, `update_ticket`, `create_epic`, `update_epic`, `set_item_status`, `add_ticket_to_epic`, `remove_ticket_from_epic`, `add_dependency`, `remove_dependency`, `add_external_blocker`, `resolve_external_blocker`, `promote_ticket`, or `promote_epic`.
+A **Mutation Type** supported by the first implementation: `update_ticket`, `update_epic`, `set_item_status`, `add_ticket_to_epic`, `remove_ticket_from_epic`, `add_dependency`, `remove_dependency`, `add_external_blocker`, `resolve_external_blocker`, `promote_ticket`, or `promote_epic`.
 _Avoid_: Comment Mutation, Label Mutation, Assignee Mutation
 
 **Mutation Log**:
 The ordered local record of **Mutations** waiting to be applied or already applied to a backend.
-_Avoid_: Change Log, Audit Log
+_Avoid_: Local Edit Log, Change Log, Audit Log
 
 **Mutation Sequence**:
 The monotonic local position of a **Mutation** in the **Mutation Log**.
@@ -321,8 +321,12 @@ _Avoid_: ticket, tickets
 - Ticket views identify each **Ticket's** **Origin**.
 - A **Ticket Mutation** is a **Mutation**.
 - An **Epic Mutation** is a **Mutation**.
-- A **Ticket Mutation** modifies exactly one **Ticket**.
-- An **Epic Mutation** modifies exactly one **Epic** or its ticket membership.
+- A **Ticket Mutation** modifies exactly one **Backend Ticket**.
+- An **Epic Mutation** modifies exactly one **Backend Epic** or its ticket membership.
+- Pre-Promotion edits to **Local Tickets** and **Local Epics** are Repository
+  Store current-state changes, not **Mutations**.
+- **Promotion** is the boundary where current local state becomes backend
+  intent.
 - A **Mutation** has exactly one **Mutation Type**.
 - The first implementation supports only **V1 Mutation Types**.
 - `update_ticket` and `update_epic` modify title and body only.
@@ -333,7 +337,8 @@ _Avoid_: ticket, tickets
 - A **Mutation Receipt** belongs to one **Mutation**.
 - A **Mutation Failure** belongs to one **Mutation**.
 - The **Repository Store** keeps current **Ticket** and **Epic** state.
-- The **Mutation Log** records replayable backend intent and is not the primary read model.
+- The **Mutation Log** records replayable backend intent and is not the primary
+  read model or a general local edit history.
 - **`tk next`** selects the ready **Ticket** with the lowest **Priority**, then oldest creation order, within the active **Workspace Scope**.
 - **List Tree** renders **Epics** as top-level rows, child **Tickets** nested under their **Epic**, and unparented **Tickets** as top-level rows.
 - **List Tree** uses compact status, priority, and kind markers.
@@ -345,11 +350,14 @@ _Avoid_: ticket, tickets
 > **Dev:** "When an agent needs the next **Ticket**, should it call **`tk`** directly?"
 > **Domain expert:** "Yes — **`tk`** is the stable command-line interface for **Ticket Project**, regardless of which backend stores the work item."
 >
-> **Dev:** "When **`tk`** marks a **Ticket** done while offline, where does that intent live?"
-> **Domain expert:** "It is recorded as a **Ticket Mutation** in the **Mutation Log** until a backend can apply it."
+> **Dev:** "When **`tk`** marks a **Backend Ticket** done while offline, where does that intent live?"
+> **Domain expert:** "It is recorded as a **Ticket Mutation** in the **Mutation Log** until a **Backend** can apply it."
+>
+> **Dev:** "When **`tk`** edits a **Local Ticket** before **Promotion**, where does that intent live?"
+> **Domain expert:** "It updates current state in the **Repository Store**. It is not a **Mutation** until **Promotion** creates backend intent."
 >
 > **Dev:** "Should **`tk list`** rebuild current state by replaying the **Mutation Log**?"
-> **Domain expert:** "No — the **Repository Store** keeps current state; the **Mutation Log** records replayable backend intent."
+> **Domain expert:** "No — the **Repository Store** keeps current state; the **Mutation Log** records replayable backend intent, not local edit history."
 >
 > **Dev:** "Should **`tk`** store that as a generic status field patch?"
 > **Domain expert:** "No — it should store a **Mutation Type** like `set_status` so the backend adapter can preserve intent."
@@ -467,7 +475,9 @@ _Avoid_: ticket, tickets
 - Keeping local IDs as visible IDs after **Promotion** was considered — resolved: **Promotion** replaces the **Display ID** and preserves the old local ID as an **Alias**.
 - Recursive promotion was considered — resolved: `--children` includes direct **Promotion Children** only in v1.
 - Backend-intended creation by default was considered when a **Primary Backend** exists — resolved: new **Tickets** and **Epics** are local by default to avoid upstream tracker noise.
-- "change log" and "audit log" were considered for replayable local intent — resolved: **Mutation Log** stores **Mutations**.
+- "local edit log", "change log", and "audit log" were considered for
+  replayable backend intent — resolved: **Mutation Log** stores **Mutations**,
+  not pre-Promotion local edit history.
 - Generic field patches were considered for **Mutations** — resolved: **Mutations** use named domain operations.
 - Comment, label, and assignee mutations were considered for v1 — resolved: they are deferred.
 - Event sourcing was considered for current state — resolved: the **Repository Store** stores current state, and the **Mutation Log** acts as an outbox for backend replay.

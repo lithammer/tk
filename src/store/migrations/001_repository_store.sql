@@ -94,7 +94,6 @@ create index external_blockers_unresolved_idx on external_blockers(item_id) wher
 create table mutations (
     sequence integer primary key,
     mutation_type text not null check(mutation_type in (
-        'create_ticket','create_epic',
         'update_ticket','update_epic',
         'set_item_status',
         'add_ticket_to_epic','remove_ticket_from_epic',

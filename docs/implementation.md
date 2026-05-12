@@ -77,9 +77,12 @@ Argument parsing uses [zig-clap](https://github.com/Hejsil/zig-clap). Hand-rolle
 Command handlers execute parsed commands against explicit dependencies (`Deps`):
 
 - `stdout: *std.Io.Writer`, `stderr: *std.Io.Writer`, `gpa: std.mem.Allocator` (slice #1)
+- `stdin: *std.Io.Reader` when command-owned input lands with `tk add -F -`
+  (slice #3)
 - `cwd: std.fs.Dir` and an injectable subprocess runner for Git common-dir
   discovery (slice #2)
 - An injectable clock for UTC millisecond timestamps (slice #2)
+- An injectable internal ID generator for opaque item IDs (slice #3)
 - Repository Store
 - Worktree service
 - Sync engine
@@ -117,6 +120,13 @@ keeps the store untracked and shared across linked worktrees instead of
 creating one store per worktree. Discover `<git-common-dir>` by running
 `git rev-parse --path-format=absolute --git-common-dir` through an injectable
 subprocess runner rather than parsing `.git` files directly.
+
+Commands after `tk init` use a reusable Repository Store opener rather than
+duplicating discovery and validation. The opener discovers the Git common dir,
+opens `<git-common-dir>/tk/ticket.db`, enables required connection pragmas,
+checks the Ticket application ID and known migration version, and returns typed
+missing/invalid/future-store results so each command can render its own
+precondition diagnostic.
 
 The subprocess runner returns a captured result (`exit code`, `stdout`,
 `stderr`) rather than streaming directly to command output. `tk init` parses
@@ -336,9 +346,25 @@ Timestamp fields store UTC millisecond strings in the format
 clock rather than SQLite defaults so tests and sync behavior remain
 deterministic.
 
-Current Ticket and Epic state is stored directly. The Mutation Log is an outbox for replayable backend intent, not the primary read model.
+Current Ticket and Epic state is stored directly. The Mutation Log is an outbox
+for replayable backend intent, not the primary read model and not a general
+audit log of every local edit.
 
-Any command that changes syncable state must update current state and append the corresponding Mutation in one SQLite transaction.
+Any command that changes backend-backed state must update current state and
+append the corresponding Mutation in one SQLite transaction. Pre-Promotion
+changes to Local Tickets and Local Epics update only current Repository Store
+state; Promotion snapshots the current local state when converting the item in
+place.
+
+Repository Store write helpers use `BEGIN IMMEDIATE` by default when the
+SQLite wrapper makes that straightforward. Write commands know they will write,
+so they should acquire the write lock before reading sequence values or making
+dependent state changes. Read-only commands can use ordinary reads or explicit
+read transactions when their query shape needs them. Slice #3 introduces a
+shared `withWriteTransaction` helper even if `tk add` is its first caller. It
+starts `BEGIN IMMEDIATE`, runs the callback, commits on success, rolls back on
+error, preserves the original failure detail if rollback also touches SQLite
+state, and does not support nested transactions in slice #3.
 
 A single command may append more than one Mutation, of different Mutation Types, in the same transaction. For example, `tk update --parent` edits Epic membership through `add_ticket_to_epic` (and `remove_ticket_from_epic` when moving between Epics), while editing title/body through `update_ticket` in the same call. Command-to-Mutation is many-to-one, not one-to-one.
 
@@ -346,10 +372,10 @@ Workspace Scope is not stored in SQLite in v1. It is stored in git worktree conf
 
 ## IDs
 
-Store items by an internal stable ID. Internal IDs are random opaque values
-(for example, 128-bit random encoded as lowercase hex or URL-safe base32), not
-sequential counters. `created_seq` handles creation ordering, and Display IDs
-and Aliases are lookup keys.
+Store items by an internal stable ID. Internal IDs are random opaque values,
+not sequential counters. The first implementation uses 128-bit random values
+encoded as lowercase hex. `created_seq` handles creation ordering, and Display
+IDs and Aliases are lookup keys.
 
 Local Display IDs use one stored Repository Store prefix plus one shared
 sequence for Tickets and Epics: `<store-prefix>-<n>`. The prefix identifies the
@@ -425,6 +451,21 @@ The `-- script --` tokenizer follows [`rogpeppe/go-internal/testscript`](https:/
 
 Each scenario gets a fresh per-script work directory exposed as `$WORK` in the env map (matching testscript). From slice #2 onward, the runner also passes a `std.fs.Dir` handle for `$WORK` via `Deps.cwd`. The work directory is removed unconditionally after the scenario; setting `TK_TESTWORK=1` opts in to preserving it for debugging. Failure output substitutes the literal string `$WORK` for the actual path so messages stay readable; re-run with `TK_TESTWORK=1` to keep artefacts.
 
+From slice #3 onward, the scenario runner supports testscript-compatible
+`stdin <source>` directives. `stdin <path>` reads a file from the scenario work
+directory, so existing `-- input/... --` sections can feed the next `tk`
+command. `stdin stdout` and `stdin stderr` feed the aggregate stdout or stderr
+captured so far in the script, matching Go testscript parity. The stdin payload
+applies to the next `tk` command only and then resets to empty. Do not add
+inline heredoc syntax. If a scenario sets stdin and no later `tk` command
+consumes it, fail the scenario with a runner-level diagnostic such as
+`script: stdin set but no tk command consumed it`. If a scenario sets stdin
+again before it is consumed, fail with `script: stdin already set` rather than
+silently replacing the pending payload. If `stdin <path>` names a missing file,
+fail immediately with a runner-level diagnostic such as
+`script: stdin source not found: <path>`; do not convert a missing fixture into
+empty stdin.
+
 ## First Slices
 
 Implement in small vertical slices:
@@ -444,10 +485,169 @@ Implement in small vertical slices:
    - Add `tk init --help` from the command-local zig-clap spec.
    - Keep `tk init` flagless in slice #2; no `--force`, `--store`, or `--quiet`.
 
-3. `tk add -F -`
+3. `tk add -F <file | ->`
    - Parse git-commit-style message input.
-   - Create local task Tickets with Priority `P2`.
-   - Append `create_ticket` Mutation in the same transaction.
+     Normalize CRLF and CR line endings to LF, trim leading and trailing blank
+     lines from the whole message, trim each title line, join consecutive
+     non-blank title lines with single spaces, and preserve later paragraphs as
+     the body after trimming outer blank lines. Reject an empty title with exit
+     code 1. Empty body is allowed. Use `tk add: Aborting add due to empty
+     message.` as the canonical diagnostic for empty, whitespace-only, and
+     blank-line-only input. Do not enforce title length or a product-level
+     message-size limit in slice #3; ordinary read/allocation failures are
+     enough for this slice. Reject messages containing NUL bytes with exit code
+     1 and `tk add: message contains NUL byte`. Preserve user text inside body
+     paragraphs, including multiple blank lines between body paragraphs; do
+     not trim trailing spaces or otherwise format body lines in slice #3. NUL
+     is the only control character rejected by `tk add` in slice #3; terminal
+     escape handling is deferred to a later output-rendering security pass.
+     Put this in a small command-side reusable message parser module (for
+     example, `src/commands/message.zig`) rather than burying it in
+     `commands/add.zig`; git-commit-style message parsing is CLI input syntax,
+     while the parsed title and body are the domain fields. Unit-test the parser
+     directly and let `commands/add.zig` map parser errors to `tk add:`
+     diagnostics. The parser returns allocator-owned normalized title/body
+     slices through a small `ParsedMessage` value with an explicit `deinit`.
+   - Support both `-F` and `--file`. `-F -` / `--file -` read from stdin;
+     `-F <file>` / `--file <file>` / `--file=<file>` read from a message file
+     resolved relative to `Deps.cwd`. Both paths share the same normalization
+     and validation. File read failures return exit code 1 with
+     `tk add: could not read message file <path>: <error>` as the diagnostic
+     shape, preserving the path argument exactly as typed for `<path>` rather
+     than printing a resolved absolute path. Stdin read failures return exit
+     code 1 with `tk add: could not read message from stdin: <error>`. Do not
+     restrict production `-F <file>` to scenario fixture paths; absolute paths
+     and ordinary relative paths are valid when the OS allows them. Scenario
+     fixtures should still prefer `input/...` files materialized under `$WORK`.
+     Read the entire stdin or file payload before parsing in slice #3; streaming
+     message parsing is deferred until there is evidence it is needed.
+     Slice #3 requires exactly one `-F` / `--file` occurrence: missing or
+     repeated file flags are usage errors with exit code 2. Positional
+     arguments are also usage errors in slice #3.
+   - Add `stdin: *std.Io.Reader` to `Deps` for `-F -`. `main.zig` wires the
+     process stdin reader; command tests and scenario tests use in-memory
+     readers so stdin behavior stays deterministic.
+   - Add `tk add --help` for the implemented slice only. The help text should
+     show `tk add -F <file | ->` / `tk add --file <file | ->`, say that this
+     slice creates local task Tickets with Priority `P2`, and avoid advertising
+     unimplemented v1 flags such as `--bug`, `--epic`, `--priority`,
+     `--parent`, `-m`, or editor mode. Help works outside a git repository and
+     without a Repository Store: exit 0, stdout only, and no Git discovery or
+     SQLite access.
+   - Add `commands/add.zig` with command `meta` so top-level `tk --help`
+     includes `add`, using a narrow description such as
+     `Create a local task Ticket from a message file`. Order top-level help by
+     user workflow rather than implementation history, starting with `init`,
+     then `add`, then `prime`.
+   - Update `man/tk.1` in the same slice to describe the command surface
+     available in the binary now, including `tk add -F <file | ->` and
+     `--file=<file>`. Remove stale design-phase commands and flags that are not
+     implemented yet, and keep the manpage current in future slices rather than
+     deferring a rewrite.
+   - Execution order is parse args, read stdin/file, normalize and validate the
+     message, open the existing Repository Store, then create the Local Ticket
+     transaction. Input errors should surface before Git discovery or SQLite
+     precondition errors.
+   - Create local task Tickets with Priority `P2`, `origin = 'local'`, and no
+     backend identity (`backend_kind = null`, `backend_key = null`) even when a
+     Remote is configured.
+   - Introduce minimal typed domain enums for Priority and Item Status rather
+     than stringly-typed command/store code. `domain/priority.zig` owns
+     `P0`..`P4`, default `P2`, and storage/render strings.
+     `domain/status.zig` owns `open`, `active`, `done`, default `open`, and
+     storage/render strings. Defer sorting helpers and richer behavior until
+     `tk list` / `tk next` need them.
+   - Introduce `domain/ticket_kind.zig` with `task` and `bug`, default `task`,
+     and storage/render string helpers. Slice #3 does not parse `--bug`, but it
+     should still avoid hardcoded `"task"` strings in command/store code.
+     Introduce `domain/origin.zig` with `local` and `backend` because Origin is
+     the behavioral boundary for whether command changes become Mutations.
+     Introduce `domain/item_class.zig` with `ticket` and `epic` when new slice
+     #3 code writes or returns `item_class`.
+     Prefer small enums over strings or booleans for closed domain
+     vocabularies.
+   - Call the injectable clock once for the creation transaction and use that
+     same UTC millisecond timestamp for `created_at` and `updated_at`.
+   - Allocate `display_seq` and `item_created_seq` inside the same SQLite write
+     transaction as the `items` and `item_ids` inserts, so a failed creation
+     rolls back both counters and burns no Display ID or creation-order slot.
+     Use the shared Repository Store write helper so `tk add` gets the standard
+     `BEGIN IMMEDIATE` write behavior.
+   - Do not append a `create_ticket` Mutation in slice #3. Local Tickets are
+     not backend intent yet; Promotion is the first backend-intent boundary and
+     snapshots the current local state when converting the item in place.
+     `tk add` must leave `mutations` unchanged and must not advance
+     `sequences('mutation_seq')`.
+   - On success, write `Created Ticket: <display-id> - <title>` followed by
+     `Priority: P2` and `Status: open` lines to stdout. Keep all three lines
+     flush-left, use Ticket vocabulary rather than Beads' `issue` wording, and
+     keep the output ASCII in this slice. Write nothing to stderr on success.
+   - Add a narrow store-facing `createLocalTicket` API instead of embedding
+     Repository Store insert SQL in `commands/add.zig`. The API takes typed
+     inputs including `TicketKind`, `Priority`, title, and body; slice #3
+     always passes `TicketKind.task` and `Priority.P2`, but the store layer
+     should not hardcode task-specific behavior. The command owns parsing,
+     stdin/file reading, message normalization, diagnostics, and rendering; the
+     store/domain boundary owns internal ID allocation, Display ID allocation,
+     `created_seq` allocation, `items`/`item_ids` inserts, and the enclosing
+     transaction. The creation API returns a structured `CreatedTicket` value
+     containing the created current-state snapshot for slice #3: internal ID,
+     Display ID, Ticket Kind, Priority, Item Status, Origin, normalized title,
+     and normalized body. The command can render success output from that value,
+     and tests can assert the created object without re-querying the store.
+     Ownership must be explicit: do not return pointers into SQLite statement
+     memory or transient buffers. The command/parser owns normalized title/body
+     input slices; the store API owns generated values it allocates, such as the
+     Display ID string.
+   - Generate internal item IDs through an injectable dependency. Production
+     uses 128-bit random values encoded as lowercase hex; tests use
+     deterministic lowercase-hex values so store rows and Mutation references
+     can be asserted without weakening the production ID contract. If a
+     creation later fails and rolls back, the generated internal ID is simply
+     discarded; it is not persisted, reserved, or tracked as used. Do not add a
+     retry loop for internal ID collisions in slice #3. A collision or other
+     unexpected insert failure should surface as a user-visible storage error
+     that asks the user to retry: `tk add: failed to create Ticket; retry the
+     command`. Low-level storage detail may be printed on a following line when
+     available, but tests should pin the stable first line. Use the same stable
+     first line for Display ID allocation, sequence allocation, and unexpected
+     Repository Store write failures. If the SQLite wrapper exposes busy/locked
+     errors reliably, map them to `tk add: Repository Store is busy; retry the
+     command`; otherwise use the generic creation failure in slice #3.
+   - Require an initialized Repository Store. If the store is missing, return
+     exit code 1 with a diagnostic that tells the user to run `tk init`; do not
+     auto-initialize or prompt. Use `tk add: Repository Store not initialized;
+     run 'tk init'` for the missing-store case. For existing invalid or
+     future-version stores, reuse the same stable diagnostic substrings as
+     `tk init`, command-prefixed as `tk add: ...`. If Git common-dir discovery
+     fails because the command is outside a git repository, report the existing
+     git-discovery diagnostic with a `tk add:` prefix rather than the
+     missing-store message.
+   - Keep this slice narrow: no `--bug`, `--epic`, `--priority`, `--parent`,
+     repeatable `-m`, or editor mode. Those flags extend the same command after
+     the first Repository Store write path is proven.
+   - Add coverage that exercises `tk init` followed by `tk add` against the
+     same Repository Store. If the scenario runner's subprocess fakeability is
+     still unresolved, keep most coverage in command-handler/store tests and
+     use a narrow integration or subprocess test for the end-to-end path.
+     Integration coverage should assert the Display ID generated from the
+     stored `display_prefix` and `display_seq`, using a simple repository
+     basename such as `project` so the first expected Display ID is
+     `project-1`. Store-level tests should also assert the matching
+     `item_ids` row has `source = 'display'` and that creation inserts no
+     Alias rows.
+     Tests should assert exact stderr for diagnostics canonicalized in this
+     slice, assert stable substrings for zig-clap diagnostics and reused
+     invalid/future-store diagnostics, and pin only the stable first line for
+     storage failures that may include low-level detail on following lines.
+     Add stable `tk add` user-observable phrasing to `src/messages.zig` rather
+     than hardcoding it at call sites: missing store, empty message, NUL
+     message, file-read prefix, stdin-read prefix, creation failure retry, and
+     store-busy retry. Success-output labels/prefixes such as `Created Ticket:
+     `, `Priority: `, and `Status: ` should also live there. For
+     command-specific add diagnostics, store the full `tk add:` line or prefix
+     in the message constant rather than composing a generic fragment with a
+     command prefix at each call site.
 
 4. `tk list`
    - Render the List Tree for local Tickets and Epics.
@@ -487,7 +687,6 @@ Implement in small vertical slices:
 
 ## Deferred
 
-- Rewriting `man/tk.1` from the canonical CLI spec.
 - Dynamic `tk prime` sections.
 - Comments, labels, and assignees. Labels remain descriptive facets only and
   must not replace Priority, Ticket Kind, Epic membership, Item Status, or

@@ -118,6 +118,42 @@ Touches `src/commands/prime.zig`.
 
 ---
 
+## Investigate terminal escape handling for rendered remote text
+
+Slice 3 rejects NUL bytes in `tk add` messages but otherwise allows
+control characters and terminal escape sequences to remain in titles and
+bodies. That is acceptable for local creation because output escaping is
+a cross-command rendering concern, not an add-specific parser rule.
+
+Before remote pull/list/show output becomes broadly useful, do a
+security pass on whether a synced Remote issue could inject terminal
+escape sequences into `tk list`, `tk show`, creation/update output, or
+agent briefing text. Decide whether Ticket should strip, escape, or
+otherwise render-control user/remote text at output boundaries.
+
+Touches future output rendering code across `tk list`, `tk show`, and
+any command that prints Remote-provided titles or bodies.
+
+---
+
+## Stress-test Repository Store locking under parallel agents
+
+Slice 2 enables WAL and `PRAGMA busy_timeout = 5000`, and slice 3's local
+Ticket creation is intended to be a short SQLite write transaction. That
+should be enough for normal local use, but Ticket's agent-first workflow
+means several agents may run `tk add`, `tk update`, or sync-adjacent
+commands against the same Repository Store at nearly the same time.
+
+Add a focused concurrency stress test once the first few write commands
+exist. Exercise parallel local writes against one Repository Store,
+observe whether busy timeouts surface in practice, and decide whether the
+current retry-at-the-user-level behavior is enough or whether Ticket needs
+an internal retry/backoff policy around short write transactions.
+
+Touches Repository Store write helpers and write-command diagnostics.
+
+---
+
 ## Design the Mutation Failure / Adapter Failure record shape
 
 Slice 9 (Backend Adapter sync skeleton) needs the structured failure

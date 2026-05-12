@@ -46,7 +46,7 @@ No open design questions.
 ### DQ-006: What is the initial Mutation Type vocabulary?
 
 **Status**: resolved
-**Decision**: Use `create_ticket`, `update_ticket`, `create_epic`, `update_epic`, `set_item_status`, `add_ticket_to_epic`, `remove_ticket_from_epic`, `add_dependency`, `remove_dependency`, `add_external_blocker`, `resolve_external_blocker`, `promote_ticket`, and `promote_epic`.
+**Decision**: Use `update_ticket`, `update_epic`, `set_item_status`, `add_ticket_to_epic`, `remove_ticket_from_epic`, `add_dependency`, `remove_dependency`, `add_external_blocker`, `resolve_external_blocker`, `promote_ticket`, and `promote_epic`.
 **Recorded in**: CONTEXT.md.
 **Rationale**: The v1 set covers creation, title/body edits, shared Item Status, epic membership, dependencies, external blockers, and promotion while deferring comments, labels, and assignees. `update_ticket` and `update_epic` cover title/body only. Epic membership is limited to Tickets with no nested Epics. Dependencies may connect Tickets and Epics in any blocking or blocked combination, but cycles are rejected.
 

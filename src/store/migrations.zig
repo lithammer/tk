@@ -169,9 +169,8 @@ test "applyAll on empty db creates v1 schema and records migration" {
     } else return error.ExpectedRow;
 
     // Behavioral check: the documented sequence-allocation pattern returns a
-    // monotonic value. This pins the contract used by the create_ticket /
-    // create_epic Mutation Apply path rather than the literal row count of
-    // pre-seeded sequences.
+    // monotonic value. This pins the contract used by item creation rather
+    // than the literal row count of pre-seeded sequences.
     if (try conn.row(
         "update sequences set value = value + 1 where name = 'item_created_seq' returning value",
         .{},
