@@ -1,11 +1,10 @@
-# Slice 2 follow-ups
+# Implementation follow-ups
 
-Holding area for review-time follow-ups that did not block slice 2. Each
-section is written in `tk add -F -` format: the first paragraph is the
-ticket title, subsequent paragraphs are the body. Once slice 3 ships
-`tk add`, the contents move into the Repository Store and this file is
-deleted. Until then, agents looking for "what's left from slice 2" read
-this file.
+Holding area for review-time follow-ups that should not block the current
+slice. Each section is written in `tk add -F -` format: the first paragraph is
+the ticket title, subsequent paragraphs are the body. Once Ticket can dogfood
+its own Repository Store comfortably, move these entries into `tk add` and
+delete this file.
 
 Inline `// TODO(followups):` comments at the relevant call sites point
 back to the section title here.
@@ -92,7 +91,7 @@ Touches `src/testing/script.zig`.
 `const Allocator = std.mem.Allocator;` and use the short `Allocator`
 in signatures. `src/store/migrations.zig` and
 `src/domain/display_prefix.zig` spell out `std.mem.Allocator` inline.
-Both styles co-exist within slice 2.
+Both styles currently co-exist.
 
 Pick one. Either alias `Allocator` in the modules that don't, or
 unalias the modules that do.
@@ -103,16 +102,15 @@ Touches every file that takes a `std.mem.Allocator` parameter.
 
 ## Pick one test-name convention across src/commands/
 
-Slice 1's `src/commands/prime.zig` uses bare scope names
-(`test "prime writes ..."`). Slice 2's `src/commands/init.zig` and
-every other slice-2 file use the `<scope>: <case>` colon-prefix form
+`src/commands/prime.zig` uses bare scope names
+(`test "prime writes ..."`). Newer command files use the
+`<scope>: <case>` colon-prefix form
 (`test "init: returns exit 1 ..."`). The repo now has both styles in
 the same directory.
 
 The colon-prefix form already dominates; bring `prime.zig` in line, or
 record the divergence as accepted in `AGENTS.md` / `CONTEXT.md`. Pin
-this before slice 3 adds another command file and the inconsistency
-spreads.
+this before more command files make the inconsistency more expensive.
 
 Touches `src/commands/prime.zig`.
 
@@ -138,8 +136,8 @@ any command that prints Remote-provided titles or bodies.
 
 ## Stress-test Repository Store locking under parallel agents
 
-Slice 2 enables WAL and `PRAGMA busy_timeout = 5000`, and slice 3's local
-Ticket creation is intended to be a short SQLite write transaction. That
+The Repository Store enables WAL and `PRAGMA busy_timeout = 5000`, and
+local Ticket creation is intended to be a short SQLite write transaction. That
 should be enough for normal local use, but Ticket's agent-first workflow
 means several agents may run `tk add`, `tk update`, or sync-adjacent
 commands against the same Repository Store at nearly the same time.
@@ -156,8 +154,8 @@ Touches Repository Store write helpers and write-command diagnostics.
 
 ## Design the Mutation Failure / Adapter Failure record shape
 
-Slice 9 (Backend Adapter sync skeleton) needs the structured failure
-type backing `mutations.failure_json` (per CONTEXT.md, Mutation
+The Backend Adapter sync skeleton needs the structured failure type backing
+`mutations.failure_json` (per CONTEXT.md, Mutation
 Failure). It must carry retry classification (rate-limited,
 validation, sync-conflict, auth, transient-network) plus enough
 context for the sync engine to schedule retries and for `tk sync log`
@@ -179,18 +177,18 @@ makes real failure modes visible; don't design from imagination.
 
 When this lands, also extend CONTEXT.md with Adapter Failure as a
 sub-concept of Mutation Failure (the architecture review during the
-slice-3 error-handling refactor specifically flagged this as the
+error-handling refactor specifically flagged this as the
 right moment for a glossary addition).
 
 Reference shapes worth studying when designing this: the Zig
 compiler's `Zcu.ErrorMsg` heap graph (`src/Zcu.zig`) and the packed-
 arena `std.zig.ErrorBundle` (`lib/std/zig/ErrorBundle.zig`). Both
-exist because the compiler has the same pressures slice 9 will face —
+exist because the compiler has the same pressures sync will face —
 multiple structured failures, stable shape across processes — and
 the patterns are language-team-vetted. Don't import them wholesale
 (the compiler's machinery is justified by IPC and incremental cache
 that Ticket does not have), but use them as a known-good
-counterweight when slice 9 designs the variant set.
+counterweight when sync designs the variant set.
 
 Touches `src/store/migrations.zig` schema, future
 `src/remote/<adapter>.zig`, future `src/sync/engine.zig`,
