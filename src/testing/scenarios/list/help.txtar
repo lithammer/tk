@@ -1,0 +1,19 @@
+-- script --
+tk list --help
+-- expected/stdout --
+tk list - render the Repository Store List Tree
+
+Usage:
+  tk list [options]
+
+Options:
+  -h, --help  Display this help and exit.
+  --all       Include done items.
+  --ready     Show ready Tickets.
+  --blocked   Show blocked Tickets.
+  --active    Show active Tickets and Epics.
+  --local     Show local items.
+  --remote    Show Remote-backed items.
+-- expected/stderr --
+-- expected/exit --
+0

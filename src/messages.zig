@@ -81,3 +81,41 @@ pub const add_priority_label = "Priority: ";
 
 /// Stdout label for the created Ticket's Item Status.
 pub const add_status_label = "Status: ";
+
+// `tk list` — Repository Store reads.
+
+/// Stderr line when no Repository Store exists for the current repository.
+pub const list_missing_store = "tk list: Repository Store not initialized; run 'tk init'";
+
+/// Stdout line for an empty default List Tree.
+pub const list_empty_default = "No open or active items.";
+
+/// Stdout line when `tk list --all` finds no items.
+pub const list_empty_all = "No items.";
+
+/// Stdout line when `tk list --ready` finds no ready items.
+pub const list_empty_ready = "No ready items.";
+
+/// Stdout line when `tk list --blocked` finds no blocked items.
+pub const list_empty_blocked = "No blocked items.";
+
+/// Stdout line when `tk list --active` finds no active items.
+pub const list_empty_active = "No active items.";
+
+/// Stdout line when an Origin-filtered list finds no local items.
+pub const list_empty_local = "No local items.";
+
+/// Stdout line when an Origin-filtered list finds no Remote-backed items.
+pub const list_empty_remote = "No remote items.";
+
+/// Stderr line when mutually exclusive readiness filters are combined.
+pub const list_conflicting_readiness_filters = "tk list: choose at most one of --all, --ready, --blocked, or --active";
+
+/// Stderr line when both Origin filters are combined.
+pub const list_conflicting_origin_filters = "tk list: choose at most one of --local or --remote";
+
+/// Stdout label for the rendered-row count footer.
+pub const list_total_label = "Total: ";
+
+/// Stdout label for the Item Status legend footer.
+pub const list_status_label = "Status: ";

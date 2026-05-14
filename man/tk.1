@@ -96,6 +96,45 @@ The current binary does not implement
 repeatable
 .BR \-m ,
 or editor mode.
+.SS Reading the List Tree
+.TP
+\fBtk list\fR [\fB\-\-all\fR | \fB\-\-ready\fR | \fB\-\-blocked\fR | \fB\-\-active\fR] [\fB\-\-local\fR | \fB\-\-remote\fR]
+Render the Repository Store List Tree.
+.PP
+The default view shows open and active Tickets and Epics. Epics render as
+top-level rows, child Tickets render under their Epic with tree glyphs, and
+unparented Tickets render as top-level rows.
+.PP
+.B \-\-all
+includes done items.
+.B \-\-ready
+shows open Tickets with no unresolved Dependencies or External Blockers.
+.B \-\-blocked
+shows open or active Tickets with unresolved Dependencies or External Blockers.
+.B \-\-active
+shows active Tickets and Epics, retaining inactive Epics as containers for
+active child Tickets.
+.PP
+.B \-\-local
+shows only local items.
+.B \-\-remote
+shows only Backend-backed items. The current binary can read backend-origin
+rows seeded by tests or future sync paths, but it does not promote or pull
+backend items yet.
+.PP
+On success with one local Ticket,
+.B tk list
+prints:
+.PP
+.RS 4
+.nf
+○ project-1 ● P2 Investigate flaky login retry
+--------------------------------------------------------------------------------
+Total: 1 item (1 open)
+
+Status: ○ open  ◐ active  ✓ done
+.fi
+.RE
 .SS Agent briefing
 .TP
 .B tk prime
@@ -144,6 +183,15 @@ Investigate flaky login retry
 Repro is intermittent on the staging cluster.
 First seen 2026-04-30.
 EOF
+.fi
+.RE
+.PP
+List visible work:
+.PP
+.RS 4
+.nf
+tk list
+tk list --ready
 .fi
 .RE
 .PP

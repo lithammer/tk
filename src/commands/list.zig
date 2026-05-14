@@ -1,0 +1,610 @@
+//! `tk list` — render the Repository Store List Tree.
+
+const std = @import("std");
+const clap = @import("clap");
+const cli = @import("../cli.zig");
+const messages = @import("../messages.zig");
+const discovery = @import("../git/discovery.zig");
+const repository = @import("../store/repository.zig");
+const ItemStatus = @import("../domain/status.zig").ItemStatus;
+const TicketKind = @import("../domain/ticket_kind.zig").TicketKind;
+const init_command = @import("init.zig");
+const add_command = @import("add.zig");
+const Harness = @import("../testing/test_cli.zig").Harness;
+const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+/// Dispatcher metadata for `tk list`.
+pub const meta: cli.CommandMeta = .{
+    .name = "list",
+    .description = "Render the Repository Store List Tree",
+};
+
+const params = clap.parseParamsComptime(
+    \\-h, --help  Display this help and exit.
+    \\--all       Include done items.
+    \\--ready     Show ready Tickets.
+    \\--blocked   Show blocked Tickets.
+    \\--active    Show active Tickets and Epics.
+    \\--local     Show local items.
+    \\--remote    Show Remote-backed items.
+    \\
+);
+
+/// Parse `tk list` flags, read the Repository Store, and render the List Tree.
+pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
+    var diag: clap.Diagnostic = .{};
+    var res = clap.parseEx(clap.Help, &params, clap.parsers.default, args_iter, .{
+        .diagnostic = &diag,
+        .allocator = deps.gpa,
+    }) catch |err| {
+        diag.report(deps.stderr, err) catch {};
+        return 2;
+    };
+    defer res.deinit();
+
+    if (res.args.help != 0) {
+        writeHelp(deps) catch {};
+        return 0;
+    }
+    const options = parseOptions(deps, res.args) orelse return 2;
+
+    const open_outcome = repository.openExisting(deps.gpa, deps.runner, deps.cwd) catch |err| {
+        renderStorageError(deps, err);
+        return 1;
+    };
+    const store = switch (open_outcome) {
+        .ok => |store| store,
+        .discovery_failed => |outcome| {
+            discovery.renderFailure(deps.stderr, deps.gpa, "list", outcome);
+            return 1;
+        },
+        .store_missing => {
+            deps.stderr.writeAll(messages.list_missing_store ++ "\n") catch {};
+            return 1;
+        },
+        .not_ticket_store => {
+            deps.stderr.writeAll("tk list: Repository Store is " ++ messages.init_refuse_foreign ++ "\n") catch {};
+            return 1;
+        },
+        .store_from_future_version => {
+            deps.stderr.writeAll("tk list: Repository Store was created by a " ++ messages.init_refuse_future_version ++ "\n") catch {};
+            return 1;
+        },
+    };
+    defer store.close();
+
+    const rows = repository.listRows(store, deps.gpa, options) catch |err| {
+        renderStorageError(deps, err);
+        return 1;
+    };
+    defer repository.freeListRows(deps.gpa, rows);
+
+    try render(deps.stdout, rows, options);
+    return 0;
+}
+
+fn parseOptions(deps: cli.Deps, args: anytype) ?repository.ListOptions {
+    const view_count: u8 =
+        @as(u8, @intFromBool(args.all != 0)) +
+        @as(u8, @intFromBool(args.ready != 0)) +
+        @as(u8, @intFromBool(args.blocked != 0)) +
+        @as(u8, @intFromBool(args.active != 0));
+    if (view_count > 1) {
+        deps.stderr.writeAll(messages.list_conflicting_readiness_filters ++ "\n") catch {};
+        return null;
+    }
+    if (args.local != 0 and args.remote != 0) {
+        deps.stderr.writeAll(messages.list_conflicting_origin_filters ++ "\n") catch {};
+        return null;
+    }
+
+    const view: repository.ListView = if (args.all != 0)
+        .all
+    else if (args.ready != 0)
+        .ready
+    else if (args.blocked != 0)
+        .blocked
+    else if (args.active != 0)
+        .active
+    else
+        .default;
+
+    const origin: repository.ListOriginFilter = if (args.local != 0)
+        .local
+    else if (args.remote != 0)
+        .remote
+    else
+        .any;
+
+    return .{ .view = view, .origin = origin };
+}
+
+fn writeHelp(deps: cli.Deps) !void {
+    try deps.stdout.writeAll(
+        \\tk list - render the Repository Store List Tree
+        \\
+        \\Usage:
+        \\  tk list [options]
+        \\
+        \\Options:
+        \\  -h, --help  Display this help and exit.
+        \\  --all       Include done items.
+        \\  --ready     Show ready Tickets.
+        \\  --blocked   Show blocked Tickets.
+        \\  --active    Show active Tickets and Epics.
+        \\  --local     Show local items.
+        \\  --remote    Show Remote-backed items.
+        \\
+    );
+}
+
+fn render(stdout: *std.Io.Writer, rows: []const repository.ListRow, options: repository.ListOptions) !void {
+    if (rows.len == 0) {
+        try stdout.print("{s}\n", .{emptyMessage(options)});
+        return;
+    }
+
+    var counts: StatusCounts = .{};
+    for (rows) |row| {
+        counts.add(row.status);
+    }
+
+    for (rows) |row| {
+        if (parentIsRendered(rows, row)) continue;
+        try renderRow(stdout, row, "");
+        try renderChildren(stdout, rows, row);
+    }
+
+    try stdout.writeAll("--------------------------------------------------------------------------------\n");
+    try renderTotal(stdout, rows.len, counts);
+    try stdout.writeAll("\n");
+    try stdout.writeAll(messages.list_status_label ++ "○ open  ◐ active  ✓ done\n");
+}
+
+fn renderChildren(stdout: *std.Io.Writer, rows: []const repository.ListRow, parent: repository.ListRow) !void {
+    const child_count = countRenderedChildren(rows, parent.id);
+    var child_index: usize = 0;
+    for (rows) |child| {
+        const container_id = child.container_id orelse continue;
+        if (!std.mem.eql(u8, container_id, parent.id)) continue;
+        child_index += 1;
+        const prefix = if (child_index == child_count) "└── " else "├── ";
+        try renderRow(stdout, child, prefix);
+    }
+}
+
+fn parentIsRendered(rows: []const repository.ListRow, row: repository.ListRow) bool {
+    const container_id = row.container_id orelse return false;
+    return findRowById(rows, container_id) != null;
+}
+
+fn countRenderedChildren(rows: []const repository.ListRow, parent_id: []const u8) usize {
+    var count: usize = 0;
+    for (rows) |row| {
+        const container_id = row.container_id orelse continue;
+        if (std.mem.eql(u8, container_id, parent_id)) count += 1;
+    }
+    return count;
+}
+
+fn findRowById(rows: []const repository.ListRow, id: []const u8) ?repository.ListRow {
+    for (rows) |row| {
+        if (std.mem.eql(u8, row.id, id)) return row;
+    }
+    return null;
+}
+
+fn emptyMessage(options: repository.ListOptions) []const u8 {
+    if (options.origin == .local and options.view == .default) return messages.list_empty_local;
+    if (options.origin == .remote and options.view == .default) return messages.list_empty_remote;
+    return switch (options.view) {
+        .default => messages.list_empty_default,
+        .all => if (options.origin == .local)
+            messages.list_empty_local
+        else if (options.origin == .remote)
+            messages.list_empty_remote
+        else
+            messages.list_empty_all,
+        .ready => messages.list_empty_ready,
+        .blocked => messages.list_empty_blocked,
+        .active => messages.list_empty_active,
+    };
+}
+
+fn renderRow(stdout: *std.Io.Writer, row: repository.ListRow, tree_prefix: []const u8) !void {
+    try stdout.print("{s}{s} {s}", .{ tree_prefix, statusGlyph(row.status), row.display_id });
+    switch (row.item_class) {
+        .ticket => {
+            const priority = row.priority orelse unreachable;
+            try stdout.print(" ● {s}", .{priority.text()});
+            if (row.ticket_kind == TicketKind.bug) try stdout.writeAll(" [bug]");
+            try stdout.print(" {s}\n", .{row.title});
+        },
+        .epic => try stdout.print(" [epic] {s}\n", .{row.title}),
+    }
+}
+
+fn renderTotal(stdout: *std.Io.Writer, total: usize, counts: StatusCounts) !void {
+    try stdout.print(messages.list_total_label ++ "{d} {s} (", .{ total, if (total == 1) "item" else "items" });
+    var wrote = false;
+    try renderCount(stdout, &wrote, counts.open, "open");
+    try renderCount(stdout, &wrote, counts.active, "active");
+    try renderCount(stdout, &wrote, counts.done, "done");
+    try stdout.writeAll(")\n");
+}
+
+fn renderCount(stdout: *std.Io.Writer, wrote: *bool, count: usize, label: []const u8) !void {
+    if (count == 0) return;
+    if (wrote.*) try stdout.writeAll(", ");
+    try stdout.print("{d} {s}", .{ count, label });
+    wrote.* = true;
+}
+
+const StatusCounts = struct {
+    open: usize = 0,
+    active: usize = 0,
+    done: usize = 0,
+
+    fn add(self: *StatusCounts, status: ItemStatus) void {
+        switch (status) {
+            .open => self.open += 1,
+            .active => self.active += 1,
+            .done => self.done += 1,
+        }
+    }
+};
+
+fn statusGlyph(status: ItemStatus) []const u8 {
+    return switch (status) {
+        .open => "○",
+        .active => "◐",
+        .done => "✓",
+    };
+}
+
+fn renderStorageError(deps: cli.Deps, err: anyerror) void {
+    deps.stderr.print("tk list: failed to read Repository Store; retry the command\n{s}\n", .{@errorName(err)}) catch {};
+}
+
+test "list: renders an unparented local Ticket from the Repository Store" {
+    const gpa = std.testing.allocator;
+    var store = try TmpStore.init(gpa, "project");
+    defer store.deinit(gpa);
+
+    var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, store.toplevel_path, .{});
+    defer cwd.close(std.testing.io);
+
+    const rev_parse = try store.gitRevParseStdout(gpa);
+    defer gpa.free(rev_parse);
+
+    {
+        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
+    }
+
+    try cwd.writeFile(std.testing.io, .{
+        .sub_path = "item.md",
+        .data = "Write list command\n",
+    });
+
+    {
+        var h = Harness.initWith(gpa, &.{ "-F", "item.md" }, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try add_command.run(h.deps(), &h.iter));
+    }
+
+    {
+        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+
+        try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
+        try std.testing.expectEqualStrings(
+            \\○ project-1 ● P2 Write list command
+            \\--------------------------------------------------------------------------------
+            \\Total: 1 item (1 open)
+            \\
+            \\Status: ○ open  ◐ active  ✓ done
+            \\
+        , h.stdout());
+        try std.testing.expectEqualStrings("", h.stderr());
+    }
+}
+
+test "list: --ready renders ready Tickets with Epic containers" {
+    const gpa = std.testing.allocator;
+    var store = try TmpStore.init(gpa, "project");
+    defer store.deinit(gpa);
+
+    var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, store.toplevel_path, .{});
+    defer cwd.close(std.testing.io);
+
+    const rev_parse = try store.gitRevParseStdout(gpa);
+    defer gpa.free(rev_parse);
+
+    {
+        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
+    }
+
+    const zqlite = @import("zqlite");
+    const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "epic-ready",
+        .display = "project-1",
+        .item_class = "epic",
+        .priority = null,
+        .ticket_kind = null,
+        .title = "Ship list command",
+        .created_seq = 1,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "ticket-ready",
+        .display = "project-2",
+        .title = "Render ready list",
+        .priority = "P1",
+        .container_id = "epic-ready",
+        .created_seq = 2,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "ticket-ready-second",
+        .display = "project-5",
+        .title = "Check tree glyphs",
+        .priority = "P3",
+        .container_id = "epic-ready",
+        .created_seq = 5,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "ticket-blocked",
+        .display = "project-3",
+        .title = "Wait for blocked fixture",
+        .container_id = "epic-ready",
+        .created_seq = 3,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "epic-blocker",
+        .display = "project-4",
+        .item_class = "epic",
+        .priority = null,
+        .ticket_kind = null,
+        .title = "External decision",
+        .created_seq = 4,
+    });
+    try TmpStore.insertDependency(conn, "epic-blocker", "ticket-blocked");
+
+    var h = Harness.initWith(gpa, &.{"--ready"}, .{ .cwd = cwd });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+
+    try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
+    try std.testing.expectEqualStrings(
+        \\○ project-1 [epic] Ship list command
+        \\├── ○ project-2 ● P1 Render ready list
+        \\└── ○ project-5 ● P3 Check tree glyphs
+        \\--------------------------------------------------------------------------------
+        \\Total: 3 items (3 open)
+        \\
+        \\Status: ○ open  ◐ active  ✓ done
+        \\
+    , h.stdout());
+    try std.testing.expectEqualStrings("", h.stderr());
+}
+
+test "list: --blocked --remote promotes a matching child when Origin hides its Epic" {
+    const gpa = std.testing.allocator;
+    var store = try TmpStore.init(gpa, "project");
+    defer store.deinit(gpa);
+
+    var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, store.toplevel_path, .{});
+    defer cwd.close(std.testing.io);
+
+    const rev_parse = try store.gitRevParseStdout(gpa);
+    defer gpa.free(rev_parse);
+
+    {
+        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
+    }
+
+    const zqlite = @import("zqlite");
+    const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "local-epic",
+        .display = "project-1",
+        .item_class = "epic",
+        .priority = null,
+        .ticket_kind = null,
+        .title = "Local parent",
+        .created_seq = 1,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "remote-ticket",
+        .display = "GH#9",
+        .ticket_kind = "bug",
+        .priority = "P0",
+        .title = "Fix remote blocker",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "9",
+        .container_id = "local-epic",
+        .created_seq = 2,
+    });
+    try TmpStore.insertExternalBlocker(conn, "blocker-1", "remote-ticket", null);
+
+    var h = Harness.initWith(gpa, &.{ "--blocked", "--remote" }, .{ .cwd = cwd });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+
+    try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
+    try std.testing.expectEqualStrings(
+        \\○ GH#9 ● P0 [bug] Fix remote blocker
+        \\--------------------------------------------------------------------------------
+        \\Total: 1 item (1 open)
+        \\
+        \\Status: ○ open  ◐ active  ✓ done
+        \\
+    , h.stdout());
+    try std.testing.expectEqualStrings("", h.stderr());
+}
+
+test "list: --all renders done items and counts rendered statuses" {
+    const gpa = std.testing.allocator;
+    var store = try TmpStore.init(gpa, "project");
+    defer store.deinit(gpa);
+
+    var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, store.toplevel_path, .{});
+    defer cwd.close(std.testing.io);
+
+    const rev_parse = try store.gitRevParseStdout(gpa);
+    defer gpa.free(rev_parse);
+
+    {
+        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
+    }
+
+    const zqlite = @import("zqlite");
+    const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+
+    try TmpStore.insertFixtureItem(conn, .{ .id = "open", .display = "project-1", .title = "Open work", .created_seq = 1 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "active", .display = "project-2", .title = "Active work", .status = "active", .created_seq = 2 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "done", .display = "project-3", .title = "Done work", .status = "done", .created_seq = 3 });
+
+    var h = Harness.initWith(gpa, &.{"--all"}, .{ .cwd = cwd });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+
+    try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
+    try std.testing.expectEqualStrings(
+        \\○ project-1 ● P2 Open work
+        \\◐ project-2 ● P2 Active work
+        \\✓ project-3 ● P2 Done work
+        \\--------------------------------------------------------------------------------
+        \\Total: 3 items (1 open, 1 active, 1 done)
+        \\
+        \\Status: ○ open  ◐ active  ✓ done
+        \\
+    , h.stdout());
+    try std.testing.expectEqualStrings("", h.stderr());
+}
+
+test "list: --active retains inactive Epic containers for active child Tickets" {
+    const gpa = std.testing.allocator;
+    var store = try TmpStore.init(gpa, "project");
+    defer store.deinit(gpa);
+
+    var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, store.toplevel_path, .{});
+    defer cwd.close(std.testing.io);
+
+    const rev_parse = try store.gitRevParseStdout(gpa);
+    defer gpa.free(rev_parse);
+
+    {
+        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
+    }
+
+    const zqlite = @import("zqlite");
+    const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "epic",
+        .display = "project-1",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .title = "Container",
+        .created_seq = 1,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "active-child",
+        .display = "project-2",
+        .title = "Active child",
+        .status = "active",
+        .container_id = "epic",
+        .created_seq = 2,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "active-epic",
+        .display = "project-3",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .title = "Active Epic",
+        .status = "active",
+        .created_seq = 3,
+    });
+
+    var h = Harness.initWith(gpa, &.{"--active"}, .{ .cwd = cwd });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+
+    try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
+    try std.testing.expectEqualStrings(
+        \\○ project-1 [epic] Container
+        \\└── ◐ project-2 ● P2 Active child
+        \\◐ project-3 [epic] Active Epic
+        \\--------------------------------------------------------------------------------
+        \\Total: 3 items (1 open, 2 active)
+        \\
+        \\Status: ○ open  ◐ active  ✓ done
+        \\
+    , h.stdout());
+    try std.testing.expectEqualStrings("", h.stderr());
+}
+
+test "list: reports missing store after successful Git discovery" {
+    const gpa = std.testing.allocator;
+    var store = try TmpStore.init(gpa, "project");
+    defer store.deinit(gpa);
+
+    var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, store.toplevel_path, .{});
+    defer cwd.close(std.testing.io);
+
+    const rev_parse = try store.gitRevParseStdout(gpa);
+    defer gpa.free(rev_parse);
+
+    var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+
+    try std.testing.expectEqual(@as(u8, 1), try run(h.deps(), &h.iter));
+    try std.testing.expectEqualStrings("", h.stdout());
+    try std.testing.expectEqualStrings(messages.list_missing_store ++ "\n", h.stderr());
+}
+
+test "list: validates mutually exclusive filters" {
+    {
+        var h = Harness.init(std.testing.allocator, &.{ "--ready", "--blocked" });
+        defer h.deinit();
+
+        try std.testing.expectEqual(@as(u8, 2), try run(h.deps(), &h.iter));
+        try std.testing.expectEqualStrings("", h.stdout());
+        try std.testing.expectEqualStrings(messages.list_conflicting_readiness_filters ++ "\n", h.stderr());
+    }
+    {
+        var h = Harness.init(std.testing.allocator, &.{ "--local", "--remote" });
+        defer h.deinit();
+
+        try std.testing.expectEqual(@as(u8, 2), try run(h.deps(), &h.iter));
+        try std.testing.expectEqualStrings("", h.stdout());
+        try std.testing.expectEqualStrings(messages.list_conflicting_origin_filters ++ "\n", h.stderr());
+    }
+}

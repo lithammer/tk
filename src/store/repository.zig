@@ -48,6 +48,77 @@ pub const CreateLocalTicketInput = struct {
     body: []const u8,
 };
 
+/// One current-state row for the `tk list` List Tree.
+///
+/// The Repository Store owns filtering and ordering. The command renderer owns
+/// the final tree glyphs and compact plain-text row shape.
+pub const ListRow = struct {
+    id: []u8,
+    display_id: []u8,
+    item_class: ItemClass,
+    ticket_kind: ?TicketKind,
+    priority: ?Priority,
+    title: []u8,
+    status: ItemStatus,
+    origin: Origin,
+    container_id: ?[]u8,
+    created_seq: i64,
+
+    /// Free text copied out of SQLite's statement-owned row buffers.
+    pub fn deinit(self: ListRow, gpa: std.mem.Allocator) void {
+        gpa.free(self.id);
+        gpa.free(self.display_id);
+        gpa.free(self.title);
+        if (self.container_id) |container_id| gpa.free(container_id);
+    }
+};
+
+/// Free a slice returned by `listRows`.
+pub fn freeListRows(gpa: std.mem.Allocator, rows: []ListRow) void {
+    for (rows) |row| row.deinit(gpa);
+    gpa.free(rows);
+}
+
+/// Item-selection mode for `tk list`.
+pub const ListView = enum {
+    default,
+    all,
+    ready,
+    blocked,
+    active,
+
+    fn sqlText(self: ListView) []const u8 {
+        return switch (self) {
+            .default => "default",
+            .all => "all",
+            .ready => "ready",
+            .blocked => "blocked",
+            .active => "active",
+        };
+    }
+};
+
+/// Stored-Origin filter for `tk list`.
+pub const ListOriginFilter = enum {
+    any,
+    local,
+    remote,
+
+    fn sqlText(self: ListOriginFilter) []const u8 {
+        return switch (self) {
+            .any => "any",
+            .local => "local",
+            .remote => "backend",
+        };
+    }
+};
+
+/// Read options for the List Tree query.
+pub const ListOptions = struct {
+    view: ListView = .default,
+    origin: ListOriginFilter = .any,
+};
+
 /// Outcome of opening an existing Repository Store.
 ///
 /// `discovery_failed` wraps a `discovery.Outcome` whose inner tag is one of
@@ -102,6 +173,83 @@ pub fn openExisting(gpa: std.mem.Allocator, runner: proc.Runner, cwd: std.Io.Dir
 }
 
 pub const CreateError = migrations.QueryError || zqlite.Error || error{OutOfMemory};
+pub const ListError = migrations.QueryError || zqlite.Error || error{OutOfMemory};
+
+/// Read current Repository Store rows for a List Tree.
+pub fn listRows(store: Store, gpa: std.mem.Allocator, options: ListOptions) ListError![]ListRow {
+    var result: std.ArrayList(ListRow) = .empty;
+    errdefer {
+        for (result.items) |row| row.deinit(gpa);
+        result.deinit(gpa);
+    }
+
+    var rows = try store.conn.rows(
+        \\with annotated as (
+        \\    select i.*,
+        \\           exists (
+        \\               select 1
+        \\                 from dependencies d
+        \\                 join items blocking on blocking.id = d.blocking_id
+        \\                where d.blocked_id = i.id
+        \\                  and blocking.status <> 'done'
+        \\           ) as has_unresolved_dependency,
+        \\           exists (
+        \\               select 1
+        \\                 from external_blockers eb
+        \\                where eb.item_id = i.id
+        \\                  and eb.resolved_at is null
+        \\           ) as has_unresolved_external_blocker
+        \\      from items i
+        \\),
+        \\matching as (
+        \\    select *,
+        \\           case ?1
+        \\             when 'default' then status in ('open', 'active')
+        \\             when 'all' then 1
+        \\             when 'ready' then item_class = 'ticket'
+        \\                               and status = 'open'
+        \\                               and not has_unresolved_dependency
+        \\                               and not has_unresolved_external_blocker
+        \\             when 'blocked' then item_class = 'ticket'
+        \\                                 and status in ('open', 'active')
+        \\                                 and (
+        \\                                     has_unresolved_dependency
+        \\                                     or has_unresolved_external_blocker
+        \\                                 )
+        \\             when 'active' then status = 'active'
+        \\           end as self_matches
+        \\      from annotated
+        \\)
+        \\select id, display_value, item_class, ticket_kind, priority, title,
+        \\       status, origin, container_id, created_seq
+        \\  from matching parent
+        \\ where (?2 = 'any' or parent.origin = ?2)
+        \\   and (
+        \\       parent.self_matches
+        \\       or (
+        \\           ?1 in ('ready', 'blocked', 'active')
+        \\           and
+        \\           parent.item_class = 'epic'
+        \\           and exists (
+        \\               select 1
+        \\                 from matching child
+        \\                where child.container_id = parent.id
+        \\                  and child.self_matches
+        \\                  and (?2 = 'any' or child.origin = ?2)
+        \\           )
+        \\       )
+        \\   )
+        \\ order by created_seq asc
+    , .{ options.view.sqlText(), options.origin.sqlText() });
+    defer rows.deinit();
+
+    while (rows.next()) |row| {
+        try result.append(gpa, try listRowFromSql(gpa, row));
+    }
+    if (rows.err) |err| return err;
+
+    return result.toOwnedSlice(gpa);
+}
 
 /// Create a Local Ticket and its current Display ID resolver row.
 pub fn createLocalTicket(
@@ -183,4 +331,117 @@ fn generateInternalId(gpa: std.mem.Allocator, random: std.Random) ![]u8 {
     random.bytes(&bytes);
     const hex = std.fmt.bytesToHex(bytes, .lower);
     return gpa.dupe(u8, &hex);
+}
+
+fn listRowFromSql(gpa: std.mem.Allocator, row: zqlite.Row) ListError!ListRow {
+    const id = try gpa.dupe(u8, row.text(0));
+    errdefer gpa.free(id);
+    const display_id = try gpa.dupe(u8, row.text(1));
+    errdefer gpa.free(display_id);
+    const title = try gpa.dupe(u8, row.text(5));
+    errdefer gpa.free(title);
+    const container_id = if (row.nullableText(8)) |text| try gpa.dupe(u8, text) else null;
+    errdefer if (container_id) |owned| gpa.free(owned);
+
+    return .{
+        .id = id,
+        .display_id = display_id,
+        .item_class = parseItemClass(row.text(2)),
+        .ticket_kind = if (row.nullableText(3)) |text| parseTicketKind(text) else null,
+        .priority = if (row.nullableText(4)) |text| parsePriority(text) else null,
+        .title = title,
+        .status = parseItemStatus(row.text(6)),
+        .origin = parseOrigin(row.text(7)),
+        .container_id = container_id,
+        .created_seq = row.int(9),
+    };
+}
+
+fn parseItemClass(text: []const u8) ItemClass {
+    if (std.mem.eql(u8, text, "ticket")) return .ticket;
+    if (std.mem.eql(u8, text, "epic")) return .epic;
+    unreachable;
+}
+
+fn parseTicketKind(text: []const u8) TicketKind {
+    if (std.mem.eql(u8, text, "task")) return .task;
+    if (std.mem.eql(u8, text, "bug")) return .bug;
+    unreachable;
+}
+
+fn parsePriority(text: []const u8) Priority {
+    if (std.mem.eql(u8, text, "P0")) return .P0;
+    if (std.mem.eql(u8, text, "P1")) return .P1;
+    if (std.mem.eql(u8, text, "P2")) return .P2;
+    if (std.mem.eql(u8, text, "P3")) return .P3;
+    if (std.mem.eql(u8, text, "P4")) return .P4;
+    unreachable;
+}
+
+fn parseItemStatus(text: []const u8) ItemStatus {
+    if (std.mem.eql(u8, text, "open")) return .open;
+    if (std.mem.eql(u8, text, "active")) return .active;
+    if (std.mem.eql(u8, text, "done")) return .done;
+    unreachable;
+}
+
+fn parseOrigin(text: []const u8) Origin {
+    if (std.mem.eql(u8, text, "local")) return .local;
+    if (std.mem.eql(u8, text, "backend")) return .backend;
+    unreachable;
+}
+
+test "listRows: ready and blocked derive from unresolved blockers" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    try TmpStore.insertFixtureItem(conn, .{ .id = "ready", .display = "tk-1", .title = "Ready", .created_seq = 1 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "blocked-dep", .display = "tk-2", .title = "Blocked by Dependency", .created_seq = 2 });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "open-blocker",
+        .display = "tk-3",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .title = "Open blocker",
+        .created_seq = 3,
+    });
+    try TmpStore.insertDependency(conn, "open-blocker", "blocked-dep");
+    try TmpStore.insertFixtureItem(conn, .{ .id = "unblocked-dep", .display = "tk-4", .title = "Unblocked by done Dependency", .created_seq = 4 });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "done-blocker",
+        .display = "tk-5",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .title = "Done blocker",
+        .status = "done",
+        .created_seq = 5,
+    });
+    try TmpStore.insertDependency(conn, "done-blocker", "unblocked-dep");
+    try TmpStore.insertFixtureItem(conn, .{ .id = "blocked-external", .display = "tk-6", .title = "Blocked externally", .created_seq = 6 });
+    try TmpStore.insertExternalBlocker(conn, "external-open", "blocked-external", null);
+    try TmpStore.insertFixtureItem(conn, .{ .id = "resolved-external", .display = "tk-7", .title = "Resolved external blocker", .created_seq = 7 });
+    try TmpStore.insertExternalBlocker(conn, "external-done", "resolved-external", "2026-05-10T00:00:00.000Z");
+
+    const ready = try listRows(store, gpa, .{ .view = .ready });
+    defer freeListRows(gpa, ready);
+    try expectDisplayIds(ready, &.{ "tk-1", "tk-4", "tk-7" });
+
+    const blocked = try listRows(store, gpa, .{ .view = .blocked });
+    defer freeListRows(gpa, blocked);
+    try expectDisplayIds(blocked, &.{ "tk-2", "tk-6" });
+}
+
+fn expectDisplayIds(rows: []const ListRow, expected: []const []const u8) !void {
+    try std.testing.expectEqual(expected.len, rows.len);
+    for (expected, 0..) |display_id, i| {
+        try std.testing.expectEqualStrings(display_id, rows[i].display_id);
+    }
 }

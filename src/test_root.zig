@@ -3,6 +3,7 @@ test {
     _ = @import("clock.zig");
     _ = @import("commands/add.zig");
     _ = @import("commands/init.zig");
+    _ = @import("commands/list.zig");
     _ = @import("commands/message.zig");
     _ = @import("commands/prime.zig");
     _ = @import("proc/runner.zig");

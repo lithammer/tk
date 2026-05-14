@@ -118,6 +118,16 @@ test "smoke: tk add creates a local Ticket from a message file" {
     try std.testing.expect(std.mem.indexOf(u8, tk_add.stdout, "Priority: P2\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, tk_add.stdout, "Status: open\n") != null);
     try std.testing.expectEqualStrings("", tk_add.stderr);
+
+    const tk_list = try runProcess(gpa, &.{ tk_abs, "list" }, project);
+    defer freeRunResult(gpa, tk_list);
+    if (!std.meta.eql(tk_list.term, std.process.Child.Term{ .exited = 0 })) {
+        std.debug.print("\ntk list unexpected exit {any}\nstdout:\n{s}\nstderr:\n{s}\n", .{ tk_list.term, tk_list.stdout, tk_list.stderr });
+        return error.SmokeListFailed;
+    }
+    try std.testing.expect(std.mem.indexOf(u8, tk_list.stdout, "○ project-1 ● P2 Investigate flaky login retry\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tk_list.stdout, "Total: 1 item (1 open)\n") != null);
+    try std.testing.expectEqualStrings("", tk_list.stderr);
 }
 
 // Note: we intentionally do not have a subprocess smoke test for the

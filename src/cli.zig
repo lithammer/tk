@@ -46,6 +46,7 @@ pub const CommandMeta = struct {
 const all_commands = .{
     @import("commands/init.zig"),
     @import("commands/add.zig"),
+    @import("commands/list.zig"),
     @import("commands/prime.zig"),
 };
 
@@ -228,6 +229,7 @@ test "runArgv prints help" {
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "Commands:") != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "init") != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "add") != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "list") != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "prime") != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "--version") != null);
     try std.testing.expectEqualStrings("", h.stderr());
