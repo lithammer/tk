@@ -255,7 +255,11 @@ fn renderStorageError(deps: cli.Deps, err: anyerror) void {
         deps.stderr.writeAll(messages.list_store_busy_retry ++ "\n") catch {};
         return;
     }
-    deps.stderr.print(messages.list_read_failed_retry ++ "\n{s}\n", .{@errorName(err)}) catch {};
+    if (err == error.OutOfMemory) {
+        deps.stderr.writeAll(messages.list_out_of_memory ++ "\n") catch {};
+        return;
+    }
+    deps.stderr.print(messages.list_read_failed ++ "\n{s}\n", .{@errorName(err)}) catch {};
 }
 
 test "list: renders an unparented local Ticket from the Repository Store" {

@@ -123,7 +123,11 @@ fn renderStorageError(deps: cli.Deps, err: anyerror) void {
         deps.stderr.writeAll(messages.add_store_busy_retry ++ "\n") catch {};
         return;
     }
-    deps.stderr.print(messages.add_create_failed_retry ++ "\n{s}\n", .{@errorName(err)}) catch {};
+    if (err == error.OutOfMemory) {
+        deps.stderr.writeAll(messages.add_out_of_memory ++ "\n") catch {};
+        return;
+    }
+    deps.stderr.print(messages.add_create_failed ++ "\n{s}\n", .{@errorName(err)}) catch {};
 }
 
 const zqlite = @import("zqlite");
@@ -340,7 +344,7 @@ test "add: validates message input before git discovery" {
     try std.testing.expectEqualStrings(messages.add_empty_message ++ "\n", h.stderr());
 }
 
-test "add: maps busy and locked storage errors to retry diagnostic" {
+test "add: maps busy, locked, and OOM storage errors to dedicated diagnostics" {
     var busy = Harness.init(std.testing.allocator, &.{});
     defer busy.deinit();
     renderStorageError(busy.deps(), error.Busy);
@@ -350,6 +354,11 @@ test "add: maps busy and locked storage errors to retry diagnostic" {
     defer locked.deinit();
     renderStorageError(locked.deps(), error.LockedSharedCache);
     try std.testing.expectEqualStrings(messages.add_store_busy_retry ++ "\n", locked.stderr());
+
+    var oom = Harness.init(std.testing.allocator, &.{});
+    defer oom.deinit();
+    renderStorageError(oom.deps(), error.OutOfMemory);
+    try std.testing.expectEqualStrings(messages.add_out_of_memory ++ "\n", oom.stderr());
 }
 
 test "add: rejects repeated file flags as a usage error" {

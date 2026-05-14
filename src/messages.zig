@@ -66,8 +66,13 @@ pub const add_file_read_prefix = "tk add: could not read message file ";
 /// error name.
 pub const add_stdin_read_prefix = "tk add: could not read message from stdin: ";
 
-/// Stderr line for unexpected Repository Store write failures.
-pub const add_create_failed_retry = "tk add: failed to create Ticket; retry the command";
+/// Stderr line for non-transient Repository Store write failures. The caller
+/// appends `"\n{s}\n"` for the underlying `@errorName`. Distinct from the busy
+/// and out-of-memory variants so we only suggest a retry when one is plausible.
+pub const add_create_failed = "tk add: failed to create Ticket";
+
+/// Stderr line when allocation fails during a `tk add` Repository Store write.
+pub const add_out_of_memory = "tk add: out of memory";
 
 /// Stderr line for busy/locked Repository Store writes.
 pub const add_store_busy_retry = "tk add: Repository Store is busy; retry the command";
@@ -114,8 +119,13 @@ pub const list_conflicting_readiness_filters = "tk list: choose at most one of -
 /// Stderr line when both Origin filters are combined.
 pub const list_conflicting_origin_filters = "tk list: choose at most one of --local or --remote";
 
-/// Stderr line for unexpected Repository Store read failures.
-pub const list_read_failed_retry = "tk list: failed to read Repository Store; retry the command";
+/// Stderr line for non-transient Repository Store read failures. The caller
+/// appends `"\n{s}\n"` for the underlying `@errorName`. Distinct from the busy
+/// and out-of-memory variants so we only suggest a retry when one is plausible.
+pub const list_read_failed = "tk list: failed to read Repository Store";
+
+/// Stderr line when allocation fails during a `tk list` Repository Store read.
+pub const list_out_of_memory = "tk list: out of memory";
 
 /// Stderr line for busy/locked Repository Store reads.
 pub const list_store_busy_retry = "tk list: Repository Store is busy; retry the command";

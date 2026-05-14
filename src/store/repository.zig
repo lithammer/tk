@@ -209,6 +209,83 @@ pub fn openExisting(gpa: std.mem.Allocator, runner: proc.Runner, cwd: std.Io.Dir
 pub const CreateError = migrations.QueryError || zqlite.Error || error{OutOfMemory};
 pub const ListError = migrations.QueryError || zqlite.Error || error{OutOfMemory};
 
+/// SQL for the List Tree read. Bound with two text parameters:
+///   `?1` — `ListView.sqlText` selecting which items match.
+///   `?2` — `ListOriginFilter.sqlText` filtering stored Origin.
+///
+/// The `case ?1 when '<tag>' then ...` arms must cover every `ListView` tag;
+/// the comptime block below this declaration enforces that contract.
+const list_rows_sql =
+    \\with annotated as (
+    \\    select i.id, i.display_value, i.item_class, i.ticket_kind,
+    \\           i.priority, i.title, i.status, i.origin, i.container_id,
+    \\           i.created_seq,
+    \\           exists (
+    \\               select 1
+    \\                 from dependencies d
+    \\                 join items blocking on blocking.id = d.blocking_id
+    \\                where d.blocked_id = i.id
+    \\                  and blocking.status <> 'done'
+    \\           ) as has_unresolved_dependency,
+    \\           exists (
+    \\               select 1
+    \\                 from external_blockers eb
+    \\                where eb.item_id = i.id
+    \\                  and eb.resolved_at is null
+    \\           ) as has_unresolved_external_blocker
+    \\      from items i
+    \\),
+    \\matching as (
+    \\    select *,
+    \\           case ?1
+    \\             when 'default' then status in ('open', 'active')
+    \\             when 'all' then 1
+    \\             when 'ready' then item_class = 'ticket'
+    \\                               and status = 'open'
+    \\                               and not has_unresolved_dependency
+    \\                               and not has_unresolved_external_blocker
+    \\             when 'blocked' then item_class = 'ticket'
+    \\                                 and status in ('open', 'active')
+    \\                                 and (
+    \\                                     has_unresolved_dependency
+    \\                                     or has_unresolved_external_blocker
+    \\                                 )
+    \\             when 'active' then status = 'active'
+    \\           end as self_matches
+    \\      from annotated
+    \\)
+    \\select id, display_value, item_class, ticket_kind, priority, title,
+    \\       status, origin, container_id, created_seq
+    \\  from matching parent
+    \\ where (?2 = 'any' or parent.origin = ?2)
+    \\   and (
+    \\       parent.self_matches
+    \\       or (
+    \\           ?1 in ('ready', 'blocked', 'active')
+    \\           and
+    \\           parent.item_class = 'epic'
+    \\           and exists (
+    \\               select 1
+    \\                 from matching child
+    \\                where child.container_id = parent.id
+    \\                  and child.self_matches
+    \\                  and (?2 = 'any' or child.origin = ?2)
+    \\           )
+    \\       )
+    \\   )
+    \\ order by created_seq asc
+;
+
+comptime {
+    @setEvalBranchQuota(20_000);
+    for (std.enums.values(ListView)) |tag| {
+        const needle = "when '" ++ @tagName(tag) ++ "' then";
+        if (std.mem.indexOf(u8, list_rows_sql, needle) == null) {
+            @compileError("listRows SQL is missing a CASE arm for ListView." ++ @tagName(tag));
+        }
+    }
+}
+
 /// Read current Repository Store rows for a List Tree.
 pub fn listRows(store: Store, gpa: std.mem.Allocator, options: ListOptions) ListError![]ListRow {
     var result: std.ArrayList(ListRow) = .empty;
@@ -217,66 +294,7 @@ pub fn listRows(store: Store, gpa: std.mem.Allocator, options: ListOptions) List
         result.deinit(gpa);
     }
 
-    var rows = try store.conn.rows(
-        \\with annotated as (
-        \\    select i.id, i.display_value, i.item_class, i.ticket_kind,
-        \\           i.priority, i.title, i.status, i.origin, i.container_id,
-        \\           i.created_seq,
-        \\           exists (
-        \\               select 1
-        \\                 from dependencies d
-        \\                 join items blocking on blocking.id = d.blocking_id
-        \\                where d.blocked_id = i.id
-        \\                  and blocking.status <> 'done'
-        \\           ) as has_unresolved_dependency,
-        \\           exists (
-        \\               select 1
-        \\                 from external_blockers eb
-        \\                where eb.item_id = i.id
-        \\                  and eb.resolved_at is null
-        \\           ) as has_unresolved_external_blocker
-        \\      from items i
-        \\),
-        \\matching as (
-        \\    select *,
-        \\           case ?1
-        \\             when 'default' then status in ('open', 'active')
-        \\             when 'all' then 1
-        \\             when 'ready' then item_class = 'ticket'
-        \\                               and status = 'open'
-        \\                               and not has_unresolved_dependency
-        \\                               and not has_unresolved_external_blocker
-        \\             when 'blocked' then item_class = 'ticket'
-        \\                                 and status in ('open', 'active')
-        \\                                 and (
-        \\                                     has_unresolved_dependency
-        \\                                     or has_unresolved_external_blocker
-        \\                                 )
-        \\             when 'active' then status = 'active'
-        \\           end as self_matches
-        \\      from annotated
-        \\)
-        \\select id, display_value, item_class, ticket_kind, priority, title,
-        \\       status, origin, container_id, created_seq
-        \\  from matching parent
-        \\ where (?2 = 'any' or parent.origin = ?2)
-        \\   and (
-        \\       parent.self_matches
-        \\       or (
-        \\           ?1 in ('ready', 'blocked', 'active')
-        \\           and
-        \\           parent.item_class = 'epic'
-        \\           and exists (
-        \\               select 1
-        \\                 from matching child
-        \\                where child.container_id = parent.id
-        \\                  and child.self_matches
-        \\                  and (?2 = 'any' or child.origin = ?2)
-        \\           )
-        \\       )
-        \\   )
-        \\ order by created_seq asc
-    , .{ options.view.sqlText(), options.origin.sqlText() });
+    var rows = try store.conn.rows(list_rows_sql, .{ options.view.sqlText(), options.origin.sqlText() });
     defer rows.deinit();
 
     while (rows.next()) |row| {
