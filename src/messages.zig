@@ -114,6 +114,12 @@ pub const list_conflicting_readiness_filters = "tk list: choose at most one of -
 /// Stderr line when both Origin filters are combined.
 pub const list_conflicting_origin_filters = "tk list: choose at most one of --local or --remote";
 
+/// Stderr line for unexpected Repository Store read failures.
+pub const list_read_failed_retry = "tk list: failed to read Repository Store; retry the command";
+
+/// Stderr line for busy/locked Repository Store reads.
+pub const list_store_busy_retry = "tk list: Repository Store is busy; retry the command";
+
 /// Stdout label for the rendered-row count footer.
 pub const list_total_label = "Total: ";
 

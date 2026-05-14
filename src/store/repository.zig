@@ -4,6 +4,7 @@ const std = @import("std");
 const zqlite = @import("zqlite");
 const clock_mod = @import("../clock.zig");
 const discovery = @import("../git/discovery.zig");
+const messages = @import("../messages.zig");
 const proc = @import("../proc/runner.zig");
 const migrations = @import("migrations.zig");
 const Priority = @import("../domain/priority.zig").Priority;
@@ -88,13 +89,7 @@ pub const ListView = enum {
     active,
 
     fn sqlText(self: ListView) []const u8 {
-        return switch (self) {
-            .default => "default",
-            .all => "all",
-            .ready => "ready",
-            .blocked => "blocked",
-            .active => "active",
-        };
+        return @tagName(self);
     }
 };
 
@@ -135,6 +130,45 @@ pub const OpenOutcome = union(enum) {
 };
 
 pub const OpenError = discovery.Error || migrations.QueryError || zqlite.Error || error{OutOfMemory};
+
+/// Render a non-`.ok` `OpenOutcome` as a command-prefixed stderr diagnostic.
+///
+/// The four failure arms share identical phrasing across commands; only the
+/// command-prefixed missing-store sentence varies. Callers pass the
+/// already-prefixed missing-store message (e.g. `messages.list_missing_store`)
+/// so `messages.zig` remains the single source of stable strings.
+pub fn renderOpenFailure(
+    stderr: *std.Io.Writer,
+    gpa: std.mem.Allocator,
+    command_name: []const u8,
+    missing_store: []const u8,
+    outcome: OpenOutcome,
+) void {
+    switch (outcome) {
+        .ok => unreachable,
+        .discovery_failed => |inner| discovery.renderFailure(stderr, gpa, command_name, inner),
+        .store_missing => stderr.print("{s}\n", .{missing_store}) catch {},
+        .not_ticket_store => stderr.print("tk {s}: Repository Store is {s}\n", .{ command_name, messages.init_refuse_foreign }) catch {},
+        .store_from_future_version => stderr.print("tk {s}: Repository Store was created by a {s}\n", .{ command_name, messages.init_refuse_future_version }) catch {},
+    }
+}
+
+/// Classify a Repository Store error as a transient SQLite busy/locked state
+/// that a retry can clear. Shared by commands so the retry contract stays
+/// uniform across writes and reads.
+pub fn isBusyError(err: anyerror) bool {
+    return switch (err) {
+        error.Busy,
+        error.BusyRecovery,
+        error.BusySnapshot,
+        error.BusyTimeout,
+        error.Locked,
+        error.LockedSharedCache,
+        error.LockedVTab,
+        => true,
+        else => false,
+    };
+}
 
 /// Open the existing Repository Store for the current Git repository.
 pub fn openExisting(gpa: std.mem.Allocator, runner: proc.Runner, cwd: std.Io.Dir) OpenError!OpenOutcome {
@@ -185,7 +219,9 @@ pub fn listRows(store: Store, gpa: std.mem.Allocator, options: ListOptions) List
 
     var rows = try store.conn.rows(
         \\with annotated as (
-        \\    select i.*,
+        \\    select i.id, i.display_value, i.item_class, i.ticket_kind,
+        \\           i.priority, i.title, i.status, i.origin, i.container_id,
+        \\           i.created_seq,
         \\           exists (
         \\               select 1
         \\                 from dependencies d
@@ -341,54 +377,26 @@ fn listRowFromSql(gpa: std.mem.Allocator, row: zqlite.Row) ListError!ListRow {
     const title = try gpa.dupe(u8, row.text(5));
     errdefer gpa.free(title);
     const container_id = if (row.nullableText(8)) |text| try gpa.dupe(u8, text) else null;
-    errdefer if (container_id) |owned| gpa.free(owned);
 
     return .{
         .id = id,
         .display_id = display_id,
-        .item_class = parseItemClass(row.text(2)),
-        .ticket_kind = if (row.nullableText(3)) |text| parseTicketKind(text) else null,
-        .priority = if (row.nullableText(4)) |text| parsePriority(text) else null,
+        .item_class = enumFromText(ItemClass, row.text(2)),
+        .ticket_kind = if (row.nullableText(3)) |text| enumFromText(TicketKind, text) else null,
+        .priority = if (row.nullableText(4)) |text| enumFromText(Priority, text) else null,
         .title = title,
-        .status = parseItemStatus(row.text(6)),
-        .origin = parseOrigin(row.text(7)),
+        .status = enumFromText(ItemStatus, row.text(6)),
+        .origin = enumFromText(Origin, row.text(7)),
         .container_id = container_id,
         .created_seq = row.int(9),
     };
 }
 
-fn parseItemClass(text: []const u8) ItemClass {
-    if (std.mem.eql(u8, text, "ticket")) return .ticket;
-    if (std.mem.eql(u8, text, "epic")) return .epic;
-    unreachable;
-}
-
-fn parseTicketKind(text: []const u8) TicketKind {
-    if (std.mem.eql(u8, text, "task")) return .task;
-    if (std.mem.eql(u8, text, "bug")) return .bug;
-    unreachable;
-}
-
-fn parsePriority(text: []const u8) Priority {
-    if (std.mem.eql(u8, text, "P0")) return .P0;
-    if (std.mem.eql(u8, text, "P1")) return .P1;
-    if (std.mem.eql(u8, text, "P2")) return .P2;
-    if (std.mem.eql(u8, text, "P3")) return .P3;
-    if (std.mem.eql(u8, text, "P4")) return .P4;
-    unreachable;
-}
-
-fn parseItemStatus(text: []const u8) ItemStatus {
-    if (std.mem.eql(u8, text, "open")) return .open;
-    if (std.mem.eql(u8, text, "active")) return .active;
-    if (std.mem.eql(u8, text, "done")) return .done;
-    unreachable;
-}
-
-fn parseOrigin(text: []const u8) Origin {
-    if (std.mem.eql(u8, text, "local")) return .local;
-    if (std.mem.eql(u8, text, "backend")) return .backend;
-    unreachable;
+/// Decode a SQLite text column written by the matching enum's `text()` method.
+/// Any other value is a Repository Store corruption bug; the schema `check`
+/// constraints prevent reaching here in practice.
+fn enumFromText(comptime T: type, text: []const u8) T {
+    return std.meta.stringToEnum(T, text) orelse unreachable;
 }
 
 test "listRows: ready and blocked derive from unresolved blockers" {

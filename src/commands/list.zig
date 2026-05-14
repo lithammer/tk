@@ -4,7 +4,6 @@ const std = @import("std");
 const clap = @import("clap");
 const cli = @import("../cli.zig");
 const messages = @import("../messages.zig");
-const discovery = @import("../git/discovery.zig");
 const repository = @import("../store/repository.zig");
 const ItemStatus = @import("../domain/status.zig").ItemStatus;
 const TicketKind = @import("../domain/ticket_kind.zig").TicketKind;
@@ -54,20 +53,8 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
     };
     const store = switch (open_outcome) {
         .ok => |store| store,
-        .discovery_failed => |outcome| {
-            discovery.renderFailure(deps.stderr, deps.gpa, "list", outcome);
-            return 1;
-        },
-        .store_missing => {
-            deps.stderr.writeAll(messages.list_missing_store ++ "\n") catch {};
-            return 1;
-        },
-        .not_ticket_store => {
-            deps.stderr.writeAll("tk list: Repository Store is " ++ messages.init_refuse_foreign ++ "\n") catch {};
-            return 1;
-        },
-        .store_from_future_version => {
-            deps.stderr.writeAll("tk list: Repository Store was created by a " ++ messages.init_refuse_future_version ++ "\n") catch {};
+        else => {
+            repository.renderOpenFailure(deps.stderr, deps.gpa, "list", messages.list_missing_store, open_outcome);
             return 1;
         },
     };
@@ -195,16 +182,17 @@ fn findRowById(rows: []const repository.ListRow, id: []const u8) ?repository.Lis
 }
 
 fn emptyMessage(options: repository.ListOptions) []const u8 {
-    if (options.origin == .local and options.view == .default) return messages.list_empty_local;
-    if (options.origin == .remote and options.view == .default) return messages.list_empty_remote;
     return switch (options.view) {
-        .default => messages.list_empty_default,
-        .all => if (options.origin == .local)
-            messages.list_empty_local
-        else if (options.origin == .remote)
-            messages.list_empty_remote
-        else
-            messages.list_empty_all,
+        .default => switch (options.origin) {
+            .local => messages.list_empty_local,
+            .remote => messages.list_empty_remote,
+            .any => messages.list_empty_default,
+        },
+        .all => switch (options.origin) {
+            .local => messages.list_empty_local,
+            .remote => messages.list_empty_remote,
+            .any => messages.list_empty_all,
+        },
         .ready => messages.list_empty_ready,
         .blocked => messages.list_empty_blocked,
         .active => messages.list_empty_active,
@@ -263,7 +251,11 @@ fn statusGlyph(status: ItemStatus) []const u8 {
 }
 
 fn renderStorageError(deps: cli.Deps, err: anyerror) void {
-    deps.stderr.print("tk list: failed to read Repository Store; retry the command\n{s}\n", .{@errorName(err)}) catch {};
+    if (repository.isBusyError(err)) {
+        deps.stderr.writeAll(messages.list_store_busy_retry ++ "\n") catch {};
+        return;
+    }
+    deps.stderr.print(messages.list_read_failed_retry ++ "\n{s}\n", .{@errorName(err)}) catch {};
 }
 
 test "list: renders an unparented local Ticket from the Repository Store" {

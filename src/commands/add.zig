@@ -5,7 +5,6 @@ const clap = @import("clap");
 const cli = @import("../cli.zig");
 const messages = @import("../messages.zig");
 const message = @import("message.zig");
-const discovery = @import("../git/discovery.zig");
 const repository = @import("../store/repository.zig");
 const Priority = @import("../domain/priority.zig").Priority;
 const TicketKind = @import("../domain/ticket_kind.zig").TicketKind;
@@ -73,20 +72,8 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
     };
     const store = switch (open_outcome) {
         .ok => |store| store,
-        .discovery_failed => |outcome| {
-            discovery.renderFailure(deps.stderr, deps.gpa, "add", outcome);
-            return 1;
-        },
-        .store_missing => {
-            deps.stderr.writeAll(messages.add_missing_store ++ "\n") catch {};
-            return 1;
-        },
-        .not_ticket_store => {
-            deps.stderr.writeAll("tk add: Repository Store is " ++ messages.init_refuse_foreign ++ "\n") catch {};
-            return 1;
-        },
-        .store_from_future_version => {
-            deps.stderr.writeAll("tk add: Repository Store was created by a " ++ messages.init_refuse_future_version ++ "\n") catch {};
+        else => {
+            repository.renderOpenFailure(deps.stderr, deps.gpa, "add", messages.add_missing_store, open_outcome);
             return 1;
         },
     };
@@ -132,25 +119,11 @@ fn writeHelp(deps: cli.Deps) !void {
 }
 
 fn renderStorageError(deps: cli.Deps, err: anyerror) void {
-    if (isStoreBusyError(err)) {
+    if (repository.isBusyError(err)) {
         deps.stderr.writeAll(messages.add_store_busy_retry ++ "\n") catch {};
         return;
     }
     deps.stderr.print(messages.add_create_failed_retry ++ "\n{s}\n", .{@errorName(err)}) catch {};
-}
-
-fn isStoreBusyError(err: anyerror) bool {
-    return switch (err) {
-        error.Busy,
-        error.BusyRecovery,
-        error.BusySnapshot,
-        error.BusyTimeout,
-        error.Locked,
-        error.LockedSharedCache,
-        error.LockedVTab,
-        => true,
-        else => false,
-    };
 }
 
 const zqlite = @import("zqlite");
