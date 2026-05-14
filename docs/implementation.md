@@ -27,7 +27,9 @@ src/
     prime.md
     init.zig
     add.zig
+    list.zig
     message.zig
+    next.zig
   domain/
     display_prefix.zig
     item_class.zig
@@ -64,14 +66,14 @@ both the Repository Store schema (migrations.zig) and the small
 `Diagnostic` scratch buffer used to capture transient SQLite errors
 across rollback boundaries.
 
-`src/store/repository.zig` owns the reusable Repository Store opener and the
-first store-facing write API, `createLocalTicket`. `src/commands/message.zig`
+`src/store/repository.zig` owns the reusable Repository Store opener, the
+first store-facing write API (`createLocalTicket`), and current-state read APIs
+for List Tree rows and next ready Ticket selection. `src/commands/message.zig`
 owns git-commit-style message input syntax; the parsed title and body are
 domain fields, but the syntax is a command-input concern.
 
-Only add files when the slice needs them. Future modules such as
-`commands/list.zig`, `commands/next.zig`, `worktree/`, `sync/`, and `remote/`
-land with the slice that first needs them.
+Only add files when the slice needs them. Future modules such as `worktree/`,
+`sync/`, and `remote/` land with the slice that first needs them.
 
 ## Boundaries
 
@@ -470,8 +472,11 @@ Current coverage includes:
 - `tk list` command/store tests for List Tree rendering, readiness and Origin
   filtering, Dependency and External Blocker behavior, empty reads, usage
   errors, missing-store diagnostics, and `tk list --help` scenario coverage.
-- subprocess smoke tests for real `tk init`, real `tk add`, and real `tk list`
-  after `git init`.
+- `tk next` command/store tests for ready Ticket selection, Priority and
+  creation-order sorting, scoped Display ID and Alias resolution, missing-store
+  diagnostics, empty ready results, and `tk next --help` scenario coverage.
+- subprocess smoke tests for real `tk init`, real `tk add`, real `tk list`,
+  and real `tk next` after `git init`.
 
 Avoid testing everything through subprocess CLI scenarios. Keep most behavior fast and local to domain or command-handler tests.
 
@@ -502,7 +507,7 @@ found: <path>`; do not convert a missing fixture into empty stdin.
 ## Completed Baseline
 
 The current binary implements `tk prime`, `tk init`,
-`tk add -F <file | ->`, and `tk list`.
+`tk add -F <file | ->`, `tk list`, and `tk next`.
 
 `tk prime` is command-owned static output embedded from
 `src/commands/prime.md`. It trims trailing whitespace, emits exactly one final
@@ -581,38 +586,47 @@ omit a kind marker. Epic rows render `[epic]` and no Priority. Output ends with
 a separator, rendered-row totals by Item Status, and the status legend. Empty
 reads succeed with exit code `0` and print the filter-specific empty message.
 
+`tk next` opens the existing Repository Store and selects one ready Ticket
+from current state. Ready work is the same Repository Store concept used by
+`tk list --ready`: Item Status `open`, no unresolved Dependencies, and no
+External Blockers. The Repository Store read API owns Priority ordering,
+creation-order tie breaks, and scoped selection by Display ID or Alias. Because
+Workspace Scope discovery has not landed yet, the command currently passes no
+scope and therefore searches all ready Tickets; `--all` is accepted now and
+will ignore Workspace Scope once the worktree slice supplies it.
+
+`tk next` renders one flush-left line:
+
+```text
+<display-id> <priority> <title>
+```
+
+If no ready Ticket matches, `tk next` exits `1` and writes
+`tk next: no ready Tickets` to stderr.
+
 ## Next Slices
 
 Continue in small vertical slices:
 
-1. `tk next`
-   - Select ready Tickets by Priority and creation order within Workspace Scope.
-   - Ready means Item Status `open` and no unresolved Dependencies or External
-     Blockers.
-   - If Workspace Scope is a Ticket, select that Ticket only when it is ready.
-     If Workspace Scope is an Epic, search ready child Tickets within that Epic;
-     v1 containment means direct child Tickets only. `--all` ignores Workspace
-     Scope.
-   - Exclude Epics.
-   - Add dependency and scope tests.
-
-2. `tk show` and `tk update`
+1. `tk show` and `tk update`
    - Render a single Ticket or Epic with its current fields.
    - Edit title/body, local-only Priority, and Epic membership.
    - `--parent` and `--no-parent` append `add_ticket_to_epic` or `remove_ticket_from_epic` Mutations; title/body edits append `update_ticket` or `update_epic`. A single invocation may emit more than one Mutation in one transaction.
 
-3. Lifecycle and blocking
+2. Lifecycle and blocking
    - Implement `tk start`, `tk stop`, `tk done`, `tk block`, and `tk unblock`.
    - Implement item-backed Dependencies and External Blocker create/resolve CLI.
    - Enforce dependency cycle rejection.
    - Add the blocked glyph to `tk list` rendering as a blocking/readiness
      overlay, not as a fourth Item Status.
 
-4. Worktree scope
+3. Worktree scope
    - Implement `tk worktree`, `set`, `clear`, and `start`.
    - Use git worktree config.
+   - Feed the discovered Workspace Scope Display ID or Alias into
+     `store.repository.nextReadyTicket`.
 
-5. Remote and sync skeleton
+4. Remote and sync skeleton
    - Implement `tk remote`.
    - Implement `tk sync log`.
    - Add fake remote adapter tests before real `gh` or `acli` behavior.

@@ -120,6 +120,14 @@ pub const TmpStore = struct {
         try conn.commit();
     }
 
+    /// Insert an Alias resolver row for an existing Ticket or Epic fixture.
+    pub fn insertAlias(conn: zqlite.Conn, value: []const u8, item_id: []const u8) !void {
+        try conn.exec(
+            \\insert into item_ids(value, source, item_id, created_at)
+            \\values (?1, 'alias', ?2, '2026-05-09T00:00:00.000Z')
+        , .{ value, item_id });
+    }
+
     /// Insert a Dependency edge from a Blocking Item to a Blocked Item.
     pub fn insertDependency(conn: zqlite.Conn, blocking_id: []const u8, blocked_id: []const u8) !void {
         try conn.exec(

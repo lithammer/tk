@@ -47,6 +47,7 @@ const all_commands = .{
     @import("commands/init.zig"),
     @import("commands/add.zig"),
     @import("commands/list.zig"),
+    @import("commands/next.zig"),
     @import("commands/prime.zig"),
 };
 

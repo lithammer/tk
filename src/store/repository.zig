@@ -114,6 +114,50 @@ pub const ListOptions = struct {
     origin: ListOriginFilter = .any,
 };
 
+/// One ready Ticket selected by `tk next`.
+///
+/// The Repository Store owns readiness, Workspace Scope interpretation after
+/// the caller supplies a scope argument, Priority ordering, and creation-order
+/// tie breaks. The command renderer owns the compact stdout row, so this
+/// payload is narrowed to the three fields the row prints.
+pub const NextTicket = struct {
+    display_id: []u8,
+    priority: Priority,
+    title: []u8,
+
+    /// Free text copied out of SQLite's statement-owned row buffers.
+    pub fn deinit(self: NextTicket, gpa: std.mem.Allocator) void {
+        gpa.free(self.display_id);
+        gpa.free(self.title);
+    }
+};
+
+/// Workspace Scope input for ready-Ticket selection.
+///
+/// `tk worktree` is responsible for discovering configured or inferred
+/// Workspace Scope. Repository Store reads resolve the resulting Display ID or
+/// Alias against `item_ids` so Promotion does not break old scope references.
+pub const NextScope = union(enum) {
+    none,
+    display_arg: []const u8,
+};
+
+/// Read options for selecting the next ready Ticket.
+pub const NextOptions = struct {
+    scope: NextScope = .none,
+    ignore_scope: bool = false,
+};
+
+/// Result of selecting the next ready Ticket.
+///
+/// `.ticket` owns copied row fields; callers must free that payload in the
+/// switch arm that receives it.
+pub const NextOutcome = union(enum) {
+    ticket: NextTicket,
+    no_ready_ticket,
+    scope_not_found,
+};
+
 /// Outcome of opening an existing Repository Store.
 ///
 /// `discovery_failed` wraps a `discovery.Outcome` whose inner tag is one of
@@ -151,6 +195,34 @@ pub fn renderOpenFailure(
         .not_ticket_store => stderr.print("tk {s}: Repository Store is {s}\n", .{ command_name, messages.init_refuse_foreign }) catch {},
         .store_from_future_version => stderr.print("tk {s}: Repository Store was created by a {s}\n", .{ command_name, messages.init_refuse_future_version }) catch {},
     }
+}
+
+/// Command-prefixed message constants used by `renderStorageError`.
+///
+/// `fallback` is the generic non-transient diagnostic; the caller appends
+/// `"\n{s}\n"` for `@errorName(err)`. The three messages stay command-specific
+/// so `messages.zig` remains the single source of truth for stable strings.
+pub const StorageErrorMessages = struct {
+    busy_retry: []const u8,
+    out_of_memory: []const u8,
+    fallback: []const u8,
+};
+
+/// Render a Repository Store read or write failure as a stderr diagnostic.
+///
+/// Busy/locked errors and `error.OutOfMemory` get dedicated phrasing so we
+/// only suggest a retry when one is plausible; everything else falls through
+/// to `fallback ++ "\n{s}\n"` carrying the underlying `@errorName`.
+pub fn renderStorageError(stderr: *std.Io.Writer, err: anyerror, msgs: StorageErrorMessages) void {
+    if (isBusyError(err)) {
+        stderr.print("{s}\n", .{msgs.busy_retry}) catch {};
+        return;
+    }
+    if (err == error.OutOfMemory) {
+        stderr.print("{s}\n", .{msgs.out_of_memory}) catch {};
+        return;
+    }
+    stderr.print("{s}\n{s}\n", .{ msgs.fallback, @errorName(err) }) catch {};
 }
 
 /// Classify a Repository Store error as a transient SQLite busy/locked state
@@ -208,14 +280,13 @@ pub fn openExisting(gpa: std.mem.Allocator, runner: proc.Runner, cwd: std.Io.Dir
 
 pub const CreateError = migrations.QueryError || zqlite.Error || error{OutOfMemory};
 pub const ListError = migrations.QueryError || zqlite.Error || error{OutOfMemory};
+pub const NextError = migrations.QueryError || zqlite.Error || error{OutOfMemory};
 
-/// SQL for the List Tree read. Bound with two text parameters:
-///   `?1` — `ListView.sqlText` selecting which items match.
-///   `?2` — `ListOriginFilter.sqlText` filtering stored Origin.
+/// Shared current-state annotation used by List Tree and next-Ticket reads.
 ///
-/// The `case ?1 when '<tag>' then ...` arms must cover every `ListView` tag.
-/// A regression test at the bottom of this file enforces that contract.
-const list_rows_sql =
+/// Keeping readiness and blocking derivation in one CTE gives `tk list` and
+/// `tk next` the same Repository Store semantics without a command-side copy.
+const annotated_current_items_cte =
     \\with annotated as (
     \\    select i.id, i.display_value, i.item_class, i.ticket_kind,
     \\           i.priority, i.title, i.status, i.origin, i.container_id,
@@ -234,7 +305,17 @@ const list_rows_sql =
     \\                  and eb.resolved_at is null
     \\           ) as has_unresolved_external_blocker
     \\      from items i
-    \\),
+    \\)
+;
+
+/// SQL for the List Tree read. Bound with two text parameters:
+///   `?1` — `ListView.sqlText` selecting which items match.
+///   `?2` — `ListOriginFilter.sqlText` filtering stored Origin.
+///
+/// The `case ?1 when '<tag>' then ...` arms must cover every `ListView` tag.
+/// A regression test at the bottom of this file enforces that contract.
+const list_rows_sql = annotated_current_items_cte ++
+    \\,
     \\matching as (
     \\    select *,
     \\           case ?1
@@ -276,6 +357,32 @@ const list_rows_sql =
     \\ order by created_seq asc
 ;
 
+/// SQL for `tk next`. Bound with:
+///   `?1` — scope mode: `all`, `ticket`, or `epic`.
+///   `?2` — internal stable ID for the scoped Ticket or Epic.
+const next_ready_ticket_sql = annotated_current_items_cte ++ "\n" ++
+    \\select display_value, priority, title
+    \\  from annotated
+    \\ where item_class = 'ticket'
+    \\   and status = 'open'
+    \\   and not has_unresolved_dependency
+    \\   and not has_unresolved_external_blocker
+    \\   and (
+    \\       ?1 = 'all'
+    \\       or (?1 = 'ticket' and id = ?2)
+    \\       or (?1 = 'epic' and container_id = ?2)
+    \\   )
+    \\ order by priority asc, created_seq asc
+    \\ limit 1
+;
+
+const resolve_item_ref_sql =
+    \\select i.id, i.item_class
+    \\  from item_ids ids
+    \\  join items i on i.id = ids.item_id
+    \\ where ids.value = ?1
+;
+
 /// Read current Repository Store rows for a List Tree.
 pub fn listRows(store: Store, gpa: std.mem.Allocator, options: ListOptions) ListError![]ListRow {
     var result: std.ArrayList(ListRow) = .empty;
@@ -293,6 +400,33 @@ pub fn listRows(store: Store, gpa: std.mem.Allocator, options: ListOptions) List
     if (rows.err) |err| return err;
 
     return result.toOwnedSlice(gpa);
+}
+
+/// Select the next ready Ticket from current Repository Store state.
+pub fn nextReadyTicket(store: Store, gpa: std.mem.Allocator, options: NextOptions) NextError!NextOutcome {
+    var scope_mode: []const u8 = "all";
+    var scope_id: []const u8 = "";
+
+    var resolved_scope: ?ResolvedItemRef = null;
+    defer if (resolved_scope) |scope| scope.deinit(gpa);
+
+    if (!options.ignore_scope) {
+        switch (options.scope) {
+            .none => {},
+            .display_arg => |display_arg| {
+                const resolved = (try resolveItemRef(store, gpa, display_arg)) orelse return .scope_not_found;
+                resolved_scope = resolved;
+                scope_id = resolved.id;
+                scope_mode = resolved.item_class.text();
+            },
+        }
+    }
+
+    if (try store.conn.row(next_ready_ticket_sql, .{ scope_mode, scope_id })) |r| {
+        defer r.deinit();
+        return .{ .ticket = try nextTicketFromSql(gpa, r) };
+    }
+    return .no_ready_ticket;
 }
 
 /// Create a Local Ticket and its current Display ID resolver row.
@@ -400,6 +534,37 @@ fn listRowFromSql(gpa: std.mem.Allocator, row: zqlite.Row) ListError!ListRow {
     };
 }
 
+const ResolvedItemRef = struct {
+    id: []u8,
+    item_class: ItemClass,
+
+    fn deinit(self: ResolvedItemRef, gpa: std.mem.Allocator) void {
+        gpa.free(self.id);
+    }
+};
+
+fn resolveItemRef(store: Store, gpa: std.mem.Allocator, display_arg: []const u8) NextError!?ResolvedItemRef {
+    if (try store.conn.row(resolve_item_ref_sql, .{display_arg})) |r| {
+        defer r.deinit();
+        return .{
+            .id = try gpa.dupe(u8, r.text(0)),
+            .item_class = enumFromText(ItemClass, r.text(1)),
+        };
+    }
+    return null;
+}
+
+fn nextTicketFromSql(gpa: std.mem.Allocator, row: zqlite.Row) NextError!NextTicket {
+    const display_id = try gpa.dupe(u8, row.text(0));
+    errdefer gpa.free(display_id);
+    const title = try gpa.dupe(u8, row.text(2));
+    return .{
+        .display_id = display_id,
+        .priority = enumFromText(Priority, row.text(1)),
+        .title = title,
+    };
+}
+
 /// Decode a SQLite text column written by the matching enum's `text()` method.
 /// Any other value is a Repository Store corruption bug; the schema `check`
 /// constraints prevent reaching here in practice.
@@ -453,6 +618,126 @@ test "listRows: ready and blocked derive from unresolved blockers" {
     const blocked = try listRows(store, gpa, .{ .view = .blocked });
     defer freeListRows(gpa, blocked);
     try expectDisplayIds(blocked, &.{ "tk-2", "tk-6" });
+}
+
+test "nextReadyTicket: selects ready Tickets by Priority then creation order" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    try TmpStore.insertFixtureItem(conn, .{ .id = "old-p2", .display = "tk-1", .title = "Older P2", .priority = "P2", .created_seq = 1 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "first-p1", .display = "tk-2", .title = "First P1", .priority = "P1", .created_seq = 2 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "second-p1", .display = "tk-3", .title = "Second P1", .priority = "P1", .created_seq = 3 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "active-p0", .display = "tk-4", .title = "Active P0", .priority = "P0", .status = "active", .created_seq = 4 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "blocked-p0", .display = "tk-5", .title = "Blocked P0", .priority = "P0", .created_seq = 5 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "blocker", .display = "tk-6", .title = "Blocker", .priority = "P4", .created_seq = 6 });
+    try TmpStore.insertDependency(conn, "blocker", "blocked-p0");
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "epic",
+        .display = "tk-7",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .title = "Epic is never next",
+        .created_seq = 7,
+    });
+
+    const outcome = try nextReadyTicket(store, gpa, .{});
+    switch (outcome) {
+        .ticket => |ticket| {
+            defer ticket.deinit(gpa);
+            try std.testing.expectEqualStrings("tk-2", ticket.display_id);
+        },
+        else => return error.UnexpectedOutcome,
+    }
+}
+
+test "nextReadyTicket: applies scoped Display ID and Alias selection" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "epic",
+        .display = "tk-1",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .title = "Scoped Epic",
+        .created_seq = 1,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "scoped-child",
+        .display = "tk-2",
+        .title = "Scoped child",
+        .priority = "P3",
+        .container_id = "epic",
+        .created_seq = 2,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "global-best",
+        .display = "tk-3",
+        .title = "Global best",
+        .priority = "P0",
+        .created_seq = 3,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "promoted",
+        .display = "GH#42",
+        .title = "Promoted Ticket",
+        .priority = "P1",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "42",
+        .created_seq = 4,
+    });
+    try TmpStore.insertAlias(conn, "tk-42", "promoted");
+
+    const scoped_epic = try nextReadyTicket(store, gpa, .{ .scope = .{ .display_arg = "tk-1" } });
+    switch (scoped_epic) {
+        .ticket => |ticket| {
+            defer ticket.deinit(gpa);
+            try std.testing.expectEqualStrings("tk-2", ticket.display_id);
+        },
+        else => return error.UnexpectedOutcome,
+    }
+
+    const scoped_alias = try nextReadyTicket(store, gpa, .{ .scope = .{ .display_arg = "tk-42" } });
+    switch (scoped_alias) {
+        .ticket => |ticket| {
+            defer ticket.deinit(gpa);
+            try std.testing.expectEqualStrings("GH#42", ticket.display_id);
+        },
+        else => return error.UnexpectedOutcome,
+    }
+
+    const ignored_scope = try nextReadyTicket(store, gpa, .{
+        .scope = .{ .display_arg = "tk-1" },
+        .ignore_scope = true,
+    });
+    switch (ignored_scope) {
+        .ticket => |ticket| {
+            defer ticket.deinit(gpa);
+            try std.testing.expectEqualStrings("tk-3", ticket.display_id);
+        },
+        else => return error.UnexpectedOutcome,
+    }
+
+    const missing_scope = try nextReadyTicket(store, gpa, .{ .scope = .{ .display_arg = "missing-9" } });
+    switch (missing_scope) {
+        .scope_not_found => {},
+        else => return error.UnexpectedOutcome,
+    }
 }
 
 fn expectDisplayIds(rows: []const ListRow, expected: []const []const u8) !void {

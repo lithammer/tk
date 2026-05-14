@@ -251,15 +251,11 @@ fn statusGlyph(status: ItemStatus) []const u8 {
 }
 
 fn renderStorageError(deps: cli.Deps, err: anyerror) void {
-    if (repository.isBusyError(err)) {
-        deps.stderr.writeAll(messages.list_store_busy_retry ++ "\n") catch {};
-        return;
-    }
-    if (err == error.OutOfMemory) {
-        deps.stderr.writeAll(messages.list_out_of_memory ++ "\n") catch {};
-        return;
-    }
-    deps.stderr.print(messages.list_read_failed ++ "\n{s}\n", .{@errorName(err)}) catch {};
+    repository.renderStorageError(deps.stderr, err, .{
+        .busy_retry = messages.list_store_busy_retry,
+        .out_of_memory = messages.list_out_of_memory,
+        .fallback = messages.list_read_failed,
+    });
 }
 
 test "list: renders an unparented local Ticket from the Repository Store" {

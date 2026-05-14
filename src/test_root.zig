@@ -5,6 +5,7 @@ test {
     _ = @import("commands/init.zig");
     _ = @import("commands/list.zig");
     _ = @import("commands/message.zig");
+    _ = @import("commands/next.zig");
     _ = @import("commands/prime.zig");
     _ = @import("proc/runner.zig");
     _ = @import("proc/fake.zig");

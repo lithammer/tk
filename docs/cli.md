@@ -119,6 +119,22 @@ or `No remote items.`
 
 `tk next` selects only ready Tickets, never Epics. It picks the ready Ticket with lowest local-only Priority, then oldest creation order, within the active Workspace Scope. `--all` ignores Workspace Scope.
 
+If there is no active Workspace Scope, `tk next` searches all ready Tickets.
+If Workspace Scope is a Ticket, `tk next` selects that Ticket only when it is
+ready. If Workspace Scope is an Epic, `tk next` searches direct child Tickets
+within that Epic. Workspace Scope resolves through the same Display ID and
+Alias resolver as item ID arguments, so Promotion does not break old scope
+references.
+
+The plain output row shape is:
+
+```text
+<display-id> <priority> <title>
+```
+
+If no ready Ticket matches, `tk next` exits `1` and writes
+`tk next: no ready Tickets` to stderr.
+
 `tk show [id]` shows one Ticket or Epic. If `id` is omitted, it shows the current Workspace Scope target.
 
 ## Update

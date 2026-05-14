@@ -135,3 +135,24 @@ pub const list_total_label = "Total: ";
 
 /// Stdout label for the Item Status legend footer.
 pub const list_status_label = "Status: ";
+
+// `tk next` — Repository Store reads.
+
+/// Stderr line when no Repository Store exists for the current repository.
+pub const next_missing_store = "tk next: Repository Store not initialized; run 'tk init'";
+
+/// Stderr line when no ready Ticket matches the current Workspace Scope.
+pub const next_no_ready_ticket = "tk next: no ready Tickets";
+
+/// Stderr line when Workspace Scope no longer resolves to a Ticket or Epic.
+pub const next_scope_not_found = "tk next: Workspace Scope does not resolve to a Ticket or Epic";
+
+/// Stderr line for non-transient Repository Store read failures. The caller
+/// appends `"\n{s}\n"` for the underlying `@errorName`.
+pub const next_read_failed = "tk next: failed to read Repository Store";
+
+/// Stderr line when allocation fails during a `tk next` Repository Store read.
+pub const next_out_of_memory = "tk next: out of memory";
+
+/// Stderr line for busy/locked Repository Store reads.
+pub const next_store_busy_retry = "tk next: Repository Store is busy; retry the command";

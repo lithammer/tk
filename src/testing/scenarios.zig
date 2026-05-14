@@ -3,10 +3,12 @@ const script = @import("script.zig");
 
 const prime_basic_path = "src/testing/scenarios/prime/basic.txtar";
 const list_help_path = "src/testing/scenarios/list/help.txtar";
+const next_help_path = "src/testing/scenarios/next/help.txtar";
 const harness_preserve_path = "src/testing/scenarios/_harness/preserve_sections.txtar";
 
 const prime_basic = @embedFile("scenarios/prime/basic.txtar");
 const list_help = @embedFile("scenarios/list/help.txtar");
+const next_help = @embedFile("scenarios/next/help.txtar");
 const harness_preserve = @embedFile("scenarios/_harness/preserve_sections.txtar");
 
 test "prime/basic" {
@@ -15,6 +17,10 @@ test "prime/basic" {
 
 test "list/help" {
     try script.runScenario(std.testing.allocator, list_help_path, list_help);
+}
+
+test "next/help" {
+    try script.runScenario(std.testing.allocator, next_help_path, next_help);
 }
 
 test "_harness/preserve_sections" {

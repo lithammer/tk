@@ -135,6 +135,40 @@ Total: 1 item (1 open)
 Status: ○ open  ◐ active  ✓ done
 .fi
 .RE
+.SS Selecting Ready Work
+.TP
+\fBtk next\fR [\fB\-\-all\fR]
+Select the next ready Ticket.
+.PP
+.B tk next
+selects open Tickets with no unresolved Dependencies or External Blockers. It
+orders ready Tickets by local Priority, then creation order, and never selects
+Epics.
+.PP
+When Workspace Scope support lands,
+.B tk next
+will default to the active Workspace Scope and
+.B \-\-all
+will ignore that scope. In the current binary, Workspace Scope discovery has
+not landed yet, so
+.B tk next
+searches all ready Tickets.
+.PP
+On success,
+.B tk next
+prints:
+.PP
+.RS 4
+.nf
+<display-id> <priority> <title>
+.fi
+.RE
+.PP
+If no ready Ticket matches,
+.B tk next
+returns exit status 1 and writes
+.B tk next: no ready Tickets
+to standard error.
 .SS Agent briefing
 .TP
 .B tk prime
@@ -192,6 +226,14 @@ List visible work:
 .nf
 tk list
 tk list --ready
+.fi
+.RE
+.PP
+Select the next ready Ticket:
+.PP
+.RS 4
+.nf
+tk next
 .fi
 .RE
 .PP

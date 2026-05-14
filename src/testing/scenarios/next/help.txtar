@@ -1,0 +1,14 @@
+-- script --
+tk next --help
+-- expected/stdout --
+tk next - select the next ready Ticket
+
+Usage:
+  tk next [options]
+
+Options:
+  -h, --help  Display this help and exit.
+  --all       Ignore Workspace Scope.
+-- expected/stderr --
+-- expected/exit --
+0

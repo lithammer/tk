@@ -119,15 +119,11 @@ fn writeHelp(deps: cli.Deps) !void {
 }
 
 fn renderStorageError(deps: cli.Deps, err: anyerror) void {
-    if (repository.isBusyError(err)) {
-        deps.stderr.writeAll(messages.add_store_busy_retry ++ "\n") catch {};
-        return;
-    }
-    if (err == error.OutOfMemory) {
-        deps.stderr.writeAll(messages.add_out_of_memory ++ "\n") catch {};
-        return;
-    }
-    deps.stderr.print(messages.add_create_failed ++ "\n{s}\n", .{@errorName(err)}) catch {};
+    repository.renderStorageError(deps.stderr, err, .{
+        .busy_retry = messages.add_store_busy_retry,
+        .out_of_memory = messages.add_out_of_memory,
+        .fallback = messages.add_create_failed,
+    });
 }
 
 const zqlite = @import("zqlite");
