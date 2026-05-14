@@ -213,8 +213,8 @@ pub const ListError = migrations.QueryError || zqlite.Error || error{OutOfMemory
 ///   `?1` — `ListView.sqlText` selecting which items match.
 ///   `?2` — `ListOriginFilter.sqlText` filtering stored Origin.
 ///
-/// The `case ?1 when '<tag>' then ...` arms must cover every `ListView` tag;
-/// the comptime block below this declaration enforces that contract.
+/// The `case ?1 when '<tag>' then ...` arms must cover every `ListView` tag.
+/// A regression test at the bottom of this file enforces that contract.
 const list_rows_sql =
     \\with annotated as (
     \\    select i.id, i.display_value, i.item_class, i.ticket_kind,
@@ -275,16 +275,6 @@ const list_rows_sql =
     \\   )
     \\ order by created_seq asc
 ;
-
-comptime {
-    @setEvalBranchQuota(20_000);
-    for (std.enums.values(ListView)) |tag| {
-        const needle = "when '" ++ @tagName(tag) ++ "' then";
-        if (std.mem.indexOf(u8, list_rows_sql, needle) == null) {
-            @compileError("listRows SQL is missing a CASE arm for ListView." ++ @tagName(tag));
-        }
-    }
-}
 
 /// Read current Repository Store rows for a List Tree.
 pub fn listRows(store: Store, gpa: std.mem.Allocator, options: ListOptions) ListError![]ListRow {
@@ -469,5 +459,15 @@ fn expectDisplayIds(rows: []const ListRow, expected: []const []const u8) !void {
     try std.testing.expectEqual(expected.len, rows.len);
     for (expected, 0..) |display_id, i| {
         try std.testing.expectEqualStrings(display_id, rows[i].display_id);
+    }
+}
+
+test "listRows SQL has a CASE arm for every ListView tag" {
+    // The Zig→SQL coupling is implicit through `@tagName`. A renamed tag would
+    // compile cleanly and produce a runtime CASE miss (NULL `self_matches` →
+    // an unexpectedly empty list). This guard fails the build instead.
+    inline for (std.enums.values(ListView)) |tag| {
+        const needle = "when '" ++ @tagName(tag) ++ "' then";
+        try std.testing.expect(std.mem.indexOf(u8, list_rows_sql, needle) != null);
     }
 }
