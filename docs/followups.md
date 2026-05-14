@@ -65,6 +65,38 @@ Touches `src/cli.zig`, `src/testing/test_cli.zig`, `src/testing/script.zig`.
 
 ---
 
+## Add color policy after list output stabilizes
+
+`tk list` is deliberately starting with plain ASCII output so the List
+Tree shape, item markers, and filtering semantics can settle before
+styled rendering enters the command path.
+
+Add `--color=auto|always|never`, fakeable `tty_stdout` plumbing on
+`Deps`, and `NO_COLOR` / `CLICOLOR_FORCE` handling in a later
+output-rendering slice. Apply the policy consistently to every command
+that emits styled output instead of making `tk list` a one-off.
+
+Touches future output rendering code, `src/cli.zig`, command modules
+that opt into styled output, and scenario snapshot handling.
+
+---
+
+## Revisit deferred work as a first-class concept
+
+The Beads-style list output includes a `deferred` state, and that concept
+looks useful for work that should remain visible but should not be
+selected by `tk next`.
+
+Do not include it in the `tk list` slice. V1 **Item Status** remains
+`open`, `active`, or `done`, and `blocked` remains distinct from Item
+Status. Revisit later whether `deferred` should become an Item Status, a
+Local Field, or a separate scheduling/visibility concept.
+
+Touches `CONTEXT.md`, `docs/cli.md`, `docs/implementation.md`,
+Repository Store schema, `tk next`, and list rendering.
+
+---
+
 ## Decide the script runner's fakeability stance
 
 `src/testing/script.zig` mixes a real subprocess runner with a fake

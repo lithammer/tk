@@ -87,7 +87,7 @@ tk add --priority P1 -F -               # creates a higher-priority local Ticket
 
 Priority is set with `tk add --priority P0..P4` or `tk update [id] --priority P0..P4`; v1 does not have a top-level priority command.
 
-`tk list` defaults to a tree view: Epics are top-level rows, child Tickets are nested under their Epic, and unparented Tickets are top-level rows. `tk list --ready` keeps the tree shape and includes non-empty Epics as containers for ready child Tickets. Rows use compact status, priority, and kind markers.
+`tk list` defaults to a tree view: Epics are top-level rows, child Tickets are nested under their Epic, and unparented Tickets are top-level rows. `tk list --ready` keeps the tree shape and includes non-empty Epics as containers for ready child Tickets. Rows use decorative tree glyphs plus compact status, priority, and kind markers. They do not render Origin as a separate field; Local or Backend origin is normally inferred from the Display ID shape.
 
 Ticket's default command paths should let agents manage local work safely. Commands that affect upstream state or sync repair, such as `promote` and `sync`, stay explicit and visible.
 

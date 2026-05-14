@@ -119,10 +119,15 @@ Commands write their primary output to stdout and diagnostics to stderr. `tk pri
 
 Each command declares its own preconditions. There is no central "needs store" gate: `tk prime` requires nothing, `tk init` creates the store, and other commands fail-fast when the store is missing.
 
-The first colored command (`tk list`) introduces a `--color=auto|always|never`
-flag (`auto` is the default), a `tty_stdout: bool` on `Deps` set from `init`
-and fakeable in tests, and honours `NO_COLOR` and `CLICOLOR_FORCE`. Existing
-commands emit raw text unconditionally.
+`tk list` starts with plain ASCII output so the List Tree shape, item markers,
+and filtering semantics can settle before color policy enters the rendering
+path. A later output-rendering slice should introduce `--color=auto|always|never`,
+a fakeable `tty_stdout: bool` on `Deps`, and `NO_COLOR` / `CLICOLOR_FORCE`
+handling across every command that emits styled output.
+
+The initial `tk list` renderer should favor simple streaming over table layout:
+decorative tree glyphs are part of the output contract, but columns are not
+aligned and Origin is not rendered as a separate field.
 
 ## Storage
 
@@ -557,9 +562,81 @@ Continue in small vertical slices:
 
 1. `tk list`
    - Render the List Tree for local Tickets and Epics.
+   - Query the real Repository Store read model even though the current public
+     create path only produces unparented local task Tickets.
+   - Keep this slice global by default. Workspace Scope discovery, scoped
+     defaults, and scoped-output labeling land with the worktree scope slice.
+     When scoped list defaults land, `--all` ignores the active Workspace Scope.
+     `--all` preserves the normal List Tree regardless of mixed Epic and child
+     statuses.
    - Preserve the List Tree shape for filtered views such as `--ready` and
      `--blocked`, including non-empty Epics as containers.
-   - Add fixture tests for Epics, child Tickets, unparented Tickets, statuses, kinds, and priorities.
+   - Treat `--all`, `--ready`, `--blocked`, and `--active` as mutually exclusive.
+   - Treat `--ready` as open Tickets only: active Tickets are already in
+     progress and are not ready work.
+   - Treat `--blocked` as open or active Tickets with unresolved Dependencies
+     or External Blockers; Epics may render as containers but are not selected
+     as blocked work in v1.
+   - Treat `--active` as active Tickets and active Epics, while retaining
+     inactive Epics as containers for active child Tickets.
+   - Implement `--local` and `--remote` against stored Origin now, even though
+     Promotion and Backend Pull are not implemented yet. Seed backend-origin
+     rows directly in list tests.
+   - Compose readiness and Origin filters as an AND. Container Epics must pass
+     the Origin filter to render. If the Origin filter hides a containing Epic,
+     render matching child Tickets as top-level rows.
+   - Order top-level rows by `created_seq` ascending and order each Epic's
+     child Tickets by `created_seq` ascending. Display Priority without using
+     it as a `tk list` sort key.
+   - Render rows with decorative tree glyphs, compact markers, and one-space
+     field separation rather than width-aligned columns.
+   - Use `○`, `◐`, and `✓` for `open`, `active`, and `done` Item Status,
+     followed by Display ID. Ticket rows then render literal priority marker
+     `●`, Priority, optional `[bug]`, and title. Epic rows render `[epic]`
+     and title without Priority.
+   - Render titles as-is on one line; do not truncate or wrap in this slice.
+   - Do not introduce a new escaping policy in this slice. Render stored titles
+     literally and leave terminal escape handling to the existing follow-up.
+   - Do not render Origin as a separate row field; Local or Backend origin is
+     normally inferred from the Display ID shape.
+   - End output with a separator, a rendered item count by Item Status, and a
+     status legend for the status glyphs. Filtered views count rendered rows,
+     including container Epics retained for matching child Tickets.
+   - Empty results are successful reads with exit code `0`: the default view
+     prints `No open or active items.`, and filtered views print a
+     filter-specific empty message.
+   - `tk list --help` describes every available flag for the command. Keep row
+     examples and the status legend out of help; those belong in `docs/cli.md`
+     and scenario fixtures.
+   - Open the Repository Store through the shared opener. Missing store,
+     foreign store, and future-version store are exit code `1` logical
+     precondition failures with `tk list:` diagnostics. Render Git discovery
+     failures through `discovery.renderFailure(..., "list", ...)`.
+   - Put stable `tk list` diagnostics and labels in `src/messages.zig`,
+     including missing-store text, empty-list messages, `Total: `, and
+     `Status: `. Renderer glyphs may stay local to the list renderer.
+   - Add a narrow Repository Store read API for list rows in
+     `src/store/repository.zig`. Push filtering and container-retention work
+     into SQL where practical, including readiness, Origin filters, and Epics
+     retained for matching child Tickets. Keep final tree rendering in
+     `commands/list.zig`.
+   - Compute ready and blocked filters from the current `dependencies` and
+     `external_blockers` tables now, even though the blocking CLI lands later.
+     A Dependency blocks only while its Blocking Item is not `done`. Seed those
+     tables directly in list tests.
+     `--blocked` matches either unresolved Dependencies or unresolved External
+     Blockers on open or active Tickets; done Tickets are not blocked work.
+     `--ready` requires neither blocker kind.
+   - Add layered tests: store tests for SQL/filter behavior, focused
+     tree-renderer tests over in-memory rows, and CLI scenario fixtures for the
+     user-facing output contract. Cover Epics, child Tickets, unparented
+     Tickets, statuses, kinds, origins, priorities, and filtered-out parent
+     promotion by seeding store state directly; do not widen `tk add` as part
+     of this slice.
+   - Use raw SQL fixture helpers, likely in `src/testing/tmp_store.zig`, to seed
+     Epics, backend-origin rows, Dependencies, and External Blockers for tests.
+     Do not add production write APIs for those concepts before their command
+     slices land.
 
 2. `tk next`
    - Select ready Tickets by Priority and creation order within Workspace Scope.
@@ -581,6 +658,8 @@ Continue in small vertical slices:
    - Implement `tk start`, `tk stop`, `tk done`, `tk block`, and `tk unblock`.
    - Implement item-backed Dependencies and External Blocker create/resolve CLI.
    - Enforce dependency cycle rejection.
+   - Add the blocked glyph to `tk list` rendering as a blocking/readiness
+     overlay, not as a fourth Item Status.
 
 5. Worktree scope
    - Implement `tk worktree`, `set`, `clear`, and `start`.

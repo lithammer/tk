@@ -318,7 +318,8 @@ _Avoid_: ticket, tickets
 - **Promotion Children** do not follow **Dependencies**.
 - Newly created **Tickets** and **Epics** are local by default, even when a **Primary Backend** exists.
 - Default ticket views include both **Local Tickets** and **Backend Tickets**.
-- Ticket views identify each **Ticket's** **Origin**.
+- Ticket views do not render **Origin** as a separate field; common origin is
+  inferred from the **Display ID** shape.
 - A **Ticket Mutation** is a **Mutation**.
 - An **Epic Mutation** is a **Mutation**.
 - A **Ticket Mutation** modifies exactly one **Backend Ticket**.
@@ -340,8 +341,12 @@ _Avoid_: ticket, tickets
 - The **Mutation Log** records replayable backend intent and is not the primary
   read model or a general local edit history.
 - **`tk next`** selects the ready **Ticket** with the lowest **Priority**, then oldest creation order, within the active **Workspace Scope**.
+- **`tk list --all`** ignores the active **Workspace Scope** once scoped list
+  defaults are implemented.
 - **List Tree** renders **Epics** as top-level rows, child **Tickets** nested under their **Epic**, and unparented **Tickets** as top-level rows.
-- **List Tree** uses compact status, priority, and kind markers.
+- **List Tree** uses decorative tree glyphs and compact status, priority, and kind markers without column alignment.
+- **List Tree** status markers render **Item Status** as `○` for `open`, `◐`
+  for `active`, and `✓` for `done`.
 - **`tk next`** does not select **Epics**.
 - **`tk list --ready`** keeps the **List Tree** shape and includes non-empty **Epics** as containers for ready child **Tickets**.
 
@@ -423,7 +428,7 @@ _Avoid_: ticket, tickets
 > **Domain expert:** "No — newly created **Tickets** and **Epics** are local by default and require explicit **Promotion** before they reach the **Primary Backend**."
 >
 > **Dev:** "Should **`tk list`** hide **Local Tickets** when a **Primary Backend** exists?"
-> **Domain expert:** "No — default ticket views include both **Local Tickets** and **Backend Tickets**, and each row identifies its **Origin**."
+> **Domain expert:** "No — default ticket views include both **Local Tickets** and **Backend Tickets**. **Origin** is not a separate rendered field; it is normally inferred from the **Display ID** shape."
 >
 > **Dev:** "If **src-12** belongs to **src-3**, does that mean **src-12** is blocked by **src-3**?"
 > **Domain expert:** "No — **Epic** membership groups work, while a **Dependency** says one item cannot progress until another is done."

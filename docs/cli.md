@@ -52,7 +52,7 @@ The first paragraph becomes the title. Later paragraphs become the body.
 ## Read
 
 ```sh
-tk list [--all] [--ready | --blocked | --active] [--local | --remote]
+tk list [--all | --ready | --blocked | --active] [--local | --remote]
 tk next [--all]
 tk show [id]
 ```
@@ -62,14 +62,60 @@ tk show [id]
 - Epics are top-level rows.
 - Child Tickets are nested under their Epic.
 - Unparented Tickets are top-level rows.
-- `tk list` defaults to open and active items. `--all` includes done items.
-- `--ready` shows only open Tickets with no unresolved Dependencies or External Blockers, keeping the tree shape and including non-empty Epics as containers.
-- `--blocked` shows only blocked Tickets, keeping the tree shape and including non-empty Epics as containers. Epics are not selected as blocked work in v1.
-- `--active` shows active Tickets and Epics, keeping the tree shape and including Epics as containers for active child Tickets.
-- `--ready`, `--blocked`, and `--active` are mutually exclusive.
+- Rows use decorative tree glyphs for child items, such as `├──` and `└──`.
+- Rows are not column-aligned; each field is separated by one space.
+- Rows do not render Origin as a separate field. Local or Backend origin is
+  normally inferred from the Display ID shape.
+- Top-level rows are ordered by creation order. Each Epic's child Tickets are
+  ordered by creation order. Priority is displayed but does not sort `tk list`.
+- `tk list` defaults to open and active items. `--all` includes done items and,
+  once scoped list defaults are implemented, ignores the active Workspace Scope.
+  It preserves the normal List Tree regardless of mixed Epic and child statuses.
+- `--ready` shows only open Tickets with no unresolved Dependencies or External Blockers, keeping the tree shape and including non-empty Epics as containers. Active Tickets are not ready.
+- `--blocked` shows open or active Tickets with unresolved Dependencies or External Blockers, keeping the tree shape and including non-empty Epics as containers. Epics are not selected as blocked work in v1.
+- `--active` shows active Tickets and Epics, keeping the tree shape and including Epics as containers for active child Tickets even when the Epic itself is not active.
+- `--all`, `--ready`, `--blocked`, and `--active` are mutually exclusive.
 - `--local` shows only Local Tickets and Local Epics.
 - `--remote` shows only items that have been promoted.
 - `--local` and `--remote` are mutually exclusive and may be combined with one of the readiness filters.
+These filters use the stored Origin. `--remote` may be empty before Promotion
+or Backend Pull has introduced backend-origin items.
+When a readiness filter and an Origin filter are combined, the filters compose
+as an AND. Container Epics must pass the Origin filter to render. If an Origin
+filter hides an Epic while one of its child Tickets still matches, the matching
+child Ticket renders as a top-level row.
+
+The plain output row shape is:
+
+```text
+[tree-prefix] <status-marker> <display-id> <priority-marker> <priority> [<kind-marker>] <title>
+[tree-prefix] <status-marker> <display-id> [epic] <title>
+```
+
+Status markers are `○` for `open`, `◐` for `active`, and `✓` for `done`.
+Ticket rows render the priority marker as `●` in plain output. Epic rows do
+not render Priority because Priority belongs to Tickets.
+
+`[epic]` is shown for Epics, `[bug]` is shown for bug Tickets, and task
+Tickets omit a kind marker.
+Titles render as-is on one line; `tk list` does not truncate or wrap them.
+This slice does not introduce a new escaping policy for stored titles.
+
+`tk list` ends with a separator, a rendered item count by Item Status, and a
+status legend. Filtered views count rendered rows, including Epics retained as
+containers for matching child Tickets:
+
+```text
+--------------------------------------------------------------------------------
+Total: 3 items (2 open, 1 active)
+
+Status: ○ open  ◐ active  ✓ done
+```
+
+An empty `tk list` result is exit code `0`. The default view prints
+`No open or active items.` Filtered views print the matching empty message:
+`No ready items.`, `No blocked items.`, `No active items.`, `No local items.`,
+or `No remote items.`
 
 `tk next` selects only ready Tickets, never Epics. It picks the ready Ticket with lowest local-only Priority, then oldest creation order, within the active Workspace Scope. `--all` ignores Workspace Scope.
 
