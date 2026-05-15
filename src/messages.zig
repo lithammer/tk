@@ -201,3 +201,84 @@ pub const next_out_of_memory = "tk next: out of memory";
 
 /// Stderr line for busy/locked Repository Store reads.
 pub const next_store_busy_retry = "tk next: Repository Store is busy; retry the command";
+
+// `tk update` — current-state and Mutation Log write.
+
+/// Stderr line when no Repository Store exists for the current repository.
+pub const update_missing_store = "tk update: Repository Store not initialized; run 'tk init'";
+
+/// Stderr prefix for unknown Display ID or Alias. Callers append
+/// `"{s}" ++ update_id_not_found_suffix ++ "\n"` for the supplied id.
+pub const update_id_not_found_prefix = "tk update: '";
+
+/// Stderr suffix for unknown Display ID or Alias.
+pub const update_id_not_found_suffix = "' is not a known Display ID or Alias";
+
+/// Stderr line when no positional id was supplied.
+pub const update_id_required = "tk update: an item ID argument is required";
+
+/// Stderr line when `--priority` is supplied for an Epic (Epics have no
+/// Priority field).
+pub const update_priority_on_epic = "tk update: --priority cannot be set on an Epic";
+
+/// Stderr line when `--parent` or `--no-parent` is supplied for an Epic
+/// (container reassignment is only valid for Tickets).
+pub const update_parent_on_epic = "tk update: --parent and --no-parent are only valid for Tickets";
+
+/// Stderr line when both `--parent` and `--no-parent` are supplied.
+pub const update_conflicting_parent_flags = "tk update: choose at most one of --parent or --no-parent";
+
+/// Stderr line when `-m` and `-F` are both supplied.
+pub const update_conflicting_message_flags = "tk update: choose at most one of -m/--message or -F/--file";
+
+/// Stderr prefix for an unknown `--parent` Display ID. Callers append
+/// `"{s}" ++ update_parent_not_found_suffix ++ "\n"` for the supplied id.
+pub const update_parent_not_found_prefix = "tk update: parent '";
+
+/// Stderr suffix for an unknown `--parent` Display ID.
+pub const update_parent_not_found_suffix = "' is not a known Display ID or Alias";
+
+/// Stderr prefix when `--parent` resolves to a Ticket instead of an Epic.
+/// Callers append `"{s}" ++ update_parent_not_epic_suffix ++ "\n"` for the
+/// resolved Display ID of the non-Epic item.
+pub const update_parent_not_epic_prefix = "tk update: parent '";
+
+/// Stderr suffix when `--parent` resolves to a Ticket instead of an Epic.
+pub const update_parent_not_epic_suffix = "' is a Ticket, not an Epic";
+
+/// Stderr prefix for message file read failures. Callers append
+/// `"{s}: {s}\n"` for the user-typed path and error name.
+pub const update_file_read_prefix = "tk update: could not read message file ";
+
+/// Stderr prefix for stdin read failures. Callers append `"{s}\n"` for the
+/// error name.
+pub const update_stdin_read_prefix = "tk update: could not read message from stdin: ";
+
+/// Stderr line when message input has no title after normalization.
+pub const update_empty_message = "tk update: Aborting update due to empty message.";
+
+/// Stderr line when message input contains a NUL byte.
+pub const update_nul_message = "tk update: message contains NUL byte";
+
+/// Stderr line for non-transient Repository Store write failures. The caller
+/// appends `"\n{s}\n"` for the underlying `@errorName`.
+pub const update_write_failed = "tk update: failed to update item";
+
+/// Stderr line when allocation fails during a `tk update` Repository Store
+/// write.
+pub const update_out_of_memory = "tk update: out of memory";
+
+/// Stderr line for busy/locked Repository Store writes.
+pub const update_store_busy_retry = "tk update: Repository Store is busy; retry the command";
+
+/// Stdout prefix for a successful Ticket update. Callers append
+/// `"{s} - {s}\n"` for Display ID and title.
+pub const update_success_ticket_prefix = "Updated Ticket: ";
+
+/// Stdout prefix for a successful Epic update. Callers append
+/// `"{s} - {s}\n"` for Display ID and title.
+pub const update_success_epic_prefix = "Updated Epic: ";
+
+/// Stderr line when `tk update` is invoked with no editing intent. At least
+/// one of `-m`, `-F`, `--priority`, `--parent`, or `--no-parent` is required.
+pub const update_no_changes_requested = "tk update: at least one of -m, -F, --priority, --parent, or --no-parent is required";

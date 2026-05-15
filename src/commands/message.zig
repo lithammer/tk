@@ -156,9 +156,53 @@ test "message: normalizes CRLF and CR line endings" {
     try std.testing.expectEqualStrings("Body", parsed.body);
 }
 
+/// Parse a message from a pre-split slice of paragraph strings.
+///
+/// Joins the paragraphs with double newlines and delegates to `parse`. Used
+/// by `tk update` when message paragraphs come from repeated `-m` flags
+/// rather than a single file or stdin blob.
+pub fn parseFromParagraphs(gpa: std.mem.Allocator, paragraphs: []const []const u8) ParseError!ParsedMessage {
+    if (paragraphs.len == 0) return error.EmptyMessage;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(gpa);
+    for (paragraphs, 0..) |p, i| {
+        if (i > 0) try buf.appendSlice(gpa, "\n\n");
+        try buf.appendSlice(gpa, p);
+    }
+    return parse(gpa, buf.items);
+}
+
 test "message: rejects empty and NUL-containing input" {
     const gpa = std.testing.allocator;
 
     try std.testing.expectError(error.EmptyMessage, parse(gpa, " \n\t\r\n"));
     try std.testing.expectError(error.NulByte, parse(gpa, "Title\x00Body"));
+}
+
+test "message: parseFromParagraphs joins paragraphs and parses normally" {
+    const gpa = std.testing.allocator;
+
+    const paras = [_][]const u8{ "Update title", "Body paragraph one", "Body paragraph two" };
+    const parsed = try parseFromParagraphs(gpa, &paras);
+    defer parsed.deinit(gpa);
+
+    try std.testing.expectEqualStrings("Update title", parsed.title);
+    try std.testing.expectEqualStrings("Body paragraph one\n\nBody paragraph two", parsed.body);
+}
+
+test "message: parseFromParagraphs with single paragraph yields empty body" {
+    const gpa = std.testing.allocator;
+
+    const paras = [_][]const u8{"Just a title"};
+    const parsed = try parseFromParagraphs(gpa, &paras);
+    defer parsed.deinit(gpa);
+
+    try std.testing.expectEqualStrings("Just a title", parsed.title);
+    try std.testing.expectEqualStrings("", parsed.body);
+}
+
+test "message: parseFromParagraphs with no paragraphs returns EmptyMessage" {
+    const gpa = std.testing.allocator;
+
+    try std.testing.expectError(error.EmptyMessage, parseFromParagraphs(gpa, &.{}));
 }

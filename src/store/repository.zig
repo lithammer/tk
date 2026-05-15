@@ -7,11 +7,13 @@ const discovery = @import("../git/discovery.zig");
 const messages = @import("../messages.zig");
 const proc = @import("../proc/runner.zig");
 const migrations = @import("migrations.zig");
+const mutations_mod = @import("mutations.zig");
 const Priority = @import("../domain/priority.zig").Priority;
 const ItemStatus = @import("../domain/status.zig").ItemStatus;
 const TicketKind = @import("../domain/ticket_kind.zig").TicketKind;
 const Origin = @import("../domain/origin.zig").Origin;
 const ItemClass = @import("../domain/item_class.zig").ItemClass;
+const MutationType = @import("../domain/mutation_type.zig").MutationType;
 
 /// Open Repository Store connection. Call `close` when done.
 pub const Store = struct {
@@ -755,7 +757,7 @@ pub fn createLocalTicket(
     };
 }
 
-fn nextSequence(conn: zqlite.Conn, name: []const u8) migrations.QueryError!i64 {
+pub fn nextSequence(conn: zqlite.Conn, name: []const u8) migrations.QueryError!i64 {
     if (try conn.row("update sequences set value = value + 1 where name = ?1 returning value", .{name})) |r| {
         defer r.deinit();
         return r.int(0);
@@ -769,6 +771,272 @@ fn queryTextAlloc(conn: zqlite.Conn, gpa: std.mem.Allocator, sql: []const u8) (m
         return gpa.dupe(u8, r.text(0));
     }
     return error.Notfound;
+}
+
+/// How the `--parent` field should be handled in an update request.
+///
+/// `unchanged` — container_id is left as-is; no parent Mutation is emitted.
+/// `clear` — container_id is set to NULL (remove from current Epic).
+/// `set` — container_id is set to the given internal stable `items.id`.
+pub const ParentOp = union(enum) {
+    unchanged,
+    clear,
+    set: []const u8,
+};
+
+/// Input for `updateItem`.
+pub const UpdateRequest = struct {
+    /// Internal stable ID of the item to update (from `resolveItemRef`).
+    id: []const u8,
+    /// Item class of the resolved item (drives Mutation type selection).
+    item_class: ItemClass,
+    /// New title, or `null` to leave unchanged.
+    title: ?[]const u8 = null,
+    /// New body, or `null` to leave unchanged.
+    body: ?[]const u8 = null,
+    /// New Priority for Tickets, or `null` to leave unchanged. Must be
+    /// `null` for Epics — the caller enforces this precondition.
+    priority: ?Priority = null,
+    /// Parent operation. Must be `.unchanged` for Epics.
+    parent: ParentOp = .unchanged,
+};
+
+/// Fields from the current item row that `updateItem` reads inside the tx.
+const CurrentItem = struct {
+    origin: Origin,
+    title: []u8,
+    body: []u8,
+    priority: ?[]u8,
+    container_id: ?[]u8,
+
+    fn deinit(self: CurrentItem, gpa: std.mem.Allocator) void {
+        gpa.free(self.title);
+        gpa.free(self.body);
+        if (self.priority) |p| gpa.free(p);
+        if (self.container_id) |c| gpa.free(c);
+    }
+};
+
+/// The minimal updated item snapshot returned on success.
+pub const UpdatedItem = struct {
+    display_id: []u8,
+    title: []u8,
+    item_class: ItemClass,
+
+    /// Free allocator-owned fields.
+    pub fn deinit(self: UpdatedItem, gpa: std.mem.Allocator) void {
+        gpa.free(self.display_id);
+        gpa.free(self.title);
+    }
+};
+
+/// Result of `updateItem`.
+///
+/// `.ok` owns an `UpdatedItem` that the caller must free. `.not_found` means
+/// the internal id did not resolve to a live row.
+pub const UpdateOutcome = union(enum) {
+    ok: UpdatedItem,
+    not_found,
+};
+
+pub const UpdateError = migrations.QueryError || zqlite.Error || error{OutOfMemory};
+
+/// Apply a field-level update to a Ticket or Epic.
+///
+/// Opens a `begin immediate` transaction, reads the current row, diffs each
+/// requested field against the stored value, writes only the changed columns,
+/// and — for Backend-origin items — appends Mutations to the outbox in the
+/// same transaction. Priority changes are never emitted as Mutations.
+///
+/// Field idempotence: if a requested value equals the current stored value it
+/// is excluded from the UPDATE and no Mutation is appended for that field.
+/// `updated_at` is bumped only when at least one field actually changes.
+pub fn updateItem(
+    store: Store,
+    gpa: std.mem.Allocator,
+    clock: clock_mod.Clock,
+    req: UpdateRequest,
+) UpdateError!UpdateOutcome {
+    var iso_buf: [24]u8 = undefined;
+    const now = clock.nowIso(&iso_buf);
+
+    try store.conn.execNoArgs("begin immediate");
+    errdefer store.conn.rollback();
+
+    // Read the current item row inside the transaction.
+    const current_row = (try store.conn.row(
+        \\select origin, title, body, priority, container_id, display_value
+        \\  from items
+        \\ where id = ?1
+    , .{req.id})) orelse {
+        store.conn.rollback();
+        return .not_found;
+    };
+    const current: CurrentItem = blk: {
+        const origin = enumFromText(Origin, current_row.text(0));
+        const title = try gpa.dupe(u8, current_row.text(1));
+        errdefer gpa.free(title);
+        const body = try gpa.dupe(u8, current_row.text(2));
+        errdefer gpa.free(body);
+        const priority: ?[]u8 = if (current_row.nullableText(3)) |p| try gpa.dupe(u8, p) else null;
+        errdefer if (priority) |p| gpa.free(p);
+        const container_id: ?[]u8 = if (current_row.nullableText(4)) |c| try gpa.dupe(u8, c) else null;
+        current_row.deinit();
+        break :blk .{
+            .origin = origin,
+            .title = title,
+            .body = body,
+            .priority = priority,
+            .container_id = container_id,
+        };
+    };
+    defer current.deinit(gpa);
+
+    // Compute per-field deltas.
+    const new_title: ?[]const u8 = if (req.title) |t|
+        if (!std.mem.eql(u8, t, current.title)) t else null
+    else
+        null;
+    const new_body: ?[]const u8 = if (req.body) |b|
+        if (!std.mem.eql(u8, b, current.body)) b else null
+    else
+        null;
+    const new_priority: ?Priority = if (req.priority) |p|
+        if (current.priority == null or !std.mem.eql(u8, p.text(), current.priority.?)) p else null
+    else
+        null;
+
+    // Parent delta: old_epic_id set when removing; new_epic_id set when adding.
+    var old_epic_id: ?[]const u8 = null;
+    var new_epic_id: ?[]const u8 = null;
+    var parent_changed = false;
+    switch (req.parent) {
+        .unchanged => {},
+        .clear => {
+            if (current.container_id != null) {
+                old_epic_id = current.container_id;
+                parent_changed = true;
+            }
+        },
+        .set => |epic_id| {
+            const already_set = if (current.container_id) |cid| std.mem.eql(u8, cid, epic_id) else false;
+            if (!already_set) {
+                old_epic_id = current.container_id;
+                new_epic_id = epic_id;
+                parent_changed = true;
+            }
+        },
+    }
+
+    const title_or_body_changed = (new_title != null or new_body != null);
+    const any_change = title_or_body_changed or new_priority != null or parent_changed;
+
+    if (!any_change) {
+        // Nothing changed — read back the display_id and title for the caller.
+        const snapshot_row = (try store.conn.row(
+            "select display_value, title from items where id = ?1",
+            .{req.id},
+        )) orelse {
+            store.conn.rollback();
+            return .not_found;
+        };
+        defer snapshot_row.deinit();
+        const display_id = try gpa.dupe(u8, snapshot_row.text(0));
+        errdefer gpa.free(display_id);
+        const snap_title = try gpa.dupe(u8, snapshot_row.text(1));
+        errdefer gpa.free(snap_title);
+        try store.conn.commit();
+        return .{ .ok = .{ .display_id = display_id, .title = snap_title, .item_class = req.item_class } };
+    }
+
+    // Build the UPDATE statement dynamically for only the changed columns.
+    // Always include updated_at when something changed.
+    const eff_title = new_title orelse current.title;
+    const eff_body = new_body orelse current.body;
+
+    if (parent_changed) {
+        const new_container: ?[]const u8 = new_epic_id;
+        const new_container_class: ?[]const u8 = if (new_container != null) "epic" else null;
+        if (new_priority) |p| {
+            try store.conn.exec(
+                \\update items
+                \\   set title = ?2, body = ?3, priority = ?4,
+                \\       container_id = ?5, container_class = ?6, updated_at = ?7
+                \\ where id = ?1
+            , .{ req.id, eff_title, eff_body, p.text(), new_container, new_container_class, now });
+        } else {
+            try store.conn.exec(
+                \\update items
+                \\   set title = ?2, body = ?3,
+                \\       container_id = ?4, container_class = ?5, updated_at = ?6
+                \\ where id = ?1
+            , .{ req.id, eff_title, eff_body, new_container, new_container_class, now });
+        }
+    } else if (new_priority) |p| {
+        try store.conn.exec(
+            \\update items
+            \\   set title = ?2, body = ?3, priority = ?4, updated_at = ?5
+            \\ where id = ?1
+        , .{ req.id, eff_title, eff_body, p.text(), now });
+    } else {
+        try store.conn.exec(
+            \\update items
+            \\   set title = ?2, body = ?3, updated_at = ?4
+            \\ where id = ?1
+        , .{ req.id, eff_title, eff_body, now });
+    }
+
+    // Append Mutations for Backend-origin items only.
+    if (current.origin == .backend) {
+        // Parent change: remove then add (mutation order per spec).
+        if (old_epic_id) |eid| {
+            try mutations_mod.appendMutation(
+                store.conn, gpa,
+                .remove_ticket_from_epic,
+                req.id, req.item_class,
+                .{ .epic_ref = .{ .epic_id = eid } },
+                now,
+            );
+        }
+        if (new_epic_id) |eid| {
+            try mutations_mod.appendMutation(
+                store.conn, gpa,
+                .add_ticket_to_epic,
+                req.id, req.item_class,
+                .{ .epic_ref = .{ .epic_id = eid } },
+                now,
+            );
+        }
+        // Title/body change: full snapshot mutation.
+        if (title_or_body_changed) {
+            const mut_type: MutationType = if (req.item_class == .ticket) .update_ticket else .update_epic;
+            try mutations_mod.appendMutation(
+                store.conn, gpa,
+                mut_type,
+                req.id, req.item_class,
+                .{ .update_title_body = .{ .title = eff_title, .body = eff_body } },
+                now,
+            );
+        }
+    }
+
+    // Read back the final display_id and title for the caller.
+    const snap = (try store.conn.row(
+        "select display_value, title from items where id = ?1",
+        .{req.id},
+    )) orelse {
+        store.conn.rollback();
+        return .not_found;
+    };
+    defer snap.deinit();
+    const display_id = try gpa.dupe(u8, snap.text(0));
+    errdefer gpa.free(display_id);
+    const snap_title = try gpa.dupe(u8, snap.text(1));
+    errdefer gpa.free(snap_title);
+
+    try store.conn.commit();
+
+    return .{ .ok = .{ .display_id = display_id, .title = snap_title, .item_class = req.item_class } };
 }
 
 fn generateInternalId(gpa: std.mem.Allocator, random: std.Random) ![]u8 {
@@ -1577,4 +1845,556 @@ test "listRows SQL has a CASE arm for every ListView tag" {
         const needle = "when '" ++ @tagName(tag) ++ "' then";
         try std.testing.expect(std.mem.indexOf(u8, list_rows_sql, needle) != null);
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// updateItem tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+const FakeClock = @import("../clock.zig").FakeClock;
+const default_fake_now_ms = @import("../testing/test_cli.zig").default_fake_now_ms;
+
+test "updateItem: returns not_found for unknown id" {
+    const gpa = std.testing.allocator;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+    var fc = FakeClock.init(default_fake_now_ms);
+
+    const outcome = try updateItem(store, gpa, fc.clock(), .{
+        .id = "no-such-id",
+        .item_class = .ticket,
+        .title = "X",
+    });
+    try std.testing.expectEqual(UpdateOutcome.not_found, outcome);
+}
+
+test "updateItem: updates title and body of a local Ticket without emitting a Mutation" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+    var fc = FakeClock.init(default_fake_now_ms);
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "t1",
+        .display = "tk-1",
+        .title = "Old title",
+        .body = "Old body",
+        .created_seq = 1,
+        .updated_at = "2026-01-01T00:00:00.000Z",
+    });
+
+    const outcome = try updateItem(store, gpa, fc.clock(), .{
+        .id = "t1",
+        .item_class = .ticket,
+        .title = "New title",
+        .body = "New body",
+    });
+    switch (outcome) {
+        .ok => |u| {
+            defer u.deinit(gpa);
+            try std.testing.expectEqualStrings("tk-1", u.display_id);
+            try std.testing.expectEqualStrings("New title", u.title);
+        },
+        .not_found => return error.UnexpectedNotFound,
+    }
+
+    const row = (try conn.row("select title, body from items where id = 't1'", .{})) orelse return error.ExpectedRow;
+    defer row.deinit();
+    try std.testing.expectEqualStrings("New title", row.text(0));
+    try std.testing.expectEqualStrings("New body", row.text(1));
+
+    try std.testing.expectEqual(@as(i64, 0), try TmpStore.mutationCount(conn));
+}
+
+test "updateItem: updates title and body of a Backend Ticket and emits update_ticket Mutation" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+    var fc = FakeClock.init(default_fake_now_ms);
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "t1",
+        .display = "GH#1",
+        .title = "Old title",
+        .body = "Old body",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "1",
+        .created_seq = 1,
+    });
+
+    const outcome = try updateItem(store, gpa, fc.clock(), .{
+        .id = "t1",
+        .item_class = .ticket,
+        .title = "New title",
+        .body = "New body",
+    });
+    switch (outcome) {
+        .ok => |u| {
+            defer u.deinit(gpa);
+            try std.testing.expectEqualStrings("GH#1", u.display_id);
+        },
+        .not_found => return error.UnexpectedNotFound,
+    }
+
+    try std.testing.expectEqual(@as(i64, 1), try TmpStore.mutationCount(conn));
+
+    const row = (try conn.row(
+        "select mutation_type, item_id, item_class from mutations where sequence = 1",
+        .{},
+    )) orelse return error.ExpectedRow;
+    defer row.deinit();
+    try std.testing.expectEqualStrings("update_ticket", row.text(0));
+    try std.testing.expectEqualStrings("t1", row.text(1));
+    try std.testing.expectEqualStrings("ticket", row.text(2));
+}
+
+test "updateItem: idempotent update does not change updated_at and emits no Mutation" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+    var fc = FakeClock.init(default_fake_now_ms);
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "t1",
+        .display = "GH#1",
+        .title = "Same title",
+        .body = "Same body",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "1",
+        .created_seq = 1,
+        .updated_at = "2026-01-01T00:00:00.000Z",
+    });
+
+    const outcome = try updateItem(store, gpa, fc.clock(), .{
+        .id = "t1",
+        .item_class = .ticket,
+        .title = "Same title",
+        .body = "Same body",
+    });
+    switch (outcome) {
+        .ok => |u| u.deinit(gpa),
+        .not_found => return error.UnexpectedNotFound,
+    }
+
+    try std.testing.expectEqual(@as(i64, 0), try TmpStore.mutationCount(conn));
+
+    const row = (try conn.row("select updated_at from items where id = 't1'", .{})) orelse return error.ExpectedRow;
+    defer row.deinit();
+    try std.testing.expectEqualStrings("2026-01-01T00:00:00.000Z", row.text(0));
+}
+
+test "updateItem: priority change on local Ticket does not emit a Mutation" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+    var fc = FakeClock.init(default_fake_now_ms);
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "t1",
+        .display = "tk-1",
+        .title = "Ticket",
+        .priority = "P2",
+        .created_seq = 1,
+    });
+
+    const outcome = try updateItem(store, gpa, fc.clock(), .{
+        .id = "t1",
+        .item_class = .ticket,
+        .priority = .P0,
+    });
+    switch (outcome) {
+        .ok => |u| u.deinit(gpa),
+        .not_found => return error.UnexpectedNotFound,
+    }
+
+    const row = (try conn.row("select priority from items where id = 't1'", .{})) orelse return error.ExpectedRow;
+    defer row.deinit();
+    try std.testing.expectEqualStrings("P0", row.text(0));
+    try std.testing.expectEqual(@as(i64, 0), try TmpStore.mutationCount(conn));
+}
+
+test "updateItem: priority change on Backend Ticket does not emit a Mutation" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+    var fc = FakeClock.init(default_fake_now_ms);
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "t1",
+        .display = "GH#1",
+        .title = "Backend ticket",
+        .priority = "P3",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "1",
+        .created_seq = 1,
+    });
+
+    const outcome = try updateItem(store, gpa, fc.clock(), .{
+        .id = "t1",
+        .item_class = .ticket,
+        .priority = .P1,
+    });
+    switch (outcome) {
+        .ok => |u| u.deinit(gpa),
+        .not_found => return error.UnexpectedNotFound,
+    }
+
+    const row = (try conn.row("select priority from items where id = 't1'", .{})) orelse return error.ExpectedRow;
+    defer row.deinit();
+    try std.testing.expectEqualStrings("P1", row.text(0));
+    try std.testing.expectEqual(@as(i64, 0), try TmpStore.mutationCount(conn));
+}
+
+test "updateItem: set parent on Backend Ticket emits add_ticket_to_epic Mutation" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+    var fc = FakeClock.init(default_fake_now_ms);
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "t1",
+        .display = "GH#1",
+        .title = "Ticket",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "1",
+        .created_seq = 1,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "e1",
+        .display = "GH#10",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .title = "Epic",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "10",
+        .created_seq = 2,
+    });
+
+    const outcome = try updateItem(store, gpa, fc.clock(), .{
+        .id = "t1",
+        .item_class = .ticket,
+        .parent = .{ .set = "e1" },
+    });
+    switch (outcome) {
+        .ok => |u| u.deinit(gpa),
+        .not_found => return error.UnexpectedNotFound,
+    }
+
+    const row = (try conn.row("select mutation_type, payload_json from mutations where sequence = 1", .{})) orelse return error.ExpectedRow;
+    defer row.deinit();
+    try std.testing.expectEqualStrings("add_ticket_to_epic", row.text(0));
+    try std.testing.expect(std.mem.indexOf(u8, row.text(1), "e1") != null);
+}
+
+test "updateItem: move between Epics on Backend Ticket emits remove then add Mutations" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+    var fc = FakeClock.init(default_fake_now_ms);
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "old-epic",
+        .display = "GH#10",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .title = "Old Epic",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "10",
+        .created_seq = 1,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "new-epic",
+        .display = "GH#20",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .title = "New Epic",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "20",
+        .created_seq = 2,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "t1",
+        .display = "GH#1",
+        .title = "Ticket",
+        .container_id = "old-epic",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "1",
+        .created_seq = 3,
+    });
+
+    const outcome = try updateItem(store, gpa, fc.clock(), .{
+        .id = "t1",
+        .item_class = .ticket,
+        .parent = .{ .set = "new-epic" },
+    });
+    switch (outcome) {
+        .ok => |u| u.deinit(gpa),
+        .not_found => return error.UnexpectedNotFound,
+    }
+
+    try std.testing.expectEqual(@as(i64, 2), try TmpStore.mutationCount(conn));
+
+    const r1 = (try conn.row("select mutation_type, payload_json from mutations where sequence = 1", .{})) orelse return error.ExpectedRow;
+    defer r1.deinit();
+    try std.testing.expectEqualStrings("remove_ticket_from_epic", r1.text(0));
+    try std.testing.expect(std.mem.indexOf(u8, r1.text(1), "old-epic") != null);
+
+    const r2 = (try conn.row("select mutation_type, payload_json from mutations where sequence = 2", .{})) orelse return error.ExpectedRow;
+    defer r2.deinit();
+    try std.testing.expectEqualStrings("add_ticket_to_epic", r2.text(0));
+    try std.testing.expect(std.mem.indexOf(u8, r2.text(1), "new-epic") != null);
+}
+
+test "updateItem: combined parent-move and title change emits Mutations in correct order" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+    var fc = FakeClock.init(default_fake_now_ms);
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "old-epic",
+        .display = "GH#10",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .title = "Old Epic",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "10",
+        .created_seq = 1,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "new-epic",
+        .display = "GH#20",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .title = "New Epic",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "20",
+        .created_seq = 2,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "t1",
+        .display = "GH#1",
+        .title = "Old title",
+        .body = "",
+        .container_id = "old-epic",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "1",
+        .created_seq = 3,
+    });
+
+    const outcome = try updateItem(store, gpa, fc.clock(), .{
+        .id = "t1",
+        .item_class = .ticket,
+        .title = "New title",
+        .parent = .{ .set = "new-epic" },
+    });
+    switch (outcome) {
+        .ok => |u| u.deinit(gpa),
+        .not_found => return error.UnexpectedNotFound,
+    }
+
+    // Expect 3 mutations: remove, add, update_ticket — in that order.
+    try std.testing.expectEqual(@as(i64, 3), try TmpStore.mutationCount(conn));
+
+    const r1 = (try conn.row("select mutation_type from mutations where sequence = 1", .{})) orelse return error.ExpectedRow;
+    defer r1.deinit();
+    try std.testing.expectEqualStrings("remove_ticket_from_epic", r1.text(0));
+
+    const r2 = (try conn.row("select mutation_type from mutations where sequence = 2", .{})) orelse return error.ExpectedRow;
+    defer r2.deinit();
+    try std.testing.expectEqualStrings("add_ticket_to_epic", r2.text(0));
+
+    const r3 = (try conn.row("select mutation_type from mutations where sequence = 3", .{})) orelse return error.ExpectedRow;
+    defer r3.deinit();
+    try std.testing.expectEqualStrings("update_ticket", r3.text(0));
+}
+
+test "updateItem: clear parent on Backend Ticket emits remove_ticket_from_epic Mutation" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+    var fc = FakeClock.init(default_fake_now_ms);
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "e1",
+        .display = "GH#10",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .title = "Epic",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "10",
+        .created_seq = 1,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "t1",
+        .display = "GH#1",
+        .title = "Ticket",
+        .container_id = "e1",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "1",
+        .created_seq = 2,
+    });
+
+    const outcome = try updateItem(store, gpa, fc.clock(), .{
+        .id = "t1",
+        .item_class = .ticket,
+        .parent = .clear,
+    });
+    switch (outcome) {
+        .ok => |u| u.deinit(gpa),
+        .not_found => return error.UnexpectedNotFound,
+    }
+
+    const row = (try conn.row("select container_id from items where id = 't1'", .{})) orelse return error.ExpectedRow;
+    defer row.deinit();
+    try std.testing.expectEqual(@as(?[]const u8, null), row.nullableText(0));
+
+    try std.testing.expectEqual(@as(i64, 1), try TmpStore.mutationCount(conn));
+
+    const mr = (try conn.row("select mutation_type from mutations where sequence = 1", .{})) orelse return error.ExpectedRow;
+    defer mr.deinit();
+    try std.testing.expectEqualStrings("remove_ticket_from_epic", mr.text(0));
+}
+
+test "updateItem: clear parent is idempotent when Ticket has no parent" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+    var fc = FakeClock.init(default_fake_now_ms);
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "t1",
+        .display = "GH#1",
+        .title = "Orphan ticket",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "1",
+        .created_seq = 1,
+    });
+
+    const outcome = try updateItem(store, gpa, fc.clock(), .{
+        .id = "t1",
+        .item_class = .ticket,
+        .parent = .clear,
+    });
+    switch (outcome) {
+        .ok => |u| u.deinit(gpa),
+        .not_found => return error.UnexpectedNotFound,
+    }
+
+    try std.testing.expectEqual(@as(i64, 0), try TmpStore.mutationCount(conn));
+}
+
+test "updateItem: Backend Epic title change emits update_epic Mutation" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+    var fc = FakeClock.init(default_fake_now_ms);
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "e1",
+        .display = "GH#10",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .title = "Old Epic title",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "10",
+        .created_seq = 1,
+    });
+
+    const outcome = try updateItem(store, gpa, fc.clock(), .{
+        .id = "e1",
+        .item_class = .epic,
+        .title = "New Epic title",
+    });
+    switch (outcome) {
+        .ok => |u| u.deinit(gpa),
+        .not_found => return error.UnexpectedNotFound,
+    }
+
+    try std.testing.expectEqual(@as(i64, 1), try TmpStore.mutationCount(conn));
+
+    const mr = (try conn.row("select mutation_type from mutations where sequence = 1", .{})) orelse return error.ExpectedRow;
+    defer mr.deinit();
+    try std.testing.expectEqualStrings("update_epic", mr.text(0));
 }

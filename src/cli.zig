@@ -50,6 +50,7 @@ const all_commands = .{
     @import("commands/next.zig"),
     @import("commands/prime.zig"),
     @import("commands/show.zig"),
+    @import("commands/update.zig"),
 };
 
 /// Top-level subcommand enum generated from `all_commands`.

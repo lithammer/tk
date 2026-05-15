@@ -143,4 +143,15 @@ pub const TmpStore = struct {
             \\values (?1, ?2, 'fixture blocker', '2026-05-09T00:00:00.000Z', ?3)
         , .{ id, item_id, resolved_at });
     }
+
+    /// Return the current count of rows in the `mutations` table.
+    ///
+    /// Useful for asserting that a local-origin write produced no Mutations.
+    pub fn mutationCount(conn: zqlite.Conn) !i64 {
+        if (try conn.row("select count(*) from mutations", .{})) |r| {
+            defer r.deinit();
+            return r.int(0);
+        }
+        return 0;
+    }
 };
