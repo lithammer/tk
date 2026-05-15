@@ -273,6 +273,281 @@ pub fn openExisting(gpa: std.mem.Allocator, runner: proc.Runner, cwd: std.Io.Dir
     return .{ .ok = .{ .conn = conn } };
 }
 
+/// Compact summary of a related item for the `tk show` sub-section rows.
+///
+/// Used for PARENT (the container Epic), TICKETS (children of an Epic),
+/// BLOCKED BY, and BLOCKING. All fields are allocator-owned by the caller.
+pub const ItemSummary = struct {
+    display_id: []u8,
+    title: []u8,
+    item_class: ItemClass,
+    status: ItemStatus,
+    priority: ?Priority,
+
+    /// Free allocator-owned fields.
+    pub fn deinit(self: ItemSummary, gpa: std.mem.Allocator) void {
+        gpa.free(self.display_id);
+        gpa.free(self.title);
+    }
+};
+
+/// One unresolved External Blocker rendered in `tk show`.
+pub const ExternalBlockerSummary = struct {
+    reason: []u8,
+
+    /// Free allocator-owned fields.
+    pub fn deinit(self: ExternalBlockerSummary, gpa: std.mem.Allocator) void {
+        gpa.free(self.reason);
+    }
+};
+
+/// Full current-state view of one Ticket or Epic for `tk show`.
+///
+/// Allocator-owned slices; free with `deinit`.
+pub const ItemDetail = struct {
+    id: []u8,
+    display_id: []u8,
+    item_class: ItemClass,
+    ticket_kind: ?TicketKind,
+    priority: ?Priority,
+    title: []u8,
+    body: []u8,
+    status: ItemStatus,
+    origin: Origin,
+    backend_kind: ?[]u8,
+    backend_key: ?[]u8,
+    created_at: []u8,
+    updated_at: []u8,
+    parent: ?ItemSummary,
+    children: []ItemSummary,
+    blocked_by: []ItemSummary,
+    blocking: []ItemSummary,
+    external_blockers: []ExternalBlockerSummary,
+
+    /// Free all allocator-owned fields.
+    pub fn deinit(self: ItemDetail, gpa: std.mem.Allocator) void {
+        gpa.free(self.id);
+        gpa.free(self.display_id);
+        gpa.free(self.title);
+        gpa.free(self.body);
+        gpa.free(self.created_at);
+        gpa.free(self.updated_at);
+        if (self.backend_kind) |bk| gpa.free(bk);
+        if (self.backend_key) |bk| gpa.free(bk);
+        if (self.parent) |p| p.deinit(gpa);
+        for (self.children) |c| c.deinit(gpa);
+        gpa.free(self.children);
+        for (self.blocked_by) |b| b.deinit(gpa);
+        gpa.free(self.blocked_by);
+        for (self.blocking) |b| b.deinit(gpa);
+        gpa.free(self.blocking);
+        for (self.external_blockers) |eb| eb.deinit(gpa);
+        gpa.free(self.external_blockers);
+    }
+};
+
+pub const ShowError = ResolveError;
+
+/// Read one item's full current state from the Repository Store.
+///
+/// Resolves `display_arg` via the `item_ids` table (Display ID or Alias).
+/// Returns `null` when the Display ID or Alias does not resolve. The caller
+/// is responsible for freeing the returned `ItemDetail` via `deinit`.
+pub fn showItem(store: Store, gpa: std.mem.Allocator, display_arg: []const u8) ShowError!?ItemDetail {
+    const ref = (try resolveItemRef(store, gpa, display_arg)) orelse return null;
+    defer ref.deinit(gpa);
+
+    // Read the main item row.
+    const item_row = (try store.conn.row(
+        \\select id, display_value, item_class, ticket_kind, priority, title, body,
+        \\       status, origin, backend_kind, backend_key, created_at, updated_at,
+        \\       container_id
+        \\  from items
+        \\ where id = ?1
+    , .{ref.id})) orelse return null;
+    defer item_row.deinit();
+
+    const id = try gpa.dupe(u8, item_row.text(0));
+    errdefer gpa.free(id);
+    const display_id = try gpa.dupe(u8, item_row.text(1));
+    errdefer gpa.free(display_id);
+    const item_class = enumFromText(ItemClass, item_row.text(2));
+    const ticket_kind: ?TicketKind = if (item_row.nullableText(3)) |t| enumFromText(TicketKind, t) else null;
+    const priority: ?Priority = if (item_row.nullableText(4)) |t| enumFromText(Priority, t) else null;
+    const title = try gpa.dupe(u8, item_row.text(5));
+    errdefer gpa.free(title);
+    const body = try gpa.dupe(u8, item_row.text(6));
+    errdefer gpa.free(body);
+    const status = enumFromText(ItemStatus, item_row.text(7));
+    const origin = enumFromText(Origin, item_row.text(8));
+    const backend_kind: ?[]u8 = if (item_row.nullableText(9)) |t| try gpa.dupe(u8, t) else null;
+    errdefer if (backend_kind) |bk| gpa.free(bk);
+    const backend_key: ?[]u8 = if (item_row.nullableText(10)) |t| try gpa.dupe(u8, t) else null;
+    errdefer if (backend_key) |bk| gpa.free(bk);
+    const created_at = try gpa.dupe(u8, item_row.text(11));
+    errdefer gpa.free(created_at);
+    const updated_at = try gpa.dupe(u8, item_row.text(12));
+    errdefer gpa.free(updated_at);
+    const container_id: ?[]const u8 = item_row.nullableText(13);
+
+    // Resolve parent if this is a Ticket with a container.
+    var parent: ?ItemSummary = null;
+    errdefer if (parent) |p| p.deinit(gpa);
+    if (container_id) |cid| {
+        if (try store.conn.row(
+            \\select display_value, title, item_class, status, priority
+            \\  from items
+            \\ where id = ?1
+        , .{cid})) |r| {
+            defer r.deinit();
+            const p_display_id = try gpa.dupe(u8, r.text(0));
+            errdefer gpa.free(p_display_id);
+            const p_title = try gpa.dupe(u8, r.text(1));
+            parent = .{
+                .display_id = p_display_id,
+                .title = p_title,
+                .item_class = enumFromText(ItemClass, r.text(2)),
+                .status = enumFromText(ItemStatus, r.text(3)),
+                .priority = if (r.nullableText(4)) |t| enumFromText(Priority, t) else null,
+            };
+        }
+    }
+
+    // Collect children if this is an Epic.
+    var children: std.ArrayList(ItemSummary) = .empty;
+    errdefer {
+        for (children.items) |c| c.deinit(gpa);
+        children.deinit(gpa);
+    }
+    if (item_class == .epic) {
+        var rows = try store.conn.rows(
+            \\select display_value, title, item_class, status, priority
+            \\  from items
+            \\ where container_id = ?1
+            \\ order by created_seq asc
+        , .{id});
+        defer rows.deinit();
+        while (rows.next()) |r| {
+            const c_display_id = try gpa.dupe(u8, r.text(0));
+            errdefer gpa.free(c_display_id);
+            const c_title = try gpa.dupe(u8, r.text(1));
+            try children.append(gpa, .{
+                .display_id = c_display_id,
+                .title = c_title,
+                .item_class = enumFromText(ItemClass, r.text(2)),
+                .status = enumFromText(ItemStatus, r.text(3)),
+                .priority = if (r.nullableText(4)) |t| enumFromText(Priority, t) else null,
+            });
+        }
+        if (rows.err) |err| return err;
+    }
+
+    // BLOCKED BY: items blocking this item that are not yet done.
+    var blocked_by: std.ArrayList(ItemSummary) = .empty;
+    errdefer {
+        for (blocked_by.items) |b| b.deinit(gpa);
+        blocked_by.deinit(gpa);
+    }
+    {
+        var rows = try store.conn.rows(
+            \\select i.display_value, i.title, i.item_class, i.status, i.priority
+            \\  from dependencies d
+            \\  join items i on i.id = d.blocking_id
+            \\ where d.blocked_id = ?1
+            \\   and i.status <> 'done'
+            \\ order by i.created_seq asc
+        , .{id});
+        defer rows.deinit();
+        while (rows.next()) |r| {
+            const b_display_id = try gpa.dupe(u8, r.text(0));
+            errdefer gpa.free(b_display_id);
+            const b_title = try gpa.dupe(u8, r.text(1));
+            try blocked_by.append(gpa, .{
+                .display_id = b_display_id,
+                .title = b_title,
+                .item_class = enumFromText(ItemClass, r.text(2)),
+                .status = enumFromText(ItemStatus, r.text(3)),
+                .priority = if (r.nullableText(4)) |t| enumFromText(Priority, t) else null,
+            });
+        }
+        if (rows.err) |err| return err;
+    }
+
+    // BLOCKING: items blocked by this item that are not yet done.
+    var blocking: std.ArrayList(ItemSummary) = .empty;
+    errdefer {
+        for (blocking.items) |b| b.deinit(gpa);
+        blocking.deinit(gpa);
+    }
+    {
+        var rows = try store.conn.rows(
+            \\select i.display_value, i.title, i.item_class, i.status, i.priority
+            \\  from dependencies d
+            \\  join items i on i.id = d.blocked_id
+            \\ where d.blocking_id = ?1
+            \\   and i.status <> 'done'
+            \\ order by i.created_seq asc
+        , .{id});
+        defer rows.deinit();
+        while (rows.next()) |r| {
+            const bl_display_id = try gpa.dupe(u8, r.text(0));
+            errdefer gpa.free(bl_display_id);
+            const bl_title = try gpa.dupe(u8, r.text(1));
+            try blocking.append(gpa, .{
+                .display_id = bl_display_id,
+                .title = bl_title,
+                .item_class = enumFromText(ItemClass, r.text(2)),
+                .status = enumFromText(ItemStatus, r.text(3)),
+                .priority = if (r.nullableText(4)) |t| enumFromText(Priority, t) else null,
+            });
+        }
+        if (rows.err) |err| return err;
+    }
+
+    // EXTERNAL BLOCKERS: unresolved only.
+    var external_blockers: std.ArrayList(ExternalBlockerSummary) = .empty;
+    errdefer {
+        for (external_blockers.items) |eb| eb.deinit(gpa);
+        external_blockers.deinit(gpa);
+    }
+    {
+        var rows = try store.conn.rows(
+            \\select reason
+            \\  from external_blockers
+            \\ where item_id = ?1
+            \\   and resolved_at is null
+            \\ order by created_at asc
+        , .{id});
+        defer rows.deinit();
+        while (rows.next()) |r| {
+            const reason = try gpa.dupe(u8, r.text(0));
+            try external_blockers.append(gpa, .{ .reason = reason });
+        }
+        if (rows.err) |err| return err;
+    }
+
+    return .{
+        .id = id,
+        .display_id = display_id,
+        .item_class = item_class,
+        .ticket_kind = ticket_kind,
+        .priority = priority,
+        .title = title,
+        .body = body,
+        .status = status,
+        .origin = origin,
+        .backend_kind = backend_kind,
+        .backend_key = backend_key,
+        .created_at = created_at,
+        .updated_at = updated_at,
+        .parent = parent,
+        .children = try children.toOwnedSlice(gpa),
+        .blocked_by = try blocked_by.toOwnedSlice(gpa),
+        .blocking = try blocking.toOwnedSlice(gpa),
+        .external_blockers = try external_blockers.toOwnedSlice(gpa),
+    };
+}
+
 pub const CreateError = migrations.QueryError || zqlite.Error || error{OutOfMemory};
 pub const ListError = migrations.QueryError || zqlite.Error || error{OutOfMemory};
 pub const NextError = migrations.QueryError || zqlite.Error || error{OutOfMemory};
@@ -1089,6 +1364,209 @@ fn expectDisplayIds(rows: []const ListRow, expected: []const []const u8) !void {
     for (expected, 0..) |display_id, i| {
         try std.testing.expectEqualStrings(display_id, rows[i].display_id);
     }
+}
+
+test "showItem: returns null for an unknown Display ID" {
+    const gpa = std.testing.allocator;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    const result = try showItem(store, gpa, "missing");
+    try std.testing.expectEqual(null, result);
+}
+
+test "showItem: returns full Ticket detail with parent, dependencies, and external blockers" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    // Epic parent.
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "epic",
+        .display = "tk-1",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .title = "Ship list command",
+        .created_seq = 1,
+    });
+    // The Ticket under test.
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "ticket",
+        .display = "tk-2",
+        .title = "Render ready list",
+        .priority = "P1",
+        .container_id = "epic",
+        .created_seq = 2,
+    });
+    // A Blocking Item (unresolved).
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "blocker",
+        .display = "tk-3",
+        .title = "Wait for backend",
+        .priority = "P2",
+        .created_seq = 3,
+    });
+    try TmpStore.insertDependency(conn, "blocker", "ticket");
+    // A Blocked Item (downstream, not done).
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "downstream",
+        .display = "tk-9",
+        .title = "Downstream cleanup",
+        .priority = "P2",
+        .created_seq = 9,
+    });
+    try TmpStore.insertDependency(conn, "ticket", "downstream");
+    // An unresolved External Blocker.
+    try TmpStore.insertExternalBlocker(conn, "eb-open", "ticket", null);
+    // A resolved External Blocker (must be excluded).
+    try TmpStore.insertExternalBlocker(conn, "eb-done", "ticket", "2026-05-10T00:00:00.000Z");
+
+    const detail = (try showItem(store, gpa, "tk-2")) orelse return error.ExpectedDetail;
+    defer detail.deinit(gpa);
+
+    try std.testing.expectEqualStrings("ticket", detail.id);
+    try std.testing.expectEqualStrings("tk-2", detail.display_id);
+    try std.testing.expectEqual(ItemClass.ticket, detail.item_class);
+    try std.testing.expectEqual(ItemStatus.open, detail.status);
+
+    // Parent.
+    const p = detail.parent orelse return error.ExpectedParent;
+    try std.testing.expectEqualStrings("tk-1", p.display_id);
+    try std.testing.expectEqualStrings("Ship list command", p.title);
+
+    // BLOCKED BY: one unresolved blocker.
+    try std.testing.expectEqual(@as(usize, 1), detail.blocked_by.len);
+    try std.testing.expectEqualStrings("tk-3", detail.blocked_by[0].display_id);
+
+    // BLOCKING: one downstream.
+    try std.testing.expectEqual(@as(usize, 1), detail.blocking.len);
+    try std.testing.expectEqualStrings("tk-9", detail.blocking[0].display_id);
+
+    // EXTERNAL BLOCKERS: only the unresolved one.
+    try std.testing.expectEqual(@as(usize, 1), detail.external_blockers.len);
+    try std.testing.expectEqualStrings("fixture blocker", detail.external_blockers[0].reason);
+}
+
+test "showItem: includes children for Epics ordered by created_seq" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "epic",
+        .display = "tk-1",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .title = "Ship list command",
+        .created_seq = 1,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "child-c",
+        .display = "tk-4",
+        .title = "Third child",
+        .container_id = "epic",
+        .created_seq = 4,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "child-a",
+        .display = "tk-2",
+        .title = "First child",
+        .container_id = "epic",
+        .created_seq = 2,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "child-b",
+        .display = "tk-3",
+        .title = "Second child",
+        .container_id = "epic",
+        .created_seq = 3,
+    });
+
+    const detail = (try showItem(store, gpa, "tk-1")) orelse return error.ExpectedDetail;
+    defer detail.deinit(gpa);
+
+    try std.testing.expectEqual(ItemClass.epic, detail.item_class);
+    try std.testing.expectEqual(@as(usize, 3), detail.children.len);
+    try std.testing.expectEqualStrings("tk-2", detail.children[0].display_id);
+    try std.testing.expectEqualStrings("tk-3", detail.children[1].display_id);
+    try std.testing.expectEqualStrings("tk-4", detail.children[2].display_id);
+}
+
+test "showItem: filters out resolved (done) dependencies" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "ticket",
+        .display = "tk-2",
+        .title = "The Ticket",
+        .created_seq = 2,
+    });
+    // Done blocker — should be excluded from blocked_by.
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "done-blocker",
+        .display = "tk-1",
+        .title = "Done blocker",
+        .status = "done",
+        .created_seq = 1,
+    });
+    try TmpStore.insertDependency(conn, "done-blocker", "ticket");
+
+    const detail = (try showItem(store, gpa, "tk-2")) orelse return error.ExpectedDetail;
+    defer detail.deinit(gpa);
+
+    // Done blocker must not appear.
+    try std.testing.expectEqual(@as(usize, 0), detail.blocked_by.len);
+}
+
+test "showItem: resolves via Alias" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "ticket-id",
+        .display = "GH#42",
+        .title = "A Ticket",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "42",
+        .created_seq = 1,
+    });
+    try TmpStore.insertAlias(conn, "tk-1", "ticket-id");
+
+    const detail = (try showItem(store, gpa, "tk-1")) orelse return error.ExpectedDetail;
+    defer detail.deinit(gpa);
+
+    try std.testing.expectEqualStrings("ticket-id", detail.id);
+    try std.testing.expectEqualStrings("GH#42", detail.display_id);
 }
 
 test "listRows SQL has a CASE arm for every ListView tag" {

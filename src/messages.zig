@@ -133,6 +133,51 @@ pub const list_total_label = "Total: ";
 /// Stdout label for the Item Status legend footer.
 pub const list_status_label = "Status: ";
 
+// `tk show` — single-item read.
+
+/// Stderr line when no Repository Store exists for the current repository.
+pub const show_missing_store = "tk show: Repository Store not initialized; run 'tk init'";
+
+/// Stderr prefix for unknown Display ID or Alias. Callers append
+/// `"{s}" ++ show_id_not_found_suffix ++ "\n"` for the supplied id.
+pub const show_id_not_found_prefix = "tk show: '";
+
+/// Stderr suffix for unknown Display ID or Alias.
+pub const show_id_not_found_suffix = "' is not a known Display ID or Alias";
+
+/// Stderr line when no positional id was supplied.
+pub const show_id_required = "tk show: an item ID argument is required";
+
+/// Stderr line for non-transient Repository Store read failures. The caller
+/// appends `"\n{s}\n"` for the underlying `@errorName`.
+pub const show_read_failed = "tk show: failed to read Repository Store";
+
+/// Stderr line when allocation fails during a `tk show` Repository Store read.
+pub const show_out_of_memory = "tk show: out of memory";
+
+/// Stderr line for busy/locked Repository Store reads.
+pub const show_store_busy_retry = "tk show: Repository Store is busy; retry the command";
+
+// `tk show` — section headers.
+
+/// Section header for the item description body.
+pub const show_section_description = "DESCRIPTION";
+
+/// Section header for the Epic parent of a Ticket.
+pub const show_section_parent = "PARENT";
+
+/// Section header for children of an Epic.
+pub const show_section_tickets = "TICKETS";
+
+/// Section header for unresolved items blocking this item.
+pub const show_section_blocked_by = "BLOCKED BY";
+
+/// Section header for items this item is blocking.
+pub const show_section_blocking = "BLOCKING";
+
+/// Section header for unresolved external blockers.
+pub const show_section_external_blockers = "EXTERNAL BLOCKERS";
+
 // `tk next` — Repository Store reads.
 
 /// Stderr line when no Repository Store exists for the current repository.
