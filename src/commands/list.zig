@@ -20,7 +20,6 @@ pub const meta: cli.CommandMeta = .{
 
 const params = clap.parseParamsComptime(
     \\-h, --help  Display this help and exit.
-    \\--all       Include done items.
     \\--ready     Show ready Tickets.
     \\--blocked   Show blocked Tickets.
     \\--active    Show active Tickets and Epics.
@@ -72,7 +71,6 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
 
 fn parseOptions(deps: cli.Deps, args: anytype) ?repository.ListOptions {
     const view_count: u8 =
-        @as(u8, @intFromBool(args.all != 0)) +
         @as(u8, @intFromBool(args.ready != 0)) +
         @as(u8, @intFromBool(args.blocked != 0)) +
         @as(u8, @intFromBool(args.active != 0));
@@ -85,9 +83,7 @@ fn parseOptions(deps: cli.Deps, args: anytype) ?repository.ListOptions {
         return null;
     }
 
-    const view: repository.ListView = if (args.all != 0)
-        .all
-    else if (args.ready != 0)
+    const view: repository.ListView = if (args.ready != 0)
         .ready
     else if (args.blocked != 0)
         .blocked
@@ -115,7 +111,6 @@ fn writeHelp(deps: cli.Deps) !void {
         \\
         \\Options:
         \\  -h, --help  Display this help and exit.
-        \\  --all       Include done items.
         \\  --ready     Show ready Tickets.
         \\  --blocked   Show blocked Tickets.
         \\  --active    Show active Tickets and Epics.
@@ -187,11 +182,6 @@ fn emptyMessage(options: repository.ListOptions) []const u8 {
             .local => messages.list_empty_local,
             .remote => messages.list_empty_remote,
             .any => messages.list_empty_default,
-        },
-        .all => switch (options.origin) {
-            .local => messages.list_empty_local,
-            .remote => messages.list_empty_remote,
-            .any => messages.list_empty_all,
         },
         .ready => messages.list_empty_ready,
         .blocked => messages.list_empty_blocked,
@@ -450,7 +440,7 @@ test "list: --blocked --remote promotes a matching child when Origin hides its E
     try std.testing.expectEqualStrings("", h.stderr());
 }
 
-test "list: --all renders done items and counts rendered statuses" {
+test "list: default view excludes done items" {
     const gpa = std.testing.allocator;
     var store = try TmpStore.init(gpa, "project");
     defer store.deinit(gpa);
@@ -476,7 +466,7 @@ test "list: --all renders done items and counts rendered statuses" {
     try TmpStore.insertFixtureItem(conn, .{ .id = "active", .display = "project-2", .title = "Active work", .status = "active", .created_seq = 2 });
     try TmpStore.insertFixtureItem(conn, .{ .id = "done", .display = "project-3", .title = "Done work", .status = "done", .created_seq = 3 });
 
-    var h = Harness.initWith(gpa, &.{"--all"}, .{ .cwd = cwd });
+    var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
 
@@ -484,9 +474,8 @@ test "list: --all renders done items and counts rendered statuses" {
     try std.testing.expectEqualStrings(
         \\○ project-1 ● P2 Open work
         \\◐ project-2 ● P2 Active work
-        \\✓ project-3 ● P2 Done work
         \\--------------------------------------------------------------------------------
-        \\Total: 3 items (1 open, 1 active, 1 done)
+        \\Total: 2 items (1 open, 1 active)
         \\
         \\Status: ○ open  ◐ active  ✓ done
         \\

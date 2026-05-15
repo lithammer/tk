@@ -52,8 +52,8 @@ The first paragraph becomes the title. Later paragraphs become the body.
 ## Read
 
 ```sh
-tk list [--all | --ready | --blocked | --active] [--local | --remote]
-tk next [--all]
+tk list [--ready | --blocked | --active] [--local | --remote]
+tk next
 tk show [id]
 ```
 
@@ -68,13 +68,14 @@ tk show [id]
   normally inferred from the Display ID shape.
 - Top-level rows are ordered by creation order. Each Epic's child Tickets are
   ordered by creation order. Priority is displayed but does not sort `tk list`.
-- `tk list` defaults to open and active items. `--all` includes done items and,
-  once scoped list defaults are implemented, ignores the active Workspace Scope.
-  It preserves the normal List Tree regardless of mixed Epic and child statuses.
-- `--ready` shows only open Tickets with no unresolved Dependencies or External Blockers, keeping the tree shape and including non-empty Epics as containers. Active Tickets are not ready.
+- `tk list` defaults to open and active items. Done-item browsing is deferred
+  until there is a concrete workflow for limiting or windowing old completed
+  work.
+- Whether `tk list` defaults to Workspace Scope is deferred from v1.
+- `--ready` shows only open Tickets with no unresolved Dependencies or External Blockers, keeping the tree shape and including non-empty Epics as containers. Active Tickets are not ready. Parent Epic status does not hide otherwise ready child Tickets.
 - `--blocked` shows open or active Tickets with unresolved Dependencies or External Blockers, keeping the tree shape and including non-empty Epics as containers. Epics are not selected as blocked work in v1.
 - `--active` shows active Tickets and Epics, keeping the tree shape and including Epics as containers for active child Tickets even when the Epic itself is not active.
-- `--all`, `--ready`, `--blocked`, and `--active` are mutually exclusive.
+- `--ready`, `--blocked`, and `--active` are mutually exclusive.
 - `--local` shows only Local Tickets and Local Epics.
 - `--remote` shows only items that have been promoted.
 - `--local` and `--remote` are mutually exclusive and may be combined with one of the readiness filters.
@@ -117,7 +118,26 @@ An empty `tk list` result is exit code `0`. The default view prints
 `No ready items.`, `No blocked items.`, `No active items.`, `No local items.`,
 or `No remote items.`
 
-`tk next` selects only ready Tickets, never Epics. It picks the ready Ticket with lowest local-only Priority, then oldest creation order, within the active Workspace Scope. `--all` ignores Workspace Scope.
+`tk next` selects only ready Tickets, never Epics. It picks the ready Ticket
+with lowest local-only Priority, then lowest Repository Store `created_seq`,
+within the active Workspace Scope. Backend Tickets use local import order for
+this tie break, not backend-native creation time. Ticket Kind does not affect
+ordering. Selection is deterministic and does not randomize among candidates.
+Assignees are not readiness or ordering inputs; Assignee support is deferred
+and may be omitted entirely.
+
+`tk next` does not explain skipped candidates or ranking reasons. Use `tk list
+--ready`, `tk list --blocked`, or `tk show` for inspection.
+
+`tk next` does not filter by Origin. Local Tickets and Backend Tickets compete
+in the same ready-work ordering.
+
+`tk next` does not use Mutation Log, Mutation Failure, or Sync Cursor state as
+readiness inputs, and it does not emit sync-health warnings. Sync health is
+inspected through `tk sync log`.
+
+`tk next` is read-only. It does not change Item Status; `tk worktree start`
+starts work and marks a Ticket active by default.
 
 If there is no active Workspace Scope, `tk next` searches all ready Tickets.
 If Workspace Scope is a Ticket, `tk next` selects that Ticket only when it is
@@ -126,14 +146,30 @@ within that Epic. Workspace Scope resolves through the same Display ID and
 Alias resolver as item ID arguments, so Promotion does not break old scope
 references.
 
-The plain output row shape is:
+`tk next` does not accept a positional scope argument. Scoped selection comes
+only from active Workspace Scope.
+
+Parent Epic status does not hide otherwise ready child Tickets. A ready child
+Ticket under a done Epic may still be selected. When scoped to an Epic, `tk
+next` applies readiness to each direct child Ticket; Dependencies and External
+Blockers on the Epic itself do not block those children.
+
+The plain output shape is one Display ID, so scripts can use
+`id=$(tk next)` and fetch details through `tk show "$id"`:
 
 ```text
-<display-id> <priority> <title>
+<display-id>
 ```
 
-If no ready Ticket matches, `tk next` exits `1` and writes
-`tk next: no ready Tickets` to stderr.
+`tk next` has no JSON or structured-output mode in v1. The Display ID line is
+the machine interface.
+
+If no ready Ticket matches repository-wide selection, `tk next` exits `1` and
+writes `tk next: no ready Tickets` to stderr. If Workspace Scope was applied,
+it instead writes `tk next: no ready Tickets in Workspace Scope`.
+
+`tk next` is flagless in v1. Global ready-work inspection uses `tk list
+--ready`.
 
 `tk show [id]` shows one Ticket or Epic. If `id` is omitted, it shows the current Workspace Scope target.
 

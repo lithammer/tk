@@ -95,9 +95,6 @@ pub const list_missing_store = "tk list: Repository Store not initialized; run '
 /// Stdout line for an empty default List Tree.
 pub const list_empty_default = "No open or active items.";
 
-/// Stdout line when `tk list --all` finds no items.
-pub const list_empty_all = "No items.";
-
 /// Stdout line when `tk list --ready` finds no ready items.
 pub const list_empty_ready = "No ready items.";
 
@@ -114,7 +111,7 @@ pub const list_empty_local = "No local items.";
 pub const list_empty_remote = "No remote items.";
 
 /// Stderr line when mutually exclusive readiness filters are combined.
-pub const list_conflicting_readiness_filters = "tk list: choose at most one of --all, --ready, --blocked, or --active";
+pub const list_conflicting_readiness_filters = "tk list: choose at most one of --ready, --blocked, or --active";
 
 /// Stderr line when both Origin filters are combined.
 pub const list_conflicting_origin_filters = "tk list: choose at most one of --local or --remote";
@@ -141,8 +138,11 @@ pub const list_status_label = "Status: ";
 /// Stderr line when no Repository Store exists for the current repository.
 pub const next_missing_store = "tk next: Repository Store not initialized; run 'tk init'";
 
-/// Stderr line when no ready Ticket matches the current Workspace Scope.
+/// Stderr line when no ready Ticket exists in repository-wide selection.
 pub const next_no_ready_ticket = "tk next: no ready Tickets";
+
+/// Stderr line when no ready Ticket matches the active Workspace Scope.
+pub const next_no_ready_ticket_in_scope = "tk next: no ready Tickets in Workspace Scope";
 
 /// Stderr line when Workspace Scope no longer resolves to a Ticket or Epic.
 pub const next_scope_not_found = "tk next: Workspace Scope does not resolve to a Ticket or Epic";

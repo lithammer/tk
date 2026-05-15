@@ -18,7 +18,6 @@ pub const meta: cli.CommandMeta = .{
 
 const params = clap.parseParamsComptime(
     \\-h, --help  Display this help and exit.
-    \\--all       Ignore Workspace Scope.
     \\
 );
 
@@ -52,20 +51,24 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
     };
     defer store.close();
 
-    const outcome = repository.nextReadyTicket(store, deps.gpa, .{
-        .ignore_scope = res.args.all != 0,
-    }) catch |err| {
+    // Workspace Scope discovery has not landed yet, so the command currently
+    // performs repository-wide selection. Keep the scoped diagnostic seam local
+    // to this renderer for the future worktree slice.
+    const applied_scope = false;
+    const outcome = repository.nextReadyTicket(store, deps.gpa, .{}) catch |err| {
         renderStorageError(deps, err);
         return 1;
     };
     switch (outcome) {
         .ticket => |ticket| {
             defer ticket.deinit(deps.gpa);
-            try deps.stdout.print("{s} {s} {s}\n", .{ ticket.display_id, ticket.priority.text(), ticket.title });
+            try deps.stdout.print("{s}\n", .{ticket.display_id});
             return 0;
         },
         .no_ready_ticket => {
-            deps.stderr.writeAll(messages.next_no_ready_ticket ++ "\n") catch {};
+            const message = if (applied_scope) messages.next_no_ready_ticket_in_scope else messages.next_no_ready_ticket;
+            deps.stderr.writeAll(message) catch {};
+            deps.stderr.writeAll("\n") catch {};
             return 1;
         },
         .scope_not_found => {
@@ -84,7 +87,6 @@ fn writeHelp(deps: cli.Deps) !void {
         \\
         \\Options:
         \\  -h, --help  Display this help and exit.
-        \\  --all       Ignore Workspace Scope.
         \\
     );
 }
@@ -133,7 +135,7 @@ test "next: prints the first ready Ticket from the Repository Store" {
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
 
         try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
-        try std.testing.expectEqualStrings("project-1 P2 Write next command\n", h.stdout());
+        try std.testing.expectEqualStrings("project-1\n", h.stdout());
         try std.testing.expectEqualStrings("", h.stderr());
     }
 }
@@ -163,6 +165,16 @@ test "next: returns exit 1 when no ready Ticket exists" {
     try std.testing.expectEqual(@as(u8, 1), try run(h.deps(), &h.iter));
     try std.testing.expectEqualStrings("", h.stdout());
     try std.testing.expectEqualStrings(messages.next_no_ready_ticket ++ "\n", h.stderr());
+}
+
+test "next: rejects explicit scope arguments" {
+    const gpa = std.testing.allocator;
+    var h = Harness.init(gpa, &.{"tk-1"});
+    defer h.deinit();
+
+    try std.testing.expectEqual(@as(u8, 2), try run(h.deps(), &h.iter));
+    try std.testing.expectEqualStrings("", h.stdout());
+    try std.testing.expectEqualStrings("Invalid argument 'tk-1'\n", h.stderr());
 }
 
 test "next: reports missing store after successful Git discovery" {

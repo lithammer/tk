@@ -135,7 +135,7 @@ test "smoke: tk add creates a local Ticket from a message file" {
         std.debug.print("\ntk next unexpected exit {any}\nstdout:\n{s}\nstderr:\n{s}\n", .{ tk_next.term, tk_next.stdout, tk_next.stderr });
         return error.SmokeNextFailed;
     }
-    try std.testing.expectEqualStrings("project-1 P2 Investigate flaky login retry\n", tk_next.stdout);
+    try std.testing.expectEqualStrings("project-1\n", tk_next.stdout);
     try std.testing.expectEqualStrings("", tk_next.stderr);
 }
 

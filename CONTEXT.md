@@ -241,7 +241,9 @@ _Avoid_: ticket, tickets
 - **Labels** are descriptive facets and do not replace **Priority**, **Ticket Kind**, **Epic** membership, **Item Status**, **Dependencies**, or **External Blockers**.
 - **Labels** are deferred from v1.
 - A **Ticket** has exactly one **Item Status**.
-- A **Ticket** may have zero or more **Assignees**.
+- **Assignee** support is deferred from v1 and may be omitted entirely.
+- If **Assignees** are introduced, a **Ticket** may have zero or more
+  **Assignees**.
 - `active` **Item Status** means the **Ticket** or **Epic** is currently being worked and does not imply assignment.
 - An **Epic** has exactly one **Item Status**.
 - An **Epic** is only `done` after explicit closure.
@@ -253,9 +255,14 @@ _Avoid_: ticket, tickets
 - **Dependency** is distinct from **Epic** membership.
 - A **Ticket** or **Epic** may have zero or more **External Blockers**.
 - A **Ticket** is ready only when its **Item Status** is `open`, it has no unresolved **Dependencies**, and it has no **External Blockers**.
+- Parent **Epic** **Item Status** does not change child **Ticket** readiness;
+  an open child **Ticket** under a done **Epic** remains ready when otherwise
+  unblocked.
+- Parent **Epic** **Dependencies** and **External Blockers** do not change
+  child **Ticket** readiness.
 - A **Workspace** may have zero or one **Workspace Scope**.
 - A **Workspace Scope** references exactly one **Ticket** or **Epic**.
-- **`tk`** commands inside a scoped **Workspace** default to the current **Ticket** or **Epic**.
+- Whether **`tk list`** defaults to **Workspace Scope** is deferred from v1.
 - **Workspace Scope** is local-only and is not synced to backends.
 - **Workspace Scope** is stored in **Worktree Config** in v1.
 - Non-git **Workspace Scope** storage is deferred from v1.
@@ -276,7 +283,7 @@ _Avoid_: ticket, tickets
 - **`tk worktree clear`** removes configured **Workspace Scope** without disabling **Inferred Workspace Scope**.
 - **Prime** provides agent workflow guidance, essential commands, and close-out reminders.
 - v1 **Prime** prints static command-owned Markdown embedded from `src/commands/prime.md` with Zig `@embedFile`.
-- Scoped **`tk`** command output identifies the active **Workspace Scope**.
+- Commands that inspect **Workspace Scope** identify the active **Workspace Scope**.
 - A **Repository Store** is shared by all **Workspaces** for the same version-control repository.
 - A **Workspace Scope** belongs to one **Workspace**, not the **Repository Store**.
 - A **Repository Store** is untracked local state by default.
@@ -340,9 +347,31 @@ _Avoid_: ticket, tickets
 - The **Repository Store** keeps current **Ticket** and **Epic** state.
 - The **Mutation Log** records replayable backend intent and is not the primary
   read model or a general local edit history.
-- **`tk next`** selects the ready **Ticket** with the lowest **Priority**, then oldest creation order, within the active **Workspace Scope**.
-- **`tk list --all`** ignores the active **Workspace Scope** once scoped list
-  defaults are implemented.
+- **`tk next`** selects the ready **Ticket** with the lowest **Priority**, then
+  lowest `created_seq`, within the active **Workspace Scope**.
+- **`tk next`** is deterministic and does not randomize among candidates.
+- **Ticket Kind** does not affect **`tk next`** ordering.
+- **Assignees** do not affect **`tk next`** readiness or ordering.
+- **`tk next`** does not explain skipped candidates or ranking reasons.
+- **`tk next`** has no JSON or structured-output mode in v1.
+- When there is no active **Workspace Scope**, **`tk next`** searches ready **Tickets** across the **Repository Store**.
+- When **Workspace Scope** references an **Epic**, **`tk next`** searches only
+  directly contained **Tickets**.
+- When **Workspace Scope** references a **Ticket** that is not ready,
+  **`tk next`** does not fall back to other ready **Tickets**.
+- **`tk next`** does not filter by **Origin**.
+- **`tk next`** does not use **Mutation Log**, **Mutation Failure**, or **Sync
+  Cursor** state as readiness inputs.
+- **`tk next`** does not emit sync-health warnings.
+- **`tk next`** does not change **Item Status**; selecting ready work is
+  separate from starting work.
+- **`tk next`** has no explicit scope argument; **Workspace Scope** is the
+  only scoped selection input.
+- **Repository Store** supports scoped **`tk next`** selection before command
+  wiring for **Workspace Scope** discovery lands.
+- **`tk next`** is flagless in v1.
+- Done-item browsing is deferred until there is a concrete workflow for old
+  completed work.
 - **List Tree** renders **Epics** as top-level rows, child **Tickets** nested under their **Epic**, and unparented **Tickets** as top-level rows.
 - **List Tree** uses decorative tree glyphs and compact status, priority, and kind markers without column alignment.
 - **List Tree** status markers render **Item Status** as `○` for `open`, `◐`
@@ -391,8 +420,8 @@ _Avoid_: ticket, tickets
 > **Dev:** "How should an agent recover workflow context after compaction or a new session?"
 > **Domain expert:** "Run **Prime** to get Ticket's agent workflow guidance and essential commands."
 >
-> **Dev:** "How does an agent know whether **`tk list`** returned global or scoped results?"
-> **Domain expert:** "Scoped output identifies the active **Workspace Scope**, and global output is requested explicitly."
+> **Dev:** "How does an agent inspect the active **Workspace Scope**?"
+> **Domain expert:** "It runs **`tk worktree`**, which reports the **Workspace Scope** and **Workspace Scope Source**."
 >
 > **Dev:** "Should each git worktree have its own ticket database?"
 > **Domain expert:** "No — all **Workspaces** for a repository share one **Repository Store**, while each **Workspace** has its own **Workspace Scope**."
@@ -449,7 +478,7 @@ _Avoid_: ticket, tickets
 > **Domain expert:** "No — **Epic** closure is explicit because completion criteria may exist outside the current child tickets."
 >
 > **Dev:** "Does an `active` **Ticket** have to be assigned to someone?"
-> **Domain expert:** "No — `active` means current work; **Assignees** are tracked separately."
+> **Domain expert:** "No — `active` means current work; **Assignee** support is deferred and may be omitted entirely."
 
 ## Flagged ambiguities
 

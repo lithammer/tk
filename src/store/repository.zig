@@ -83,7 +83,6 @@ pub fn freeListRows(gpa: std.mem.Allocator, rows: []ListRow) void {
 /// Item-selection mode for `tk list`.
 pub const ListView = enum {
     default,
-    all,
     ready,
     blocked,
     active,
@@ -119,16 +118,13 @@ pub const ListOptions = struct {
 /// The Repository Store owns readiness, Workspace Scope interpretation after
 /// the caller supplies a scope argument, Priority ordering, and creation-order
 /// tie breaks. The command renderer owns the compact stdout row, so this
-/// payload is narrowed to the three fields the row prints.
+/// payload is narrowed to the Display ID the command prints.
 pub const NextTicket = struct {
     display_id: []u8,
-    priority: Priority,
-    title: []u8,
 
     /// Free text copied out of SQLite's statement-owned row buffers.
     pub fn deinit(self: NextTicket, gpa: std.mem.Allocator) void {
         gpa.free(self.display_id);
-        gpa.free(self.title);
     }
 };
 
@@ -145,7 +141,6 @@ pub const NextScope = union(enum) {
 /// Read options for selecting the next ready Ticket.
 pub const NextOptions = struct {
     scope: NextScope = .none,
-    ignore_scope: bool = false,
 };
 
 /// Result of selecting the next ready Ticket.
@@ -320,7 +315,6 @@ const list_rows_sql = annotated_current_items_cte ++
     \\    select *,
     \\           case ?1
     \\             when 'default' then status in ('open', 'active')
-    \\             when 'all' then 1
     \\             when 'ready' then item_class = 'ticket'
     \\                               and status = 'open'
     \\                               and not has_unresolved_dependency
@@ -361,7 +355,7 @@ const list_rows_sql = annotated_current_items_cte ++
 ///   `?1` — scope mode: `all`, `ticket`, or `epic`.
 ///   `?2` — internal stable ID for the scoped Ticket or Epic.
 const next_ready_ticket_sql = annotated_current_items_cte ++ "\n" ++
-    \\select display_value, priority, title
+    \\select display_value
     \\  from annotated
     \\ where item_class = 'ticket'
     \\   and status = 'open'
@@ -410,16 +404,14 @@ pub fn nextReadyTicket(store: Store, gpa: std.mem.Allocator, options: NextOption
     var resolved_scope: ?ResolvedItemRef = null;
     defer if (resolved_scope) |scope| scope.deinit(gpa);
 
-    if (!options.ignore_scope) {
-        switch (options.scope) {
-            .none => {},
-            .display_arg => |display_arg| {
-                const resolved = (try resolveItemRef(store, gpa, display_arg)) orelse return .scope_not_found;
-                resolved_scope = resolved;
-                scope_id = resolved.id;
-                scope_mode = resolved.item_class.text();
-            },
-        }
+    switch (options.scope) {
+        .none => {},
+        .display_arg => |display_arg| {
+            const resolved = (try resolveItemRef(store, gpa, display_arg)) orelse return .scope_not_found;
+            resolved_scope = resolved;
+            scope_id = resolved.id;
+            scope_mode = resolved.item_class.text();
+        },
     }
 
     if (try store.conn.row(next_ready_ticket_sql, .{ scope_mode, scope_id })) |r| {
@@ -556,12 +548,8 @@ fn resolveItemRef(store: Store, gpa: std.mem.Allocator, display_arg: []const u8)
 
 fn nextTicketFromSql(gpa: std.mem.Allocator, row: zqlite.Row) NextError!NextTicket {
     const display_id = try gpa.dupe(u8, row.text(0));
-    errdefer gpa.free(display_id);
-    const title = try gpa.dupe(u8, row.text(2));
     return .{
         .display_id = display_id,
-        .priority = enumFromText(Priority, row.text(1)),
-        .title = title,
     };
 }
 
@@ -657,6 +645,222 @@ test "nextReadyTicket: selects ready Tickets by Priority then creation order" {
     }
 }
 
+test "nextReadyTicket: selects backend Tickets regardless of Mutation state" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "local",
+        .display = "tk-1",
+        .title = "Local ready",
+        .priority = "P1",
+        .created_seq = 1,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "backend",
+        .display = "GH#9",
+        .title = "Backend ready",
+        .priority = "P0",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "9",
+        .created_seq = 2,
+    });
+    try conn.exec(
+        \\insert into mutations(
+        \\  sequence, mutation_type, item_id, item_class, payload_json, state,
+        \\  failure_json, created_at, state_changed_at
+        \\)
+        \\values (
+        \\  1, 'update_ticket', 'backend', 'ticket', '{}', 'failed', '{}',
+        \\  '2026-05-09T00:00:00.000Z', '2026-05-09T00:00:00.000Z'
+        \\)
+    , .{});
+
+    const outcome = try nextReadyTicket(store, gpa, .{});
+    switch (outcome) {
+        .ticket => |ticket| {
+            defer ticket.deinit(gpa);
+            try std.testing.expectEqualStrings("GH#9", ticket.display_id);
+        },
+        else => return error.UnexpectedOutcome,
+    }
+}
+
+test "nextReadyTicket: breaks Priority ties by created_seq across Origins" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "backend",
+        .display = "GH#9",
+        .title = "Imported first",
+        .priority = "P1",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "9",
+        .created_seq = 1,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "local",
+        .display = "tk-1",
+        .title = "Local second",
+        .priority = "P1",
+        .created_seq = 2,
+    });
+
+    const outcome = try nextReadyTicket(store, gpa, .{});
+    switch (outcome) {
+        .ticket => |ticket| {
+            defer ticket.deinit(gpa);
+            try std.testing.expectEqualStrings("GH#9", ticket.display_id);
+        },
+        else => return error.UnexpectedOutcome,
+    }
+}
+
+test "nextReadyTicket: ignores Ticket Kind for ordering" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "task",
+        .display = "tk-1",
+        .title = "Earlier task",
+        .ticket_kind = "task",
+        .priority = "P1",
+        .created_seq = 1,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "bug",
+        .display = "tk-2",
+        .title = "Later bug",
+        .ticket_kind = "bug",
+        .priority = "P1",
+        .created_seq = 2,
+    });
+
+    const outcome = try nextReadyTicket(store, gpa, .{});
+    switch (outcome) {
+        .ticket => |ticket| {
+            defer ticket.deinit(gpa);
+            try std.testing.expectEqualStrings("tk-1", ticket.display_id);
+        },
+        else => return error.UnexpectedOutcome,
+    }
+}
+
+test "nextReadyTicket: selects a ready child Ticket under a done Epic" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "done-epic",
+        .display = "tk-1",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .title = "Closed container",
+        .status = "done",
+        .created_seq = 1,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "ready-child",
+        .display = "tk-2",
+        .title = "Ready child",
+        .priority = "P1",
+        .container_id = "done-epic",
+        .created_seq = 2,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "later-ready",
+        .display = "tk-3",
+        .title = "Later ready",
+        .priority = "P2",
+        .created_seq = 3,
+    });
+
+    const outcome = try nextReadyTicket(store, gpa, .{});
+    switch (outcome) {
+        .ticket => |ticket| {
+            defer ticket.deinit(gpa);
+            try std.testing.expectEqualStrings("tk-2", ticket.display_id);
+        },
+        else => return error.UnexpectedOutcome,
+    }
+}
+
+test "nextReadyTicket: scoped Epic blockers do not block ready children" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "epic",
+        .display = "tk-1",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .title = "Blocked Epic",
+        .created_seq = 1,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "child",
+        .display = "tk-2",
+        .title = "Ready child",
+        .priority = "P2",
+        .container_id = "epic",
+        .created_seq = 2,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "blocker",
+        .display = "tk-3",
+        .title = "Epic blocker",
+        .priority = "P4",
+        .created_seq = 3,
+    });
+    try TmpStore.insertDependency(conn, "blocker", "epic");
+    try TmpStore.insertExternalBlocker(conn, "external-blocker", "epic", null);
+
+    const outcome = try nextReadyTicket(store, gpa, .{ .scope = .{ .display_arg = "tk-1" } });
+    switch (outcome) {
+        .ticket => |ticket| {
+            defer ticket.deinit(gpa);
+            try std.testing.expectEqualStrings("tk-2", ticket.display_id);
+        },
+        else => return error.UnexpectedOutcome,
+    }
+}
+
 test "nextReadyTicket: applies scoped Display ID and Alias selection" {
     const gpa = std.testing.allocator;
     const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
@@ -717,18 +921,6 @@ test "nextReadyTicket: applies scoped Display ID and Alias selection" {
         .ticket => |ticket| {
             defer ticket.deinit(gpa);
             try std.testing.expectEqualStrings("GH#42", ticket.display_id);
-        },
-        else => return error.UnexpectedOutcome,
-    }
-
-    const ignored_scope = try nextReadyTicket(store, gpa, .{
-        .scope = .{ .display_arg = "tk-1" },
-        .ignore_scope = true,
-    });
-    switch (ignored_scope) {
-        .ticket => |ticket| {
-            defer ticket.deinit(gpa);
-            try std.testing.expectEqualStrings("tk-3", ticket.display_id);
         },
         else => return error.UnexpectedOutcome,
     }

@@ -567,9 +567,10 @@ The command surface intentionally remains narrow: no `--bug`, `--epic`,
 
 `tk list` opens the existing Repository Store and renders the global List Tree
 with plain text tree glyphs. The default view includes open and active rows.
-`--all`, `--ready`, `--blocked`, and `--active` are mutually exclusive
-readiness filters; `--local` and `--remote` are mutually exclusive stored
-Origin filters and may compose with one readiness filter. The read API in
+`--ready`, `--blocked`, and `--active` are mutually exclusive readiness
+filters; `--local` and `--remote` are mutually exclusive stored Origin filters
+and may compose with one readiness filter. Done-item browsing is deferred until
+there is a concrete workflow for limiting or windowing old completed work. The read API in
 `store.repository.listRows` pushes readiness, blocking, Origin filtering, and
 Epic container retention into SQL, while `src/commands/list.zig` owns final
 tree rendering and footer counts.
@@ -577,8 +578,10 @@ tree rendering and footer counts.
 Readiness is derived from current Repository Store state. Ready work is open
 Tickets without unresolved Dependencies or External Blockers. Blocked work is
 open or active Tickets with an unresolved Dependency or External Blocker; Epics
-may render as containers but are not selected as blocked work. Dependencies
-block only while the Blocking Item is not `done`.
+may render as containers but are not selected as blocked work. Parent Epic
+status does not change child Ticket readiness, so an otherwise ready child
+under a done Epic still matches `--ready`. Dependencies block only while the
+Blocking Item is not `done`.
 
 `tk list` output uses `○`, `◐`, and `✓` for `open`, `active`, and `done`.
 Ticket rows render `● <priority>` plus `[bug]` for bug Tickets; task Tickets
@@ -590,19 +593,43 @@ reads succeed with exit code `0` and print the filter-specific empty message.
 from current state. Ready work is the same Repository Store concept used by
 `tk list --ready`: Item Status `open`, no unresolved Dependencies, and no
 External Blockers. The Repository Store read API owns Priority ordering,
-creation-order tie breaks, and scoped selection by Display ID or Alias. Because
-Workspace Scope discovery has not landed yet, the command currently passes no
-scope and therefore searches all ready Tickets; `--all` is accepted now and
-will ignore Workspace Scope once the worktree slice supplies it.
+`created_seq` tie breaks, and scoped selection by Display ID or Alias. Backend
+Tickets use local import order for that tie break, not backend-native creation
+time. Selection is deterministic and does not randomize among candidates.
+Ticket Kind does not affect ordering. Assignees are not readiness or ordering
+inputs; Assignee support is deferred and may be omitted entirely. `tk next`
+does not explain skipped candidates or ranking reasons; inspection belongs to
+`tk list --ready`, `tk list --blocked`, and `tk show`. `tk next` does not
+filter by Origin; Local Tickets and Backend Tickets compete in the same
+ready-work ordering. Mutation Log, Mutation Failure, and Sync Cursor state are
+not readiness inputs for `tk next`; sync health belongs to `tk sync log`, not
+`tk next` warnings. `tk next` is read-only and does not change Item Status; `tk
+worktree start` owns starting work and marking a Ticket active by default.
+Because Workspace Scope discovery has not landed yet, the command currently
+passes no scope and therefore searches all ready Tickets. `tk next` is flagless
+in v1 and accepts no positional scope argument; global ready-work inspection
+uses `tk list --ready`. Whether `tk list` defaults to Workspace Scope is
+deferred from v1.
+The Repository Store API already supports scoped ready-Ticket selection by
+Display ID or Alias so the future worktree slice can supply Workspace Scope
+without changing selection semantics.
+Parent Epic status, Dependencies, and External Blockers do not hide otherwise
+ready child Tickets.
 
-`tk next` renders one flush-left line:
+`tk next` renders one flush-left Display ID. The selected Ticket's Priority and
+title stay out of stdout so agents and scripts can use `id=$(tk next)` and read
+the full item through `tk show "$id"`. There is no JSON or structured-output
+mode in v1; the Display ID line is the machine interface:
 
 ```text
-<display-id> <priority> <title>
+<display-id>
 ```
 
-If no ready Ticket matches, `tk next` exits `1` and writes
-`tk next: no ready Tickets` to stderr.
+If no ready Ticket matches repository-wide selection, `tk next` exits `1` and
+writes `tk next: no ready Tickets` to stderr. Once Workspace Scope discovery
+lands, scoped empty selection uses
+`tk next: no ready Tickets in Workspace Scope` so the diagnostic does not imply
+the whole Repository Store has no ready work.
 
 ## Next Slices
 
@@ -634,9 +661,9 @@ Continue in small vertical slices:
 ## Deferred
 
 - Dynamic `tk prime` sections.
-- Comments, labels, and assignees. Labels remain descriptive facets only and
-  must not replace Priority, Ticket Kind, Epic membership, Item Status, or
-  blocking concepts.
+- Comments, labels, and assignees. Assignee support is not assumed to land.
+  Labels remain descriptive facets only and must not replace Priority, Ticket
+  Kind, Epic membership, Item Status, or blocking concepts.
 - Custom local Display ID prefix configuration, such as `tk init --prefix`,
   unless the repository-basename default proves too implicit before item
   creation lands.

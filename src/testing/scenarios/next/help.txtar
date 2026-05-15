@@ -8,7 +8,6 @@ Usage:
 
 Options:
   -h, --help  Display this help and exit.
-  --all       Ignore Workspace Scope.
 -- expected/stderr --
 -- expected/exit --
 0

@@ -8,7 +8,6 @@ Usage:
 
 Options:
   -h, --help  Display this help and exit.
-  --all       Include done items.
   --ready     Show ready Tickets.
   --blocked   Show blocked Tickets.
   --active    Show active Tickets and Epics.
