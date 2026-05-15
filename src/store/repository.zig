@@ -526,16 +526,32 @@ fn listRowFromSql(gpa: std.mem.Allocator, row: zqlite.Row) ListError!ListRow {
     };
 }
 
-const ResolvedItemRef = struct {
+/// A Display ID or Alias resolved to a stable internal ID and Item class.
+///
+/// Returned by `resolveItemRef` and `resolveAsEpic`. The caller owns `id`
+/// and must free it with `deinit` in the switch arm that receives the value.
+pub const ResolvedItemRef = struct {
     id: []u8,
     item_class: ItemClass,
 
-    fn deinit(self: ResolvedItemRef, gpa: std.mem.Allocator) void {
+    /// Free the internal ID string allocated by the Repository Store resolver.
+    pub fn deinit(self: ResolvedItemRef, gpa: std.mem.Allocator) void {
         gpa.free(self.id);
     }
 };
 
-fn resolveItemRef(store: Store, gpa: std.mem.Allocator, display_arg: []const u8) NextError!?ResolvedItemRef {
+/// Errors that `resolveItemRef` and `resolveAsEpic` can return.
+///
+/// `NextError` is a superset of `ResolveError`, so callers that propagate
+/// into a `NextError` context need no conversion.
+pub const ResolveError = migrations.QueryError || zqlite.Error || error{OutOfMemory};
+
+/// Look up a Display ID or Alias in the Repository Store and return the
+/// matching stable internal ID and Item class.
+///
+/// The `item_ids` table uses a case-insensitive collation, so `TK-1` and
+/// `tk-1` resolve identically. Returns `null` when no matching row exists.
+pub fn resolveItemRef(store: Store, gpa: std.mem.Allocator, display_arg: []const u8) ResolveError!?ResolvedItemRef {
     if (try store.conn.row(resolve_item_ref_sql, .{display_arg})) |r| {
         defer r.deinit();
         return .{
@@ -544,6 +560,29 @@ fn resolveItemRef(store: Store, gpa: std.mem.Allocator, display_arg: []const u8)
         };
     }
     return null;
+}
+
+/// Outcome of resolving a Display ID or Alias that must refer to an Epic.
+///
+/// `not_an_epic` carries the resolved reference so callers can render a
+/// user-facing diagnostic that names the resolved Display ID's actual class.
+/// Each arm owns its payload; callers free `epic.id` and `not_an_epic.id`
+/// in the matching switch arm.
+pub const ResolveEpicOutcome = union(enum) {
+    epic: ResolvedItemRef,
+    not_found,
+    not_an_epic: ResolvedItemRef,
+};
+
+/// Resolve a Display ID or Alias to an Epic reference.
+///
+/// Use this for `--parent <epic-id>` validation so the deferred composite
+/// foreign key on `items(container_id, container_class)` does not surface as
+/// a raw FK error when the user supplies a Ticket's Display ID.
+pub fn resolveAsEpic(store: Store, gpa: std.mem.Allocator, display_arg: []const u8) ResolveError!ResolveEpicOutcome {
+    const resolved = (try resolveItemRef(store, gpa, display_arg)) orelse return .not_found;
+    if (resolved.item_class == .epic) return .{ .epic = resolved };
+    return .{ .not_an_epic = resolved };
 }
 
 fn nextTicketFromSql(gpa: std.mem.Allocator, row: zqlite.Row) NextError!NextTicket {
@@ -929,6 +968,119 @@ test "nextReadyTicket: applies scoped Display ID and Alias selection" {
     switch (missing_scope) {
         .scope_not_found => {},
         else => return error.UnexpectedOutcome,
+    }
+}
+
+test "resolveItemRef: returns null for an unknown Display ID" {
+    const gpa = std.testing.allocator;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    const result = try resolveItemRef(store, gpa, "missing");
+    try std.testing.expectEqual(null, result);
+}
+
+test "resolveItemRef: resolves Display IDs and Aliases case-insensitively" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    try TmpStore.insertFixtureItem(conn, .{ .id = "ticket-id", .display = "tk-1", .title = "A Ticket", .created_seq = 1 });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "epic-id",
+        .display = "tk-2",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .title = "An Epic",
+        .created_seq = 2,
+    });
+    try TmpStore.insertAlias(conn, "legacy-9", "ticket-id");
+
+    {
+        const resolved = (try resolveItemRef(store, gpa, "tk-1")) orelse return error.ExpectedResolved;
+        defer resolved.deinit(gpa);
+        try std.testing.expectEqualStrings("ticket-id", resolved.id);
+        try std.testing.expectEqual(ItemClass.ticket, resolved.item_class);
+    }
+    {
+        const resolved = (try resolveItemRef(store, gpa, "TK-1")) orelse return error.ExpectedResolved;
+        defer resolved.deinit(gpa);
+        try std.testing.expectEqualStrings("ticket-id", resolved.id);
+        try std.testing.expectEqual(ItemClass.ticket, resolved.item_class);
+    }
+    {
+        const resolved = (try resolveItemRef(store, gpa, "tk-2")) orelse return error.ExpectedResolved;
+        defer resolved.deinit(gpa);
+        try std.testing.expectEqualStrings("epic-id", resolved.id);
+        try std.testing.expectEqual(ItemClass.epic, resolved.item_class);
+    }
+    {
+        const resolved = (try resolveItemRef(store, gpa, "legacy-9")) orelse return error.ExpectedResolved;
+        defer resolved.deinit(gpa);
+        try std.testing.expectEqualStrings("ticket-id", resolved.id);
+        try std.testing.expectEqual(ItemClass.ticket, resolved.item_class);
+    }
+}
+
+test "resolveAsEpic: routes Tickets, Epics, and unknown ids" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    try TmpStore.insertFixtureItem(conn, .{ .id = "ticket-id", .display = "tk-1", .title = "A Ticket", .created_seq = 1 });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "epic-id",
+        .display = "tk-2",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .title = "An Epic",
+        .created_seq = 2,
+    });
+
+    {
+        const outcome = try resolveAsEpic(store, gpa, "tk-2");
+        switch (outcome) {
+            .epic => |ref| {
+                defer ref.deinit(gpa);
+                try std.testing.expectEqualStrings("epic-id", ref.id);
+                try std.testing.expectEqual(ItemClass.epic, ref.item_class);
+            },
+            else => return error.ExpectedEpic,
+        }
+    }
+    {
+        const outcome = try resolveAsEpic(store, gpa, "tk-1");
+        switch (outcome) {
+            .not_an_epic => |ref| {
+                defer ref.deinit(gpa);
+                try std.testing.expectEqualStrings("ticket-id", ref.id);
+                try std.testing.expectEqual(ItemClass.ticket, ref.item_class);
+            },
+            else => return error.ExpectedNotAnEpic,
+        }
+    }
+    {
+        const outcome = try resolveAsEpic(store, gpa, "missing");
+        switch (outcome) {
+            .not_found => {},
+            else => return error.ExpectedNotFound,
+        }
     }
 }
 
