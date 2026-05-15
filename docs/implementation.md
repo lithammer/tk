@@ -30,9 +30,12 @@ src/
     list.zig
     message.zig
     next.zig
+    show.zig
+    update.zig
   domain/
     display_prefix.zig
     item_class.zig
+    mutation_type.zig
     origin.zig
     priority.zig
     status.zig
@@ -45,7 +48,9 @@ src/
   store/
     diagnostic.zig
     migrations.zig
+    mutations.zig
     repository.zig
+    sequences.zig
   testing/
     arg_iter.zig
     scenarios.zig
@@ -67,10 +72,18 @@ both the Repository Store schema (migrations.zig) and the small
 across rollback boundaries.
 
 `src/store/repository.zig` owns the reusable Repository Store opener, the
-first store-facing write API (`createLocalTicket`), and current-state read APIs
-for List Tree rows and next ready Ticket selection. `src/commands/message.zig`
-owns git-commit-style message input syntax; the parsed title and body are
-domain fields, but the syntax is a command-input concern.
+store-facing write APIs (`createLocalTicket`, `updateItem`), current-state
+read APIs for List Tree rows, next ready Ticket selection, and single-item
+detail reads, and the Display ID / Alias resolver (`resolveItemRef`,
+`resolveAsEpic`). `src/store/mutations.zig` owns the typed `MutationPayload`
+tagged union and the `appendMutation` outbox helper; both Repository Store
+writes and future Backend Adapter callers append Mutations through it.
+`src/store/sequences.zig` is a thin shared allocator for the named counters
+in the `sequences` table, called by both `repository.zig` and
+`mutations.zig` so neither has to depend on the other for sequence numbers.
+`src/commands/message.zig` owns git-commit-style message input syntax for
+both `-F` and repeatable `-m`; the parsed title and body are domain fields,
+but the syntax is a command-input concern.
 
 Only add files when the slice needs them. Future modules such as `worktree/`,
 `sync/`, and `remote/` land with the slice that first needs them.
@@ -507,7 +520,7 @@ found: <path>`; do not convert a missing fixture into empty stdin.
 ## Completed Baseline
 
 The current binary implements `tk prime`, `tk init`,
-`tk add -F <file | ->`, `tk list`, and `tk next`.
+`tk add -F <file | ->`, `tk list`, `tk next`, `tk show`, and `tk update`.
 
 `tk prime` is command-owned static output embedded from
 `src/commands/prime.md`. It trims trailing whitespace, emits exactly one final
@@ -631,21 +644,140 @@ lands, scoped empty selection uses
 `tk next: no ready Tickets in Workspace Scope` so the diagnostic does not imply
 the whole Repository Store has no ready work.
 
+`tk show <id>` renders one Ticket or Epic with its full current state in a
+Beads-style layout: a `<status-glyph> <display-id> · <title>   [<facet> ·
+<STATUS>]` header where the facet is `● <priority>` for Tickets and `EPIC`
+for Epics; an `Origin: <origin>[ · Kind: <kind>]` metadata line where
+Backend items render `Origin: github (#<key>)` or `Origin: jira (<key>)`;
+a `Created: YYYY-MM-DD · Updated: YYYY-MM-DD` date line truncated from the
+stored ISO timestamps; and optional `DESCRIPTION`, `PARENT` (for Tickets)
+or `TICKETS` (for Epics), `BLOCKED BY`, `BLOCKING`, and `EXTERNAL BLOCKERS`
+sections separated by one blank line. Empty sections are omitted entirely
+to keep the layout readable for minimal items. The positional `<id>` is
+required while Workspace Scope discovery is deferred; resolved through the
+same Display ID / Alias resolver as every other item argument. Unknown id
+exits `1` with `tk show: '<id>' is not a known Display ID or Alias`.
+`BLOCKED BY` and `BLOCKING` show only unresolved Dependencies (joined Item
+Status not `done`); `EXTERNAL BLOCKERS` lists rows where `resolved_at is
+null`. Aliases are not yet rendered (no Promotion has happened in v1).
+
+`tk update <id>` is the first command that writes to the Mutation Log. It
+edits title/body, local-only Priority, and Epic membership. Argument shape:
+`-m <paragraph>...` (repeatable, git-commit-style; first paragraph is the
+title) or `-F <file | ->` (mutually exclusive with `-m`), `--priority
+P0..P4`, and `--parent <epic-id> | --no-parent` (mutually exclusive). At
+least one editing flag is required; no editing intent is a usage error.
+The positional `<id>` is required while Workspace Scope is deferred.
+`--priority` on an Epic target and `--parent` or `--no-parent` on an Epic
+target are usage errors. `--parent <id>` resolves through the same Display
+ID / Alias resolver and must resolve to an Epic; "resolves to a Ticket"
+gets a user-facing diagnostic instead of a raw FK error. The success line
+is `Updated Ticket: <display-id> - <title>` or `Updated Epic: <display-id>
+- <title>`, always emitted on a syntactically-valid update even when the
+result is field-idempotent.
+
+`tk update`'s Mutation rules: **Origin gates Mutations.** Local Ticket
+and Local Epic edits update current Repository Store state only; they
+never advance `mutation_seq`. Backend Ticket and Backend Epic title/body
+and parent edits append Mutations in the same transaction as the
+current-state write. **Priority is a Local Field** and never emits a
+Mutation, even for Backend items; `--priority` changes `items.priority`
+and bumps `updated_at` only. **`update_ticket` and `update_epic` carry
+the full `{title, body}` snapshot** in `payload_json`, never a partial
+patch, so Mutation Apply stays idempotent under retries. **Moving
+between Epics emits two Mutations** in one transaction sequenced
+remove-then-add: `remove_ticket_from_epic {epic_id: <old>}` then
+`add_ticket_to_epic {epic_id: <new>}`. `epic_id` is the internal stable
+`items.id`, not the Display ID, so Promotion cannot break the reference.
+**Field idempotence at the row level**: identical input is dropped (no
+UPDATE, no Mutation append, `updated_at` unchanged). The command still
+prints `Updated Ticket: …` on field-idempotent invocations so agents
+need not parse the diff to confirm the call was accepted.
+
+`tk update`'s message parsing reuses `src/commands/message.zig`:
+`parseFromParagraphs` joins repeatable `-m` slices with a single blank
+line and delegates to `parse`, so CRLF/CR normalization, title folding,
+and body trim semantics are identical to `tk add -F`.
+
+The typed Mutation infrastructure lives in three small modules.
+`src/domain/mutation_type.zig` exports the `MutationType` enum whose tag
+names match the SQL `check(mutation_type in (...))` spellings exactly so
+text round-trips without a separate map. `src/store/mutations.zig`
+exports `MutationPayload` — a shape-keyed tagged union (`update_title_body`
+for `update_ticket`/`update_epic`; `epic_ref` for
+`add_ticket_to_epic`/`remove_ticket_from_epic`; future slices extend it)
+plus `appendMutation(conn, gpa, mutation_type, item_id, item_class,
+payload, now)`. The function must run inside the caller's active `begin
+immediate` transaction; it allocates `mutation_seq` from
+`sequences.next`, serializes the payload to JSON via
+`std.json.Stringify.valueAlloc`, and inserts one row with state
+`pending`. `src/store/sequences.zig` exposes `next(conn, name)` — the
+shared allocator for the named counters in the `sequences` table —
+called by both `createLocalTicket` and `appendMutation` so neither has
+to depend on the other for sequence numbers.
+
+`tk show` and `tk list` share `ItemStatus.glyph()` from
+`src/domain/status.zig` so the `○`/`◐`/`✓` rendering stays in lockstep
+across commands. `src/commands/show.zig` keeps the row-shape rendering
+local (the Beads-style layout is `tk show`'s contract, not a shared
+concern); `src/commands/update.zig` shares no rendering with other
+commands.
+
+`tk show`'s store read API is `repository.showItem(store, gpa,
+display_arg) -> ?ItemDetail`. `ItemDetail` carries the item row plus
+allocator-owned `parent: ?ItemSummary`, `children: []ItemSummary` (for
+Epics), `blocked_by: []ItemSummary`, `blocking: []ItemSummary`, and
+`external_blockers: []ExternalBlockerSummary`. The read runs the main
+item lookup plus four related-row queries; it does not open a
+transaction (snapshot consistency across the related reads is a
+deliberate non-goal for a read-only display command in this slice).
+
+`tk update`'s store write API is `repository.updateItem(store, gpa,
+clock, UpdateRequest) -> UpdateError!UpdateOutcome`. The request carries
+the already-resolved internal id, the item's `ItemClass`, and optional
+edits for title, body, priority, and a `ParentOp` (`unchanged | clear |
+set: <internal-id>`). The function opens `begin immediate`, reads the
+current row inside the transaction, computes per-field deltas against
+the stored values, writes only the changed columns plus `updated_at`,
+and — for Backend-origin items — calls `mutations.appendMutation`
+sequenced remove-then-add-then-update. The current row is held with
+`defer` until function exit so OOM during the column copy-out does not
+leak the SQLite cursor before the `errdefer store.conn.rollback()`
+fires.
+
 ## Next Slices
 
 Continue in small vertical slices:
 
-1. `tk show` and `tk update`
-   - Render a single Ticket or Epic with its current fields.
-   - Edit title/body, local-only Priority, and Epic membership.
-   - `--parent` and `--no-parent` append `add_ticket_to_epic` or `remove_ticket_from_epic` Mutations; title/body edits append `update_ticket` or `update_epic`. A single invocation may emit more than one Mutation in one transaction.
+1. `tk done` — minimum lifecycle for dogfooding
+   - First lifecycle command. Marks one Ticket or Epic `done` for both
+     Local and Backend items.
+   - Resolves the positional `<id>` through the existing Display ID /
+     Alias resolver.
+   - For Backend-origin items, appends a `set_item_status` Mutation
+     carrying the new Item Status in the same transaction as the
+     current-state write.
+   - Field-idempotent: a `done` target stays `done` and emits no
+     Mutation.
+   - Adds the `set_item_status` payload variant to
+     `MutationPayload`. The Mutation Type enum already lists the value.
+   - Unblocks dogfooding: every entry in `docs/followups.md` can be
+     piped through `tk add -F -` and worked through `tk next` → `tk
+     show` → `tk update` → `tk done`, then the followups file can be
+     deleted.
 
-2. Lifecycle and blocking
-   - Implement `tk start`, `tk stop`, `tk done`, `tk block`, and `tk unblock`.
-   - Implement item-backed Dependencies and External Blocker create/resolve CLI.
-   - Enforce dependency cycle rejection.
-   - Add the blocked glyph to `tk list` rendering as a blocking/readiness
-     overlay, not as a fourth Item Status.
+2. Rest of lifecycle and blocking
+   - Implement `tk start` and `tk stop` (symmetric `set_item_status`
+     transitions to `active` / back to `open`).
+   - Implement `tk block` and `tk unblock` (item-backed Dependency edge
+     create/remove with `add_dependency` / `remove_dependency`).
+   - Implement External Blocker create/resolve CLI with
+     `add_external_blocker` / `resolve_external_blocker`.
+   - Enforce dependency cycle rejection (schema trigger already in
+     place; surface the constraint failure as a user-facing
+     diagnostic).
+   - Add the blocked glyph to `tk list` rendering as a
+     blocking/readiness overlay, not as a fourth Item Status.
 
 3. Worktree scope
    - Implement `tk worktree`, `set`, `clear`, and `start`.
