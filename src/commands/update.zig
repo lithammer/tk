@@ -76,11 +76,7 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
 
     if (res.args.message.len > 0) {
         parsed_msg = message.parseFromParagraphs(deps.gpa, res.args.message) catch |err| {
-            switch (err) {
-                error.EmptyMessage => deps.stderr.writeAll(messages.update_empty_message ++ "\n") catch {},
-                error.NulByte => deps.stderr.writeAll(messages.update_nul_message ++ "\n") catch {},
-                error.OutOfMemory => return error.OutOfMemory,
-            }
+            try renderParseError(deps, err);
             return 1;
         };
     } else if (res.args.file) |path| {
@@ -97,11 +93,7 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
         defer deps.gpa.free(raw);
 
         parsed_msg = message.parse(deps.gpa, raw) catch |err| {
-            switch (err) {
-                error.EmptyMessage => deps.stderr.writeAll(messages.update_empty_message ++ "\n") catch {},
-                error.NulByte => deps.stderr.writeAll(messages.update_nul_message ++ "\n") catch {},
-                error.OutOfMemory => return error.OutOfMemory,
-            }
+            try renderParseError(deps, err);
             return 1;
         };
     }
@@ -159,7 +151,7 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
             },
             .not_found => {
                 deps.stderr.print(
-                    messages.update_parent_not_found_prefix ++ "{s}" ++ messages.update_parent_not_found_suffix ++ "\n",
+                    messages.update_parent_prefix ++ "{s}" ++ messages.update_parent_not_found_suffix ++ "\n",
                     .{parent_display},
                 ) catch {};
                 return 1;
@@ -167,7 +159,7 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
             .not_an_epic => |ref| {
                 defer ref.deinit(deps.gpa);
                 deps.stderr.print(
-                    messages.update_parent_not_epic_prefix ++ "{s}" ++ messages.update_parent_not_epic_suffix ++ "\n",
+                    messages.update_parent_prefix ++ "{s}" ++ messages.update_parent_not_epic_suffix ++ "\n",
                     .{parent_display},
                 ) catch {};
                 return 1;
@@ -233,6 +225,14 @@ fn renderStorageError(deps: cli.Deps, err: anyerror) void {
     });
 }
 
+fn renderParseError(deps: cli.Deps, err: message.ParseError) !void {
+    switch (err) {
+        error.EmptyMessage => deps.stderr.writeAll(messages.update_empty_message ++ "\n") catch {},
+        error.NulByte => deps.stderr.writeAll(messages.update_nul_message ++ "\n") catch {},
+        error.OutOfMemory => return error.OutOfMemory,
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Tests
 // ──────────────────────────────────────────────────────────────────────────────
@@ -248,8 +248,14 @@ test "update: --help prints usage and exits 0" {
     defer h.deinit();
 
     try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
-    try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "tk update") != null);
-    try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "Usage:") != null);
+    const out = h.stdout();
+    try std.testing.expect(std.mem.indexOf(u8, out, "tk update") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Usage:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "-m, --message") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "-F, --file") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "--priority") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "--parent") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "--no-parent") != null);
     try std.testing.expectEqualStrings("", h.stderr());
 }
 
@@ -504,6 +510,88 @@ test "update: rejects --parent on an Epic" {
     }
 }
 
+test "update: rejects --no-parent on an Epic target" {
+    const gpa = std.testing.allocator;
+    var store = try TmpStore.init(gpa, "project");
+    defer store.deinit(gpa);
+
+    var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, store.toplevel_path, .{});
+    defer cwd.close(std.testing.io);
+
+    const rev_parse = try store.gitRevParseStdout(gpa);
+    defer gpa.free(rev_parse);
+
+    {
+        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
+    }
+
+    const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "e1",
+        .display = "project-1",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .title = "Epic",
+        .created_seq = 1,
+    });
+
+    {
+        var h = Harness.initWith(gpa, &.{ "project-1", "--no-parent" }, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+
+        try std.testing.expectEqual(@as(u8, 2), try run(h.deps(), &h.iter));
+        try std.testing.expectEqualStrings("", h.stdout());
+        try std.testing.expectEqualStrings(messages.update_parent_on_epic ++ "\n", h.stderr());
+    }
+}
+
+test "update: rejects --parent that resolves to nothing" {
+    const gpa = std.testing.allocator;
+    var store = try TmpStore.init(gpa, "project");
+    defer store.deinit(gpa);
+
+    var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, store.toplevel_path, .{});
+    defer cwd.close(std.testing.io);
+
+    const rev_parse = try store.gitRevParseStdout(gpa);
+    defer gpa.free(rev_parse);
+
+    {
+        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
+    }
+
+    const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "t1",
+        .display = "project-1",
+        .title = "Ticket one",
+        .created_seq = 1,
+    });
+
+    {
+        var h = Harness.initWith(gpa, &.{ "project-1", "--parent", "no-such-epic" }, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+
+        try std.testing.expectEqual(@as(u8, 1), try run(h.deps(), &h.iter));
+        try std.testing.expectEqualStrings("", h.stdout());
+        try std.testing.expectEqualStrings(
+            messages.update_parent_prefix ++ "no-such-epic" ++ messages.update_parent_not_found_suffix ++ "\n",
+            h.stderr(),
+        );
+    }
+}
+
 test "update: rejects --parent that resolves to a Ticket instead of an Epic" {
     const gpa = std.testing.allocator;
     var store = try TmpStore.init(gpa, "project");
@@ -545,7 +633,7 @@ test "update: rejects --parent that resolves to a Ticket instead of an Epic" {
         try std.testing.expectEqual(@as(u8, 1), try run(h.deps(), &h.iter));
         try std.testing.expectEqualStrings("", h.stdout());
         try std.testing.expectEqualStrings(
-            messages.update_parent_not_epic_prefix ++ "project-2" ++ messages.update_parent_not_epic_suffix ++ "\n",
+            messages.update_parent_prefix ++ "project-2" ++ messages.update_parent_not_epic_suffix ++ "\n",
             h.stderr(),
         );
     }
@@ -600,6 +688,65 @@ test "update: --no-parent removes Ticket from its Epic" {
     const row = (try conn.row("select container_id from items where id = 't1'", .{})) orelse return error.ExpectedRow;
     defer row.deinit();
     try std.testing.expectEqual(@as(?[]const u8, null), row.nullableText(0));
+}
+
+test "update: --no-parent on a Backend Ticket emits remove_ticket_from_epic Mutation" {
+    const gpa = std.testing.allocator;
+    var store = try TmpStore.init(gpa, "project");
+    defer store.deinit(gpa);
+
+    var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, store.toplevel_path, .{});
+    defer cwd.close(std.testing.io);
+
+    const rev_parse = try store.gitRevParseStdout(gpa);
+    defer gpa.free(rev_parse);
+
+    {
+        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
+    }
+
+    const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "e1",
+        .display = "project-1",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .title = "Epic",
+        .created_seq = 1,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "bt",
+        .display = "GH#9",
+        .title = "Backend ticket",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "9",
+        .container_id = "e1",
+        .created_seq = 2,
+    });
+
+    {
+        var h = Harness.initWith(gpa, &.{ "GH#9", "--no-parent" }, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+
+        try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
+        try std.testing.expectEqualStrings("", h.stderr());
+    }
+
+    try std.testing.expectEqual(@as(i64, 1), try TmpStore.mutationCount(conn));
+    const mrow = (try conn.row(
+        "select mutation_type, payload_json from mutations where sequence = 1",
+        .{},
+    )) orelse return error.ExpectedRow;
+    defer mrow.deinit();
+    try std.testing.expectEqualStrings("remove_ticket_from_epic", mrow.text(0));
+    try std.testing.expectEqualStrings("{\"epic_id\":\"e1\"}", mrow.text(1));
 }
 
 test "update: reads message from -F file" {

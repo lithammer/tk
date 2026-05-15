@@ -231,17 +231,12 @@ pub const update_conflicting_parent_flags = "tk update: choose at most one of --
 /// Stderr line when `-m` and `-F` are both supplied.
 pub const update_conflicting_message_flags = "tk update: choose at most one of -m/--message or -F/--file";
 
-/// Stderr prefix for an unknown `--parent` Display ID. Callers append
-/// `"{s}" ++ update_parent_not_found_suffix ++ "\n"` for the supplied id.
-pub const update_parent_not_found_prefix = "tk update: parent '";
+/// Stderr prefix for any `--parent` diagnostic (unknown id or wrong class).
+/// Callers append `"{s}" ++ <variant suffix> ++ "\n"` for the supplied id.
+pub const update_parent_prefix = "tk update: parent '";
 
 /// Stderr suffix for an unknown `--parent` Display ID.
 pub const update_parent_not_found_suffix = "' is not a known Display ID or Alias";
-
-/// Stderr prefix when `--parent` resolves to a Ticket instead of an Epic.
-/// Callers append `"{s}" ++ update_parent_not_epic_suffix ++ "\n"` for the
-/// resolved Display ID of the non-Epic item.
-pub const update_parent_not_epic_prefix = "tk update: parent '";
 
 /// Stderr suffix when `--parent` resolves to a Ticket instead of an Epic.
 pub const update_parent_not_epic_suffix = "' is a Ticket, not an Epic";

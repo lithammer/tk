@@ -190,7 +190,7 @@ fn emptyMessage(options: repository.ListOptions) []const u8 {
 }
 
 fn renderRow(stdout: *std.Io.Writer, row: repository.ListRow, tree_prefix: []const u8) !void {
-    try stdout.print("{s}{s} {s}", .{ tree_prefix, statusGlyph(row.status), row.display_id });
+    try stdout.print("{s}{s} {s}", .{ tree_prefix, row.status.glyph(), row.display_id });
     switch (row.item_class) {
         .ticket => {
             const priority = row.priority orelse unreachable;
@@ -231,14 +231,6 @@ const StatusCounts = struct {
         }
     }
 };
-
-fn statusGlyph(status: ItemStatus) []const u8 {
-    return switch (status) {
-        .open => "○",
-        .active => "◐",
-        .done => "✓",
-    };
-}
 
 fn renderStorageError(deps: cli.Deps, err: anyerror) void {
     repository.renderStorageError(deps.stderr, err, .{

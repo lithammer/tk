@@ -17,4 +17,13 @@ pub const ItemStatus = enum {
             .done => "done",
         };
     }
+
+    /// Compact tree glyph used by `tk list` and `tk show` rendering.
+    pub fn glyph(self: ItemStatus) []const u8 {
+        return switch (self) {
+            .open => "○",
+            .active => "◐",
+            .done => "✓",
+        };
+    }
 };

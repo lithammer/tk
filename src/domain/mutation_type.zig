@@ -29,3 +29,10 @@ pub const MutationType = enum {
         return std.meta.stringToEnum(MutationType, s);
     }
 };
+
+test "MutationType: every value round-trips through text/fromText" {
+    inline for (std.enums.values(MutationType)) |t| {
+        try std.testing.expectEqual(t, MutationType.fromText(t.text()).?);
+    }
+    try std.testing.expectEqual(@as(?MutationType, null), MutationType.fromText("not_a_real_type"));
+}

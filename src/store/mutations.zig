@@ -9,7 +9,7 @@
 const std = @import("std");
 const zqlite = @import("zqlite");
 const migrations = @import("migrations.zig");
-const repository = @import("repository.zig");
+const sequences = @import("sequences.zig");
 const MutationType = @import("../domain/mutation_type.zig").MutationType;
 const ItemClass = @import("../domain/item_class.zig").ItemClass;
 
@@ -59,11 +59,10 @@ pub fn appendMutation(
     payload: MutationPayload,
     now: []const u8,
 ) AppendError!void {
-    const seq = try repository.nextSequence(conn, "mutation_seq");
+    const seq = try sequences.next(conn, "mutation_seq");
 
     const payload_json = switch (payload) {
-        .update_title_body => |tb| try std.json.Stringify.valueAlloc(gpa, tb, .{}),
-        .epic_ref => |er| try std.json.Stringify.valueAlloc(gpa, er, .{}),
+        inline else => |v| try std.json.Stringify.valueAlloc(gpa, v, .{}),
     };
     defer gpa.free(payload_json);
 

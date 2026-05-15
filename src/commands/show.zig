@@ -8,6 +8,7 @@ const repository = @import("../store/repository.zig");
 const ItemClass = @import("../domain/item_class.zig").ItemClass;
 const ItemStatus = @import("../domain/status.zig").ItemStatus;
 const Origin = @import("../domain/origin.zig").Origin;
+const TicketKind = @import("../domain/ticket_kind.zig").TicketKind;
 const init_command = @import("init.zig");
 const Harness = @import("../testing/test_cli.zig").Harness;
 const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
@@ -59,17 +60,16 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
     };
     defer store.close();
 
-    const detail = repository.showItem(store, deps.gpa, id) catch |err| {
+    const detail = (repository.showItem(store, deps.gpa, id) catch |err| {
         renderStorageError(deps, err);
         return 1;
-    };
-    if (detail == null) {
+    }) orelse {
         deps.stderr.print(messages.show_id_not_found_prefix ++ "{s}" ++ messages.show_id_not_found_suffix ++ "\n", .{id}) catch {};
         return 1;
-    }
-    defer detail.?.deinit(deps.gpa);
+    };
+    defer detail.deinit(deps.gpa);
 
-    render(deps.stdout, detail.?) catch {};
+    render(deps.stdout, detail) catch {};
     return 0;
 }
 
@@ -93,18 +93,10 @@ fn writeHelp(deps: cli.Deps) !void {
 /// one blank line. The output ends with a single trailing newline.
 fn render(stdout: *std.Io.Writer, detail: repository.ItemDetail) !void {
     // Header: <status-glyph> <display-id> · <title>   [<facet> · STATUS]
+    var facet_buf: [8]u8 = undefined;
     const facet: []const u8 = switch (detail.item_class) {
         .epic => "EPIC",
-        .ticket => blk: {
-            const p = detail.priority orelse unreachable;
-            break :blk switch (p) {
-                .P0 => "● P0",
-                .P1 => "● P1",
-                .P2 => "● P2",
-                .P3 => "● P3",
-                .P4 => "● P4",
-            };
-        },
+        .ticket => try std.fmt.bufPrint(&facet_buf, "● {s}", .{(detail.priority orelse unreachable).text()}),
     };
     const status_upper: []const u8 = switch (detail.status) {
         .open => "OPEN",
@@ -112,7 +104,7 @@ fn render(stdout: *std.Io.Writer, detail: repository.ItemDetail) !void {
         .done => "DONE",
     };
     try stdout.print("{s} {s} · {s}   [{s} · {s}]\n", .{
-        statusGlyph(detail.status),
+        detail.status.glyph(),
         detail.display_id,
         detail.title,
         facet,
@@ -120,25 +112,21 @@ fn render(stdout: *std.Io.Writer, detail: repository.ItemDetail) !void {
     });
 
     // Metadata line.
-    const origin_text: []const u8 = switch (detail.origin) {
-        .local => "local",
-        .backend => "",
-    };
-    if (detail.origin == .local) {
-        try stdout.print("Origin: {s}", .{origin_text});
-    } else {
-        // backend: github (#<key>) or jira (<key>)
-        const bk = detail.backend_kind orelse "";
-        const bkey = detail.backend_key orelse "";
-        if (std.mem.eql(u8, bk, "github")) {
-            try stdout.print("Origin: github (#{s})", .{bkey});
-        } else {
-            try stdout.print("Origin: {s} ({s})", .{ bk, bkey });
-        }
+    switch (detail.origin) {
+        .local => try stdout.writeAll("Origin: local"),
+        .backend => {
+            const bk = detail.backend_kind orelse "";
+            const bkey = detail.backend_key orelse "";
+            if (std.mem.eql(u8, bk, "github")) {
+                try stdout.print("Origin: github (#{s})", .{bkey});
+            } else {
+                try stdout.print("Origin: {s} ({s})", .{ bk, bkey });
+            }
+        },
     }
     if (detail.item_class == .ticket) {
-        const kind_text: []const u8 = if (detail.ticket_kind) |k| k.text() else "task";
-        try stdout.print(" · Kind: {s}", .{kind_text});
+        const kind = detail.ticket_kind orelse unreachable;
+        try stdout.print(" · Kind: {s}", .{kind.text()});
     }
     try stdout.writeAll("\n");
 
@@ -216,7 +204,7 @@ fn renderSubRow(stdout: *std.Io.Writer, glyph: []const u8, item: repository.Item
     const epic_prefix: []const u8 = if (item.item_class == .epic) "(EPIC) " else "";
     try stdout.print("  {s} {s} {s}: {s}{s}", .{
         glyph,
-        statusGlyph(item.status),
+        item.status.glyph(),
         item.display_id,
         epic_prefix,
         item.title,
@@ -225,14 +213,6 @@ fn renderSubRow(stdout: *std.Io.Writer, glyph: []const u8, item: repository.Item
         try stdout.print(" ● {s}", .{p.text()});
     }
     try stdout.writeAll("\n");
-}
-
-fn statusGlyph(status: ItemStatus) []const u8 {
-    return switch (status) {
-        .open => "○",
-        .active => "◐",
-        .done => "✓",
-    };
 }
 
 fn renderStorageError(deps: cli.Deps, err: anyerror) void {
@@ -628,8 +608,12 @@ test "show: resolves via Alias" {
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
 
         try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
-        // Should render the item resolved by the alias.
-        try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "GH#42") != null);
+        try std.testing.expectEqualStrings(
+            \\○ GH#42 · A Backend Ticket   [● P2 · OPEN]
+            \\Origin: github (#42) · Kind: task
+            \\Created: 2026-04-21 · Updated: 2026-04-21
+            \\
+        , h.stdout());
         try std.testing.expectEqualStrings("", h.stderr());
     }
 }
@@ -702,7 +686,10 @@ test "show: --help prints usage and exits 0" {
     defer h.deinit();
 
     try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
-    try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "tk show") != null);
-    try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "Usage:") != null);
+    const out = h.stdout();
+    try std.testing.expect(std.mem.indexOf(u8, out, "tk show") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Usage:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "<id>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "-h, --help") != null);
     try std.testing.expectEqualStrings("", h.stderr());
 }

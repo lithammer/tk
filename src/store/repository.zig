@@ -8,6 +8,7 @@ const messages = @import("../messages.zig");
 const proc = @import("../proc/runner.zig");
 const migrations = @import("migrations.zig");
 const mutations_mod = @import("mutations.zig");
+const sequences = @import("sequences.zig");
 const Priority = @import("../domain/priority.zig").Priority;
 const ItemStatus = @import("../domain/status.zig").ItemStatus;
 const TicketKind = @import("../domain/ticket_kind.zig").TicketKind;
@@ -715,8 +716,8 @@ pub fn createLocalTicket(
     try store.conn.execNoArgs("begin immediate");
     errdefer store.conn.rollback();
 
-    const display_seq = try nextSequence(store.conn, "display_seq");
-    const created_seq = try nextSequence(store.conn, "item_created_seq");
+    const display_seq = try sequences.next(store.conn, "display_seq");
+    const created_seq = try sequences.next(store.conn, "item_created_seq");
     const prefix = try queryTextAlloc(store.conn, gpa, "select value from store_config where key = 'display_prefix'");
     defer gpa.free(prefix);
     const display_id = try std.fmt.allocPrint(gpa, "{s}-{d}", .{ prefix, display_seq });
@@ -757,13 +758,6 @@ pub fn createLocalTicket(
     };
 }
 
-pub fn nextSequence(conn: zqlite.Conn, name: []const u8) migrations.QueryError!i64 {
-    if (try conn.row("update sequences set value = value + 1 where name = ?1 returning value", .{name})) |r| {
-        defer r.deinit();
-        return r.int(0);
-    }
-    return error.Notfound;
-}
 
 fn queryTextAlloc(conn: zqlite.Conn, gpa: std.mem.Allocator, sql: []const u8) (migrations.QueryError || error{OutOfMemory})![]u8 {
     if (try conn.row(sql, .{})) |r| {
@@ -863,7 +857,9 @@ pub fn updateItem(
     try store.conn.execNoArgs("begin immediate");
     errdefer store.conn.rollback();
 
-    // Read the current item row inside the transaction.
+    // Read the current item row inside the transaction. The SQLite prepared-
+    // statement cursor must outlive the `gpa.dupe` chain so OOM during the
+    // copy-out does not leak the cursor before `errdefer rollback` fires.
     const current_row = (try store.conn.row(
         \\select origin, title, body, priority, container_id, display_value
         \\  from items
@@ -872,6 +868,7 @@ pub fn updateItem(
         store.conn.rollback();
         return .not_found;
     };
+    defer current_row.deinit();
     const current: CurrentItem = blk: {
         const origin = enumFromText(Origin, current_row.text(0));
         const title = try gpa.dupe(u8, current_row.text(1));
@@ -881,7 +878,6 @@ pub fn updateItem(
         const priority: ?[]u8 = if (current_row.nullableText(3)) |p| try gpa.dupe(u8, p) else null;
         errdefer if (priority) |p| gpa.free(p);
         const container_id: ?[]u8 = if (current_row.nullableText(4)) |c| try gpa.dupe(u8, c) else null;
-        current_row.deinit();
         break :blk .{
             .origin = origin,
             .title = title,
@@ -1107,8 +1103,10 @@ pub fn resolveItemRef(store: Store, gpa: std.mem.Allocator, display_arg: []const
 
 /// Outcome of resolving a Display ID or Alias that must refer to an Epic.
 ///
-/// `not_an_epic` carries the resolved reference so callers can render a
-/// user-facing diagnostic that names the resolved Display ID's actual class.
+/// `not_an_epic` carries the resolved reference for future diagnostics that
+/// want to name the resolved item's actual `item_class`. With v1's two
+/// Item Classes, callers may safely hardcode "Ticket" in the user-facing
+/// message instead of reading `ref.item_class`.
 /// Each arm owns its payload; callers free `epic.id` and `not_an_epic.id`
 /// in the matching switch arm.
 pub const ResolveEpicOutcome = union(enum) {
@@ -1694,8 +1692,12 @@ test "showItem: returns full Ticket detail with parent, dependencies, and extern
         .created_seq = 9,
     });
     try TmpStore.insertDependency(conn, "ticket", "downstream");
-    // An unresolved External Blocker.
-    try TmpStore.insertExternalBlocker(conn, "eb-open", "ticket", null);
+    // An unresolved External Blocker with an explicit reason so the test
+    // assertion does not couple to the TmpStore fixture default.
+    try conn.exec(
+        \\insert into external_blockers(id, item_id, reason, created_at, resolved_at)
+        \\values (?1, ?2, ?3, '2026-05-09T00:00:00.000Z', null)
+    , .{ "eb-open", "ticket", "needs legal review" });
     // A resolved External Blocker (must be excluded).
     try TmpStore.insertExternalBlocker(conn, "eb-done", "ticket", "2026-05-10T00:00:00.000Z");
 
@@ -1722,7 +1724,7 @@ test "showItem: returns full Ticket detail with parent, dependencies, and extern
 
     // EXTERNAL BLOCKERS: only the unresolved one.
     try std.testing.expectEqual(@as(usize, 1), detail.external_blockers.len);
-    try std.testing.expectEqualStrings("fixture blocker", detail.external_blockers[0].reason);
+    try std.testing.expectEqualStrings("needs legal review", detail.external_blockers[0].reason);
 }
 
 test "showItem: includes children for Epics ordered by created_seq" {
@@ -1954,13 +1956,14 @@ test "updateItem: updates title and body of a Backend Ticket and emits update_ti
     try std.testing.expectEqual(@as(i64, 1), try TmpStore.mutationCount(conn));
 
     const row = (try conn.row(
-        "select mutation_type, item_id, item_class from mutations where sequence = 1",
+        "select mutation_type, item_id, item_class, payload_json from mutations where sequence = 1",
         .{},
     )) orelse return error.ExpectedRow;
     defer row.deinit();
     try std.testing.expectEqualStrings("update_ticket", row.text(0));
     try std.testing.expectEqualStrings("t1", row.text(1));
     try std.testing.expectEqualStrings("ticket", row.text(2));
+    try std.testing.expectEqualStrings("{\"title\":\"New title\",\"body\":\"New body\"}", row.text(3));
 }
 
 test "updateItem: idempotent update does not change updated_at and emits no Mutation" {
@@ -2077,6 +2080,50 @@ test "updateItem: priority change on Backend Ticket does not emit a Mutation" {
     try std.testing.expectEqual(@as(i64, 0), try TmpStore.mutationCount(conn));
 }
 
+test "updateItem: set parent on local Ticket updates container_id without emitting a Mutation" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+    var fc = FakeClock.init(default_fake_now_ms);
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "t1",
+        .display = "tk-1",
+        .title = "Local Ticket",
+        .created_seq = 1,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "e1",
+        .display = "tk-2",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .title = "Local Epic",
+        .created_seq = 2,
+    });
+
+    const outcome = try updateItem(store, gpa, fc.clock(), .{
+        .id = "t1",
+        .item_class = .ticket,
+        .parent = .{ .set = "e1" },
+    });
+    switch (outcome) {
+        .ok => |u| u.deinit(gpa),
+        .not_found => return error.UnexpectedNotFound,
+    }
+
+    const row = (try conn.row("select container_id, container_class from items where id = 't1'", .{})) orelse return error.ExpectedRow;
+    defer row.deinit();
+    try std.testing.expectEqualStrings("e1", row.text(0));
+    try std.testing.expectEqualStrings("epic", row.text(1));
+    try std.testing.expectEqual(@as(i64, 0), try TmpStore.mutationCount(conn));
+}
+
 test "updateItem: set parent on Backend Ticket emits add_ticket_to_epic Mutation" {
     const gpa = std.testing.allocator;
     const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
@@ -2123,7 +2170,7 @@ test "updateItem: set parent on Backend Ticket emits add_ticket_to_epic Mutation
     const row = (try conn.row("select mutation_type, payload_json from mutations where sequence = 1", .{})) orelse return error.ExpectedRow;
     defer row.deinit();
     try std.testing.expectEqualStrings("add_ticket_to_epic", row.text(0));
-    try std.testing.expect(std.mem.indexOf(u8, row.text(1), "e1") != null);
+    try std.testing.expectEqualStrings("{\"epic_id\":\"e1\"}", row.text(1));
 }
 
 test "updateItem: move between Epics on Backend Ticket emits remove then add Mutations" {
@@ -2187,12 +2234,12 @@ test "updateItem: move between Epics on Backend Ticket emits remove then add Mut
     const r1 = (try conn.row("select mutation_type, payload_json from mutations where sequence = 1", .{})) orelse return error.ExpectedRow;
     defer r1.deinit();
     try std.testing.expectEqualStrings("remove_ticket_from_epic", r1.text(0));
-    try std.testing.expect(std.mem.indexOf(u8, r1.text(1), "old-epic") != null);
+    try std.testing.expectEqualStrings("{\"epic_id\":\"old-epic\"}", r1.text(1));
 
     const r2 = (try conn.row("select mutation_type, payload_json from mutations where sequence = 2", .{})) orelse return error.ExpectedRow;
     defer r2.deinit();
     try std.testing.expectEqualStrings("add_ticket_to_epic", r2.text(0));
-    try std.testing.expect(std.mem.indexOf(u8, r2.text(1), "new-epic") != null);
+    try std.testing.expectEqualStrings("{\"epic_id\":\"new-epic\"}", r2.text(1));
 }
 
 test "updateItem: combined parent-move and title change emits Mutations in correct order" {
