@@ -1,0 +1,26 @@
+{
+    "hooks": {
+        "PreCompact": [
+            {
+                "hooks": [
+                    {
+                        "command": "./zig-out/bin/tk prime",
+                        "type": "command"
+                    }
+                ],
+                "matcher": ""
+            }
+        ],
+        "SessionStart": [
+            {
+                "hooks": [
+                    {
+                        "command": "./zig-out/bin/tk prime",
+                        "type": "command"
+                    }
+                ],
+                "matcher": ""
+            }
+        ]
+    }
+}

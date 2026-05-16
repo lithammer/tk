@@ -1,0 +1,16 @@
+{
+	"hooks": {
+		"SessionStart": [
+			{
+				"matcher": "startup|resume",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "./zig-out/bin/tk prime",
+						"statusMessage": "Loading session notes"
+					}
+				]
+			}
+		]
+	}
+}
