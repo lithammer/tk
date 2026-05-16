@@ -861,6 +861,11 @@ pub const StatusChangedItem = struct {
 pub const SetStatusOutcome = union(enum) {
     ok: StatusChangedItem,
     not_found,
+    /// Refused: the item is `done` and the request asked for any other
+    /// Item Status. ADR 0006 makes `done` terminal in v1. Carries the
+    /// persisted `ItemClass` so callers can render `Ticket` vs `Epic`
+    /// in the diagnostic without an extra round-trip.
+    locked_done: ItemClass,
 };
 
 /// Error set for `setItemStatus`.
@@ -1078,6 +1083,14 @@ pub fn updateItem(
 /// same Repository Store transaction. Local-origin changes only update current
 /// state. Field-idempotent calls succeed without changing `updated_at` or
 /// emitting a Mutation.
+///
+/// ADR 0006 makes `done` terminal in v1. A pre-read short-circuit refuses
+/// any request that would move a `done` row to a non-`done` Item Status
+/// and returns `.locked_done` so callers can render a typed diagnostic.
+/// The `items_no_escape_from_done` trigger from migration 002 is the only
+/// trigger that can fire on the UPDATE inside this function, and the
+/// short-circuit prevents even that one from firing; the trigger remains
+/// as defense-in-depth for write paths that do not pre-read.
 pub fn setItemStatus(
     store: Store,
     gpa: std.mem.Allocator,
@@ -1103,6 +1116,16 @@ pub fn setItemStatus(
     const origin = enumFromText(Origin, current_row.text(0));
     const current_status = enumFromText(ItemStatus, current_row.text(1));
     const item_class = enumFromText(ItemClass, current_row.text(2));
+
+    // ADR 0006: `done` is terminal in v1. Refuse non-`done` targets before
+    // any allocator dupes so the no-op write transaction commits cleanly
+    // and the caller receives a typed `.locked_done` outcome rather than
+    // the schema trigger's `error.ConstraintTrigger`.
+    if (current_status == .done and req.status != .done) {
+        try store.conn.commit();
+        return .{ .locked_done = item_class };
+    }
+
     const display_id = try gpa.dupe(u8, current_row.text(3));
     errdefer gpa.free(display_id);
     const title = try gpa.dupe(u8, current_row.text(4));
@@ -2010,6 +2033,7 @@ test "setItemStatus: local-origin done updates status and emits no Mutation" {
             try std.testing.expectEqual(ItemStatus.done, item.status);
         },
         .not_found => return error.UnexpectedNotFound,
+        .locked_done => return error.UnexpectedLockedDone,
     }
 
     const row = (try conn.row("select status, updated_at from items where id = 't1'", .{})) orelse return error.ExpectedRow;
@@ -2050,6 +2074,7 @@ test "setItemStatus: Backend-origin change emits set_item_status Mutation" {
             try std.testing.expectEqual(ItemClass.epic, item.item_class);
         },
         .not_found => return error.UnexpectedNotFound,
+        .locked_done => return error.UnexpectedLockedDone,
     }
 
     const row = (try conn.row(
@@ -2096,6 +2121,7 @@ test "setItemStatus: already-done Backend row is idempotent" {
             try std.testing.expectEqual(ItemStatus.done, item.status);
         },
         .not_found => return error.UnexpectedNotFound,
+        .locked_done => return error.UnexpectedLockedDone,
     }
 
     try std.testing.expectEqual(@as(i64, 0), try TmpStore.mutationCount(conn));
@@ -2134,12 +2160,158 @@ test "setItemStatus: already-done local row is idempotent" {
             try std.testing.expectEqual(ItemStatus.done, item.status);
         },
         .not_found => return error.UnexpectedNotFound,
+        .locked_done => return error.UnexpectedLockedDone,
     }
 
     try std.testing.expectEqual(@as(i64, 0), try TmpStore.mutationCount(conn));
     const row = (try conn.row("select updated_at from items where id = 't1'", .{})) orelse return error.ExpectedRow;
     defer row.deinit();
     try std.testing.expectEqualStrings("2026-01-01T00:00:00.000Z", row.text(0));
+}
+
+test "setItemStatus: done Ticket cannot move to active (locked_done)" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+    var fc = FakeClock.init(default_fake_now_ms);
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "t1",
+        .display = "tk-1",
+        .title = "Local Ticket",
+        .status = "done",
+        .created_seq = 1,
+        .updated_at = "2026-01-01T00:00:00.000Z",
+    });
+
+    const outcome = try setItemStatus(store, gpa, fc.clock(), .{ .id = "t1", .status = .active });
+    switch (outcome) {
+        .locked_done => |item_class| try std.testing.expectEqual(ItemClass.ticket, item_class),
+        else => return error.ExpectedLockedDone,
+    }
+
+    const row = (try conn.row("select status, updated_at from items where id = 't1'", .{})) orelse return error.ExpectedRow;
+    defer row.deinit();
+    try std.testing.expectEqualStrings("done", row.text(0));
+    try std.testing.expectEqualStrings("2026-01-01T00:00:00.000Z", row.text(1));
+    try std.testing.expectEqual(@as(i64, 0), try TmpStore.mutationCount(conn));
+    const seq = (try conn.row("select value from sequences where name = 'mutation_seq'", .{})) orelse return error.ExpectedRow;
+    defer seq.deinit();
+    try std.testing.expectEqual(@as(i64, 0), seq.int(0));
+}
+
+test "setItemStatus: done Epic cannot move to open (locked_done)" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+    var fc = FakeClock.init(default_fake_now_ms);
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "e1",
+        .display = "tk-1",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .title = "Local Epic",
+        .status = "done",
+        .created_seq = 1,
+        .updated_at = "2026-01-01T00:00:00.000Z",
+    });
+
+    const outcome = try setItemStatus(store, gpa, fc.clock(), .{ .id = "e1", .status = .open });
+    switch (outcome) {
+        .locked_done => |item_class| try std.testing.expectEqual(ItemClass.epic, item_class),
+        else => return error.ExpectedLockedDone,
+    }
+
+    const row = (try conn.row("select status, updated_at from items where id = 'e1'", .{})) orelse return error.ExpectedRow;
+    defer row.deinit();
+    try std.testing.expectEqualStrings("done", row.text(0));
+    try std.testing.expectEqualStrings("2026-01-01T00:00:00.000Z", row.text(1));
+    try std.testing.expectEqual(@as(i64, 0), try TmpStore.mutationCount(conn));
+    const seq = (try conn.row("select value from sequences where name = 'mutation_seq'", .{})) orelse return error.ExpectedRow;
+    defer seq.deinit();
+    try std.testing.expectEqual(@as(i64, 0), seq.int(0));
+}
+
+test "setItemStatus: done Backend Ticket cannot move to active (locked_done)" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+    var fc = FakeClock.init(default_fake_now_ms);
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "bt1",
+        .display = "GH#7",
+        .title = "Backend Ticket",
+        .status = "done",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "7",
+        .created_seq = 1,
+        .updated_at = "2026-01-01T00:00:00.000Z",
+    });
+
+    const outcome = try setItemStatus(store, gpa, fc.clock(), .{ .id = "bt1", .status = .active });
+    switch (outcome) {
+        .locked_done => |item_class| try std.testing.expectEqual(ItemClass.ticket, item_class),
+        else => return error.ExpectedLockedDone,
+    }
+
+    const row = (try conn.row("select status, updated_at from items where id = 'bt1'", .{})) orelse return error.ExpectedRow;
+    defer row.deinit();
+    try std.testing.expectEqualStrings("done", row.text(0));
+    try std.testing.expectEqualStrings("2026-01-01T00:00:00.000Z", row.text(1));
+    try std.testing.expectEqual(@as(i64, 0), try TmpStore.mutationCount(conn));
+    const seq = (try conn.row("select value from sequences where name = 'mutation_seq'", .{})) orelse return error.ExpectedRow;
+    defer seq.deinit();
+    try std.testing.expectEqual(@as(i64, 0), seq.int(0));
+}
+
+test "items_no_escape_from_done trigger rejects direct done->active UPDATE" {
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "t1",
+        .display = "tk-1",
+        .title = "Local Ticket",
+        .status = "done",
+        .created_seq = 1,
+        .updated_at = "2026-01-01T00:00:00.000Z",
+    });
+
+    try conn.execNoArgs("begin immediate");
+    errdefer conn.rollback();
+    try std.testing.expectError(
+        error.ConstraintTrigger,
+        conn.execNoArgs("update items set status = 'active' where id = 't1'"),
+    );
+    conn.rollback();
+
+    const row = (try conn.row("select status, updated_at from items where id = 't1'", .{})) orelse return error.ExpectedRow;
+    defer row.deinit();
+    try std.testing.expectEqualStrings("done", row.text(0));
+    try std.testing.expectEqualStrings("2026-01-01T00:00:00.000Z", row.text(1));
 }
 
 test "setItemStatus: rolls back current state and Mutation sequence when outbox insert fails" {
@@ -2223,6 +2395,7 @@ test "setItemStatus: completing a blocker makes the blocked Ticket ready" {
     switch (outcome) {
         .ok => |item| item.deinit(gpa),
         .not_found => return error.UnexpectedNotFound,
+        .locked_done => return error.UnexpectedLockedDone,
     }
 
     const next = try nextReadyTicket(store, gpa, .{});

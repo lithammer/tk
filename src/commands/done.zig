@@ -85,6 +85,10 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
             deps.stderr.print(messages.done_id_not_found_prefix ++ "{s}" ++ messages.done_id_not_found_suffix ++ "\n", .{id}) catch {};
             return 1;
         },
+        // `tk done` always passes `req.status = .done`, so the
+        // `current_status == .done and req.status != .done` short-circuit
+        // in `setItemStatus` cannot fire from this command.
+        .locked_done => unreachable,
     }
 
     return 0;
