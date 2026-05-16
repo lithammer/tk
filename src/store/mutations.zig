@@ -15,9 +15,8 @@ const ItemClass = @import("../domain/item_class.zig").ItemClass;
 
 /// Typed payload variants for Mutation Log entries.
 ///
-/// Each variant maps to one or more `MutationType` values. Only the variants
-/// needed by Increment 3 (title/body edits and Epic parent changes) are
-/// present; later slices will add the remaining variants.
+/// Each variant maps to one or more `MutationType` values. Backend Adapters
+/// consume these typed Mutation Log payloads instead of command-specific JSON.
 pub const MutationPayload = union(enum) {
     /// Payload for `update_ticket` and `update_epic` — full title/body
     /// snapshot of the current state after the edit.
@@ -25,6 +24,8 @@ pub const MutationPayload = union(enum) {
     /// Payload for `add_ticket_to_epic` and `remove_ticket_from_epic` —
     /// the internal stable ID of the Epic being referenced.
     epic_ref: EpicRef,
+    /// Payload for `set_item_status` — target Item Status after the change.
+    item_status: StatusChange,
 
     /// Full title/body snapshot used by `update_ticket` / `update_epic`.
     pub const TitleBody = struct {
@@ -38,6 +39,11 @@ pub const MutationPayload = union(enum) {
     /// Promotion cannot break the reference.
     pub const EpicRef = struct {
         epic_id: []const u8,
+    };
+
+    /// Status-change payload used by `set_item_status`.
+    pub const StatusChange = struct {
+        status: []const u8,
     };
 };
 
@@ -236,6 +242,42 @@ test "appendMutation: remove_ticket_from_epic inserts pending row with epic_id" 
 
     try std.testing.expectEqualStrings("remove_ticket_from_epic", row.text(0));
     try std.testing.expectEqualStrings("{\"epic_id\":\"old-epic-id\"}", row.text(1));
+}
+
+test "appendMutation: set_item_status inserts status-only payload" {
+    const gpa = std.testing.allocator;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "t1",
+        .display = "tk-1",
+        .title = "Ticket",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "1",
+        .created_seq = 1,
+    });
+
+    try conn.execNoArgs("begin immediate");
+    try appendMutation(conn, gpa, .set_item_status, "t1", .ticket, .{
+        .item_status = .{ .status = "done" },
+    }, "2026-05-09T00:00:00.000Z");
+    try conn.commit();
+
+    const row = (try conn.row(
+        "select mutation_type, item_class, payload_json from mutations where sequence = 1",
+        .{},
+    )) orelse return error.ExpectedRow;
+    defer row.deinit();
+
+    try std.testing.expectEqualStrings("set_item_status", row.text(0));
+    try std.testing.expectEqualStrings("ticket", row.text(1));
+    try std.testing.expectEqualStrings("{\"status\":\"done\"}", row.text(2));
 }
 
 test "appendMutation: sequence is monotonically increasing across calls" {

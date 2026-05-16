@@ -277,3 +277,36 @@ pub const update_success_epic_prefix = "Updated Epic: ";
 /// Stderr line when `tk update` is invoked with no editing intent. At least
 /// one of `-m`, `-F`, `--priority`, `--parent`, or `--no-parent` is required.
 pub const update_no_changes_requested = "tk update: at least one of -m, -F, --priority, --parent, or --no-parent is required";
+
+// `tk done` — minimum lifecycle status write.
+
+/// Stderr line when no Repository Store exists for the current repository.
+pub const done_missing_store = "tk done: Repository Store not initialized; run 'tk init'";
+
+/// Stderr line when no positional id was supplied.
+pub const done_id_required = "tk done: an item ID argument is required";
+
+/// Stderr prefix for unknown Display ID or Alias. Callers append
+/// `"{s}" ++ done_id_not_found_suffix ++ "\n"` for the supplied id.
+pub const done_id_not_found_prefix = "tk done: '";
+
+/// Stderr suffix for unknown Display ID or Alias.
+pub const done_id_not_found_suffix = "' is not a known Display ID or Alias";
+
+/// Stderr line for busy/locked Repository Store writes.
+pub const done_store_busy_retry = "tk done: Repository Store is busy; retry the command";
+
+/// Stderr line when allocation fails during a `tk done` Repository Store write.
+pub const done_out_of_memory = "tk done: out of memory";
+
+/// Stderr line for non-transient Repository Store write failures. The caller
+/// appends `"\n{s}\n"` for the underlying `@errorName`.
+pub const done_write_failed = "tk done: failed to mark item done";
+
+/// Stdout prefix for a successful Ticket status write. Callers append
+/// `"{s} - {s}\n"` for Display ID and title.
+pub const done_success_ticket_prefix = "Marked Ticket done: ";
+
+/// Stdout prefix for a successful Epic status write. Callers append
+/// `"{s} - {s}\n"` for Display ID and title.
+pub const done_success_epic_prefix = "Marked Epic done: ";

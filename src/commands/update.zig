@@ -191,6 +191,8 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
             };
             deps.stdout.print("{s}{s} - {s}\n", .{ prefix, updated.display_id, updated.title }) catch {};
         },
+        // Race window: the resolved row may have been deleted between
+        // `resolveItemRef` and the BEGIN IMMEDIATE inside `updateItem`.
         .not_found => {
             deps.stderr.print(messages.update_id_not_found_prefix ++ "{s}" ++ messages.update_id_not_found_suffix ++ "\n", .{id}) catch {};
             return 1;

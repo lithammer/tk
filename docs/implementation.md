@@ -27,6 +27,7 @@ src/
     prime.md
     init.zig
     add.zig
+    done.zig
     list.zig
     message.zig
     next.zig
@@ -72,9 +73,9 @@ both the Repository Store schema (migrations.zig) and the small
 across rollback boundaries.
 
 `src/store/repository.zig` owns the reusable Repository Store opener, the
-store-facing write APIs (`createLocalTicket`, `updateItem`), current-state
-read APIs for List Tree rows, next ready Ticket selection, and single-item
-detail reads, and the Display ID / Alias resolver (`resolveItemRef`,
+store-facing write APIs (`createLocalTicket`, `updateItem`, `setItemStatus`),
+current-state read APIs for List Tree rows, next ready Ticket selection, and
+single-item detail reads, and the Display ID / Alias resolver (`resolveItemRef`,
 `resolveAsEpic`). `src/store/mutations.zig` owns the typed `MutationPayload`
 tagged union and the `appendMutation` outbox helper; both Repository Store
 writes and future Backend Adapter callers append Mutations through it.
@@ -488,6 +489,23 @@ Current coverage includes:
 - `tk next` command/store tests for ready Ticket selection, Priority and
   creation-order sorting, scoped Display ID and Alias resolution, missing-store
   diagnostics, empty ready results, and `tk next --help` scenario coverage.
+- `tk show` command/store tests for Ticket and Epic detail rendering, parent
+  and child sub-sections, Dependency and External Blocker rows, Display ID and
+  Alias resolution, missing-store and unknown-id diagnostics, and `tk show
+  --help` scenario coverage.
+- `tk update` command/store tests for title and body edits, local-only
+  Priority writes, Epic parent set/clear, field-idempotent invocations, the
+  no-Mutation invariant for local-origin rows, the `set_item_status`-free
+  outbox for Backend-origin rows, mutual-exclusion and class-level validation
+  errors, missing-store, unknown-id, and unknown-parent diagnostics, forced
+  write rollback, and `tk update --help` scenario coverage.
+- `tk done` command/store tests for local Ticket and Epic completion, Alias
+  resolution, the `set_item_status` Mutation emitted for Backend-origin rows,
+  field-idempotent invocations that leave `updated_at` unchanged and emit no
+  Mutation for both Local and Backend origins, blocker-completion releasing
+  the `ready`/`blocked` views, forced write rollback that reverts both
+  current state and the `mutation_seq` allocation, missing-store and
+  unknown-id diagnostics, and `tk done --help` scenario coverage.
 - subprocess smoke tests for real `tk init`, real `tk add`, real `tk list`,
   and real `tk next` after `git init`.
 
@@ -520,7 +538,8 @@ found: <path>`; do not convert a missing fixture into empty stdin.
 ## Completed Baseline
 
 The current binary implements `tk prime`, `tk init`,
-`tk add -F <file | ->`, `tk list`, `tk next`, `tk show`, and `tk update`.
+`tk add -F <file | ->`, `tk list`, `tk next`, `tk show`, `tk update`, and
+`tk done`.
 
 `tk prime` is command-owned static output embedded from
 `src/commands/prime.md`. It trims trailing whitespace, emits exactly one final
@@ -705,8 +724,9 @@ names match the SQL `check(mutation_type in (...))` spellings exactly so
 text round-trips without a separate map. `src/store/mutations.zig`
 exports `MutationPayload` — a shape-keyed tagged union (`update_title_body`
 for `update_ticket`/`update_epic`; `epic_ref` for
-`add_ticket_to_epic`/`remove_ticket_from_epic`; future slices extend it)
-plus `appendMutation(conn, gpa, mutation_type, item_id, item_class,
+`add_ticket_to_epic`/`remove_ticket_from_epic`; `item_status` for
+`set_item_status`; future slices extend it) plus
+`appendMutation(conn, gpa, mutation_type, item_id, item_class,
 payload, now)`. The function must run inside the caller's active `begin
 immediate` transaction; it allocates `mutation_seq` from
 `sequences.next`, serializes the payload to JSON via
@@ -745,28 +765,37 @@ sequenced remove-then-add-then-update. The current row is held with
 leak the SQLite cursor before the `errdefer store.conn.rollback()`
 fires.
 
+`tk done <id>` is the minimum lifecycle command for dogfooding. The
+positional `<id>` is required while Workspace Scope discovery is deferred,
+matching `tk show` and `tk update`, and resolves through the same Display ID /
+Alias resolver. The command marks one Ticket or Epic `done` and prints
+`Marked Ticket done: <display-id> - <title>` or
+`Marked Epic done: <display-id> - <title>`. Local-origin writes update current
+state only. Backend-origin writes update current state and append one pending
+`set_item_status` Mutation in the same transaction with JSON payload
+`{"status":"done"}`. The payload deliberately stores only the target status,
+not prior status or transition intent; that surviving risk is accepted until
+Backend Adapters prove they need richer lifecycle semantics.
+
+`tk done` uses the status-generic Repository Store helper
+`repository.setItemStatus(store, gpa, clock, SetStatusRequest) ->
+SetStatusError!SetStatusOutcome`. The request carries the resolved internal
+id and target `ItemStatus`; the returned snapshot carries copied Display ID,
+title, persisted `ItemClass`, and effective status. The helper opens `begin
+immediate`, reads `origin`, `status`, `item_class`, `display_value`, and
+`title` inside the transaction, copies the Display ID and title while the
+SQLite row cursor is alive, and returns the row's persisted `ItemClass` rather
+than request metadata. Field-idempotent calls commit without UPDATE, leave
+`updated_at` unchanged, and emit no Mutation. Changed Backend-origin rows call
+`mutations.appendMutation` after the current-state UPDATE and before commit,
+so allocation or SQLite failure rolls back both current state and the outbox
+sequence allocation.
+
 ## Next Slices
 
 Continue in small vertical slices:
 
-1. `tk done` — minimum lifecycle for dogfooding
-   - First lifecycle command. Marks one Ticket or Epic `done` for both
-     Local and Backend items.
-   - Resolves the positional `<id>` through the existing Display ID /
-     Alias resolver.
-   - For Backend-origin items, appends a `set_item_status` Mutation
-     carrying the new Item Status in the same transaction as the
-     current-state write.
-   - Field-idempotent: a `done` target stays `done` and emits no
-     Mutation.
-   - Adds the `set_item_status` payload variant to
-     `MutationPayload`. The Mutation Type enum already lists the value.
-   - Unblocks dogfooding: every entry in `docs/followups.md` can be
-     piped through `tk add -F -` and worked through `tk next` → `tk
-     show` → `tk update` → `tk done`, then the followups file can be
-     deleted.
-
-2. Rest of lifecycle and blocking
+1. Remaining lifecycle and blocking
    - Implement `tk start` and `tk stop` (symmetric `set_item_status`
      transitions to `active` / back to `open`).
    - Implement `tk block` and `tk unblock` (item-backed Dependency edge
@@ -779,13 +808,13 @@ Continue in small vertical slices:
    - Add the blocked glyph to `tk list` rendering as a
      blocking/readiness overlay, not as a fourth Item Status.
 
-3. Worktree scope
+2. Worktree scope
    - Implement `tk worktree`, `set`, `clear`, and `start`.
    - Use git worktree config.
    - Feed the discovered Workspace Scope Display ID or Alias into
      `store.repository.nextReadyTicket`.
 
-4. Remote and sync skeleton
+3. Remote and sync skeleton
    - Implement `tk remote`.
    - Implement `tk sync log`.
    - Add fake remote adapter tests before real `gh` or `acli` behavior.

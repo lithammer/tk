@@ -758,7 +758,6 @@ pub fn createLocalTicket(
     };
 }
 
-
 fn queryTextAlloc(conn: zqlite.Conn, gpa: std.mem.Allocator, sql: []const u8) (migrations.QueryError || error{OutOfMemory})![]u8 {
     if (try conn.row(sql, .{})) |r| {
         defer r.deinit();
@@ -833,7 +832,39 @@ pub const UpdateOutcome = union(enum) {
     not_found,
 };
 
+/// Error set for `updateItem`.
 pub const UpdateError = migrations.QueryError || zqlite.Error || error{OutOfMemory};
+
+/// Input for a reusable Item Status lifecycle write.
+pub const SetStatusRequest = struct {
+    /// Internal stable ID of the Ticket or Epic to update.
+    id: []const u8,
+    /// Target Item Status to persist.
+    status: ItemStatus,
+};
+
+/// Minimal item snapshot returned after a lifecycle status write.
+pub const StatusChangedItem = struct {
+    display_id: []u8,
+    title: []u8,
+    item_class: ItemClass,
+    status: ItemStatus,
+
+    /// Free allocator-owned fields copied from the Repository Store.
+    pub fn deinit(self: StatusChangedItem, gpa: std.mem.Allocator) void {
+        gpa.free(self.display_id);
+        gpa.free(self.title);
+    }
+};
+
+/// Result of `setItemStatus`.
+pub const SetStatusOutcome = union(enum) {
+    ok: StatusChangedItem,
+    not_found,
+};
+
+/// Error set for `setItemStatus`.
+pub const SetStatusError = migrations.QueryError || zqlite.Error || error{OutOfMemory};
 
 /// Apply a field-level update to a Ticket or Epic.
 ///
@@ -987,18 +1018,22 @@ pub fn updateItem(
         // Parent change: remove then add (mutation order per spec).
         if (old_epic_id) |eid| {
             try mutations_mod.appendMutation(
-                store.conn, gpa,
+                store.conn,
+                gpa,
                 .remove_ticket_from_epic,
-                req.id, req.item_class,
+                req.id,
+                req.item_class,
                 .{ .epic_ref = .{ .epic_id = eid } },
                 now,
             );
         }
         if (new_epic_id) |eid| {
             try mutations_mod.appendMutation(
-                store.conn, gpa,
+                store.conn,
+                gpa,
                 .add_ticket_to_epic,
-                req.id, req.item_class,
+                req.id,
+                req.item_class,
                 .{ .epic_ref = .{ .epic_id = eid } },
                 now,
             );
@@ -1007,9 +1042,11 @@ pub fn updateItem(
         if (title_or_body_changed) {
             const mut_type: MutationType = if (req.item_class == .ticket) .update_ticket else .update_epic;
             try mutations_mod.appendMutation(
-                store.conn, gpa,
+                store.conn,
+                gpa,
                 mut_type,
-                req.id, req.item_class,
+                req.id,
+                req.item_class,
                 .{ .update_title_body = .{ .title = eff_title, .body = eff_body } },
                 now,
             );
@@ -1033,6 +1070,80 @@ pub fn updateItem(
     try store.conn.commit();
 
     return .{ .ok = .{ .display_id = display_id, .title = snap_title, .item_class = req.item_class } };
+}
+
+/// Set a Ticket or Epic Item Status in current state.
+///
+/// Backend-origin changes append a pending `set_item_status` Mutation in the
+/// same Repository Store transaction. Local-origin changes only update current
+/// state. Field-idempotent calls succeed without changing `updated_at` or
+/// emitting a Mutation.
+pub fn setItemStatus(
+    store: Store,
+    gpa: std.mem.Allocator,
+    clock: clock_mod.Clock,
+    req: SetStatusRequest,
+) SetStatusError!SetStatusOutcome {
+    var iso_buf: [24]u8 = undefined;
+    const now = clock.nowIso(&iso_buf);
+
+    try store.conn.execNoArgs("begin immediate");
+    errdefer store.conn.rollback();
+
+    const current_row = (try store.conn.row(
+        \\select origin, status, item_class, display_value, title
+        \\  from items
+        \\ where id = ?1
+    , .{req.id})) orelse {
+        store.conn.rollback();
+        return .not_found;
+    };
+    defer current_row.deinit();
+
+    const origin = enumFromText(Origin, current_row.text(0));
+    const current_status = enumFromText(ItemStatus, current_row.text(1));
+    const item_class = enumFromText(ItemClass, current_row.text(2));
+    const display_id = try gpa.dupe(u8, current_row.text(3));
+    errdefer gpa.free(display_id);
+    const title = try gpa.dupe(u8, current_row.text(4));
+    errdefer gpa.free(title);
+
+    if (current_status == req.status) {
+        try store.conn.commit();
+        return .{ .ok = .{
+            .display_id = display_id,
+            .title = title,
+            .item_class = item_class,
+            .status = req.status,
+        } };
+    }
+
+    try store.conn.exec(
+        \\update items
+        \\   set status = ?2, updated_at = ?3
+        \\ where id = ?1
+    , .{ req.id, req.status.text(), now });
+
+    if (origin == .backend) {
+        try mutations_mod.appendMutation(
+            store.conn,
+            gpa,
+            .set_item_status,
+            req.id,
+            item_class,
+            .{ .item_status = .{ .status = req.status.text() } },
+            now,
+        );
+    }
+
+    try store.conn.commit();
+
+    return .{ .ok = .{
+        .display_id = display_id,
+        .title = title,
+        .item_class = item_class,
+        .status = req.status,
+    } };
 }
 
 fn generateInternalId(gpa: std.mem.Allocator, random: std.Random) ![]u8 {
@@ -1850,11 +1961,293 @@ test "listRows SQL has a CASE arm for every ListView tag" {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// updateItem tests
+// setItemStatus tests
 // ──────────────────────────────────────────────────────────────────────────────
 
 const FakeClock = @import("../clock.zig").FakeClock;
 const default_fake_now_ms = @import("../testing/test_cli.zig").default_fake_now_ms;
+
+test "setItemStatus: returns not_found for unknown id" {
+    const gpa = std.testing.allocator;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+    var fc = FakeClock.init(default_fake_now_ms);
+
+    const outcome = try setItemStatus(store, gpa, fc.clock(), .{ .id = "missing", .status = .done });
+    try std.testing.expectEqual(SetStatusOutcome.not_found, outcome);
+}
+
+test "setItemStatus: local-origin done updates status and emits no Mutation" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+    var fc = FakeClock.init(default_fake_now_ms);
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "t1",
+        .display = "tk-1",
+        .title = "Local Ticket",
+        .created_seq = 1,
+        .updated_at = "2026-01-01T00:00:00.000Z",
+    });
+
+    const outcome = try setItemStatus(store, gpa, fc.clock(), .{ .id = "t1", .status = .done });
+    switch (outcome) {
+        .ok => |item| {
+            defer item.deinit(gpa);
+            try std.testing.expectEqualStrings("tk-1", item.display_id);
+            try std.testing.expectEqualStrings("Local Ticket", item.title);
+            try std.testing.expectEqual(ItemClass.ticket, item.item_class);
+            try std.testing.expectEqual(ItemStatus.done, item.status);
+        },
+        .not_found => return error.UnexpectedNotFound,
+    }
+
+    const row = (try conn.row("select status, updated_at from items where id = 't1'", .{})) orelse return error.ExpectedRow;
+    defer row.deinit();
+    try std.testing.expectEqualStrings("done", row.text(0));
+    try std.testing.expect(!std.mem.eql(u8, "2026-01-01T00:00:00.000Z", row.text(1)));
+    try std.testing.expectEqual(@as(i64, 0), try TmpStore.mutationCount(conn));
+}
+
+test "setItemStatus: Backend-origin change emits set_item_status Mutation" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+    var fc = FakeClock.init(default_fake_now_ms);
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "e1",
+        .display = "GH#10",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .title = "Backend Epic",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "10",
+        .created_seq = 1,
+    });
+
+    const outcome = try setItemStatus(store, gpa, fc.clock(), .{ .id = "e1", .status = .done });
+    switch (outcome) {
+        .ok => |item| {
+            defer item.deinit(gpa);
+            try std.testing.expectEqual(ItemClass.epic, item.item_class);
+        },
+        .not_found => return error.UnexpectedNotFound,
+    }
+
+    const row = (try conn.row(
+        "select mutation_type, item_id, item_class, payload_json from mutations where sequence = 1",
+        .{},
+    )) orelse return error.ExpectedRow;
+    defer row.deinit();
+    try std.testing.expectEqualStrings("set_item_status", row.text(0));
+    try std.testing.expectEqualStrings("e1", row.text(1));
+    try std.testing.expectEqualStrings("epic", row.text(2));
+    try std.testing.expectEqualStrings("{\"status\":\"done\"}", row.text(3));
+}
+
+test "setItemStatus: already-done Backend row is idempotent" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+    var fc = FakeClock.init(default_fake_now_ms);
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "t1",
+        .display = "GH#1",
+        .title = "Backend Ticket",
+        .status = "done",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "1",
+        .created_seq = 1,
+        .updated_at = "2026-01-01T00:00:00.000Z",
+    });
+
+    const outcome = try setItemStatus(store, gpa, fc.clock(), .{ .id = "t1", .status = .done });
+    switch (outcome) {
+        .ok => |item| {
+            defer item.deinit(gpa);
+            try std.testing.expectEqualStrings("GH#1", item.display_id);
+            try std.testing.expectEqualStrings("Backend Ticket", item.title);
+            try std.testing.expectEqual(ItemClass.ticket, item.item_class);
+            try std.testing.expectEqual(ItemStatus.done, item.status);
+        },
+        .not_found => return error.UnexpectedNotFound,
+    }
+
+    try std.testing.expectEqual(@as(i64, 0), try TmpStore.mutationCount(conn));
+    const row = (try conn.row("select updated_at from items where id = 't1'", .{})) orelse return error.ExpectedRow;
+    defer row.deinit();
+    try std.testing.expectEqualStrings("2026-01-01T00:00:00.000Z", row.text(0));
+}
+
+test "setItemStatus: already-done local row is idempotent" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+    var fc = FakeClock.init(default_fake_now_ms);
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "t1",
+        .display = "tk-1",
+        .title = "Local Ticket",
+        .status = "done",
+        .created_seq = 1,
+        .updated_at = "2026-01-01T00:00:00.000Z",
+    });
+
+    const outcome = try setItemStatus(store, gpa, fc.clock(), .{ .id = "t1", .status = .done });
+    switch (outcome) {
+        .ok => |item| {
+            defer item.deinit(gpa);
+            try std.testing.expectEqualStrings("tk-1", item.display_id);
+            try std.testing.expectEqualStrings("Local Ticket", item.title);
+            try std.testing.expectEqual(ItemClass.ticket, item.item_class);
+            try std.testing.expectEqual(ItemStatus.done, item.status);
+        },
+        .not_found => return error.UnexpectedNotFound,
+    }
+
+    try std.testing.expectEqual(@as(i64, 0), try TmpStore.mutationCount(conn));
+    const row = (try conn.row("select updated_at from items where id = 't1'", .{})) orelse return error.ExpectedRow;
+    defer row.deinit();
+    try std.testing.expectEqualStrings("2026-01-01T00:00:00.000Z", row.text(0));
+}
+
+test "setItemStatus: rolls back current state and Mutation sequence when outbox insert fails" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+    var fc = FakeClock.init(default_fake_now_ms);
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "t1",
+        .display = "GH#1",
+        .title = "Backend Ticket",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "1",
+        .created_seq = 1,
+        .updated_at = "2026-01-01T00:00:00.000Z",
+    });
+    try conn.execNoArgs(
+        \\create trigger fail_set_item_status_mutation
+        \\before insert on mutations
+        \\when new.mutation_type = 'set_item_status'
+        \\begin
+        \\  select raise(abort, 'forced set_item_status failure');
+        \\end
+    );
+
+    try std.testing.expectError(error.ConstraintTrigger, setItemStatus(store, gpa, fc.clock(), .{ .id = "t1", .status = .done }));
+
+    const row = (try conn.row("select status, updated_at from items where id = 't1'", .{})) orelse return error.ExpectedRow;
+    defer row.deinit();
+    try std.testing.expectEqualStrings("open", row.text(0));
+    try std.testing.expectEqualStrings("2026-01-01T00:00:00.000Z", row.text(1));
+    try std.testing.expectEqual(@as(i64, 0), try TmpStore.mutationCount(conn));
+    const seq = (try conn.row("select value from sequences where name = 'mutation_seq'", .{})) orelse return error.ExpectedRow;
+    defer seq.deinit();
+    try std.testing.expectEqual(@as(i64, 0), seq.int(0));
+}
+
+test "setItemStatus: completing a blocker makes the blocked Ticket ready" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+    var fc = FakeClock.init(default_fake_now_ms);
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "blocked",
+        .display = "tk-1",
+        .title = "Blocked Ticket",
+        .priority = "P2",
+        .created_seq = 1,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "blocker",
+        .display = "tk-2",
+        .title = "Blocking Item",
+        .priority = "P3",
+        .status = "active",
+        .created_seq = 2,
+    });
+    try TmpStore.insertDependency(conn, "blocker", "blocked");
+
+    try std.testing.expectEqual(NextOutcome.no_ready_ticket, try nextReadyTicket(store, gpa, .{}));
+    {
+        const blocked_rows = try listRows(store, gpa, .{ .view = .blocked });
+        defer freeListRows(gpa, blocked_rows);
+        try expectDisplayIds(blocked_rows, &.{"tk-1"});
+    }
+
+    const outcome = try setItemStatus(store, gpa, fc.clock(), .{ .id = "blocker", .status = .done });
+    switch (outcome) {
+        .ok => |item| item.deinit(gpa),
+        .not_found => return error.UnexpectedNotFound,
+    }
+
+    const next = try nextReadyTicket(store, gpa, .{});
+    switch (next) {
+        .ticket => |ticket| {
+            defer ticket.deinit(gpa);
+            try std.testing.expectEqualStrings("tk-1", ticket.display_id);
+        },
+        else => return error.ExpectedReadyTicket,
+    }
+    {
+        const ready_rows = try listRows(store, gpa, .{ .view = .ready });
+        defer freeListRows(gpa, ready_rows);
+        try expectDisplayIds(ready_rows, &.{"tk-1"});
+    }
+    {
+        const blocked_rows = try listRows(store, gpa, .{ .view = .blocked });
+        defer freeListRows(gpa, blocked_rows);
+        try std.testing.expectEqual(@as(usize, 0), blocked_rows.len);
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// updateItem tests
+// ──────────────────────────────────────────────────────────────────────────────
 
 test "updateItem: returns not_found for unknown id" {
     const gpa = std.testing.allocator;
