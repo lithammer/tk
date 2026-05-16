@@ -70,6 +70,8 @@ const all_commands = .{
     @import("commands/next.zig"),
     @import("commands/prime.zig"),
     @import("commands/show.zig"),
+    @import("commands/start.zig"),
+    @import("commands/stop.zig"),
     @import("commands/update.zig"),
 };
 
@@ -79,8 +81,6 @@ const remote_sync_slice = "Planned: remote and sync skeleton slice.";
 const post_sync_slice = "Planned: later slice once Remote and sync are in place.";
 
 const unimplemented_commands = [_]UnimplementedMeta{
-    .{ .name = "start", .description = "Mark a Ticket or Epic active", .tracking = lifecycle_blocking_slice },
-    .{ .name = "stop", .description = "Move an active Ticket or Epic back to open", .tracking = lifecycle_blocking_slice },
     .{ .name = "block", .description = "Record that one item blocks another", .tracking = lifecycle_blocking_slice },
     .{ .name = "unblock", .description = "Remove a blocking relationship", .tracking = lifecycle_blocking_slice },
     .{ .name = "worktree", .description = "Inspect or configure the current Workspace Scope", .tracking = worktree_slice },
@@ -326,11 +326,11 @@ test "runArgv routes a planned subcommand to a not-yet-implemented stub" {
 }
 
 test "runArgv stub diagnostic carries the lifecycle-and-blocking tracking note" {
-    var h = Harness.init(std.testing.allocator, &.{"start"});
+    var h = Harness.init(std.testing.allocator, &.{"block"});
     defer h.deinit();
 
     const code = try runArgv(h.deps(), &h.iter);
     try std.testing.expectEqual(@as(u8, 1), code);
-    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "tk start: not yet implemented") != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "tk block: not yet implemented") != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stderr(), lifecycle_blocking_slice) != null);
 }

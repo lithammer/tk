@@ -310,3 +310,87 @@ pub const done_success_ticket_prefix = "Marked Ticket done: ";
 /// Stdout prefix for a successful Epic status write. Callers append
 /// `"{s} - {s}\n"` for Display ID and title.
 pub const done_success_epic_prefix = "Marked Epic done: ";
+
+// `tk start` — symmetric lifecycle status write to `active`.
+
+/// Stderr line when no Repository Store exists for the current repository.
+pub const start_missing_store = "tk start: Repository Store not initialized; run 'tk init'";
+
+/// Stderr line when no positional id was supplied.
+pub const start_id_required = "tk start: an item ID argument is required";
+
+/// Stderr prefix for unknown Display ID or Alias. Callers append
+/// `"{s}" ++ start_id_not_found_suffix ++ "\n"` for the supplied id.
+pub const start_id_not_found_prefix = "tk start: '";
+
+/// Stderr suffix for unknown Display ID or Alias.
+pub const start_id_not_found_suffix = "' is not a known Display ID or Alias";
+
+/// Stderr line for busy/locked Repository Store writes.
+pub const start_store_busy_retry = "tk start: Repository Store is busy; retry the command";
+
+/// Stderr line when allocation fails during a `tk start` Repository Store
+/// write.
+pub const start_out_of_memory = "tk start: out of memory";
+
+/// Stderr line for non-transient Repository Store write failures. The caller
+/// appends `"\n{s}\n"` for the underlying `@errorName`.
+pub const start_write_failed = "tk start: failed to mark item active";
+
+/// Stdout prefix for a successful Ticket status write. Callers append
+/// `"{s} - {s}\n"` for Display ID and title.
+pub const start_success_ticket_prefix = "Marked Ticket active: ";
+
+/// Stdout prefix for a successful Epic status write. Callers append
+/// `"{s} - {s}\n"` for Display ID and title.
+pub const start_success_epic_prefix = "Marked Epic active: ";
+
+/// Stderr line when `tk start` refuses a done Ticket. ADR 0006: done is
+/// terminal in v1.
+pub const start_locked_done_ticket = "tk start: cannot start a done Ticket";
+
+/// Stderr line when `tk start` refuses a done Epic. ADR 0006: done is
+/// terminal in v1.
+pub const start_locked_done_epic = "tk start: cannot start a done Epic";
+
+// `tk stop` — symmetric lifecycle status write back to `open`.
+
+/// Stderr line when no Repository Store exists for the current repository.
+pub const stop_missing_store = "tk stop: Repository Store not initialized; run 'tk init'";
+
+/// Stderr line when no positional id was supplied.
+pub const stop_id_required = "tk stop: an item ID argument is required";
+
+/// Stderr prefix for unknown Display ID or Alias. Callers append
+/// `"{s}" ++ stop_id_not_found_suffix ++ "\n"` for the supplied id.
+pub const stop_id_not_found_prefix = "tk stop: '";
+
+/// Stderr suffix for unknown Display ID or Alias.
+pub const stop_id_not_found_suffix = "' is not a known Display ID or Alias";
+
+/// Stderr line for busy/locked Repository Store writes.
+pub const stop_store_busy_retry = "tk stop: Repository Store is busy; retry the command";
+
+/// Stderr line when allocation fails during a `tk stop` Repository Store
+/// write.
+pub const stop_out_of_memory = "tk stop: out of memory";
+
+/// Stderr line for non-transient Repository Store write failures. The caller
+/// appends `"\n{s}\n"` for the underlying `@errorName`.
+pub const stop_write_failed = "tk stop: failed to mark item open";
+
+/// Stdout prefix for a successful Ticket status write. Callers append
+/// `"{s} - {s}\n"` for Display ID and title.
+pub const stop_success_ticket_prefix = "Marked Ticket open: ";
+
+/// Stdout prefix for a successful Epic status write. Callers append
+/// `"{s} - {s}\n"` for Display ID and title.
+pub const stop_success_epic_prefix = "Marked Epic open: ";
+
+/// Stderr line when `tk stop` refuses a done Ticket. ADR 0006: done is
+/// terminal in v1.
+pub const stop_locked_done_ticket = "tk stop: cannot stop a done Ticket";
+
+/// Stderr line when `tk stop` refuses a done Epic. ADR 0006: done is
+/// terminal in v1.
+pub const stop_locked_done_epic = "tk stop: cannot stop a done Epic";

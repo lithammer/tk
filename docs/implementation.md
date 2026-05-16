@@ -538,8 +538,8 @@ found: <path>`; do not convert a missing fixture into empty stdin.
 ## Completed Baseline
 
 The current binary implements `tk prime`, `tk init`,
-`tk add -F <file | ->`, `tk list`, `tk next`, `tk show`, `tk update`, and
-`tk done`.
+`tk add -F <file | ->`, `tk list`, `tk next`, `tk show`, `tk update`,
+`tk done`, `tk start`, and `tk stop`.
 
 `tk prime` is command-owned static output embedded from
 `src/commands/prime.md`. It trims trailing whitespace, emits exactly one final
@@ -789,15 +789,41 @@ than request metadata. Field-idempotent calls commit without UPDATE, leave
 `updated_at` unchanged, and emit no Mutation. Changed Backend-origin rows call
 `mutations.appendMutation` after the current-state UPDATE and before commit,
 so allocation or SQLite failure rolls back both current state and the outbox
-sequence allocation.
+sequence allocation. Any request that would move a `done` row to a non-`done`
+Item Status short-circuits with the `.locked_done` outcome arm, carrying the
+persisted `ItemClass` for caller-side rendering; ADR 0006 makes `done`
+terminal in v1, and migration 002's `items_no_escape_from_done` trigger
+backstops the rule for any future writer that bypasses `setItemStatus`.
+
+`tk start <id>` and `tk stop <id>` are the symmetric lifecycle commands.
+`tk start` writes Item Status `active`; `tk stop` writes Item Status `open`.
+Both resolve the positional `<id>` through the same Display ID / Alias
+resolver as `tk done`, route through `repository.setItemStatus`, and print
+`Marked Ticket active: <display-id> - <title>` / `Marked Epic active: …` or
+`Marked Ticket open: <display-id> - <title>` / `Marked Epic open: …` on
+success. Local-origin writes update current state only; Backend-origin
+writes append one pending `set_item_status` Mutation in the same
+transaction with JSON payload `{"status":"active"}` or `{"status":"open"}`.
+Field-idempotent calls (`tk start` on an already-active row, `tk stop` on
+an already-open row) match `tk done`'s behavior: the success line still
+prints, no Mutation is appended, and `updated_at` is unchanged. The
+`.locked_done` outcome arm surfaces as `tk start: cannot start a done
+<Ticket|Epic>` or `tk stop: cannot stop a done <Ticket|Epic>` on stderr
+with exit 1; per ADR 0006 done is terminal in v1, so neither command can
+revive a completed Ticket or Epic, and the schema-level
+`items_no_escape_from_done` trigger from migration 002 enforces the
+constraint for any writer that bypasses the pre-read short-circuit. v1
+intentionally has no single-active invariant — multiple Tickets and Epics
+may be `active` simultaneously, and readiness selection by `tk next` and
+`tk list --ready` is not gated by `tk start`. `tk worktree start` (next
+slice) will route through `setItemStatus` and inherit the `.locked_done`
+outcome.
 
 ## Next Slices
 
 Continue in small vertical slices:
 
 1. Remaining lifecycle and blocking
-   - Implement `tk start` and `tk stop` (symmetric `set_item_status`
-     transitions to `active` / back to `open`).
    - Implement `tk block` and `tk unblock` (item-backed Dependency edge
      create/remove with `add_dependency` / `remove_dependency`).
    - Implement External Blocker create/resolve CLI with
