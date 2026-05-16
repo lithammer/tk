@@ -43,6 +43,25 @@ pub const CommandMeta = struct {
     description: []const u8,
 };
 
+/// Metadata for a planned subcommand whose surface is documented in `tk prime`
+/// and `docs/cli.md` but whose implementation has not yet shipped.
+///
+/// Registered in `unimplemented_commands` so an agent that follows the
+/// workflow vision from `tk prime` and reaches for a future command receives a
+/// deliberate "not yet implemented" diagnostic instead of an unknown-
+/// subcommand error from the top-level parser. The slot is removed when the
+/// real command module lands in `all_commands`.
+pub const UnimplementedMeta = struct {
+    /// CLI spelling, also used as the generated `SubCommand` tag name.
+    name: [:0]const u8,
+    /// One-line description shown under the "Planned" section of `tk --help`.
+    description: []const u8,
+    /// One-line tracking note pointing at the slice that will ship the
+    /// command. Rendered after the "not yet implemented" line on stderr so
+    /// agents see where to look.
+    tracking: []const u8,
+};
+
 const all_commands = .{
     @import("commands/init.zig"),
     @import("commands/add.zig"),
@@ -54,18 +73,42 @@ const all_commands = .{
     @import("commands/update.zig"),
 };
 
-/// Top-level subcommand enum generated from `all_commands`.
+const lifecycle_blocking_slice = "Planned: remaining lifecycle and blocking slice.";
+const worktree_slice = "Planned: worktree scope slice.";
+const remote_sync_slice = "Planned: remote and sync skeleton slice.";
+const post_sync_slice = "Planned: later slice once Remote and sync are in place.";
+
+const unimplemented_commands = [_]UnimplementedMeta{
+    .{ .name = "start", .description = "Mark a Ticket or Epic active", .tracking = lifecycle_blocking_slice },
+    .{ .name = "stop", .description = "Move an active Ticket or Epic back to open", .tracking = lifecycle_blocking_slice },
+    .{ .name = "block", .description = "Record that one item blocks another", .tracking = lifecycle_blocking_slice },
+    .{ .name = "unblock", .description = "Remove a blocking relationship", .tracking = lifecycle_blocking_slice },
+    .{ .name = "worktree", .description = "Inspect or configure the current Workspace Scope", .tracking = worktree_slice },
+    .{ .name = "promote", .description = "Promote a Local Ticket or Epic through the configured Remote", .tracking = post_sync_slice },
+    .{ .name = "sync", .description = "Pull remote state and apply pending Mutations", .tracking = remote_sync_slice },
+    .{ .name = "remote", .description = "Inspect or configure the Remote", .tracking = remote_sync_slice },
+};
+
+/// Top-level subcommand enum generated from `all_commands` and
+/// `unimplemented_commands`.
 ///
-/// Adding a command module to `all_commands` is the only dispatcher touchpoint:
-/// the enum, zig-clap parser, help listing, and dispatch switch all derive from
-/// this compile-time tuple.
+/// The two compile-time tables are the only dispatcher touchpoints: the
+/// enum, zig-clap parser, help listing, and dispatch switch all derive from
+/// them. A new command starts as an `UnimplementedMeta` row (auto-registered
+/// for "not yet implemented" diagnostics) and graduates to `all_commands`
+/// when its module ships.
 pub const SubCommand = blk: {
-    const Tag = std.math.IntFittingRange(0, all_commands.len -| 1);
-    var names: [all_commands.len][]const u8 = undefined;
-    var values: [all_commands.len]Tag = undefined;
+    const total = all_commands.len + unimplemented_commands.len;
+    const Tag = std.math.IntFittingRange(0, total -| 1);
+    var names: [total][]const u8 = undefined;
+    var values: [total]Tag = undefined;
     for (all_commands, 0..) |cmd, i| {
         names[i] = cmd.meta.name;
         values[i] = @intCast(i);
+    }
+    for (unimplemented_commands, 0..) |stub, i| {
+        names[all_commands.len + i] = stub.name;
+        values[all_commands.len + i] = @intCast(all_commands.len + i);
     }
     break :blk @Enum(Tag, .exhaustive, &names, &values);
 };
@@ -136,9 +179,28 @@ pub fn runArgv(deps: Deps, args_iter: anytype) !u8 {
                     break :blk cmd.run(deps, args_iter);
                 }
             }
+            inline for (unimplemented_commands) |stub| {
+                if (comptime std.mem.eql(u8, stub.name, @tagName(tag))) {
+                    break :blk runUnimplemented(deps, stub);
+                }
+            }
             unreachable;
         },
     };
+}
+
+/// Render the "not yet implemented" diagnostic for a planned subcommand.
+///
+/// Returns exit 1 to keep the contract honest: an agent that invoked the
+/// command did request work, the work did not happen, and exit 0 would mask
+/// the gap. The body names the tracking slice so the agent knows where to
+/// look without grepping the codebase.
+fn runUnimplemented(deps: Deps, stub: UnimplementedMeta) !u8 {
+    deps.stderr.print(
+        "tk {s}: not yet implemented\n{s}\n",
+        .{ stub.name, stub.tracking },
+    ) catch {};
+    return 1;
 }
 
 fn writeTopLevelHelp(deps: Deps) !void {
@@ -155,6 +217,14 @@ fn writeTopLevelHelp(deps: Deps) !void {
     );
     inline for (all_commands) |cmd| {
         try deps.stdout.print("  {s:<10} {s}\n", .{ cmd.meta.name, cmd.meta.description });
+    }
+    try deps.stdout.writeAll(
+        \\
+        \\Planned (not yet implemented):
+        \\
+    );
+    inline for (unimplemented_commands) |stub| {
+        try deps.stdout.print("  {s:<10} {s}\n", .{ stub.name, stub.description });
     }
     try deps.stdout.writeAll(
         \\
@@ -236,5 +306,31 @@ test "runArgv prints help" {
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "list") != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "prime") != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "--version") != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "Planned (not yet implemented):") != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "worktree") != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "sync") != null);
     try std.testing.expectEqualStrings("", h.stderr());
+}
+
+test "runArgv routes a planned subcommand to a not-yet-implemented stub" {
+    var h = Harness.init(std.testing.allocator, &.{"worktree"});
+    defer h.deinit();
+
+    const code = try runArgv(h.deps(), &h.iter);
+    try std.testing.expectEqual(@as(u8, 1), code);
+    try std.testing.expectEqualStrings("", h.stdout());
+    try std.testing.expectEqualStrings(
+        "tk worktree: not yet implemented\n" ++ worktree_slice ++ "\n",
+        h.stderr(),
+    );
+}
+
+test "runArgv stub diagnostic carries the lifecycle-and-blocking tracking note" {
+    var h = Harness.init(std.testing.allocator, &.{"start"});
+    defer h.deinit();
+
+    const code = try runArgv(h.deps(), &h.iter);
+    try std.testing.expectEqual(@as(u8, 1), code);
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "tk start: not yet implemented") != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), lifecycle_blocking_slice) != null);
 }
