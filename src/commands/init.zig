@@ -33,8 +33,7 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
         .diagnostic = &diag,
         .allocator = deps.gpa,
     }) catch |err| {
-        // TODO(followups): "Prefix tk init clap diagnostics with the command
-        // name" — docs/followups.md.
+        // TODO(ticket-2): prefix clap diagnostics with the command name.
         diag.report(deps.stderr, err) catch {};
         return 2;
     };
@@ -74,8 +73,8 @@ fn execute(deps: cli.Deps) !u8 {
     // Per docs/implementation.md: when the directory already exists with
     // broader permissions, slice 2 uses it as-is and does not chmod it.
     // Only tighten when we're the ones who just created it.
-    // TODO(followups): "Surface a stderr warning when tk init can't tighten
-    // store permissions" — docs/followups.md.
+    // TODO(ticket-1): surface a stderr warning when we can't tighten
+    // store permissions.
     if (dir_status == .created) setDirMode0700(deps, tk_dir_path) catch {};
 
     const db_path = try std.fs.path.joinZ(deps.gpa, &.{ tk_dir_path, "ticket.db" });

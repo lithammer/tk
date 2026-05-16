@@ -108,9 +108,8 @@ pub fn runArgv(deps: Deps, args_iter: anytype) !u8 {
         .allocator = deps.gpa,
         .terminating_positional = 0,
     }) catch |err| {
-        // TODO(followups): "Prefix tk init clap diagnostics with the command
-        // name" — applies symmetrically here for top-level parse failures.
-        // See docs/followups.md.
+        // TODO(ticket-2): prefix clap diagnostics with the command name —
+        // applies symmetrically here for top-level parse failures.
         diag.report(deps.stderr, err) catch {};
         return 2;
     };
