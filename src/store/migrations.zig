@@ -5,6 +5,10 @@
 //! sync_cursors, and schema_migrations, plus the indexes tied to known v1
 //! query paths.
 //!
+//! Migration 2 installs the `items_no_escape_from_done` trigger so the
+//! "Done is terminal" rule (ADR 0006) holds for every write path against
+//! `items`, not only the Repository Store helpers that exist today.
+//!
 //! Each migration runs inside its own transaction. The caller is responsible
 //! for connection-level setup (foreign_keys, busy_timeout, journal_mode)
 //! before invoking `applyAll`.
@@ -36,8 +40,17 @@ pub const migration_1: Migration = .{
     .sql = @embedFile("migrations/001_repository_store.sql"),
 };
 
+/// Adds the `items_no_escape_from_done` trigger that enforces the
+/// "Done is terminal" rule (ADR 0006) at the schema layer, so any write
+/// path -- including those the Repository Store API does not own yet --
+/// inherits the protection.
+pub const migration_2: Migration = .{
+    .version = 2,
+    .sql = @embedFile("migrations/002_items_no_escape_from_done.sql"),
+};
+
 /// Ordered migration list applied by `applyAll`.
-pub const all_migrations: []const Migration = &.{migration_1};
+pub const all_migrations: []const Migration = &.{ migration_1, migration_2 };
 
 /// Errors that the SQL helpers in this module can return. zqlite's
 /// `prepare` (used internally by `exec` and `row`) adds `MultipleStatements`
@@ -140,13 +153,13 @@ fn openMemoryDb() !Conn {
     return conn;
 }
 
-test "applyAll on empty db creates v1 schema and records migration" {
+test "applyAll on empty db installs every migration and records each one" {
     const conn = try openMemoryDb();
     defer conn.close();
 
     try applyAll(conn, "2026-05-09T00:00:00.000Z", null);
 
-    try std.testing.expectEqual(@as(u32, 1), try currentVersion(conn));
+    try std.testing.expectEqual(@as(u32, 2), try currentVersion(conn));
 
     try std.testing.expectEqual(
         @as(?i64, application_id),
@@ -154,7 +167,7 @@ test "applyAll on empty db creates v1 schema and records migration" {
     );
 
     try std.testing.expectEqual(
-        @as(?i64, 1),
+        @as(?i64, 2),
         try queryOptionalInt(conn, "pragma user_version"),
     );
 
@@ -188,7 +201,7 @@ test "applyAll is idempotent on a current store" {
     try applyAll(conn, "2026-05-09T00:00:01.000Z", null);
 
     try std.testing.expectEqual(
-        @as(?i64, 1),
+        @as(?i64, 2),
         try queryOptionalInt(conn, "select count(*) from schema_migrations"),
     );
 }
@@ -448,5 +461,119 @@ test "Repository Store rejects an Item without a current Display ID" {
         \\insert into items(id, display_value, item_class, ticket_kind, priority, title, body, origin, status, created_seq, created_at, updated_at)
         \\values ('t1', 'tk-1', 'ticket', 'task', 'P2', 'title', '', 'local', 'open', 1, '2026-05-09T00:00:00.000Z', '2026-05-09T00:00:00.000Z');
         \\commit;
+    );
+}
+
+test "Repository Store forbids leaving the done Item Status" {
+    const conn = try test_helpers.freshDb();
+    defer conn.close();
+    try test_helpers.insertTicket(conn, .{
+        .id = "t1",
+        .display = "tk-1",
+        .status = "done",
+        .created_seq = 1,
+    });
+
+    // The v2 trigger fires on any UPDATE OF status when the prior row was
+    // `done` and the new value differs.
+    try test_helpers.expectRejected(conn,
+        \\update items set status = 'open' where id = 't1' and status = 'done'
+    );
+
+    // The failed update must leave the Item Status unchanged.
+    if (try conn.row("select status from items where id = 't1'", .{})) |r| {
+        defer r.deinit();
+        try std.testing.expectEqualStrings("done", r.text(0));
+    } else return error.ExpectedRow;
+}
+
+test "Repository Store permits no-op UPDATE OF status on a done item" {
+    // ADR 0006: the trigger fires only when `old.status = 'done'` *and*
+    // `new.status != 'done'`. A done -> done UPDATE OF status still fires
+    // the trigger but the WHEN clause is false, so abort is not raised.
+    // Pinning this guards against a future regression that flips the
+    // WHEN polarity.
+    const conn = try test_helpers.freshDb();
+    defer conn.close();
+    try test_helpers.insertTicket(conn, .{
+        .id = "t1",
+        .display = "tk-1",
+        .status = "done",
+        .created_seq = 1,
+    });
+
+    try conn.execNoArgs("update items set status = 'done' where id = 't1'");
+
+    if (try conn.row("select status from items where id = 't1'", .{})) |r| {
+        defer r.deinit();
+        try std.testing.expectEqualStrings("done", r.text(0));
+    } else return error.ExpectedRow;
+}
+
+test "Repository Store permits editing non-status columns on a done item" {
+    // ADR 0006: the constraint covers Item Status only; title, body,
+    // Priority, and Epic membership remain editable on a done item.
+    // `BEFORE UPDATE OF status` is column-targeted, so an UPDATE that
+    // does not list `status` in its SET clause must not fire the trigger.
+    // Pinning this guards against a future regression that drops `OF status`.
+    const conn = try test_helpers.freshDb();
+    defer conn.close();
+    try test_helpers.insertTicket(conn, .{
+        .id = "t1",
+        .display = "tk-1",
+        .title = "before",
+        .status = "done",
+        .created_seq = 1,
+    });
+
+    try conn.execNoArgs("update items set title = 'after' where id = 't1'");
+
+    if (try conn.row("select title, status from items where id = 't1'", .{})) |r| {
+        defer r.deinit();
+        try std.testing.expectEqualStrings("after", r.text(0));
+        try std.testing.expectEqualStrings("done", r.text(1));
+    } else return error.ExpectedRow;
+}
+
+test "Repository Store applyAll upgrades a v1 store to v2 without rewriting v1 data" {
+    const conn = try openMemoryDb();
+    defer conn.close();
+
+    // Simulate a Repository Store that stopped at v1: apply only migration_1
+    // through the same code path `applyAll` uses, so the schema_migrations
+    // bookkeeping and pragmas match what a v1 binary would have written.
+    try applyOne(conn, migration_1, "2026-05-09T00:00:00.000Z");
+    try std.testing.expectEqual(@as(u32, 1), try currentVersion(conn));
+
+    // Insert a fixture row that has to survive the upgrade. Use the same
+    // ticket helper the rest of the file relies on so the row satisfies the
+    // deferred composite FK against item_ids.
+    try test_helpers.insertTicket(conn, .{ .id = "t1", .display = "tk-1", .created_seq = 1 });
+
+    try applyAll(conn, "2026-05-10T00:00:00.000Z", null);
+
+    try std.testing.expectEqual(@as(u32, 2), try currentVersion(conn));
+    if (try conn.row("select display_value, status from items where id = 't1'", .{})) |r| {
+        defer r.deinit();
+        try std.testing.expectEqualStrings("tk-1", r.text(0));
+        try std.testing.expectEqualStrings("open", r.text(1));
+    } else return error.ExpectedRow;
+}
+
+test "Repository Store applyAll is a no-op when already at v2" {
+    const conn = try openMemoryDb();
+    defer conn.close();
+
+    try applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    try applyAll(conn, "2026-05-10T00:00:00.000Z", null);
+
+    try std.testing.expectEqual(@as(u32, 2), try currentVersion(conn));
+    try std.testing.expectEqual(
+        @as(?i64, 2),
+        try queryOptionalInt(conn, "select count(*) from schema_migrations"),
+    );
+    try std.testing.expectEqual(
+        @as(?i64, 2),
+        try queryOptionalInt(conn, "pragma user_version"),
     );
 }

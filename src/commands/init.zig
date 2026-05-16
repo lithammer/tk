@@ -392,7 +392,7 @@ test "init: idempotent on second run preserves an externally-set prefix" {
     const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
     defer conn.close();
     try std.testing.expectEqual(
-        @as(?i64, 1),
+        @as(?i64, @intCast(migrations.all_migrations.len)),
         try migrations.queryOptionalInt(conn, "select count(*) from schema_migrations"),
     );
     if (try conn.row("select value from store_config where key = 'display_prefix'", .{})) |r| {
