@@ -274,6 +274,8 @@ _Avoid_: ticket, tickets
 - **Aliases** are globally unique across **Tickets** and **Epics**.
 - **Start** sets a **Ticket** or **Epic** to `active`.
 - **Stop** moves an active **Ticket** or **Epic** back to `open`.
+- **`done`** is terminal in v1: once a **Ticket** or **Epic** is `done`, **Start** and **Stop** refuse to transition it back to `active` or `open`. The **Repository Store** enforces this with a schema trigger; resurrection through a dedicated `tk reopen` command is deferred from v1.
+- The **`done`** terminal rule constrains **Item Status** transitions only; title, body, **Priority**, and **Epic** membership remain editable on a `done` item.
 - **`tk worktree start`** creates a **Ticket Branch**, creates a git worktree, stores **Workspace Scope**, and marks the scoped item `active` by default.
 - **`tk worktree start`** accepts an optional positional path for the worktree.
 - Without an explicit path, **`tk worktree start`** creates a sibling worktree by default.
