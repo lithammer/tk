@@ -394,3 +394,99 @@ pub const stop_locked_done_ticket = "tk stop: cannot stop a done Ticket";
 /// Stderr line when `tk stop` refuses a done Epic. ADR 0006: done is
 /// terminal in v1.
 pub const stop_locked_done_epic = "tk stop: cannot stop a done Epic";
+
+// `tk block` — Dependency creation.
+
+/// Stderr line when no Repository Store exists for the current repository.
+pub const block_missing_store = "tk block: Repository Store not initialized; run 'tk init'";
+
+/// Stderr line when either Dependency argument is missing.
+pub const block_args_required = "tk block: blocked and blocking item ID arguments are required";
+
+/// Stderr prefix for an unknown Blocked Item Display ID or Alias. Callers
+/// append `"{s}" ++ block_item_not_found_suffix ++ "\n"` for the supplied id.
+pub const block_blocked_not_found_prefix = "tk block: blocked item '";
+
+/// Stderr prefix for an unknown Blocking Item Display ID or Alias. Callers
+/// append `"{s}" ++ block_item_not_found_suffix ++ "\n"` for the supplied id.
+pub const block_blocking_not_found_prefix = "tk block: blocking item '";
+
+/// Stderr suffix shared by role-specific unknown-ID diagnostics.
+pub const block_item_not_found_suffix = "' is not a known Display ID or Alias";
+
+/// Stderr line when the Blocked Item and Blocking Item resolve to the same
+/// Ticket or Epic.
+pub const block_self_dependency = "tk block: an item cannot depend on itself";
+
+/// Stderr prefix when the Blocked Item is already done. Callers append
+/// `"{s}' is done\n"` for the supplied Display ID or Alias.
+pub const block_blocked_done_prefix = "tk block: blocked item '";
+
+/// Stderr prefix when the Blocking Item is already done. Callers append
+/// `"{s}' is done\n"` for the supplied Display ID or Alias.
+pub const block_blocking_done_prefix = "tk block: blocking item '";
+
+/// Stderr line when a new Dependency would introduce a cycle.
+pub const block_dependency_cycle = "tk block: Dependency would create a cycle";
+
+/// Stderr prefix when a Backend Blocked Item references a Local Blocking Item.
+/// Callers append `"{blocked}' cannot depend on Local blocking item '{blocking}'\n"`.
+pub const block_backend_blocked_local_blocking_prefix = "tk block: Backend blocked item '";
+
+/// Stderr prefix when a Backend Blocked Item references a Blocking Item from
+/// another Backend kind. Callers append
+/// `"{blocked}' cannot depend on blocking item '{blocking}' from another Backend kind\n"`.
+pub const block_backend_kind_mismatch_prefix = "tk block: Backend blocked item '";
+
+/// Stderr line for busy/locked Repository Store writes.
+pub const block_store_busy_retry = "tk block: Repository Store is busy; retry the command";
+
+/// Stderr line when allocation fails during a `tk block` Repository Store
+/// write.
+pub const block_out_of_memory = "tk block: out of memory";
+
+/// Stderr line for non-transient Repository Store write failures. The caller
+/// appends `"\n{s}\n"` for the underlying `@errorName`.
+pub const block_write_failed = "tk block: failed to add Dependency";
+
+/// Stdout prefix for successful Dependency creation. Callers append
+/// `"{s} blocked by {s}\n"` for the Blocked and Blocking Display IDs.
+pub const block_success_prefix = "Added Dependency: ";
+
+// `tk unblock` — Dependency removal.
+
+/// Stderr line when no Repository Store exists for the current repository.
+pub const unblock_missing_store = "tk unblock: Repository Store not initialized; run 'tk init'";
+
+/// Stderr line when either Dependency argument is missing.
+pub const unblock_args_required = "tk unblock: blocked and blocking item ID arguments are required";
+
+/// Stderr prefix for an unknown Blocked Item Display ID or Alias. Callers
+/// append `"{s}" ++ unblock_item_not_found_suffix ++ "\n"` for the supplied id.
+pub const unblock_blocked_not_found_prefix = "tk unblock: blocked item '";
+
+/// Stderr prefix for an unknown Blocking Item Display ID or Alias. Callers
+/// append `"{s}" ++ unblock_item_not_found_suffix ++ "\n"` for the supplied id.
+pub const unblock_blocking_not_found_prefix = "tk unblock: blocking item '";
+
+/// Stderr suffix shared by role-specific unknown-ID diagnostics.
+pub const unblock_item_not_found_suffix = "' is not a known Display ID or Alias";
+
+/// Stderr line when the Blocked Item and Blocking Item resolve to the same
+/// Ticket or Epic.
+pub const unblock_self_dependency = "tk unblock: an item cannot depend on itself";
+
+/// Stderr line for busy/locked Repository Store writes.
+pub const unblock_store_busy_retry = "tk unblock: Repository Store is busy; retry the command";
+
+/// Stderr line when allocation fails during a `tk unblock` Repository Store
+/// write.
+pub const unblock_out_of_memory = "tk unblock: out of memory";
+
+/// Stderr line for non-transient Repository Store write failures. The caller
+/// appends `"\n{s}\n"` for the underlying `@errorName`.
+pub const unblock_write_failed = "tk unblock: failed to remove Dependency";
+
+/// Stdout prefix for successful Dependency removal. Callers append
+/// `"{s} no longer blocked by {s}\n"` for the Blocked and Blocking Display IDs.
+pub const unblock_success_prefix = "Removed Dependency: ";

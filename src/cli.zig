@@ -65,6 +65,7 @@ pub const UnimplementedMeta = struct {
 const all_commands = .{
     @import("commands/init.zig"),
     @import("commands/add.zig"),
+    @import("commands/block.zig"),
     @import("commands/done.zig"),
     @import("commands/list.zig"),
     @import("commands/next.zig"),
@@ -72,17 +73,15 @@ const all_commands = .{
     @import("commands/show.zig"),
     @import("commands/start.zig"),
     @import("commands/stop.zig"),
+    @import("commands/unblock.zig"),
     @import("commands/update.zig"),
 };
 
-const lifecycle_blocking_slice = "Planned: remaining lifecycle and blocking slice.";
 const worktree_slice = "Planned: worktree scope slice.";
 const remote_sync_slice = "Planned: remote and sync skeleton slice.";
 const post_sync_slice = "Planned: later slice once Remote and sync are in place.";
 
 const unimplemented_commands = [_]UnimplementedMeta{
-    .{ .name = "block", .description = "Record that one item blocks another", .tracking = lifecycle_blocking_slice },
-    .{ .name = "unblock", .description = "Remove a blocking relationship", .tracking = lifecycle_blocking_slice },
     .{ .name = "worktree", .description = "Inspect or configure the current Workspace Scope", .tracking = worktree_slice },
     .{ .name = "promote", .description = "Promote a Local Ticket or Epic through the configured Remote", .tracking = post_sync_slice },
     .{ .name = "sync", .description = "Pull remote state and apply pending Mutations", .tracking = remote_sync_slice },
@@ -240,6 +239,8 @@ fn writeTopLevelHelp(deps: Deps) !void {
 }
 
 const Harness = @import("testing/test_cli.zig").Harness;
+const TmpStore = @import("testing/tmp_store.zig").TmpStore;
+const zqlite = @import("zqlite");
 
 test "runArgv routes prime" {
     var h = Harness.init(std.testing.allocator, &.{"prime"});
@@ -325,12 +326,470 @@ test "runArgv routes a planned subcommand to a not-yet-implemented stub" {
     );
 }
 
-test "runArgv stub diagnostic carries the lifecycle-and-blocking tracking note" {
-    var h = Harness.init(std.testing.allocator, &.{"block"});
-    defer h.deinit();
+test "runArgv block creates a Dependency that affects next ready Ticket" {
+    const gpa = std.testing.allocator;
+    var store = try TmpStore.init(gpa, "project");
+    defer store.deinit(gpa);
 
-    const code = try runArgv(h.deps(), &h.iter);
-    try std.testing.expectEqual(@as(u8, 1), code);
-    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "tk block: not yet implemented") != null);
-    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), lifecycle_blocking_slice) != null);
+    var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, store.toplevel_path, .{});
+    defer cwd.close(std.testing.io);
+
+    const rev_parse = try store.gitRevParseStdout(gpa);
+    defer gpa.free(rev_parse);
+
+    {
+        var h = Harness.initWith(gpa, &.{"init"}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
+    }
+
+    const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try TmpStore.insertFixtureItem(conn, .{ .id = "blocked", .display = "project-1", .title = "Blocked work", .created_seq = 1 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "blocking", .display = "project-2", .title = "Blocking work", .created_seq = 2 });
+
+    {
+        var h = Harness.initWith(gpa, &.{ "block", "project-1", "project-2" }, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
+        try std.testing.expectEqualStrings("Added Dependency: project-1 blocked by project-2\n", h.stdout());
+        try std.testing.expectEqualStrings("", h.stderr());
+    }
+
+    {
+        var h = Harness.initWith(gpa, &.{"next"}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
+        try std.testing.expectEqualStrings("project-2\n", h.stdout());
+        try std.testing.expectEqualStrings("", h.stderr());
+    }
+}
+
+test "runArgv unblock removes a Dependency so the blocked Ticket is ready again" {
+    const gpa = std.testing.allocator;
+    var store = try TmpStore.init(gpa, "project");
+    defer store.deinit(gpa);
+
+    var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, store.toplevel_path, .{});
+    defer cwd.close(std.testing.io);
+
+    const rev_parse = try store.gitRevParseStdout(gpa);
+    defer gpa.free(rev_parse);
+
+    {
+        var h = Harness.initWith(gpa, &.{"init"}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
+    }
+
+    const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try TmpStore.insertFixtureItem(conn, .{ .id = "blocked", .display = "project-1", .title = "Blocked work", .created_seq = 1 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "blocking", .display = "project-2", .title = "Blocking work", .created_seq = 2 });
+    try TmpStore.insertDependency(conn, "blocking", "blocked");
+
+    {
+        var h = Harness.initWith(gpa, &.{ "unblock", "project-1", "project-2" }, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
+        try std.testing.expectEqualStrings("Removed Dependency: project-1 no longer blocked by project-2\n", h.stdout());
+        try std.testing.expectEqualStrings("", h.stderr());
+    }
+
+    {
+        var h = Harness.initWith(gpa, &.{"next"}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
+        try std.testing.expectEqualStrings("project-1\n", h.stdout());
+        try std.testing.expectEqualStrings("", h.stderr());
+    }
+}
+
+test "runArgv block rejects a self Dependency with a role-specific diagnostic" {
+    const gpa = std.testing.allocator;
+    var store = try TmpStore.init(gpa, "project");
+    defer store.deinit(gpa);
+
+    var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, store.toplevel_path, .{});
+    defer cwd.close(std.testing.io);
+
+    const rev_parse = try store.gitRevParseStdout(gpa);
+    defer gpa.free(rev_parse);
+
+    {
+        var h = Harness.initWith(gpa, &.{"init"}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
+    }
+
+    const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try TmpStore.insertFixtureItem(conn, .{ .id = "item", .display = "project-1", .title = "One item", .created_seq = 1 });
+
+    var h = Harness.initWith(gpa, &.{ "block", "project-1", "project-1" }, .{ .cwd = cwd });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+    try std.testing.expectEqual(@as(u8, 1), try runArgv(h.deps(), &h.iter));
+    try std.testing.expectEqualStrings("", h.stdout());
+    try std.testing.expectEqualStrings("tk block: an item cannot depend on itself\n", h.stderr());
+}
+
+test "runArgv unblock rejects a self Dependency argument pair" {
+    const gpa = std.testing.allocator;
+    var store = try TmpStore.init(gpa, "project");
+    defer store.deinit(gpa);
+
+    var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, store.toplevel_path, .{});
+    defer cwd.close(std.testing.io);
+
+    const rev_parse = try store.gitRevParseStdout(gpa);
+    defer gpa.free(rev_parse);
+
+    {
+        var h = Harness.initWith(gpa, &.{"init"}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
+    }
+
+    const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try TmpStore.insertFixtureItem(conn, .{ .id = "item", .display = "project-1", .title = "One item", .created_seq = 1 });
+
+    var h = Harness.initWith(gpa, &.{ "unblock", "project-1", "project-1" }, .{ .cwd = cwd });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+    try std.testing.expectEqual(@as(u8, 1), try runArgv(h.deps(), &h.iter));
+    try std.testing.expectEqualStrings("", h.stdout());
+    try std.testing.expectEqualStrings("tk unblock: an item cannot depend on itself\n", h.stderr());
+}
+
+test "runArgv block rejects a done Blocked Item" {
+    const gpa = std.testing.allocator;
+    var store = try TmpStore.init(gpa, "project");
+    defer store.deinit(gpa);
+
+    var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, store.toplevel_path, .{});
+    defer cwd.close(std.testing.io);
+
+    const rev_parse = try store.gitRevParseStdout(gpa);
+    defer gpa.free(rev_parse);
+
+    {
+        var h = Harness.initWith(gpa, &.{"init"}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
+    }
+
+    const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try TmpStore.insertFixtureItem(conn, .{ .id = "blocked", .display = "project-1", .title = "Finished work", .status = "done", .created_seq = 1 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "blocking", .display = "project-2", .title = "Blocking work", .created_seq = 2 });
+
+    var h = Harness.initWith(gpa, &.{ "block", "project-1", "project-2" }, .{ .cwd = cwd });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+    try std.testing.expectEqual(@as(u8, 1), try runArgv(h.deps(), &h.iter));
+    try std.testing.expectEqualStrings("", h.stdout());
+    try std.testing.expectEqualStrings("tk block: blocked item 'project-1' is done\n", h.stderr());
+}
+
+test "runArgv block rejects a Dependency cycle with a domain diagnostic" {
+    const gpa = std.testing.allocator;
+    var store = try TmpStore.init(gpa, "project");
+    defer store.deinit(gpa);
+
+    var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, store.toplevel_path, .{});
+    defer cwd.close(std.testing.io);
+
+    const rev_parse = try store.gitRevParseStdout(gpa);
+    defer gpa.free(rev_parse);
+
+    {
+        var h = Harness.initWith(gpa, &.{"init"}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
+    }
+
+    const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try TmpStore.insertFixtureItem(conn, .{ .id = "a", .display = "project-1", .title = "First item", .created_seq = 1 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "b", .display = "project-2", .title = "Second item", .created_seq = 2 });
+    try TmpStore.insertDependency(conn, "b", "a");
+
+    var h = Harness.initWith(gpa, &.{ "block", "project-2", "project-1" }, .{ .cwd = cwd });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+    try std.testing.expectEqual(@as(u8, 1), try runArgv(h.deps(), &h.iter));
+    try std.testing.expectEqualStrings("", h.stdout());
+    try std.testing.expectEqualStrings("tk block: Dependency would create a cycle\n", h.stderr());
+}
+
+test "runArgv block emits add_dependency Mutation for same-backend items" {
+    const gpa = std.testing.allocator;
+    var store = try TmpStore.init(gpa, "project");
+    defer store.deinit(gpa);
+
+    var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, store.toplevel_path, .{});
+    defer cwd.close(std.testing.io);
+
+    const rev_parse = try store.gitRevParseStdout(gpa);
+    defer gpa.free(rev_parse);
+
+    {
+        var h = Harness.initWith(gpa, &.{"init"}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
+    }
+
+    const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "blocked",
+        .display = "GH#1",
+        .title = "Backend blocked",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "1",
+        .created_seq = 1,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "blocking",
+        .display = "GH#2",
+        .title = "Backend blocking",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "2",
+        .created_seq = 2,
+    });
+
+    var h = Harness.initWith(gpa, &.{ "block", "GH#1", "GH#2" }, .{ .cwd = cwd });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+    try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
+    try std.testing.expectEqualStrings("Added Dependency: GH#1 blocked by GH#2\n", h.stdout());
+    try std.testing.expectEqualStrings("", h.stderr());
+
+    const row = (try conn.row(
+        \\select mutation_type, item_id, item_class, payload_json
+        \\  from mutations
+        \\ where sequence = 1
+    , .{})) orelse return error.ExpectedRow;
+    defer row.deinit();
+    try std.testing.expectEqualStrings("add_dependency", row.text(0));
+    try std.testing.expectEqualStrings("blocked", row.text(1));
+    try std.testing.expectEqualStrings("ticket", row.text(2));
+    try std.testing.expectEqualStrings("{\"blocking_id\":\"blocking\"}", row.text(3));
+}
+
+test "runArgv block rejects Backend Blocked Item depending on Local Blocking Item" {
+    const gpa = std.testing.allocator;
+    var store = try TmpStore.init(gpa, "project");
+    defer store.deinit(gpa);
+
+    var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, store.toplevel_path, .{});
+    defer cwd.close(std.testing.io);
+
+    const rev_parse = try store.gitRevParseStdout(gpa);
+    defer gpa.free(rev_parse);
+
+    {
+        var h = Harness.initWith(gpa, &.{"init"}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
+    }
+
+    const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "blocked",
+        .display = "GH#1",
+        .title = "Backend blocked",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "1",
+        .created_seq = 1,
+    });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "blocking", .display = "project-1", .title = "Local blocking", .created_seq = 2 });
+
+    var h = Harness.initWith(gpa, &.{ "block", "GH#1", "project-1" }, .{ .cwd = cwd });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+    try std.testing.expectEqual(@as(u8, 1), try runArgv(h.deps(), &h.iter));
+    try std.testing.expectEqualStrings("", h.stdout());
+    try std.testing.expectEqualStrings(
+        "tk block: Backend blocked item 'GH#1' cannot depend on Local blocking item 'project-1'\n",
+        h.stderr(),
+    );
+    try std.testing.expectEqual(@as(i64, 0), try TmpStore.mutationCount(conn));
+}
+
+test "runArgv block rejects Backend Dependency across Backend kinds" {
+    const gpa = std.testing.allocator;
+    var store = try TmpStore.init(gpa, "project");
+    defer store.deinit(gpa);
+
+    var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, store.toplevel_path, .{});
+    defer cwd.close(std.testing.io);
+
+    const rev_parse = try store.gitRevParseStdout(gpa);
+    defer gpa.free(rev_parse);
+
+    {
+        var h = Harness.initWith(gpa, &.{"init"}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
+    }
+
+    const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "blocked",
+        .display = "GH#1",
+        .title = "GitHub blocked",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "1",
+        .created_seq = 1,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "blocking",
+        .display = "JIRA-2",
+        .title = "Jira blocking",
+        .origin = "backend",
+        .backend_kind = "jira",
+        .backend_key = "2",
+        .created_seq = 2,
+    });
+
+    var h = Harness.initWith(gpa, &.{ "block", "GH#1", "JIRA-2" }, .{ .cwd = cwd });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+    try std.testing.expectEqual(@as(u8, 1), try runArgv(h.deps(), &h.iter));
+    try std.testing.expectEqualStrings("", h.stdout());
+    try std.testing.expectEqualStrings(
+        "tk block: Backend blocked item 'GH#1' cannot depend on blocking item 'JIRA-2' from another Backend kind\n",
+        h.stderr(),
+    );
+    try std.testing.expectEqual(@as(i64, 0), try TmpStore.mutationCount(conn));
+}
+
+test "runArgv unblock emits remove_dependency Mutation for same-backend items" {
+    const gpa = std.testing.allocator;
+    var store = try TmpStore.init(gpa, "project");
+    defer store.deinit(gpa);
+
+    var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, store.toplevel_path, .{});
+    defer cwd.close(std.testing.io);
+
+    const rev_parse = try store.gitRevParseStdout(gpa);
+    defer gpa.free(rev_parse);
+
+    {
+        var h = Harness.initWith(gpa, &.{"init"}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
+    }
+
+    const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "blocked",
+        .display = "GH#1",
+        .title = "Backend blocked",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "1",
+        .created_seq = 1,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "blocking",
+        .display = "GH#2",
+        .title = "Backend blocking",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "2",
+        .created_seq = 2,
+    });
+    try TmpStore.insertDependency(conn, "blocking", "blocked");
+
+    var h = Harness.initWith(gpa, &.{ "unblock", "GH#1", "GH#2" }, .{ .cwd = cwd });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+    try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
+    try std.testing.expectEqualStrings("Removed Dependency: GH#1 no longer blocked by GH#2\n", h.stdout());
+    try std.testing.expectEqualStrings("", h.stderr());
+
+    const row = (try conn.row(
+        \\select mutation_type, item_id, item_class, payload_json
+        \\  from mutations
+        \\ where sequence = 1
+    , .{})) orelse return error.ExpectedRow;
+    defer row.deinit();
+    try std.testing.expectEqualStrings("remove_dependency", row.text(0));
+    try std.testing.expectEqualStrings("blocked", row.text(1));
+    try std.testing.expectEqualStrings("ticket", row.text(2));
+    try std.testing.expectEqualStrings("{\"blocking_id\":\"blocking\"}", row.text(3));
+}
+
+test "runArgv block existing Dependency is idempotent and emits no Mutation" {
+    const gpa = std.testing.allocator;
+    var store = try TmpStore.init(gpa, "project");
+    defer store.deinit(gpa);
+
+    var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, store.toplevel_path, .{});
+    defer cwd.close(std.testing.io);
+
+    const rev_parse = try store.gitRevParseStdout(gpa);
+    defer gpa.free(rev_parse);
+
+    {
+        var h = Harness.initWith(gpa, &.{"init"}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
+    }
+
+    const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "blocked",
+        .display = "GH#1",
+        .title = "Backend blocked",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "1",
+        .created_seq = 1,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "blocking",
+        .display = "GH#2",
+        .title = "Backend blocking",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "2",
+        .created_seq = 2,
+    });
+    try TmpStore.insertDependency(conn, "blocking", "blocked");
+
+    var h = Harness.initWith(gpa, &.{ "block", "GH#1", "GH#2" }, .{ .cwd = cwd });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+    try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
+    try std.testing.expectEqualStrings("Added Dependency: GH#1 blocked by GH#2\n", h.stdout());
+    try std.testing.expectEqualStrings("", h.stderr());
+    try std.testing.expectEqual(@as(i64, 0), try TmpStore.mutationCount(conn));
 }

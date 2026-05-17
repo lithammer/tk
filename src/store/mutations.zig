@@ -26,6 +26,9 @@ pub const MutationPayload = union(enum) {
     epic_ref: EpicRef,
     /// Payload for `set_item_status` — target Item Status after the change.
     item_status: StatusChange,
+    /// Payload for `add_dependency` and `remove_dependency` — the internal
+    /// stable ID of the Blocking Item referenced by the Dependency.
+    dependency_ref: DependencyRef,
 
     /// Full title/body snapshot used by `update_ticket` / `update_epic`.
     pub const TitleBody = struct {
@@ -44,6 +47,11 @@ pub const MutationPayload = union(enum) {
     /// Status-change payload used by `set_item_status`.
     pub const StatusChange = struct {
         status: []const u8,
+    };
+
+    /// Blocking Item reference used by `add_dependency` / `remove_dependency`.
+    pub const DependencyRef = struct {
+        blocking_id: []const u8,
     };
 };
 

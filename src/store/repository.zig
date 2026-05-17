@@ -67,6 +67,7 @@ pub const ListRow = struct {
     origin: Origin,
     container_id: ?[]u8,
     created_seq: i64,
+    has_unresolved_blocker: bool,
 
     /// Free text copied out of SQLite's statement-owned row buffers.
     pub fn deinit(self: ListRow, gpa: std.mem.Allocator) void {
@@ -608,7 +609,8 @@ const list_rows_sql = annotated_current_items_cte ++
     \\      from annotated
     \\)
     \\select id, display_value, item_class, ticket_kind, priority, title,
-    \\       status, origin, container_id, created_seq
+    \\       status, origin, container_id, created_seq,
+    \\       (has_unresolved_dependency or has_unresolved_external_blocker) as has_unresolved_blocker
     \\  from matching parent
     \\ where (?2 = 'any' or parent.origin = ?2)
     \\   and (
@@ -870,6 +872,42 @@ pub const SetStatusOutcome = union(enum) {
 
 /// Error set for `setItemStatus`.
 pub const SetStatusError = migrations.QueryError || zqlite.Error || error{OutOfMemory};
+
+/// Input for creating an item-backed Dependency edge.
+pub const AddDependencyRequest = struct {
+    /// Internal stable ID of the Blocked Item whose readiness changes.
+    blocked_id: []const u8,
+    /// Internal stable ID of the Blocking Item that must be done first.
+    blocking_id: []const u8,
+};
+
+/// Error set for `addDependency`.
+pub const AddDependencyError = migrations.QueryError || zqlite.Error || mutations_mod.AppendError || error{OutOfMemory};
+
+/// Result of `addDependency`.
+pub const AddDependencyOutcome = union(enum) {
+    ok,
+    /// The Blocked Item is already `done`; v1 only creates live blocking
+    /// relationships.
+    blocked_done,
+    /// The Blocking Item is already `done`; v1 only creates live blocking
+    /// relationships.
+    blocking_done,
+    /// The requested Dependency would make the graph cyclic.
+    cycle,
+    /// A Backend Blocked Item cannot be applied to its Backend Adapter while
+    /// the Blocking Item is still local-only.
+    backend_blocked_local_blocking,
+    /// Backend Dependency Mutations can only target references addressable by
+    /// the same Backend Adapter.
+    backend_kind_mismatch,
+};
+
+/// Input for removing an item-backed Dependency edge.
+pub const RemoveDependencyRequest = AddDependencyRequest;
+
+/// Error set for `removeDependency`.
+pub const RemoveDependencyError = migrations.QueryError || zqlite.Error || mutations_mod.AppendError || error{OutOfMemory};
 
 /// Apply a field-level update to a Ticket or Epic.
 ///
@@ -1169,6 +1207,164 @@ pub fn setItemStatus(
     } };
 }
 
+/// Create a Dependency edge from a Blocking Item to a Blocked Item.
+///
+/// The command layer resolves Display IDs and Aliases into internal stable IDs
+/// before calling this helper. Dependency edges are current-state relationship
+/// data; same-backend Dependency changes also append backend intent through
+/// the Mutation Log.
+pub fn addDependency(
+    store: Store,
+    gpa: std.mem.Allocator,
+    clock: clock_mod.Clock,
+    req: AddDependencyRequest,
+) AddDependencyError!AddDependencyOutcome {
+    var iso_buf: [24]u8 = undefined;
+    const now = clock.nowIso(&iso_buf);
+
+    try store.conn.execNoArgs("begin immediate");
+    errdefer store.conn.rollback();
+
+    const endpoint_row = (try store.conn.row(
+        \\select blocked.status, blocked.origin, blocked.item_class, blocked.backend_kind,
+        \\       blocking.status, blocking.origin, blocking.backend_kind
+        \\  from items blocked
+        \\  join items blocking on blocking.id = ?2
+        \\ where blocked.id = ?1
+    , .{ req.blocked_id, req.blocking_id })) orelse return error.ConstraintForeignKey;
+    defer endpoint_row.deinit();
+
+    const blocked_status = enumFromText(ItemStatus, endpoint_row.text(0));
+    const blocked_origin = enumFromText(Origin, endpoint_row.text(1));
+    const blocked_class = enumFromText(ItemClass, endpoint_row.text(2));
+    const blocked_backend_kind = endpoint_row.nullableText(3);
+    const blocking_status = enumFromText(ItemStatus, endpoint_row.text(4));
+    const blocking_origin = enumFromText(Origin, endpoint_row.text(5));
+    const blocking_backend_kind = endpoint_row.nullableText(6);
+
+    if (blocked_status == .done) {
+        try store.conn.commit();
+        return .blocked_done;
+    }
+    if (blocking_status == .done) {
+        try store.conn.commit();
+        return .blocking_done;
+    }
+    if (blocked_origin == .backend and blocking_origin == .local) {
+        try store.conn.commit();
+        return .backend_blocked_local_blocking;
+    }
+    if (blocked_origin == .backend and blocking_origin == .backend and !std.mem.eql(u8, blocked_backend_kind.?, blocking_backend_kind.?)) {
+        try store.conn.commit();
+        return .backend_kind_mismatch;
+    }
+
+    if (try store.conn.row(
+        \\with recursive reachable(id) as (
+        \\    select ?2
+        \\    union
+        \\    select d.blocking_id
+        \\      from dependencies d, reachable
+        \\     where d.blocked_id = reachable.id
+        \\)
+        \\select 1 from reachable where id = ?1
+    , .{ req.blocked_id, req.blocking_id })) |cycle_row| {
+        defer cycle_row.deinit();
+        try store.conn.commit();
+        return .cycle;
+    }
+
+    const had_edge = if (try store.conn.row(
+        \\select 1 from dependencies
+        \\ where blocking_id = ?1
+        \\   and blocked_id = ?2
+    , .{ req.blocking_id, req.blocked_id })) |edge_row| blk: {
+        edge_row.deinit();
+        break :blk true;
+    } else false;
+
+    try store.conn.exec(
+        \\insert or ignore into dependencies(blocking_id, blocked_id, created_at)
+        \\values (?1, ?2, ?3)
+    , .{ req.blocking_id, req.blocked_id, now });
+
+    if (!had_edge and blocked_origin == .backend and blocking_origin == .backend and std.mem.eql(u8, blocked_backend_kind.?, blocking_backend_kind.?)) {
+        try mutations_mod.appendMutation(
+            store.conn,
+            gpa,
+            .add_dependency,
+            req.blocked_id,
+            blocked_class,
+            .{ .dependency_ref = .{ .blocking_id = req.blocking_id } },
+            now,
+        );
+    }
+
+    try store.conn.commit();
+    return .ok;
+}
+
+/// Remove a Dependency edge from a Blocking Item to a Blocked Item.
+///
+/// Missing edges are successful no-ops so `tk unblock` behaves as a
+/// desired-state cleanup command.
+pub fn removeDependency(
+    store: Store,
+    gpa: std.mem.Allocator,
+    clock: clock_mod.Clock,
+    req: RemoveDependencyRequest,
+) RemoveDependencyError!void {
+    var iso_buf: [24]u8 = undefined;
+    const now = clock.nowIso(&iso_buf);
+
+    try store.conn.execNoArgs("begin immediate");
+    errdefer store.conn.rollback();
+
+    const endpoint_row = (try store.conn.row(
+        \\select blocked.origin, blocked.item_class, blocked.backend_kind,
+        \\       blocking.origin, blocking.backend_kind
+        \\  from items blocked
+        \\  join items blocking on blocking.id = ?2
+        \\ where blocked.id = ?1
+    , .{ req.blocked_id, req.blocking_id })) orelse return error.ConstraintForeignKey;
+    defer endpoint_row.deinit();
+
+    const blocked_origin = enumFromText(Origin, endpoint_row.text(0));
+    const blocked_class = enumFromText(ItemClass, endpoint_row.text(1));
+    const blocked_backend_kind = endpoint_row.nullableText(2);
+    const blocking_origin = enumFromText(Origin, endpoint_row.text(3));
+    const blocking_backend_kind = endpoint_row.nullableText(4);
+
+    const had_edge = if (try store.conn.row(
+        \\select 1 from dependencies
+        \\ where blocking_id = ?1
+        \\   and blocked_id = ?2
+    , .{ req.blocking_id, req.blocked_id })) |edge_row| blk: {
+        edge_row.deinit();
+        break :blk true;
+    } else false;
+
+    try store.conn.exec(
+        \\delete from dependencies
+        \\ where blocking_id = ?1
+        \\   and blocked_id = ?2
+    , .{ req.blocking_id, req.blocked_id });
+
+    if (had_edge and blocked_origin == .backend and blocking_origin == .backend and std.mem.eql(u8, blocked_backend_kind.?, blocking_backend_kind.?)) {
+        try mutations_mod.appendMutation(
+            store.conn,
+            gpa,
+            .remove_dependency,
+            req.blocked_id,
+            blocked_class,
+            .{ .dependency_ref = .{ .blocking_id = req.blocking_id } },
+            now,
+        );
+    }
+
+    try store.conn.commit();
+}
+
 fn generateInternalId(gpa: std.mem.Allocator, random: std.Random) ![]u8 {
     var bytes: [16]u8 = undefined;
     random.bytes(&bytes);
@@ -1196,6 +1392,7 @@ fn listRowFromSql(gpa: std.mem.Allocator, row: zqlite.Row) ListError!ListRow {
         .origin = enumFromText(Origin, row.text(7)),
         .container_id = container_id,
         .created_seq = row.int(9),
+        .has_unresolved_blocker = row.int(10) != 0,
     };
 }
 

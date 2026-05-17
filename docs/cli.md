@@ -89,13 +89,15 @@ child Ticket renders as a top-level row.
 The plain output row shape is:
 
 ```text
-[tree-prefix] <status-marker> <display-id> <priority-marker> <priority> [<kind-marker>] <title>
-[tree-prefix] <status-marker> <display-id> [epic] <title>
+[tree-prefix] <status-marker> <display-id> [<blocked-marker>] <priority-marker> <priority> [<kind-marker>] <title>
+[tree-prefix] <status-marker> <display-id> [<blocked-marker>] [epic] <title>
 ```
 
 Status markers are `○` for `open`, `◐` for `active`, and `✓` for `done`.
 Ticket rows render the priority marker as `●` in plain output. Epic rows do
 not render Priority because Priority belongs to Tickets.
+Rows with unresolved Dependencies or External Blockers render blocked marker
+`⊘` after the Display ID. The blocked marker is an overlay, not an Item Status.
 
 `[epic]` is shown for Epics, `[bug]` is shown for bug Tickets, and task
 Tickets omit a kind marker.
@@ -111,6 +113,7 @@ containers for matching child Tickets:
 Total: 3 items (2 open, 1 active)
 
 Status: ○ open  ◐ active  ✓ done
+Blocked: ⊘ blocked
 ```
 
 An empty `tk list` result is exit code `0`. The default view prints
@@ -212,6 +215,13 @@ Blocking affects `tk next`, `tk list --ready`, and `tk list --blocked`.
 Dependencies may connect Tickets and Epics in any blocking or blocked combination, but cycles are rejected.
 
 External Blocker CLI is deferred from the initial blocking command surface, but the Repository Store models External Blockers separately from Dependencies.
+
+Successful Dependency changes print one line:
+
+```text
+Added Dependency: <blocked-id> blocked by <blocking-id>
+Removed Dependency: <blocked-id> no longer blocked by <blocking-id>
+```
 
 ## Promotion
 

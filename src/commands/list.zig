@@ -141,6 +141,7 @@ fn render(stdout: *std.Io.Writer, rows: []const repository.ListRow, options: rep
     try renderTotal(stdout, rows.len, counts);
     try stdout.writeAll("\n");
     try stdout.writeAll(messages.list_status_label ++ "○ open  ◐ active  ✓ done\n");
+    try stdout.writeAll("Blocked: ⊘ blocked\n");
 }
 
 fn renderChildren(stdout: *std.Io.Writer, rows: []const repository.ListRow, parent: repository.ListRow) !void {
@@ -191,6 +192,7 @@ fn emptyMessage(options: repository.ListOptions) []const u8 {
 
 fn renderRow(stdout: *std.Io.Writer, row: repository.ListRow, tree_prefix: []const u8) !void {
     try stdout.print("{s}{s} {s}", .{ tree_prefix, row.status.glyph(), row.display_id });
+    if (row.has_unresolved_blocker) try stdout.writeAll(" ⊘");
     switch (row.item_class) {
         .ticket => {
             const priority = row.priority orelse unreachable;
@@ -282,6 +284,7 @@ test "list: renders an unparented local Ticket from the Repository Store" {
             \\Total: 1 item (1 open)
             \\
             \\Status: ○ open  ◐ active  ✓ done
+            \\Blocked: ⊘ blocked
             \\
         , h.stdout());
         try std.testing.expectEqualStrings("", h.stderr());
@@ -366,6 +369,7 @@ test "list: --ready renders ready Tickets with Epic containers" {
         \\Total: 3 items (3 open)
         \\
         \\Status: ○ open  ◐ active  ✓ done
+        \\Blocked: ⊘ blocked
         \\
     , h.stdout());
     try std.testing.expectEqualStrings("", h.stderr());
@@ -422,11 +426,56 @@ test "list: --blocked --remote promotes a matching child when Origin hides its E
 
     try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
     try std.testing.expectEqualStrings(
-        \\○ GH#9 ● P0 [bug] Fix remote blocker
+        \\○ GH#9 ⊘ ● P0 [bug] Fix remote blocker
         \\--------------------------------------------------------------------------------
         \\Total: 1 item (1 open)
         \\
         \\Status: ○ open  ◐ active  ✓ done
+        \\Blocked: ⊘ blocked
+        \\
+    , h.stdout());
+    try std.testing.expectEqualStrings("", h.stderr());
+}
+
+test "list: marks rendered rows with unresolved blockers" {
+    const gpa = std.testing.allocator;
+    var store = try TmpStore.init(gpa, "project");
+    defer store.deinit(gpa);
+
+    var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, store.toplevel_path, .{});
+    defer cwd.close(std.testing.io);
+
+    const rev_parse = try store.gitRevParseStdout(gpa);
+    defer gpa.free(rev_parse);
+
+    {
+        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
+    }
+
+    const zqlite = @import("zqlite");
+    const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+
+    try TmpStore.insertFixtureItem(conn, .{ .id = "blocked", .display = "project-1", .title = "Blocked work", .created_seq = 1 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "blocking", .display = "project-2", .title = "Blocking work", .created_seq = 2 });
+    try TmpStore.insertDependency(conn, "blocking", "blocked");
+
+    var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+
+    try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
+    try std.testing.expectEqualStrings(
+        \\○ project-1 ⊘ ● P2 Blocked work
+        \\○ project-2 ● P2 Blocking work
+        \\--------------------------------------------------------------------------------
+        \\Total: 2 items (2 open)
+        \\
+        \\Status: ○ open  ◐ active  ✓ done
+        \\Blocked: ⊘ blocked
         \\
     , h.stdout());
     try std.testing.expectEqualStrings("", h.stderr());
@@ -470,6 +519,7 @@ test "list: default view excludes done items" {
         \\Total: 2 items (1 open, 1 active)
         \\
         \\Status: ○ open  ◐ active  ✓ done
+        \\Blocked: ⊘ blocked
         \\
     , h.stdout());
     try std.testing.expectEqualStrings("", h.stderr());
@@ -538,6 +588,7 @@ test "list: --active retains inactive Epic containers for active child Tickets" 
         \\Total: 3 items (1 open, 2 active)
         \\
         \\Status: ○ open  ◐ active  ✓ done
+        \\Blocked: ⊘ blocked
         \\
     , h.stdout());
     try std.testing.expectEqualStrings("", h.stderr());

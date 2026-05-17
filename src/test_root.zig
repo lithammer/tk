@@ -2,6 +2,8 @@ test {
     _ = @import("cli.zig");
     _ = @import("clock.zig");
     _ = @import("commands/add.zig");
+    _ = @import("commands/block.zig");
+    _ = @import("commands/unblock.zig");
     _ = @import("commands/init.zig");
     _ = @import("commands/list.zig");
     _ = @import("commands/message.zig");

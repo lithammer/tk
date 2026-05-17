@@ -1,0 +1,13 @@
+-- script --
+tk block --help
+-- expected/stdout --
+tk block - create a Dependency
+
+Usage:
+  tk block <blocked-id> <blocking-id> [options]
+
+Options:
+  -h, --help  Display this help and exit.
+-- expected/stderr --
+-- expected/exit --
+0

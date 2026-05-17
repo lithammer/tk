@@ -27,11 +27,15 @@ src/
     prime.md
     init.zig
     add.zig
+    block.zig
     done.zig
     list.zig
     message.zig
     next.zig
     show.zig
+    start.zig
+    stop.zig
+    unblock.zig
     update.zig
   domain/
     display_prefix.zig
@@ -73,10 +77,11 @@ both the Repository Store schema (migrations.zig) and the small
 across rollback boundaries.
 
 `src/store/repository.zig` owns the reusable Repository Store opener, the
-store-facing write APIs (`createLocalTicket`, `updateItem`, `setItemStatus`),
-current-state read APIs for List Tree rows, next ready Ticket selection, and
-single-item detail reads, and the Display ID / Alias resolver (`resolveItemRef`,
-`resolveAsEpic`). `src/store/mutations.zig` owns the typed `MutationPayload`
+store-facing write APIs (`createLocalTicket`, `updateItem`, `setItemStatus`,
+`addDependency`, `removeDependency`), current-state read APIs for List Tree
+rows, next ready Ticket selection, and single-item detail reads, and the
+Display ID / Alias resolver (`resolveItemRef`, `resolveAsEpic`).
+`src/store/mutations.zig` owns the typed `MutationPayload`
 tagged union and the `appendMutation` outbox helper; both Repository Store
 writes and future Backend Adapter callers append Mutations through it.
 `src/store/sequences.zig` is a thin shared allocator for the named counters
@@ -239,9 +244,9 @@ pulls this is import order, not backend-native creation time. `created_at` and
 created/updated timestamps are deferred until Backend Pull has a concrete
 reader for them. `items.updated_at` changes when the item's current fields
 change from the user's point of view, including title/body, status, priority,
-Promotion identity, or containment. It does not change for incoming
-Dependencies, Alias additions that do not change the current Display ID, or
-Mutation state changes.
+Promotion identity, or containment. It does not change for Dependency
+additions/removals, Alias additions that do not change the current Display ID,
+or Mutation state changes.
 `body` accepts arbitrary non-null text, including an empty string. Message
 normalization happens at command input boundaries such as `tk add` and
 `tk update`, not through schema validation. Blocking is represented separately
@@ -333,8 +338,9 @@ status transition. Dependencies and External Blockers intentionally live in
 separate tables because Dependencies derive resolution from the Blocking Item's
 status, while External Blockers store explicit resolution state.
 The current schema includes External Blockers, but the CLI for creating and
-resolving them is deferred to the lifecycle/blocking slice so that command
-surface can be designed separately. Once that CLI lands,
+resolving them is deferred until that command surface has a stable way to
+identify one External Blocker when several exist on the same item. Once that
+CLI lands,
 creating or resolving an External Blocker updates `external_blockers` and
 appends `add_external_blocker` or `resolve_external_blocker` in the same
 transaction.
@@ -484,8 +490,9 @@ Current coverage includes:
   missing-store and Git diagnostics, local Ticket state, Display ID allocation,
   `item_ids`, store-busy diagnostics, and the no-Mutation invariant.
 - `tk list` command/store tests for List Tree rendering, readiness and Origin
-  filtering, Dependency and External Blocker behavior, empty reads, usage
-  errors, missing-store diagnostics, and `tk list --help` scenario coverage.
+  filtering, Dependency and External Blocker behavior, blocked glyph rendering,
+  empty reads, usage errors, missing-store diagnostics, and `tk list --help`
+  scenario coverage.
 - `tk next` command/store tests for ready Ticket selection, Priority and
   creation-order sorting, scoped Display ID and Alias resolution, missing-store
   diagnostics, empty ready results, and `tk next --help` scenario coverage.
@@ -506,6 +513,11 @@ Current coverage includes:
   the `ready`/`blocked` views, forced write rollback that reverts both
   current state and the `mutation_seq` allocation, missing-store and
   unknown-id diagnostics, and `tk done --help` scenario coverage.
+- `tk block` and `tk unblock` command/store tests for Dependency readiness
+  effects, same-backend `add_dependency` / `remove_dependency` Mutations,
+  idempotent existing-edge handling, self-edge rejection, done-item rejection,
+  cycle diagnostics, Backend/Local and mixed-Backend gating, and `--help`
+  scenario coverage.
 - subprocess smoke tests for real `tk init`, real `tk add`, real `tk list`,
   and real `tk next` after `git init`.
 
@@ -539,7 +551,7 @@ found: <path>`; do not convert a missing fixture into empty stdin.
 
 The current binary implements `tk prime`, `tk init`,
 `tk add -F <file | ->`, `tk list`, `tk next`, `tk show`, `tk update`,
-`tk done`, `tk start`, and `tk stop`.
+`tk done`, `tk start`, `tk stop`, `tk block`, and `tk unblock`.
 
 `tk prime` is command-owned static output embedded from
 `src/commands/prime.md`. It trims trailing whitespace, emits exactly one final
@@ -617,9 +629,16 @@ Blocking Item is not `done`.
 
 `tk list` output uses `○`, `◐`, and `✓` for `open`, `active`, and `done`.
 Ticket rows render `● <priority>` plus `[bug]` for bug Tickets; task Tickets
-omit a kind marker. Epic rows render `[epic]` and no Priority. Output ends with
-a separator, rendered-row totals by Item Status, and the status legend. Empty
-reads succeed with exit code `0` and print the filter-specific empty message.
+omit a kind marker. Epic rows render `[epic]` and no Priority. Blocked rows
+render `⊘` after the Display ID. Output ends with a separator,
+rendered-row totals by Item Status, the status legend, and a blocked legend
+line (`Blocked: ⊘ blocked`). Empty reads succeed with exit code `0` and print
+the filter-specific empty message.
+The blocked glyph is an overlay on any rendered Ticket or Epic with unresolved
+Dependencies or External Blockers. It does not change row inclusion by itself:
+`tk list --blocked` still selects open or active blocked Tickets only, while
+default and active views may show blocked Epics when those Epics otherwise
+render.
 
 `tk next` opens the existing Repository Store and selects one ready Ticket
 from current state. Ready work is the same Repository Store concept used by
@@ -725,7 +744,8 @@ text round-trips without a separate map. `src/store/mutations.zig`
 exports `MutationPayload` — a shape-keyed tagged union (`update_title_body`
 for `update_ticket`/`update_epic`; `epic_ref` for
 `add_ticket_to_epic`/`remove_ticket_from_epic`; `item_status` for
-`set_item_status`; future slices extend it) plus
+`set_item_status`; `dependency_ref` for `add_dependency`/`remove_dependency`;
+future slices extend it) plus
 `appendMutation(conn, gpa, mutation_type, item_id, item_class,
 payload, now)`. The function must run inside the caller's active `begin
 immediate` transaction; it allocates `mutation_seq` from
@@ -815,32 +835,86 @@ revive a completed Ticket or Epic, and the schema-level
 constraint for any writer that bypasses the pre-read short-circuit. v1
 intentionally has no single-active invariant — multiple Tickets and Epics
 may be `active` simultaneously, and readiness selection by `tk next` and
-`tk list --ready` is not gated by `tk start`. `tk worktree start` (next
-slice) will route through `setItemStatus` and inherit the `.locked_done`
+`tk list --ready` is not gated by `tk start`. `tk worktree start` (future
+worktree slice) will route through `setItemStatus` and inherit the `.locked_done`
 outcome.
+
+Dependency Mutations are owned by the Blocked Item. When a Dependency
+change emits `add_dependency` or `remove_dependency`, `mutations.item_id`
+is the internal stable ID of the Blocked Item, `mutations.item_class` is
+that item's class, and the payload carries the Blocking Item's internal
+stable ID as `{"blocking_id":"<internal-id>"}`. This matches the
+user-visible effect: the Blocked Item's readiness changes, while the Blocking
+Item is the referenced prerequisite.
+
+Origin gating follows the Blocked Item. A Local Blocked Item may depend on
+either a Local or Backend Blocking Item and emits no Mutation. A Backend
+Blocked Item may depend on a Backend Blocking Item from the same
+`backend_kind` and emits the Dependency Mutation in the same transaction as
+the current-state edge change. A Backend Blocked Item cannot depend on a
+Local Blocking Item, or on a Backend Blocking Item from another
+`backend_kind`, in v1 because the target Backend Adapter would have no
+single backend identity to apply; `tk block` should reject those combinations
+with user-facing diagnostics rather than deferring the failure to sync.
+
+Dependency writes are desired-state operations. `tk block` succeeds when the
+edge already exists, and `tk unblock` succeeds when the edge is already
+absent. These field-idempotent calls leave current state unchanged, do not
+append Mutations, do not advance `mutation_seq`, and do not change either
+item's `updated_at`. Changed Dependency edges also leave both items'
+`updated_at` unchanged; the Dependency row and any emitted Mutation carry
+their own timestamps.
+
+`tk block` creates only live blocking relationships: it rejects the command
+when either the Blocked Item or the Blocking Item is already `done`. `tk
+unblock` may remove an existing Dependency regardless of either item's Item
+Status so old or imported edges can always be cleaned up.
+
+`tk unblock` also allows cleanup of existing edges whose Origin or backend-kind
+combination would be rejected for new `tk block` creation. Removal emits a
+`remove_dependency` Mutation only when the pair is backend-applicable by the
+same Origin rules used for `add_dependency`; otherwise the removal is local
+current-state cleanup.
+
+`tk block <same-id> <same-id>` and `tk unblock <same-id> <same-id>` are
+rejected before any write with `tk block: an item cannot depend on itself` or
+`tk unblock: an item cannot depend on itself`.
+
+Unknown ID diagnostics are role-specific: `tk block: blocked item '<id>' is
+not a known Display ID or Alias` / `tk unblock: blocked item '<id>' is not a
+known Display ID or Alias`, and the same shape with `blocking item` for the
+second argument. Resolve and report the Blocked Item first, then the Blocking
+Item, so argument-order mistakes produce stable output.
+
+`tk block` validation diagnostics keep the same roles: `tk block: blocked item
+'<id>' is done`, `tk block: blocking item '<id>' is done`, `tk block:
+Backend blocked item '<blocked-id>' cannot depend on Local blocking item
+'<blocking-id>'`, and `tk block: Backend blocked item '<blocked-id>' cannot
+depend on blocking item '<blocking-id>' from another Backend kind`.
+
+Cycle rejection is an expected domain outcome, not a generic SQLite failure.
+The store write helper should check for the would-be cycle inside the same
+`begin immediate` transaction and return a typed outcome that `tk block`
+renders as `tk block: Dependency would create a cycle`. The schema trigger
+remains a backstop for future writers or race-shaped mistakes that bypass the
+preflight.
+
+`tk block` and `tk unblock` success output is one flush-left line:
+`Added Dependency: <blocked-id> blocked by <blocking-id>` or
+`Removed Dependency: <blocked-id> no longer blocked by <blocking-id>`. The
+IDs are rendered as current Display IDs after Alias resolution.
 
 ## Next Slices
 
 Continue in small vertical slices:
 
-1. Remaining lifecycle and blocking
-   - Implement `tk block` and `tk unblock` (item-backed Dependency edge
-     create/remove with `add_dependency` / `remove_dependency`).
-   - Implement External Blocker create/resolve CLI with
-     `add_external_blocker` / `resolve_external_blocker`.
-   - Enforce dependency cycle rejection (schema trigger already in
-     place; surface the constraint failure as a user-facing
-     diagnostic).
-   - Add the blocked glyph to `tk list` rendering as a
-     blocking/readiness overlay, not as a fourth Item Status.
-
-2. Worktree scope
+1. Worktree scope
    - Implement `tk worktree`, `set`, `clear`, and `start`.
    - Use git worktree config.
    - Feed the discovered Workspace Scope Display ID or Alias into
      `store.repository.nextReadyTicket`.
 
-3. Remote and sync skeleton
+2. Remote and sync skeleton
    - Implement `tk remote`.
    - Implement `tk sync log`.
    - Add fake remote adapter tests before real `gh` or `acli` behavior.
@@ -848,6 +922,14 @@ Continue in small vertical slices:
 ## Deferred
 
 - Dynamic `tk prime` sections.
+- External Blocker create/resolve CLI. The Repository Store and read views
+  already model External Blockers, but the command surface needs a stable way
+  to identify one External Blocker when several exist on the same item.
+- Promotion behavior for existing Local Dependencies. The blocking slice
+  defines current-state Dependencies and immediate Dependency Mutations only;
+  the Promotion slice must decide whether backend-applicable Local
+  Dependencies are snapped into backend intent when a Local Blocked Item is
+  promoted.
 - Comments, labels, and assignees. Assignee support is not assumed to land.
   Labels remain descriptive facets only and must not replace Priority, Ticket
   Kind, Epic membership, Item Status, or blocking concepts.
