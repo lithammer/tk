@@ -6,6 +6,137 @@
 //! `tk worktree set`, `clear`, and `start`.
 
 const std = @import("std");
+const zqlite = @import("zqlite");
+const repository = @import("../store/repository.zig");
+const migrations = @import("../store/migrations.zig");
+const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+/// Workspace Scope and its provenance.
+///
+/// `display_id` is the *current* Display ID after Alias resolution, so
+/// configured scope rendered by `tk worktree` matches the user's working
+/// vocabulary even when the stored value is now an Alias.
+pub const Scope = struct {
+    source: enum { configured, inferred },
+    display_id: []u8,
+
+    /// Free the resolved Display ID. Held by the caller in the switch arm
+    /// that receives a `.scope` outcome.
+    pub fn deinit(self: Scope, gpa: std.mem.Allocator) void {
+        gpa.free(self.display_id);
+    }
+};
+
+/// Raw discovery inputs handed off from the git-side reader.
+///
+/// `configured_value` is whatever `git config --worktree --get tk.scope`
+/// returned (null when the key is unset or the extension is disabled).
+/// `branch_name` is the current branch's short ref (null on detached HEAD).
+pub const Raw = struct {
+    configured_value: ?[]const u8 = null,
+    branch_name: ?[]const u8 = null,
+};
+
+/// Outcome of resolving raw discovery against the Repository Store.
+///
+/// Per AGENTS.md "Error Handling": each switch arm frees its own payload.
+/// There is intentionally no `Outcome.deinit` because cleanup is asymmetric
+/// across variants.
+pub const ResolveOutcome = union(enum) {
+    none,
+    scope: Scope,
+    /// `tk.scope` held a value the resolver could not find. Carried as a
+    /// gpa-owned slice so callers can name it in a diagnostic before freeing.
+    configured_unresolved: []u8,
+};
+
+pub const ResolveError = repository.ResolveError;
+
+/// Resolve raw discovery output against the Repository Store.
+///
+/// Configured scope is checked first per CONTEXT.md ("Worktree Config scope
+/// takes precedence over Inferred Workspace Scope"). When the stored value
+/// resolves through `item_ids`, the returned `display_id` is the *current*
+/// Display ID, not the stored string. A stored value that no longer
+/// resolves surfaces as `.configured_unresolved` so callers can render
+/// `tk worktree: Workspace Scope '<stored>' is not a known Display ID or
+/// Alias` (per docs/implementation.md "Worktrees").
+pub fn resolveAgainstStore(
+    store: repository.Store,
+    gpa: std.mem.Allocator,
+    raw: Raw,
+) ResolveError!ResolveOutcome {
+    if (raw.configured_value) |stored| {
+        if (try repository.resolveItemRef(store, gpa, stored)) |resolved| {
+            defer resolved.deinit(gpa);
+            const current = try currentDisplayValue(store, gpa, resolved.id);
+            return .{ .scope = .{ .source = .configured, .display_id = current } };
+        }
+        return .{ .configured_unresolved = try gpa.dupe(u8, stored) };
+    }
+    if (raw.branch_name) |branch| {
+        if (std.mem.startsWith(u8, branch, ticket_branch_prefix)) {
+            const tail = branch[ticket_branch_prefix.len..];
+            if (try longestPrefixMatch(store, gpa, tail)) |item_id| {
+                defer gpa.free(item_id);
+                const current = try currentDisplayValue(store, gpa, item_id);
+                return .{ .scope = .{ .source = .inferred, .display_id = current } };
+            }
+        }
+    }
+    return .none;
+}
+
+const ticket_branch_prefix = "tk/";
+
+/// SQL for prefix-strict branch inference. Bound with:
+///   `?1` — the branch tail after stripping `tk/`.
+///
+/// Selects the longest `item_ids.value` such that the tail either matches
+/// the value exactly or starts with `<value>-` (so a slug suffix is allowed
+/// but a value of `proj` does not silently shadow a branch `tk/project-1`).
+/// `collate nocase` keeps the lookup consistent with the case-insensitive
+/// `item_ids` primary key.
+const longest_prefix_match_sql =
+    \\select item_id
+    \\  from item_ids
+    \\ where (?1 = value collate nocase
+    \\        or ?1 like value || '-%' collate nocase)
+    \\ order by length(value) desc
+    \\ limit 1
+;
+
+fn longestPrefixMatch(
+    store: repository.Store,
+    gpa: std.mem.Allocator,
+    tail: []const u8,
+) ResolveError!?[]u8 {
+    if (tail.len == 0) return null;
+    if (try store.conn.row(longest_prefix_match_sql, .{tail})) |r| {
+        defer r.deinit();
+        return try gpa.dupe(u8, r.text(0));
+    }
+    return null;
+}
+
+/// Read the current Display ID for an internal stable item ID.
+///
+/// Reused by both configured-scope resolution and (later) inferred-scope
+/// resolution so the rendered Display ID always matches `items.display_value`
+/// rather than echoing whatever string the caller passed in.
+fn currentDisplayValue(
+    store: repository.Store,
+    gpa: std.mem.Allocator,
+    item_id: []const u8,
+) ResolveError![]u8 {
+    if (try store.conn.row("select display_value from items where id = ?1", .{item_id})) |r| {
+        defer r.deinit();
+        return try gpa.dupe(u8, r.text(0));
+    }
+    // resolveItemRef succeeded, so the item must exist. Hitting this means
+    // the deferred FK between `item_ids` and `items` is in a broken state.
+    unreachable;
+}
 
 /// Sanitize a Ticket/Epic title into a slug for a git ref or filesystem path
 /// component.
@@ -52,6 +183,156 @@ pub fn sanitize(gpa: std.mem.Allocator, title: []const u8, max_len: usize) ![]u8
 
 fn isSlugByte(c: u8) bool {
     return (c >= 'a' and c <= 'z') or (c >= '0' and c <= '9');
+}
+
+test "resolveAgainstStore: configured value resolves to its current Display ID" {
+    const gpa = std.testing.allocator;
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: repository.Store = .{ .conn = conn };
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "abc123",
+        .display = "proj-1",
+        .title = "Implement worktree scope",
+        .created_seq = 1,
+    });
+
+    const outcome = try resolveAgainstStore(store, gpa, .{ .configured_value = "proj-1" });
+    switch (outcome) {
+        .scope => |s| {
+            defer s.deinit(gpa);
+            try std.testing.expectEqual(@as(@TypeOf(s.source), .configured), s.source);
+            try std.testing.expectEqualStrings("proj-1", s.display_id);
+        },
+        else => return error.UnexpectedOutcome,
+    }
+}
+
+test "resolveAgainstStore: configured value that no longer resolves surfaces as .configured_unresolved" {
+    const gpa = std.testing.allocator;
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: repository.Store = .{ .conn = conn };
+
+    const outcome = try resolveAgainstStore(store, gpa, .{ .configured_value = "ghost-42" });
+    switch (outcome) {
+        .configured_unresolved => |stored| {
+            defer gpa.free(stored);
+            try std.testing.expectEqualStrings("ghost-42", stored);
+        },
+        else => return error.UnexpectedOutcome,
+    }
+}
+
+test "resolveAgainstStore: empty raw returns .none" {
+    const gpa = std.testing.allocator;
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: repository.Store = .{ .conn = conn };
+
+    const outcome = try resolveAgainstStore(store, gpa, .{});
+    try std.testing.expect(outcome == .none);
+}
+
+test "resolveAgainstStore: branch matching tk/<id>-<slug> resolves as inferred scope" {
+    const gpa = std.testing.allocator;
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: repository.Store = .{ .conn = conn };
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "abc123",
+        .display = "proj-1",
+        .title = "Fix login",
+        .created_seq = 1,
+    });
+
+    const outcome = try resolveAgainstStore(store, gpa, .{ .branch_name = "tk/proj-1-fix-login" });
+    switch (outcome) {
+        .scope => |s| {
+            defer s.deinit(gpa);
+            try std.testing.expectEqual(@as(@TypeOf(s.source), .inferred), s.source);
+            try std.testing.expectEqualStrings("proj-1", s.display_id);
+        },
+        else => return error.UnexpectedOutcome,
+    }
+}
+
+test "resolveAgainstStore: branch without tk/ prefix does not infer scope" {
+    const gpa = std.testing.allocator;
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: repository.Store = .{ .conn = conn };
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "abc123",
+        .display = "proj-1",
+        .title = "Fix login",
+        .created_seq = 1,
+    });
+
+    // Branch literally named `proj-1` (no `tk/` prefix) must not infer scope.
+    const outcome = try resolveAgainstStore(store, gpa, .{ .branch_name = "proj-1" });
+    try std.testing.expect(outcome == .none);
+}
+
+test "resolveAgainstStore: longest matching item_ids.value wins when slug shadows a shorter ID" {
+    const gpa = std.testing.allocator;
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: repository.Store = .{ .conn = conn };
+
+    // Both `proj-1` and `proj-1-fix` exist as Display IDs. Branch
+    // `tk/proj-1-fix-login` must resolve to the longer match.
+    try TmpStore.insertFixtureItem(conn, .{ .id = "short", .display = "proj-1", .title = "Short", .created_seq = 1 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "long", .display = "proj-1-fix", .title = "Long", .created_seq = 2 });
+
+    const outcome = try resolveAgainstStore(store, gpa, .{ .branch_name = "tk/proj-1-fix-login" });
+    switch (outcome) {
+        .scope => |s| {
+            defer s.deinit(gpa);
+            try std.testing.expectEqualStrings("proj-1-fix", s.display_id);
+        },
+        else => return error.UnexpectedOutcome,
+    }
+}
+
+test "resolveAgainstStore: configured scope takes precedence over branch inference" {
+    const gpa = std.testing.allocator;
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: repository.Store = .{ .conn = conn };
+
+    try TmpStore.insertFixtureItem(conn, .{ .id = "configured", .display = "proj-1", .title = "Configured", .created_seq = 1 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "inferred", .display = "proj-2", .title = "Inferred", .created_seq = 2 });
+
+    const outcome = try resolveAgainstStore(store, gpa, .{
+        .configured_value = "proj-1",
+        .branch_name = "tk/proj-2-anything",
+    });
+    switch (outcome) {
+        .scope => |s| {
+            defer s.deinit(gpa);
+            try std.testing.expectEqual(@as(@TypeOf(s.source), .configured), s.source);
+            try std.testing.expectEqualStrings("proj-1", s.display_id);
+        },
+        else => return error.UnexpectedOutcome,
+    }
 }
 
 test "sanitize: lowercase ASCII alphanumeric and hyphens pass through unchanged" {
