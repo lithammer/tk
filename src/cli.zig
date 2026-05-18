@@ -362,6 +362,8 @@ test "runArgv block creates a Dependency that affects next ready Ticket" {
         var h = Harness.initWith(gpa, &.{"next"}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try h.fake_runner.expect(&.{ "git", "config", "--worktree", "--get", "tk.scope" }, .{ .exit_code = 1 });
+        try h.fake_runner.expect(&.{ "git", "symbolic-ref" }, .{ .exit_code = 1 });
         try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
         try std.testing.expectEqualStrings("project-2\n", h.stdout());
         try std.testing.expectEqualStrings("", h.stderr());
@@ -405,6 +407,8 @@ test "runArgv unblock removes a Dependency so the blocked Ticket is ready again"
         var h = Harness.initWith(gpa, &.{"next"}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try h.fake_runner.expect(&.{ "git", "config", "--worktree", "--get", "tk.scope" }, .{ .exit_code = 1 });
+        try h.fake_runner.expect(&.{ "git", "symbolic-ref" }, .{ .exit_code = 1 });
         try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
         try std.testing.expectEqualStrings("project-1\n", h.stdout());
         try std.testing.expectEqualStrings("", h.stderr());

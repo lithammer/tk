@@ -192,6 +192,11 @@ pub const next_no_ready_ticket_in_scope = "tk next: no ready Tickets in Workspac
 /// Stderr line when Workspace Scope no longer resolves to a Ticket or Epic.
 pub const next_scope_not_found = "tk next: Workspace Scope does not resolve to a Ticket or Epic";
 
+/// Stderr line when `tk.scope` holds a value that no longer matches any
+/// `item_ids` row. The caller prints this with the stored value substituted.
+pub const next_scope_unresolved_prefix = "tk next: Workspace Scope '";
+pub const next_scope_unresolved_suffix = "' is not a known Display ID or Alias";
+
 /// Stderr line for non-transient Repository Store read failures. The caller
 /// appends `"\n{s}\n"` for the underlying `@errorName`.
 pub const next_read_failed = "tk next: failed to read Repository Store";

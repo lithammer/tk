@@ -5,10 +5,12 @@ const clap = @import("clap");
 const cli = @import("../cli.zig");
 const messages = @import("../messages.zig");
 const repository = @import("../store/repository.zig");
+const worktree_scope = @import("../worktree/scope.zig");
 const init_command = @import("init.zig");
 const add_command = @import("add.zig");
 const Harness = @import("../testing/test_cli.zig").Harness;
 const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+const zqlite = @import("zqlite");
 
 /// Dispatcher metadata for `tk next`.
 pub const meta: cli.CommandMeta = .{
@@ -51,11 +53,40 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
     };
     defer store.close();
 
-    // Workspace Scope discovery has not landed yet, so the command currently
-    // performs repository-wide selection. Keep the scoped diagnostic seam local
-    // to this renderer for the future worktree slice.
-    const applied_scope = false;
-    const outcome = repository.nextReadyTicket(store, deps.gpa, .{}) catch |err| {
+    // Workspace Scope discovery: configured `tk.scope` first, branch-name
+    // inference as fallback. A stored value that no longer resolves is a
+    // hand-edited-config issue, not silent fallthrough.
+    const raw = worktree_scope.readGitSide(deps.gpa, deps.runner, deps.cwd) catch |err| {
+        renderStorageError(deps, err);
+        return 1;
+    };
+    defer worktree_scope.freeRaw(deps.gpa, raw);
+    const scope_outcome = worktree_scope.resolveAgainstStore(store, deps.gpa, raw) catch |err| {
+        renderStorageError(deps, err);
+        return 1;
+    };
+    var applied_scope = false;
+    var next_scope: repository.NextScope = .none;
+    var scope_payload: ?worktree_scope.Scope = null;
+    defer if (scope_payload) |s| s.deinit(deps.gpa);
+    switch (scope_outcome) {
+        .none => {},
+        .scope => |s| {
+            scope_payload = s;
+            next_scope = .{ .display_arg = s.display_id };
+            applied_scope = true;
+        },
+        .configured_unresolved => |stored| {
+            defer deps.gpa.free(stored);
+            deps.stderr.print(
+                "{s}{s}{s}\n",
+                .{ messages.next_scope_unresolved_prefix, stored, messages.next_scope_unresolved_suffix },
+            ) catch {};
+            return 1;
+        },
+    }
+
+    const outcome = repository.nextReadyTicket(store, deps.gpa, .{ .scope = next_scope }) catch |err| {
         renderStorageError(deps, err);
         return 1;
     };
@@ -99,6 +130,43 @@ fn renderStorageError(deps: cli.Deps, err: anyerror) void {
     });
 }
 
+test "next: configured Workspace Scope selects within scope and overrides default ordering" {
+    const gpa = std.testing.allocator;
+    var tmp_store = try TmpStore.init(gpa, "project");
+    defer tmp_store.deinit(gpa);
+    var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, tmp_store.toplevel_path, .{});
+    defer cwd.close(std.testing.io);
+    const rev_parse = try tmp_store.gitRevParseStdout(gpa);
+    defer gpa.free(rev_parse);
+
+    {
+        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
+    }
+
+    const conn = try zqlite.open(tmp_store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try TmpStore.insertFixtureItem(conn, .{ .id = "t1", .display = "project-1", .title = "First", .created_seq = 1 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "t2", .display = "project-2", .title = "Second", .created_seq = 2 });
+
+    // Without scope, default ordering picks `project-1` first. With
+    // `tk.scope = project-2` configured, `tk next` must return `project-2`.
+    var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+    try h.fake_runner.expect(
+        &.{ "git", "config", "--worktree", "--get", "tk.scope" },
+        .{ .exit_code = 0, .stdout = "project-2\n" },
+    );
+    try h.fake_runner.expect(&.{ "git", "symbolic-ref" }, .{ .exit_code = 1 });
+
+    try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
+    try std.testing.expectEqualStrings("project-2\n", h.stdout());
+    try std.testing.expectEqualStrings("", h.stderr());
+}
+
 test "next: prints the first ready Ticket from the Repository Store" {
     const gpa = std.testing.allocator;
     var store = try TmpStore.init(gpa, "project");
@@ -133,6 +201,7 @@ test "next: prints the first ready Ticket from the Repository Store" {
         var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try expectNoWorkspaceScope(&h);
 
         try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
         try std.testing.expectEqualStrings("project-1\n", h.stdout());
@@ -161,10 +230,19 @@ test "next: returns exit 1 when no ready Ticket exists" {
     var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+    try expectNoWorkspaceScope(&h);
 
     try std.testing.expectEqual(@as(u8, 1), try run(h.deps(), &h.iter));
     try std.testing.expectEqualStrings("", h.stdout());
     try std.testing.expectEqualStrings(messages.next_no_ready_ticket ++ "\n", h.stderr());
+}
+
+/// Register the pair of git invocations `readGitSide` makes when no
+/// Workspace Scope is configured. Each call exits non-zero, so both
+/// `tk.scope` lookup and branch-name inference collapse to `null`.
+fn expectNoWorkspaceScope(h: *Harness) !void {
+    try h.fake_runner.expect(&.{ "git", "config", "--worktree", "--get", "tk.scope" }, .{ .exit_code = 1 });
+    try h.fake_runner.expect(&.{ "git", "symbolic-ref" }, .{ .exit_code = 1 });
 }
 
 test "next: rejects explicit scope arguments" {
