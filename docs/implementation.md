@@ -37,6 +37,7 @@ src/
     stop.zig
     unblock.zig
     update.zig
+    worktree.zig
   domain/
     display_prefix.zig
     item_class.zig
@@ -56,6 +57,8 @@ src/
     mutations.zig
     repository.zig
     sequences.zig
+  worktree/
+    scope.zig
   testing/
     arg_iter.zig
     scenarios.zig
@@ -67,9 +70,12 @@ src/
 ```
 
 `src/git/` is a thin façade over Git subprocess invocations (`rev-parse`
-path discovery is the first user; `tk worktree` will reuse it). It does
-not own command-specific worktree logic — that belongs in `worktree/`
-when those commands land. `src/proc/` houses the subprocess runner
+path discovery is the first user; `tk worktree start` reuses it via
+`discoverPaths`). It does not own command-specific worktree logic —
+that lives in `src/worktree/scope.zig`, which owns Workspace Scope
+storage, two-function discovery (`readGitSide` + `resolveAgainstStore`),
+branch-name inference, and slug derivation. `src/proc/` houses the
+subprocess runner
 abstraction and its test fakes (`FakeRunner` for scripted responses,
 `ErrorInjectingRunner` for runner-error mapping). `src/store/` houses
 both the Repository Store schema (migrations.zig) and the small
@@ -687,7 +693,9 @@ found: <path>`; do not convert a missing fixture into empty stdin.
 
 The current binary implements `tk prime`, `tk init`,
 `tk add -F <file | ->`, `tk list`, `tk next`, `tk show`, `tk update`,
-`tk done`, `tk start`, `tk stop`, `tk block`, and `tk unblock`.
+`tk done`, `tk start`, `tk stop`, `tk block`, `tk unblock`, and the
+four `tk worktree` subcommands (`tk worktree`, `tk worktree set`,
+`tk worktree clear`, `tk worktree start`).
 
 `tk prime` is command-owned static output embedded from
 `src/commands/prime.md`. It trims trailing whitespace, emits exactly one final
@@ -1044,12 +1052,12 @@ IDs are rendered as current Display IDs after Alias resolution.
 
 Continue in small vertical slices:
 
-1. Worktree scope
-   - Implement the four `tk worktree` subcommands and the
-     `src/worktree/scope.zig` discovery primitive per the Worktrees design
-     section above.
-   - Wire discovery into `tk next` as the first consumer; defer optional
-     `<id>` for the other lifecycle commands.
+1. Optional `<id>` wiring for the remaining lifecycle commands
+   - Loosen the required positional on `tk show`, `tk update`,
+     `tk start`, `tk stop`, `tk done` to fall back to Workspace Scope
+     when omitted, using the discovery primitive that already powers
+     `tk next`.
+   - Deferred from the worktree-scope slice per Q1 of the design grill.
 
 2. Remote and sync skeleton
    - Implement `tk remote`.
