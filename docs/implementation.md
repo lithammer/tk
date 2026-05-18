@@ -1050,38 +1050,30 @@ IDs are rendered as current Display IDs after Alias resolution.
 
 ## Next Slices
 
-Continue in small vertical slices:
+Continue in small vertical slices. Backlog ownership lives in Local Tickets;
+this section only names the current implementation queue.
 
-1. Optional `<id>` wiring for the remaining lifecycle commands
-   - Loosen the required positional on `tk show`, `tk update`,
-     `tk start`, `tk stop`, `tk done` to fall back to Workspace Scope
-     when omitted, using the discovery primitive that already powers
-     `tk next`.
-   - Deferred from the worktree-scope slice per Q1 of the design grill.
+1. `ticket-14` — Optional `<id>` wiring for the remaining lifecycle commands.
+   Loosen `tk show`, `tk update`, `tk start`, `tk stop`, and `tk done` to fall
+   back to Workspace Scope when omitted.
+2. `ticket-17` — Remote and sync skeleton. Implement the v1 `tk remote` surface,
+   `tk sync log`, and fake Backend Adapter tests before real `gh` or `acli`
+   behavior. Coordinate with `ticket-11` for the persisted Mutation Failure /
+   Adapter Failure shape.
 
-2. Remote and sync skeleton
-   - Implement `tk remote`.
-   - Implement `tk sync log`.
-   - Add fake remote adapter tests before real `gh` or `acli` behavior.
+## Deferred Backlog
 
-## Deferred
+Deferred implementation work is tracked as Local Tickets so it remains visible
+to `tk list` / `tk next` instead of living only in this document. The ticket body
+is the source of truth for each deferred item.
 
-- Dynamic `tk prime` sections.
-- External Blocker create/resolve CLI. The Repository Store and read views
-  already model External Blockers, but the command surface needs a stable way
-  to identify one External Blocker when several exist on the same item.
-- Promotion behavior for existing Local Dependencies. The blocking slice
-  defines current-state Dependencies and immediate Dependency Mutations only;
-  the Promotion slice must decide whether backend-applicable Local
-  Dependencies are snapped into backend intent when a Local Blocked Item is
-  promoted.
-- Comments, labels, and assignees. Assignee support is not assumed to land.
-  Labels remain descriptive facets only and must not replace Priority, Ticket
-  Kind, Epic membership, Item Status, or blocking concepts.
-- Custom local Display ID prefix configuration, such as `tk init --prefix`,
-  unless the repository-basename default proves too implicit before item
-  creation lands.
-- Force sync or conflict resolution.
-- Multiple remotes.
-- Non-git Workspace Scope storage.
-- Cross-repository local import/export.
+- `ticket-18` — Dynamic `tk prime` sections.
+- `ticket-19` — External Blocker create/resolve CLI.
+- `ticket-20` — Promotion behavior for existing Local Dependencies.
+- `ticket-21` — Comments, labels, and assignees.
+- `ticket-22` — Custom local Display ID prefix configuration.
+- `ticket-23` — Force sync or conflict resolution.
+- `ticket-24` — Multiple Remotes.
+- `ticket-25` — Non-git Workspace Scope storage.
+- `ticket-26` — Cross-repository local import/export.
+- `ticket-16` — Configurable worktree path layout for `tk worktree start`.
