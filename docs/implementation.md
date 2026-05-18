@@ -451,11 +451,147 @@ Adapters call external CLIs such as `gh` and `acli` through an injectable subpro
 
 ## Worktrees
 
-`tk worktree start <id> [path] [--no-status]` creates a Ticket Branch, creates a git worktree, and stores Workspace Scope in git worktree config.
+`tk worktree`, `tk worktree set <id>`, `tk worktree clear`, and
+`tk worktree start <id> [path] [--no-status]` make up the v1 Workspace Scope
+surface. Workspace Scope storage and discovery live in
+`src/worktree/scope.zig`; per ADR 0001 the Repository Store remains untracked,
+and per the v1 Worktree Config decision the scope itself is per-worktree git
+config rather than a tracked file.
 
-`tk worktree` reports configured, inferred, or absent Workspace Scope.
+Workspace Scope is stored under the single git worktree config key `tk.scope`.
+The stored value is the user-typed Display ID or Alias string (not the internal
+stable `items.id`), which keeps `git config --worktree --get-all tk.*`
+human-inspectable and lets the existing Alias resolver carry old references
+through Promotion. `tk worktree set` and `tk worktree start` lazily enable
+`extensions.worktreeConfig = true` at repo level on first use; `tk init` does
+not touch repo-level git config. There is no persisted `tk.scopeSource` —
+Workspace Scope Source is derived at read time from whether `tk.scope` is
+present in the current worktree's config.
 
-Branch-name inference is read-only and lower precedence than worktree config.
+Workspace Scope discovery is a two-function split that mirrors the
+`git/discovery.zig` ⇄ `store/repository.zig` boundary: `readGitSide(gpa, runner,
+cwd)` runs the git subprocesses (`git config --worktree --get tk.scope` and,
+on miss, `git symbolic-ref --short HEAD`) and returns raw strings;
+`resolveAgainstStore(store, raw)` does the SQL match against `item_ids` and
+returns a typed `Scope` (`.none`, `.configured`, or `.inferred`). `Deps` does
+not grow a worktree service yet — callers compose the two free functions. Any
+non-zero exit from `git config --worktree --get tk.scope` (key absent, extension
+disabled, version differences) collapses to "no configured scope"; detached
+HEAD collapses to "no inference".
+
+Branch-name inference is prefix-strict: only branches matching `tk/<display-id>`
+or `tk/<display-id>-<slug>` infer Workspace Scope. The Display ID portion is
+variable-length (`project-1`, `PROJ-123`, `acme/proj-1`) and may itself contain
+`-`, so extraction uses a single SQL query against `item_ids` that selects the
+longest stored `value` for which the branch tail (after stripping `tk/`) is
+either an exact match or has a `-` boundary directly after the value:
+`select value from item_ids where (?1 = value or ?1 like value || '-%') collate
+nocase order by length(value) desc limit 1`. The query reuses the existing
+`item_ids` partial index, returns the canonical stored spelling, and uses
+`collate nocase` so case differences in branch names still resolve. Anything
+that fails the prefix check is "no inference"; users who want scope without the
+`tk/` prefix run `tk worktree set <id>`. Branch-name inference is read-only and
+lower precedence than configured Workspace Scope.
+
+`tk worktree start <id>` creates a Ticket Branch named
+`tk/<display-id>-<branch-slug>` and a git worktree at
+`<parent-of-main-toplevel>/<repo-basename>.<display-id>-<path-slug>` by default.
+The branch slug is the title sanitized to lowercase `[a-z0-9-]` (every other
+character collapsed into a single `-`, leading and trailing `-` trimmed) and
+capped at 40 characters at the last `-` boundary that fits; an empty result
+drops the slug so the branch is just `tk/<display-id>`. The path slug uses the
+same sanitizer with a tighter 30-character cap so paths stay short enough for
+tab completion (length distribution from a real monorepo set the cap; ADR 0007
+records the data). The Display ID portion of the path is lowercased and has
+`/`, `:`, and `#` replaced with `-` for cross-filesystem safety, then
+consecutive `-` collapsed. The explicit `[path]` positional is interpreted
+relative to the current working directory and bypasses both default paths.
+"Parent of main toplevel" is computed from the *main* worktree, not the
+current one, so running `tk worktree start` from inside an existing linked
+worktree still places the new worktree next to the main repo rather than
+nesting inside the linked one.
+
+`tk worktree start` executes a fixed sequence: (1) resolve `<id>` to the
+internal stable ID; (2) reject `done` items uniformly per ADR 0006, even with
+`--no-status`, so worktree creation does not become a backdoor around the
+done-terminal rule; (3) reject if the default or explicit path already exists;
+(4) reject if the would-be branch already exists; (5) run main-toplevel
+discovery via `git/discovery.zig`; (6) ensure `extensions.worktreeConfig =
+true` at repo level (idempotent); (7) `git worktree add -b <branch> <path>`
+from the main toplevel using current HEAD as base (no `--base` flag in v1);
+(8) `git -C <path> config --worktree tk.scope <stored-value>` against the new
+worktree's per-worktree config; (9) call `repository.setItemStatus` with
+target `active` unless `--no-status`; (10) print the success block. Steps 1–4
+are pure preflight that catch every foreseeable error before any side effect.
+Step 7 is the commit point: before it, `tk worktree start` refuses with no
+filesystem or git state changes; after it, partial failures are surfaced as
+recovery diagnostics rather than rolled back. A failure between steps 7 and 8
+leaves a worktree whose scope is still discoverable through branch inference
+(the branch matches `tk/<id>-<slug>` by construction); the diagnostic suggests
+`tk worktree set <id>`. A failure between 8 and 9 leaves a fully scoped
+worktree whose Ticket is not yet active; the diagnostic suggests `tk start
+<id>`. v1 deliberately does not attempt to `git worktree remove` a successful
+add, because the partial-state recovery paths are one-line follow-ups using
+commands shipped in this same slice.
+
+`tk worktree set <id>` overwrites silently when `tk.scope` is already
+configured — same field-idempotent shape as `tk update`, `tk start`, and
+`tk done`. `tk worktree clear` is a no-op success when no `tk.scope` key
+exists: it runs `git config --worktree --unset tk.scope` and treats the
+key-not-found exit code as success so users do not have to pre-check with
+`tk worktree`.
+
+`tk worktree` (no subcommand) prints a two-line status block on stdout. The
+labels left-align at column eight so the values share an indent:
+
+```text
+Scope:  <display-id> - <title>
+Source: configured
+```
+
+```text
+Scope:  <display-id> - <title>
+Source: inferred from branch '<branch-name>'
+```
+
+The Display ID rendered is always the *current* Display ID after Alias
+resolution, not the stored string, so a worktree whose configured scope was a
+local Display ID before Promotion shows the new backend Display ID after.
+The branch name in the inferred-source hint is the raw current branch, kept
+verbatim so the message stays diagnostically truthful. No scope of either kind
+exits 0 with `No Workspace Scope.`; absence is descriptive, not an error. A
+configured scope whose stored value no longer resolves through `item_ids`
+exits 1 with `tk worktree: Workspace Scope '<stored>' is not a known Display
+ID or Alias`, defending against manual `git config` edits — v1 reserves
+Display IDs and Aliases indefinitely so this should only fire on hand-edited
+config.
+
+`tk worktree start` success output is one Beads-style four-line block on
+stdout:
+
+```text
+Created worktree for Ticket: <display-id> - <title>
+Status: active
+Branch: tk/<display-id>-<branch-slug>
+Path:   <absolute-path>
+```
+
+The `Status:` line is omitted entirely when `--no-status` is set; printing
+`Status: open` would be misleading since the *worktree* was created, not the
+Ticket's status changed. Epics render the verb-noun pair as `Created worktree
+for Epic:`. The path is absolute so agents can `cd` to it without computing
+relative paths from their current working directory.
+
+`tk next` is the first consumer of Workspace Scope discovery in this slice.
+It calls `readGitSide` plus `resolveAgainstStore`, then passes the resulting
+`Scope` straight into `repository.nextReadyTicket(... .scope = .{ .display_arg
+= ... })`. The "scoped empty selection" diagnostic
+(`tk next: no ready Tickets in Workspace Scope`) now activates when
+`Source` is `configured` or `inferred`. Loosening the still-required `<id>`
+positional to optional on `tk show`, `tk update`, `tk start`, `tk stop`, and
+`tk done` is deferred to a focused follow-up slice; this slice keeps the
+behavior change to one command so the discovery primitive can stabilise
+against `tk next` first.
 
 ## Testing
 
@@ -909,10 +1045,11 @@ IDs are rendered as current Display IDs after Alias resolution.
 Continue in small vertical slices:
 
 1. Worktree scope
-   - Implement `tk worktree`, `set`, `clear`, and `start`.
-   - Use git worktree config.
-   - Feed the discovered Workspace Scope Display ID or Alias into
-     `store.repository.nextReadyTicket`.
+   - Implement the four `tk worktree` subcommands and the
+     `src/worktree/scope.zig` discovery primitive per the Worktrees design
+     section above.
+   - Wire discovery into `tk next` as the first consumer; defer optional
+     `<id>` for the other lifecycle commands.
 
 2. Remote and sync skeleton
    - Implement `tk remote`.
