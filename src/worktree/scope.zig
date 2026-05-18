@@ -162,34 +162,22 @@ fn loadScope(
     item_id: []const u8,
     source: @FieldType(Scope, "source"),
 ) ResolveError!Scope {
-    const display_id = try currentDisplayValue(store, gpa, item_id);
+    const row = (try store.conn.row(
+        "select display_value, title from items where id = ?1",
+        .{item_id},
+    )) orelse unreachable;
+    defer row.deinit();
+    const display_id = try gpa.dupe(u8, row.text(0));
     errdefer gpa.free(display_id);
-    const title = try currentTitle(store, gpa, item_id);
+    const title = try gpa.dupe(u8, row.text(1));
     return .{ .source = source, .display_id = display_id, .title = title };
-}
-
-fn currentTitle(
-    store: repository.Store,
-    gpa: std.mem.Allocator,
-    item_id: []const u8,
-) ResolveError![]u8 {
-    if (try store.conn.row("select title from items where id = ?1", .{item_id})) |r| {
-        defer r.deinit();
-        return try gpa.dupe(u8, r.text(0));
-    }
-    unreachable;
 }
 
 const ticket_branch_prefix = "tk/";
 
-/// SQL for prefix-strict branch inference. Bound with:
-///   `?1` — the branch tail after stripping `tk/`.
-///
-/// Selects the longest `item_ids.value` such that the tail either matches
-/// the value exactly or starts with `<value>-` (so a slug suffix is allowed
-/// but a value of `proj` does not silently shadow a branch `tk/project-1`).
-/// `collate nocase` keeps the lookup consistent with the case-insensitive
-/// `item_ids` primary key.
+/// Longest stored Display ID or Alias that is a `-`-bounded prefix of the
+/// branch tail. The `-` boundary keeps `proj` from silently shadowing
+/// `tk/project-1`. `collate nocase` matches the `item_ids` PK collation.
 const longest_prefix_match_sql =
     \\select item_id
     \\  from item_ids
@@ -210,25 +198,6 @@ fn longestPrefixMatch(
         return try gpa.dupe(u8, r.text(0));
     }
     return null;
-}
-
-/// Read the current Display ID for an internal stable item ID.
-///
-/// Reused by both configured-scope resolution and (later) inferred-scope
-/// resolution so the rendered Display ID always matches `items.display_value`
-/// rather than echoing whatever string the caller passed in.
-fn currentDisplayValue(
-    store: repository.Store,
-    gpa: std.mem.Allocator,
-    item_id: []const u8,
-) ResolveError![]u8 {
-    if (try store.conn.row("select display_value from items where id = ?1", .{item_id})) |r| {
-        defer r.deinit();
-        return try gpa.dupe(u8, r.text(0));
-    }
-    // resolveItemRef succeeded, so the item must exist. Hitting this means
-    // the deferred FK between `item_ids` and `items` is in a broken state.
-    unreachable;
 }
 
 /// Sanitize a Ticket/Epic title into a slug for a git ref or filesystem path

@@ -1,14 +1,13 @@
 //! `tk worktree` — inspect and configure Workspace Scope.
 
 const std = @import("std");
-const clap = @import("clap");
 const cli = @import("../cli.zig");
 const messages = @import("../messages.zig");
 const repository = @import("../store/repository.zig");
 const worktree_scope = @import("../worktree/scope.zig");
 const git_discovery = @import("../git/discovery.zig");
-const clock_mod = @import("../clock.zig");
 const ItemClass = @import("../domain/item_class.zig").ItemClass;
+const ItemStatus = @import("../domain/status.zig").ItemStatus;
 
 /// Dispatcher metadata for `tk worktree`.
 pub const meta: cli.CommandMeta = .{
@@ -16,21 +15,20 @@ pub const meta: cli.CommandMeta = .{
     .description = "Inspect or configure the current Workspace Scope",
 };
 
+const Subcommand = enum { clear, set, start };
+
 /// Parse `tk worktree` args, dispatch to subcommand or report status.
 pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
-    // Manual subcommand peek before zig-clap parses anything else, so each
-    // arm can own its own parameter shape (`set <id>`, `start <id> [path]
-    // [--no-status]`). With no subcommand we fall through to the read-only
-    // status report.
-    const sub = args_iter.next();
-    if (sub) |s| {
+    if (args_iter.next()) |s| {
         if (std.mem.eql(u8, s, "-h") or std.mem.eql(u8, s, "--help")) {
             writeHelp(deps) catch {};
             return 0;
         }
-        if (std.mem.eql(u8, s, "clear")) return try runClear(deps);
-        if (std.mem.eql(u8, s, "set")) return try runSet(deps, args_iter);
-        if (std.mem.eql(u8, s, "start")) return try runStart(deps, args_iter);
+        if (std.meta.stringToEnum(Subcommand, s)) |sub| return switch (sub) {
+            .clear => try runClear(deps),
+            .set => try runSet(deps, args_iter),
+            .start => try runStart(deps, args_iter),
+        };
     }
     return try runStatus(deps);
 }
@@ -54,28 +52,58 @@ fn writeHelp(deps: cli.Deps) !void {
     );
 }
 
-fn runStatus(deps: cli.Deps) !u8 {
-    const open_outcome = repository.openExisting(deps.gpa, deps.runner, deps.cwd) catch |err| {
-        renderStatusStorageError(deps, err);
-        return 1;
+const status_storage_msgs: repository.StorageErrorMessages = .{
+    .busy_retry = messages.worktree_status_store_busy_retry,
+    .out_of_memory = messages.worktree_status_out_of_memory,
+    .fallback = messages.worktree_status_read_failed,
+};
+
+const set_storage_msgs: repository.StorageErrorMessages = .{
+    .busy_retry = messages.worktree_set_store_busy_retry,
+    .out_of_memory = messages.worktree_set_out_of_memory,
+    .fallback = messages.worktree_set_read_failed,
+};
+
+const start_storage_msgs: repository.StorageErrorMessages = .{
+    .busy_retry = messages.worktree_start_store_busy_retry,
+    .out_of_memory = messages.worktree_start_out_of_memory,
+    .fallback = messages.worktree_start_write_failed,
+};
+
+/// Open the Repository Store for a subcommand, rendering the standard
+/// open-failure or storage-error diagnostics on failure. Returns `null` so
+/// callers can `orelse return 1`.
+fn openStoreOrFail(
+    deps: cli.Deps,
+    sub_name: []const u8,
+    missing_msg: []const u8,
+    storage_msgs: repository.StorageErrorMessages,
+) error{OutOfMemory}!?repository.Store {
+    const outcome = repository.openExisting(deps.gpa, deps.runner, deps.cwd) catch |err| {
+        repository.renderStorageError(deps.stderr, err, storage_msgs);
+        return if (err == error.OutOfMemory) error.OutOfMemory else null;
     };
-    const store = switch (open_outcome) {
-        .ok => |store| store,
+    switch (outcome) {
+        .ok => |store| return store,
         else => {
-            repository.renderOpenFailure(deps.stderr, deps.gpa, "worktree", messages.worktree_status_missing_store, open_outcome);
-            return 1;
+            repository.renderOpenFailure(deps.stderr, deps.gpa, sub_name, missing_msg, outcome);
+            return null;
         },
-    };
+    }
+}
+
+fn runStatus(deps: cli.Deps) !u8 {
+    const store = (try openStoreOrFail(deps, "worktree", messages.worktree_status_missing_store, status_storage_msgs)) orelse return 1;
     defer store.close();
 
     const raw = worktree_scope.readGitSide(deps.gpa, deps.runner, deps.cwd) catch |err| {
-        renderStatusStorageError(deps, err);
+        repository.renderStorageError(deps.stderr, err, status_storage_msgs);
         return 1;
     };
     defer worktree_scope.freeRaw(deps.gpa, raw);
 
     const scope_outcome = worktree_scope.resolveAgainstStore(store, deps.gpa, raw) catch |err| {
-        renderStatusStorageError(deps, err);
+        repository.renderStorageError(deps.stderr, err, status_storage_msgs);
         return 1;
     };
     switch (scope_outcome) {
@@ -106,12 +134,48 @@ fn runStatus(deps: cli.Deps) !u8 {
     }
 }
 
-fn renderStatusStorageError(deps: cli.Deps, err: anyerror) void {
-    repository.renderStorageError(deps.stderr, err, .{
-        .busy_retry = messages.worktree_status_store_busy_retry,
-        .out_of_memory = messages.worktree_status_out_of_memory,
-        .fallback = messages.worktree_status_read_failed,
-    });
+/// Resolved item fields needed by `tk worktree start`. One query against
+/// `item_ids` joined to `items` replaces the prior `resolveItemRef` +
+/// `showItem` pair, dropping two superfluous reads and the over-fetch of
+/// container/dependency rows.
+const StartTarget = struct {
+    id: []u8,
+    display_id: []u8,
+    title: []u8,
+    item_class: ItemClass,
+    status: ItemStatus,
+
+    fn deinit(self: StartTarget, gpa: std.mem.Allocator) void {
+        gpa.free(self.id);
+        gpa.free(self.display_id);
+        gpa.free(self.title);
+    }
+};
+
+fn lookupStartTarget(
+    store: repository.Store,
+    gpa: std.mem.Allocator,
+    display_arg: []const u8,
+) repository.ResolveError!?StartTarget {
+    const row = (try store.conn.row(
+        \\select i.id, i.display_value, i.item_class, i.title, i.status
+        \\  from item_ids ids
+        \\  join items i on i.id = ids.item_id
+        \\ where ids.value = ?1
+    , .{display_arg})) orelse return null;
+    defer row.deinit();
+    const id = try gpa.dupe(u8, row.text(0));
+    errdefer gpa.free(id);
+    const display_id = try gpa.dupe(u8, row.text(1));
+    errdefer gpa.free(display_id);
+    const title = try gpa.dupe(u8, row.text(3));
+    return .{
+        .id = id,
+        .display_id = display_id,
+        .title = title,
+        .item_class = std.meta.stringToEnum(ItemClass, row.text(2)) orelse unreachable,
+        .status = std.meta.stringToEnum(ItemStatus, row.text(4)) orelse unreachable,
+    };
 }
 
 fn runStart(deps: cli.Deps, args_iter: anytype) !u8 {
@@ -132,21 +196,11 @@ fn runStart(deps: cli.Deps, args_iter: anytype) !u8 {
         return 2;
     };
 
-    const open_outcome = repository.openExisting(deps.gpa, deps.runner, deps.cwd) catch |err| {
-        renderStartStorageError(deps, err);
-        return 1;
-    };
-    const store = switch (open_outcome) {
-        .ok => |store| store,
-        else => {
-            repository.renderOpenFailure(deps.stderr, deps.gpa, "worktree start", messages.worktree_start_missing_store, open_outcome);
-            return 1;
-        },
-    };
+    const store = (try openStoreOrFail(deps, "worktree start", messages.worktree_start_missing_store, start_storage_msgs)) orelse return 1;
     defer store.close();
 
-    const resolved = (repository.resolveItemRef(store, deps.gpa, id) catch |err| {
-        renderStartStorageError(deps, err);
+    const target = (lookupStartTarget(store, deps.gpa, id) catch |err| {
+        repository.renderStorageError(deps.stderr, err, start_storage_msgs);
         return 1;
     }) orelse {
         deps.stderr.print(
@@ -155,67 +209,55 @@ fn runStart(deps: cli.Deps, args_iter: anytype) !u8 {
         ) catch {};
         return 1;
     };
-    defer resolved.deinit(deps.gpa);
+    defer target.deinit(deps.gpa);
 
-    const detail = (repository.showItem(store, deps.gpa, id) catch |err| {
-        renderStartStorageError(deps, err);
-        return 1;
-    }) orelse unreachable; // resolveItemRef just succeeded
-    defer detail.deinit(deps.gpa);
-
-    if (detail.status == .done) {
+    if (target.status == .done) {
         deps.stderr.print(
             "{s}{s}\n",
-            .{ messages.worktree_start_locked_done_prefix, detail.item_class.label() },
+            .{ messages.worktree_start_locked_done_prefix, target.item_class.label() },
         ) catch {};
         return 1;
     }
 
-    const branch_slug = try worktree_scope.sanitize(deps.gpa, detail.title, 40);
+    const branch_slug = try worktree_scope.sanitize(deps.gpa, target.title, 40);
     defer deps.gpa.free(branch_slug);
-    const path_slug = try worktree_scope.sanitize(deps.gpa, detail.title, 30);
+    const path_slug = try worktree_scope.sanitize(deps.gpa, target.title, 30);
     defer deps.gpa.free(path_slug);
 
-    const branch = try buildBranch(deps.gpa, detail.display_id, branch_slug);
+    const branch = try buildBranch(deps.gpa, target.display_id, branch_slug);
     defer deps.gpa.free(branch);
 
     const worktree_path = if (path_arg) |p|
         try deps.gpa.dupe(u8, p)
     else
-        try buildDefaultPath(deps.gpa, deps.runner, deps.cwd, detail.display_id, path_slug);
+        (try buildDefaultPath(deps, target.display_id, path_slug)) orelse return 1;
     defer deps.gpa.free(worktree_path);
 
-    // git config extensions.worktreeConfig true
-    try runGitOrFail(deps, &.{ "git", "config", "extensions.worktreeConfig", "true" }, messages.worktree_start_git_failed) orelse return 1;
-    // git worktree add -b <branch> <path>
-    try runGitOrFail(deps, &.{ "git", "worktree", "add", "-b", branch, worktree_path }, messages.worktree_start_git_failed) orelse return 1;
-    // git -C <path> config --worktree tk.scope <id>
-    try runGitOrFail(deps, &.{ "git", "-C", worktree_path, "config", "--worktree", "tk.scope", id }, messages.worktree_start_git_failed) orelse return 1;
+    if (!(try runGitOrFail(deps, &.{ "git", "config", "extensions.worktreeConfig", "true" }, messages.worktree_start_git_failed))) return 1;
+    if (!(try runGitOrFail(deps, &.{ "git", "worktree", "add", "-b", branch, worktree_path }, messages.worktree_start_git_failed))) return 1;
+    if (!(try runGitOrFail(deps, &.{ "git", "-C", worktree_path, "config", "--worktree", "tk.scope", id }, messages.worktree_start_git_failed))) return 1;
 
     if (!no_status) {
         const set_outcome = repository.setItemStatus(store, deps.gpa, deps.clock, .{
-            .id = resolved.id,
+            .id = target.id,
             .status = .active,
         }) catch |err| {
-            renderStartStorageError(deps, err);
+            repository.renderStorageError(deps.stderr, err, start_storage_msgs);
             return 1;
         };
-        // Status flip succeeded or was idempotent — either way the worktree
-        // is in place. `.locked_done` is impossible here because we
-        // pre-checked detail.status above; future races are caught by the
-        // schema trigger from ADR 0006.
         switch (set_outcome) {
             .ok => |snap| snap.deinit(deps.gpa),
-            .not_found => unreachable,
-            .locked_done => unreachable,
+            // pre-checked target.status above; the schema trigger from ADR
+            // 0006 backstops any future writer that bypasses this path.
+            .not_found, .locked_done => unreachable,
         }
     }
 
     try deps.stdout.print("{s}{s}: {s} - {s}\n", .{
         messages.worktree_start_success_prefix,
-        detail.item_class.label(),
-        detail.display_id,
-        detail.title,
+        target.item_class.label(),
+        target.display_id,
+        target.title,
     });
     if (!no_status) try deps.stdout.writeAll("Status: active\n");
     try deps.stdout.print("Branch: {s}\n", .{branch});
@@ -230,73 +272,35 @@ fn buildBranch(gpa: std.mem.Allocator, display_id: []const u8, slug: []const u8)
 
 /// Compute the default worktree path: `<parent-of-main-toplevel>/<repo>.<id-sanitized>-<slug>`.
 ///
-/// `<parent-of-main-toplevel>` is derived from `git rev-parse --show-toplevel`
-/// of the current worktree; this matches the v1 simplification noted in Q12
-/// that running from inside a linked worktree may nest paths in unexpected
-/// places. Configurable layout is deferred.
+/// "Parent of main toplevel" is derived from `git rev-parse --show-toplevel`
+/// of the current worktree; the linked-worktree edge case is an accepted
+/// surviving risk for v1 per the design contract. Returns `null` so callers
+/// can `orelse return 1` after the discovery diagnostic is rendered.
 fn buildDefaultPath(
-    gpa: std.mem.Allocator,
-    runner: anytype,
-    cwd: std.Io.Dir,
+    deps: cli.Deps,
     display_id: []const u8,
     slug: []const u8,
-) ![]u8 {
-    const outcome = try git_discovery.discoverPaths(gpa, runner, cwd);
+) error{OutOfMemory}!?[]u8 {
+    var outcome = try git_discovery.discoverPaths(deps.gpa, deps.runner, deps.cwd);
     switch (outcome) {
-        .ok => |paths| {
-            var p = paths;
-            defer p.deinit(gpa);
-            const parent = std.fs.path.dirname(p.toplevel) orelse "/";
-            const repo = std.fs.path.basename(p.toplevel);
-            const id_sanitized = try sanitizeIdForPath(gpa, display_id);
-            defer gpa.free(id_sanitized);
+        .ok => |*paths| {
+            defer paths.deinit(deps.gpa);
+            const parent = std.fs.path.dirname(paths.toplevel) orelse "/";
+            const repo = std.fs.path.basename(paths.toplevel);
+            const id_sanitized = try worktree_scope.sanitize(deps.gpa, display_id, std.math.maxInt(usize));
+            defer deps.gpa.free(id_sanitized);
             const leaf = if (slug.len == 0)
-                try std.fmt.allocPrint(gpa, "{s}.{s}", .{ repo, id_sanitized })
+                try std.fmt.allocPrint(deps.gpa, "{s}.{s}", .{ repo, id_sanitized })
             else
-                try std.fmt.allocPrint(gpa, "{s}.{s}-{s}", .{ repo, id_sanitized, slug });
-            defer gpa.free(leaf);
-            return try std.fs.path.join(gpa, &.{ parent, leaf });
+                try std.fmt.allocPrint(deps.gpa, "{s}.{s}-{s}", .{ repo, id_sanitized, slug });
+            defer deps.gpa.free(leaf);
+            return try std.fs.path.join(deps.gpa, &.{ parent, leaf });
         },
-        else => |inner| {
-            git_discovery.renderFailure(undefined, gpa, "worktree start", inner);
-            return error.GitDiscoveryFailed;
+        else => {
+            git_discovery.renderFailure(deps.stderr, deps.gpa, "worktree start", outcome);
+            return null;
         },
     }
-}
-
-/// Lowercase Display ID and replace `/`, `:`, `#` with `-` for filesystem
-/// safety, then collapse consecutive `-`. Matches the path-safety rule
-/// recorded in the implementation contract.
-fn sanitizeIdForPath(gpa: std.mem.Allocator, display_id: []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(gpa);
-    var prev_dash = false;
-    for (display_id) |c| {
-        const lower = std.ascii.toLower(c);
-        const mapped: u8 = switch (lower) {
-            '/', ':', '#' => '-',
-            else => lower,
-        };
-        if (mapped == '-') {
-            if (!prev_dash and out.items.len > 0) {
-                try out.append(gpa, '-');
-                prev_dash = true;
-            }
-        } else {
-            try out.append(gpa, mapped);
-            prev_dash = false;
-        }
-    }
-    if (out.items.len > 0 and out.items[out.items.len - 1] == '-') _ = out.pop();
-    return try out.toOwnedSlice(gpa);
-}
-
-fn renderStartStorageError(deps: cli.Deps, err: anyerror) void {
-    repository.renderStorageError(deps.stderr, err, .{
-        .busy_retry = messages.worktree_start_store_busy_retry,
-        .out_of_memory = messages.worktree_start_out_of_memory,
-        .fallback = messages.worktree_start_write_failed,
-    });
 }
 
 fn runSet(deps: cli.Deps, args_iter: anytype) !u8 {
@@ -305,56 +309,44 @@ fn runSet(deps: cli.Deps, args_iter: anytype) !u8 {
         return 2;
     };
 
-    const open_outcome = repository.openExisting(deps.gpa, deps.runner, deps.cwd) catch |err| {
-        renderSetStorageError(deps, err);
-        return 1;
-    };
-    const store = switch (open_outcome) {
-        .ok => |store| store,
-        else => {
-            repository.renderOpenFailure(deps.stderr, deps.gpa, "worktree set", messages.worktree_set_missing_store, open_outcome);
-            return 1;
-        },
-    };
+    const store = (try openStoreOrFail(deps, "worktree set", messages.worktree_set_missing_store, set_storage_msgs)) orelse return 1;
     defer store.close();
 
-    if (try repository.resolveItemRef(store, deps.gpa, id)) |resolved| {
-        defer resolved.deinit(deps.gpa);
-    } else {
+    const resolved = (repository.resolveItemRef(store, deps.gpa, id) catch |err| {
+        repository.renderStorageError(deps.stderr, err, set_storage_msgs);
+        return 1;
+    }) orelse {
         deps.stderr.print(
             "{s}{s}{s}\n",
             .{ messages.worktree_set_id_not_found_prefix, id, messages.worktree_set_id_not_found_suffix },
         ) catch {};
         return 1;
-    }
+    };
+    resolved.deinit(deps.gpa);
 
-    // Ensure the repo opts into per-worktree config before we write
-    // `tk.scope` against the current worktree. The set is itself
-    // idempotent at git level: writing `true` over an existing `true`
-    // is a no-op rewrite.
-    try runGitOrFail(deps, &.{ "git", "config", "extensions.worktreeConfig", "true" }, messages.worktree_set_failed) orelse return 1;
-    try runGitOrFail(deps, &.{ "git", "config", "--worktree", "tk.scope", id }, messages.worktree_set_failed) orelse return 1;
+    if (!(try runGitOrFail(deps, &.{ "git", "config", "extensions.worktreeConfig", "true" }, messages.worktree_set_failed))) return 1;
+    if (!(try runGitOrFail(deps, &.{ "git", "config", "--worktree", "tk.scope", id }, messages.worktree_set_failed))) return 1;
 
     try deps.stdout.print("{s}{s}\n", .{ messages.worktree_set_prefix, id });
     return 0;
 }
 
-/// Run a git subprocess, returning `true` on success and surfacing the failure
-/// diagnostic + exit-1 path through `null` so callers can `orelse return 1`.
-fn runGitOrFail(deps: cli.Deps, argv: []const []const u8, failure_msg: []const u8) !?void {
+/// Run a git subprocess. Returns `true` on exit 0, `false` on spawn failure
+/// or non-zero exit (with the diagnostic already written to stderr).
+fn runGitOrFail(deps: cli.Deps, argv: []const []const u8, failure_msg: []const u8) error{OutOfMemory}!bool {
     var result = deps.runner.run(deps.gpa, .{ .argv = argv, .cwd = deps.cwd }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.ExecutableNotFound, error.SpawnFailed => {
             deps.stderr.print("{s}\n{s}\n", .{ failure_msg, @errorName(err) }) catch {};
-            return null;
+            return false;
         },
     };
     defer result.deinit(deps.gpa);
     if (result.exit_code != 0) {
         deps.stderr.print("{s}\n", .{failure_msg}) catch {};
-        return null;
+        return false;
     }
-    return;
+    return true;
 }
 
 fn renderSetStorageError(deps: cli.Deps, err: anyerror) void {
@@ -378,9 +370,8 @@ fn runClear(deps: cli.Deps) !u8 {
     };
     defer result.deinit(deps.gpa);
 
-    // Exit code 5 means the key was already absent; per Q8 that is the
-    // idempotent no-op success path. Any other non-zero exit is a real
-    // failure worth surfacing.
+    // Exit 5 is git's "key already absent" code; the design contract treats
+    // that as the idempotent no-op success path.
     if (result.exit_code != 0 and result.exit_code != 5) {
         deps.stderr.print("{s}\n", .{messages.worktree_clear_failed}) catch {};
         return 1;

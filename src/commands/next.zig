@@ -53,9 +53,6 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
     };
     defer store.close();
 
-    // Workspace Scope discovery: configured `tk.scope` first, branch-name
-    // inference as fallback. A stored value that no longer resolves is a
-    // hand-edited-config issue, not silent fallthrough.
     const raw = worktree_scope.readGitSide(deps.gpa, deps.runner, deps.cwd) catch |err| {
         renderStorageError(deps, err);
         return 1;
@@ -65,16 +62,13 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
         renderStorageError(deps, err);
         return 1;
     };
-    var applied_scope = false;
-    var next_scope: repository.NextScope = .none;
     var scope_payload: ?worktree_scope.Scope = null;
     defer if (scope_payload) |s| s.deinit(deps.gpa);
-    switch (scope_outcome) {
-        .none => {},
-        .scope => |s| {
+    const next_scope: repository.NextScope = switch (scope_outcome) {
+        .none => .none,
+        .scope => |s| blk: {
             scope_payload = s;
-            next_scope = .{ .display_arg = s.display_id };
-            applied_scope = true;
+            break :blk .{ .display_arg = s.display_id };
         },
         .configured_unresolved => |stored| {
             defer deps.gpa.free(stored);
@@ -84,7 +78,7 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
             ) catch {};
             return 1;
         },
-    }
+    };
 
     const outcome = repository.nextReadyTicket(store, deps.gpa, .{ .scope = next_scope }) catch |err| {
         renderStorageError(deps, err);
@@ -97,7 +91,7 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
             return 0;
         },
         .no_ready_ticket => {
-            const message = if (applied_scope) messages.next_no_ready_ticket_in_scope else messages.next_no_ready_ticket;
+            const message = if (scope_payload != null) messages.next_no_ready_ticket_in_scope else messages.next_no_ready_ticket;
             deps.stderr.writeAll(message) catch {};
             deps.stderr.writeAll("\n") catch {};
             return 1;
