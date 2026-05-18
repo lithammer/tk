@@ -98,18 +98,7 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
         };
     }
 
-    // Open the Repository Store.
-    const open_outcome = repository.openExisting(deps.gpa, deps.runner, deps.cwd) catch |err| {
-        renderStorageError(deps, err);
-        return 1;
-    };
-    const store = switch (open_outcome) {
-        .ok => |s| s,
-        else => {
-            repository.renderOpenFailure(deps.stderr, deps.gpa, "update", messages.update_missing_store, open_outcome);
-            return 1;
-        },
-    };
+    const store = repository.openStoreCatching(deps.gpa, deps.runner, deps.cwd, deps.stderr, open_msgs) orelse return 1;
     defer store.close();
 
     // Resolve the item id.
@@ -219,12 +208,20 @@ fn writeHelp(deps: cli.Deps) !void {
     );
 }
 
+const storage_msgs: repository.StorageErrorMessages = .{
+    .busy_retry = messages.update_store_busy_retry,
+    .out_of_memory = messages.update_out_of_memory,
+    .fallback = messages.update_write_failed,
+};
+
+const open_msgs: repository.OpenMessages = .{
+    .command_name = "update",
+    .missing_store = messages.update_missing_store,
+    .storage = storage_msgs,
+};
+
 fn renderStorageError(deps: cli.Deps, err: anyerror) void {
-    repository.renderStorageError(deps.stderr, err, .{
-        .busy_retry = messages.update_store_busy_retry,
-        .out_of_memory = messages.update_out_of_memory,
-        .fallback = messages.update_write_failed,
-    });
+    repository.renderStorageError(deps.stderr, err, storage_msgs);
 }
 
 fn renderParseError(deps: cli.Deps, err: message.ParseError) !void {

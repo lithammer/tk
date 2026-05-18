@@ -224,6 +224,49 @@ pub fn renderStorageError(stderr: *std.Io.Writer, err: anyerror, msgs: StorageEr
     stderr.print("{s}\n{s}\n", .{ msgs.fallback, @errorName(err) }) catch {};
 }
 
+/// Per-command message bundle for `openStoreCatching`. Each command declares
+/// one constant at module level so the open-failure rendering pipeline is
+/// driven entirely by the command's stable phrasing.
+pub const OpenMessages = struct {
+    /// Subcommand name as it appears in diagnostics, e.g. `"next"` or
+    /// `"worktree set"`. Used by `renderOpenFailure` to format `tk <name>: …`.
+    command_name: []const u8,
+    /// Pre-formatted "Repository Store not initialized" line for this command.
+    missing_store: []const u8,
+    /// Storage-error triple used when `openExisting` raises an error.
+    storage: StorageErrorMessages,
+};
+
+/// Open the Repository Store for a command, rendering the standard
+/// open-failure or storage-error diagnostic on any failure. Returns the open
+/// `Store` on success or `null` after the diagnostic is written; callers do
+/// `openStoreCatching(...) orelse return 1;`.
+///
+/// `error.OutOfMemory` is rendered through `msgs.storage.out_of_memory` rather
+/// than propagated. This matches every existing command's storage-error
+/// handling: anticipated OOM exits 1 with a stable message; only unanticipated
+/// failures (e.g. zig-clap OOM that bypasses command rendering) reach the
+/// exit-3 catch-all in `main.zig`.
+pub fn openStoreCatching(
+    gpa: std.mem.Allocator,
+    runner: proc.Runner,
+    cwd: std.Io.Dir,
+    stderr: *std.Io.Writer,
+    msgs: OpenMessages,
+) ?Store {
+    const outcome = openExisting(gpa, runner, cwd) catch |err| {
+        renderStorageError(stderr, err, msgs.storage);
+        return null;
+    };
+    switch (outcome) {
+        .ok => |store| return store,
+        else => {
+            renderOpenFailure(stderr, gpa, msgs.command_name, msgs.missing_store, outcome);
+            return null;
+        },
+    }
+}
+
 /// Classify a Repository Store error as a transient SQLite busy/locked state
 /// that a retry can clear. Shared by commands so the retry contract stays
 /// uniform across writes and reads.

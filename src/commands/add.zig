@@ -66,17 +66,7 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
     };
     defer parsed.deinit(deps.gpa);
 
-    const open_outcome = repository.openExisting(deps.gpa, deps.runner, deps.cwd) catch |err| {
-        renderStorageError(deps, err);
-        return 1;
-    };
-    const store = switch (open_outcome) {
-        .ok => |store| store,
-        else => {
-            repository.renderOpenFailure(deps.stderr, deps.gpa, "add", messages.add_missing_store, open_outcome);
-            return 1;
-        },
-    };
+    const store = repository.openStoreCatching(deps.gpa, deps.runner, deps.cwd, deps.stderr, open_msgs) orelse return 1;
     defer store.close();
 
     const created = repository.createLocalTicket(store, deps.gpa, deps.clock, deps.random, .{
@@ -118,12 +108,20 @@ fn writeHelp(deps: cli.Deps) !void {
     );
 }
 
+const storage_msgs: repository.StorageErrorMessages = .{
+    .busy_retry = messages.add_store_busy_retry,
+    .out_of_memory = messages.add_out_of_memory,
+    .fallback = messages.add_create_failed,
+};
+
+const open_msgs: repository.OpenMessages = .{
+    .command_name = "add",
+    .missing_store = messages.add_missing_store,
+    .storage = storage_msgs,
+};
+
 fn renderStorageError(deps: cli.Deps, err: anyerror) void {
-    repository.renderStorageError(deps.stderr, err, .{
-        .busy_retry = messages.add_store_busy_retry,
-        .out_of_memory = messages.add_out_of_memory,
-        .fallback = messages.add_create_failed,
-    });
+    repository.renderStorageError(deps.stderr, err, storage_msgs);
 }
 
 const zqlite = @import("zqlite");

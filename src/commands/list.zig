@@ -46,17 +46,7 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
     }
     const options = parseOptions(deps, res.args) orelse return 2;
 
-    const open_outcome = repository.openExisting(deps.gpa, deps.runner, deps.cwd) catch |err| {
-        renderStorageError(deps, err);
-        return 1;
-    };
-    const store = switch (open_outcome) {
-        .ok => |store| store,
-        else => {
-            repository.renderOpenFailure(deps.stderr, deps.gpa, "list", messages.list_missing_store, open_outcome);
-            return 1;
-        },
-    };
+    const store = repository.openStoreCatching(deps.gpa, deps.runner, deps.cwd, deps.stderr, open_msgs) orelse return 1;
     defer store.close();
 
     const rows = repository.listRows(store, deps.gpa, options) catch |err| {
@@ -234,12 +224,20 @@ const StatusCounts = struct {
     }
 };
 
+const storage_msgs: repository.StorageErrorMessages = .{
+    .busy_retry = messages.list_store_busy_retry,
+    .out_of_memory = messages.list_out_of_memory,
+    .fallback = messages.list_read_failed,
+};
+
+const open_msgs: repository.OpenMessages = .{
+    .command_name = "list",
+    .missing_store = messages.list_missing_store,
+    .storage = storage_msgs,
+};
+
 fn renderStorageError(deps: cli.Deps, err: anyerror) void {
-    repository.renderStorageError(deps.stderr, err, .{
-        .busy_retry = messages.list_store_busy_retry,
-        .out_of_memory = messages.list_out_of_memory,
-        .fallback = messages.list_read_failed,
-    });
+    repository.renderStorageError(deps.stderr, err, storage_msgs);
 }
 
 test "list: renders an unparented local Ticket from the Repository Store" {
