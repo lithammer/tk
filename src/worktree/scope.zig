@@ -7,9 +7,11 @@
 
 const std = @import("std");
 const zqlite = @import("zqlite");
+const proc = @import("../proc/runner.zig");
 const repository = @import("../store/repository.zig");
 const migrations = @import("../store/migrations.zig");
 const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+const fake_proc = @import("../proc/fake.zig");
 
 /// Workspace Scope and its provenance.
 ///
@@ -32,10 +34,20 @@ pub const Scope = struct {
 /// `configured_value` is whatever `git config --worktree --get tk.scope`
 /// returned (null when the key is unset or the extension is disabled).
 /// `branch_name` is the current branch's short ref (null on detached HEAD).
+/// Fields are `[]const u8` so tests can construct `Raw` from string literals
+/// without an allocator; `readGitSide` returns a `Raw` whose populated slices
+/// are gpa-owned and freed through `freeRaw`.
 pub const Raw = struct {
     configured_value: ?[]const u8 = null,
     branch_name: ?[]const u8 = null,
 };
+
+/// Free populated slices on a `Raw` returned by `readGitSide`. Safe on an
+/// all-null `Raw`. Do not call on a literal-built `Raw` from tests.
+pub fn freeRaw(gpa: std.mem.Allocator, raw: Raw) void {
+    if (raw.configured_value) |s| gpa.free(s);
+    if (raw.branch_name) |s| gpa.free(s);
+}
 
 /// Outcome of resolving raw discovery against the Repository Store.
 ///
@@ -51,6 +63,63 @@ pub const ResolveOutcome = union(enum) {
 };
 
 pub const ResolveError = repository.ResolveError;
+
+/// Read the two git-side inputs needed to resolve Workspace Scope.
+///
+/// Runs `git config --worktree --get tk.scope` and `git symbolic-ref --short
+/// HEAD` through the supplied runner. Any non-zero git exit (key absent,
+/// `extensions.worktreeConfig` disabled, detached HEAD, git binary missing,
+/// spawn failure) collapses the corresponding slot to `null`. Only
+/// `error.OutOfMemory` escapes; everything else folds into the "no info"
+/// shape so callers above this seam render scope as `.none` instead of
+/// distinguishing many failure modes that all mean the same thing for
+/// downstream consumers.
+///
+/// Populated slices in the returned `Raw` are gpa-owned; free them with
+/// `freeRaw`.
+pub fn readGitSide(
+    gpa: std.mem.Allocator,
+    runner: proc.Runner,
+    cwd: std.Io.Dir,
+) error{OutOfMemory}!Raw {
+    const configured = try readSingleLine(
+        gpa,
+        runner,
+        cwd,
+        &.{ "git", "config", "--worktree", "--get", "tk.scope" },
+    );
+    errdefer if (configured) |s| gpa.free(s);
+    const branch = try readSingleLine(
+        gpa,
+        runner,
+        cwd,
+        &.{ "git", "symbolic-ref", "--short", "HEAD" },
+    );
+    return .{ .configured_value = configured, .branch_name = branch };
+}
+
+/// Run a git subprocess and return the trimmed stdout when it exits 0.
+///
+/// Any failure to spawn, non-zero exit, or empty trimmed stdout returns
+/// `null` so caller can collapse it into "no info" without distinguishing
+/// failure shapes.
+fn readSingleLine(
+    gpa: std.mem.Allocator,
+    runner: proc.Runner,
+    cwd: std.Io.Dir,
+    argv: []const []const u8,
+) error{OutOfMemory}!?[]const u8 {
+    var result = runner.run(gpa, .{ .argv = argv, .cwd = cwd }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.ExecutableNotFound, error.SpawnFailed => return null,
+    };
+    defer result.deinit(gpa);
+
+    if (result.exit_code != 0) return null;
+    const trimmed = std.mem.trim(u8, result.stdout, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    return try gpa.dupe(u8, trimmed);
+}
 
 /// Resolve raw discovery output against the Repository Store.
 ///
@@ -183,6 +252,61 @@ pub fn sanitize(gpa: std.mem.Allocator, title: []const u8, max_len: usize) ![]u8
 
 fn isSlugByte(c: u8) bool {
     return (c >= 'a' and c <= 'z') or (c >= '0' and c <= '9');
+}
+
+test "readGitSide: returns trimmed configured value when git config exits 0" {
+    const gpa = std.testing.allocator;
+    var fake = fake_proc.FakeRunner.init(gpa);
+    defer fake.deinit();
+    try fake.expect(&.{ "git", "config", "--worktree", "--get", "tk.scope" }, .{
+        .exit_code = 0,
+        .stdout = "proj-1\n",
+    });
+    try fake.expect(&.{ "git", "symbolic-ref" }, .{ .exit_code = 1 });
+
+    const raw = try readGitSide(gpa, fake.runner(), std.Io.Dir.cwd());
+    defer freeRaw(gpa, raw);
+    try std.testing.expectEqualStrings("proj-1", raw.configured_value.?);
+    try std.testing.expect(raw.branch_name == null);
+}
+
+test "readGitSide: returns trimmed branch name when symbolic-ref exits 0" {
+    const gpa = std.testing.allocator;
+    var fake = fake_proc.FakeRunner.init(gpa);
+    defer fake.deinit();
+    try fake.expect(&.{ "git", "config", "--worktree", "--get", "tk.scope" }, .{ .exit_code = 1 });
+    try fake.expect(&.{ "git", "symbolic-ref" }, .{
+        .exit_code = 0,
+        .stdout = "tk/proj-1-fix-login\n",
+    });
+
+    const raw = try readGitSide(gpa, fake.runner(), std.Io.Dir.cwd());
+    defer freeRaw(gpa, raw);
+    try std.testing.expect(raw.configured_value == null);
+    try std.testing.expectEqualStrings("tk/proj-1-fix-login", raw.branch_name.?);
+}
+
+test "readGitSide: detached HEAD and unset key collapse to all-null Raw" {
+    const gpa = std.testing.allocator;
+    var fake = fake_proc.FakeRunner.init(gpa);
+    defer fake.deinit();
+    try fake.expect(&.{ "git", "config", "--worktree", "--get", "tk.scope" }, .{ .exit_code = 1 });
+    try fake.expect(&.{ "git", "symbolic-ref" }, .{ .exit_code = 128 });
+
+    const raw = try readGitSide(gpa, fake.runner(), std.Io.Dir.cwd());
+    defer freeRaw(gpa, raw);
+    try std.testing.expect(raw.configured_value == null);
+    try std.testing.expect(raw.branch_name == null);
+}
+
+test "readGitSide: git missing collapses to all-null Raw" {
+    const gpa = std.testing.allocator;
+    var injector = fake_proc.ErrorInjectingRunner{ .err = error.ExecutableNotFound };
+
+    const raw = try readGitSide(gpa, injector.runner(), std.Io.Dir.cwd());
+    defer freeRaw(gpa, raw);
+    try std.testing.expect(raw.configured_value == null);
+    try std.testing.expect(raw.branch_name == null);
 }
 
 test "resolveAgainstStore: configured value resolves to its current Display ID" {
