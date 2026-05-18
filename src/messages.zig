@@ -495,3 +495,13 @@ pub const unblock_write_failed = "tk unblock: failed to remove Dependency";
 /// Stdout prefix for successful Dependency removal. Callers append
 /// `"{s} no longer blocked by {s}\n"` for the Blocked and Blocking Display IDs.
 pub const unblock_success_prefix = "Removed Dependency: ";
+
+// `tk worktree` and subcommands.
+
+/// Stdout line printed by `tk worktree clear` on success and on the idempotent
+/// no-op when no `tk.scope` was configured.
+pub const worktree_cleared = "Workspace Scope cleared";
+
+/// Stderr line for non-transient git failures during `tk worktree clear`. The
+/// caller appends `"\n{s}\n"` for the underlying `@errorName`.
+pub const worktree_clear_failed = "tk worktree clear: failed to update git worktree config";

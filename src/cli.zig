@@ -75,14 +75,13 @@ const all_commands = .{
     @import("commands/stop.zig"),
     @import("commands/unblock.zig"),
     @import("commands/update.zig"),
+    @import("commands/worktree.zig"),
 };
 
-const worktree_slice = "Planned: worktree scope slice.";
 const remote_sync_slice = "Planned: remote and sync skeleton slice.";
 const post_sync_slice = "Planned: later slice once Remote and sync are in place.";
 
 const unimplemented_commands = [_]UnimplementedMeta{
-    .{ .name = "worktree", .description = "Inspect or configure the current Workspace Scope", .tracking = worktree_slice },
     .{ .name = "promote", .description = "Promote a Local Ticket or Epic through the configured Remote", .tracking = post_sync_slice },
     .{ .name = "sync", .description = "Pull remote state and apply pending Mutations", .tracking = remote_sync_slice },
     .{ .name = "remote", .description = "Inspect or configure the Remote", .tracking = remote_sync_slice },
@@ -314,14 +313,14 @@ test "runArgv prints help" {
 }
 
 test "runArgv routes a planned subcommand to a not-yet-implemented stub" {
-    var h = Harness.init(std.testing.allocator, &.{"worktree"});
+    var h = Harness.init(std.testing.allocator, &.{"promote"});
     defer h.deinit();
 
     const code = try runArgv(h.deps(), &h.iter);
     try std.testing.expectEqual(@as(u8, 1), code);
     try std.testing.expectEqualStrings("", h.stdout());
     try std.testing.expectEqualStrings(
-        "tk worktree: not yet implemented\n" ++ worktree_slice ++ "\n",
+        "tk promote: not yet implemented\n" ++ post_sync_slice ++ "\n",
         h.stderr(),
     );
 }
