@@ -4,6 +4,7 @@ const std = @import("std");
 const clap = @import("clap");
 const cli = @import("../cli.zig");
 const messages = @import("../messages.zig");
+const repository = @import("../store/repository.zig");
 
 /// Dispatcher metadata for `tk worktree`.
 pub const meta: cli.CommandMeta = .{
@@ -20,8 +21,75 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
     const sub = args_iter.next();
     if (sub) |s| {
         if (std.mem.eql(u8, s, "clear")) return try runClear(deps);
+        if (std.mem.eql(u8, s, "set")) return try runSet(deps, args_iter);
     }
     return 0;
+}
+
+fn runSet(deps: cli.Deps, args_iter: anytype) !u8 {
+    const id = args_iter.next() orelse {
+        deps.stderr.print("{s}\n", .{messages.worktree_set_id_required}) catch {};
+        return 2;
+    };
+
+    const open_outcome = repository.openExisting(deps.gpa, deps.runner, deps.cwd) catch |err| {
+        renderSetStorageError(deps, err);
+        return 1;
+    };
+    const store = switch (open_outcome) {
+        .ok => |store| store,
+        else => {
+            repository.renderOpenFailure(deps.stderr, deps.gpa, "worktree set", messages.worktree_set_missing_store, open_outcome);
+            return 1;
+        },
+    };
+    defer store.close();
+
+    if (try repository.resolveItemRef(store, deps.gpa, id)) |resolved| {
+        defer resolved.deinit(deps.gpa);
+    } else {
+        deps.stderr.print(
+            "{s}{s}{s}\n",
+            .{ messages.worktree_set_id_not_found_prefix, id, messages.worktree_set_id_not_found_suffix },
+        ) catch {};
+        return 1;
+    }
+
+    // Ensure the repo opts into per-worktree config before we write
+    // `tk.scope` against the current worktree. The set is itself
+    // idempotent at git level: writing `true` over an existing `true`
+    // is a no-op rewrite.
+    try runGitOrFail(deps, &.{ "git", "config", "extensions.worktreeConfig", "true" }, messages.worktree_set_failed) orelse return 1;
+    try runGitOrFail(deps, &.{ "git", "config", "--worktree", "tk.scope", id }, messages.worktree_set_failed) orelse return 1;
+
+    try deps.stdout.print("{s}{s}\n", .{ messages.worktree_set_prefix, id });
+    return 0;
+}
+
+/// Run a git subprocess, returning `true` on success and surfacing the failure
+/// diagnostic + exit-1 path through `null` so callers can `orelse return 1`.
+fn runGitOrFail(deps: cli.Deps, argv: []const []const u8, failure_msg: []const u8) !?void {
+    var result = deps.runner.run(deps.gpa, .{ .argv = argv, .cwd = deps.cwd }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.ExecutableNotFound, error.SpawnFailed => {
+            deps.stderr.print("{s}\n{s}\n", .{ failure_msg, @errorName(err) }) catch {};
+            return null;
+        },
+    };
+    defer result.deinit(deps.gpa);
+    if (result.exit_code != 0) {
+        deps.stderr.print("{s}\n", .{failure_msg}) catch {};
+        return null;
+    }
+    return;
+}
+
+fn renderSetStorageError(deps: cli.Deps, err: anyerror) void {
+    repository.renderStorageError(deps.stderr, err, .{
+        .busy_retry = messages.worktree_set_store_busy_retry,
+        .out_of_memory = messages.worktree_set_out_of_memory,
+        .fallback = messages.worktree_set_read_failed,
+    });
 }
 
 fn runClear(deps: cli.Deps) !u8 {
@@ -49,6 +117,39 @@ fn runClear(deps: cli.Deps) !u8 {
 }
 
 const Harness = @import("../testing/test_cli.zig").Harness;
+const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+const init_command = @import("init.zig");
+const zqlite = @import("zqlite");
+
+const StoreFixture = struct {
+    tmp_store: TmpStore,
+    cwd: std.Io.Dir,
+    rev_parse: []u8,
+
+    fn init(gpa: std.mem.Allocator) !StoreFixture {
+        var tmp_store = try TmpStore.init(gpa, "project");
+        errdefer tmp_store.deinit(gpa);
+        var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, tmp_store.toplevel_path, .{});
+        errdefer cwd.close(std.testing.io);
+        const rev_parse = try tmp_store.gitRevParseStdout(gpa);
+        errdefer gpa.free(rev_parse);
+
+        {
+            var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+            defer h.deinit();
+            try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+            try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
+        }
+
+        return .{ .tmp_store = tmp_store, .cwd = cwd, .rev_parse = rev_parse };
+    }
+
+    fn deinit(self: *StoreFixture, gpa: std.mem.Allocator) void {
+        gpa.free(self.rev_parse);
+        self.cwd.close(std.testing.io);
+        self.tmp_store.deinit(gpa);
+    }
+};
 
 test "worktree clear: runs git config --unset and prints success" {
     const gpa = std.testing.allocator;
@@ -69,6 +170,71 @@ test "worktree clear: exit code 5 from git config --unset is the idempotent no-o
 
     try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
     try std.testing.expectEqualStrings("Workspace Scope cleared\n", h.stdout());
+    try std.testing.expectEqualStrings("", h.stderr());
+}
+
+test "worktree set: missing positional id exits 2 with usage" {
+    const gpa = std.testing.allocator;
+    var h = Harness.init(gpa, &.{"set"});
+    defer h.deinit();
+
+    try std.testing.expectEqual(@as(u8, 2), try run(h.deps(), &h.iter));
+    try std.testing.expectEqualStrings("", h.stdout());
+    try std.testing.expectEqualStrings(messages.worktree_set_id_required ++ "\n", h.stderr());
+}
+
+test "worktree set: unknown id exits 1 with role-specific diagnostic" {
+    const gpa = std.testing.allocator;
+    var fixture = try StoreFixture.init(gpa);
+    defer fixture.deinit(gpa);
+
+    var h = Harness.initWith(gpa, &.{ "set", "no-such-id" }, .{ .cwd = fixture.cwd });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
+
+    try std.testing.expectEqual(@as(u8, 1), try run(h.deps(), &h.iter));
+    try std.testing.expectEqualStrings("", h.stdout());
+    try std.testing.expectEqualStrings(
+        messages.worktree_set_id_not_found_prefix ++ "no-such-id" ++ messages.worktree_set_id_not_found_suffix ++ "\n",
+        h.stderr(),
+    );
+}
+
+test "worktree set: git config failure surfaces as exit 1" {
+    const gpa = std.testing.allocator;
+    var fixture = try StoreFixture.init(gpa);
+    defer fixture.deinit(gpa);
+    const conn = try zqlite.open(fixture.tmp_store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try TmpStore.insertFixtureItem(conn, .{ .id = "t1", .display = "project-1", .title = "T", .created_seq = 1 });
+
+    var h = Harness.initWith(gpa, &.{ "set", "project-1" }, .{ .cwd = fixture.cwd });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
+    try h.fake_runner.expect(&.{ "git", "config", "extensions.worktreeConfig", "true" }, .{ .exit_code = 128 });
+
+    try std.testing.expectEqual(@as(u8, 1), try run(h.deps(), &h.iter));
+    try std.testing.expectEqualStrings("", h.stdout());
+    try std.testing.expectEqualStrings(messages.worktree_set_failed ++ "\n", h.stderr());
+}
+
+test "worktree set: validates id, enables per-worktree config, writes tk.scope" {
+    const gpa = std.testing.allocator;
+    var fixture = try StoreFixture.init(gpa);
+    defer fixture.deinit(gpa);
+
+    const conn = try zqlite.open(fixture.tmp_store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try TmpStore.insertFixtureItem(conn, .{ .id = "t1", .display = "project-1", .title = "Implement", .created_seq = 1 });
+
+    var h = Harness.initWith(gpa, &.{ "set", "project-1" }, .{ .cwd = fixture.cwd });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
+    try h.fake_runner.expect(&.{ "git", "config", "extensions.worktreeConfig", "true" }, .{ .exit_code = 0 });
+    try h.fake_runner.expect(&.{ "git", "config", "--worktree", "tk.scope", "project-1" }, .{ .exit_code = 0 });
+
+    try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
+    try std.testing.expectEqualStrings("Set Workspace Scope to project-1\n", h.stdout());
     try std.testing.expectEqualStrings("", h.stderr());
 }
 

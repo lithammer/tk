@@ -505,3 +505,36 @@ pub const worktree_cleared = "Workspace Scope cleared";
 /// Stderr line for non-transient git failures during `tk worktree clear`. The
 /// caller appends `"\n{s}\n"` for the underlying `@errorName`.
 pub const worktree_clear_failed = "tk worktree clear: failed to update git worktree config";
+
+/// Stdout prefix for successful `tk worktree set`. Callers append the
+/// user-supplied Display ID or Alias.
+pub const worktree_set_prefix = "Set Workspace Scope to ";
+
+/// Stderr line when `tk worktree set` is called without an `<id>` positional.
+pub const worktree_set_id_required = "tk worktree set: missing required <id>; usage: tk worktree set <id>";
+
+/// Stderr prefix when the supplied id does not resolve through `item_ids`.
+/// Callers append `"{s}" ++ worktree_set_id_not_found_suffix ++ "\n"` for the
+/// supplied id.
+pub const worktree_set_id_not_found_prefix = "tk worktree set: '";
+
+/// Stderr suffix for the unknown-id diagnostic.
+pub const worktree_set_id_not_found_suffix = "' is not a known Display ID or Alias";
+
+/// Stderr line for non-transient git failures while writing the config. The
+/// caller appends `"\n{s}\n"` for the underlying `@errorName`.
+pub const worktree_set_failed = "tk worktree set: failed to update git worktree config";
+
+/// Stderr line for a missing Repository Store during `tk worktree set`.
+pub const worktree_set_missing_store = "tk worktree set: Repository Store not initialized; run 'tk init'";
+
+/// Stderr line for busy/locked Repository Store during `tk worktree set`.
+pub const worktree_set_store_busy_retry = "tk worktree set: Repository Store is busy; retry the command";
+
+/// Stderr line when allocation fails during a `tk worktree set` read.
+pub const worktree_set_out_of_memory = "tk worktree set: out of memory";
+
+/// Stderr line for non-transient Repository Store read failures during
+/// `tk worktree set`. Caller appends `"\n{s}\n"` for the underlying
+/// `@errorName`.
+pub const worktree_set_read_failed = "tk worktree set: failed to read Repository Store";
