@@ -1,0 +1,19 @@
+-- script --
+tk worktree --help
+-- expected/stdout --
+tk worktree - inspect or configure Workspace Scope
+
+Usage:
+  tk worktree                     Report configured/inferred scope.
+  tk worktree set <id>            Configure Workspace Scope for this worktree.
+  tk worktree clear               Remove configured Workspace Scope.
+  tk worktree start <id> [path]   Create a Ticket Branch and scoped git worktree.
+
+Options for `start`:
+  --no-status   Skip marking the scoped item active.
+
+Options:
+  -h, --help    Display this help and exit.
+-- expected/stderr --
+-- expected/exit --
+0

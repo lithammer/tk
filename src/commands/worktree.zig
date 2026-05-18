@@ -24,11 +24,34 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
     // status report.
     const sub = args_iter.next();
     if (sub) |s| {
+        if (std.mem.eql(u8, s, "-h") or std.mem.eql(u8, s, "--help")) {
+            writeHelp(deps) catch {};
+            return 0;
+        }
         if (std.mem.eql(u8, s, "clear")) return try runClear(deps);
         if (std.mem.eql(u8, s, "set")) return try runSet(deps, args_iter);
         if (std.mem.eql(u8, s, "start")) return try runStart(deps, args_iter);
     }
     return try runStatus(deps);
+}
+
+fn writeHelp(deps: cli.Deps) !void {
+    try deps.stdout.writeAll(
+        \\tk worktree - inspect or configure Workspace Scope
+        \\
+        \\Usage:
+        \\  tk worktree                     Report configured/inferred scope.
+        \\  tk worktree set <id>            Configure Workspace Scope for this worktree.
+        \\  tk worktree clear               Remove configured Workspace Scope.
+        \\  tk worktree start <id> [path]   Create a Ticket Branch and scoped git worktree.
+        \\
+        \\Options for `start`:
+        \\  --no-status   Skip marking the scoped item active.
+        \\
+        \\Options:
+        \\  -h, --help    Display this help and exit.
+        \\
+    );
 }
 
 fn runStatus(deps: cli.Deps) !u8 {

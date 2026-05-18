@@ -9,6 +9,7 @@ const next_help_path = "src/testing/scenarios/next/help.txtar";
 const show_help_path = "src/testing/scenarios/show/help.txtar";
 const unblock_help_path = "src/testing/scenarios/unblock/help.txtar";
 const update_help_path = "src/testing/scenarios/update/help.txtar";
+const worktree_help_path = "src/testing/scenarios/worktree/help.txtar";
 const harness_preserve_path = "src/testing/scenarios/_harness/preserve_sections.txtar";
 
 const prime_basic = @embedFile("scenarios/prime/basic.txtar");
@@ -19,6 +20,7 @@ const next_help = @embedFile("scenarios/next/help.txtar");
 const show_help = @embedFile("scenarios/show/help.txtar");
 const unblock_help = @embedFile("scenarios/unblock/help.txtar");
 const update_help = @embedFile("scenarios/update/help.txtar");
+const worktree_help = @embedFile("scenarios/worktree/help.txtar");
 const harness_preserve = @embedFile("scenarios/_harness/preserve_sections.txtar");
 
 test "prime/basic" {
@@ -51,6 +53,10 @@ test "unblock/help" {
 
 test "update/help" {
     try script.runScenario(std.testing.allocator, update_help_path, update_help);
+}
+
+test "worktree/help" {
+    try script.runScenario(std.testing.allocator, worktree_help_path, worktree_help);
 }
 
 test "_harness/preserve_sections" {
