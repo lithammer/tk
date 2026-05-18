@@ -35,6 +35,9 @@ The goal is similar in spirit to Beads: make work visible to humans and agents f
 - [0003: Use a current-state store with a mutation outbox](./docs/adr/0003-use-current-state-store-with-mutation-outbox.md)
 - [0004: Use Zig 0.16 for the first implementation](./docs/adr/0004-use-zig-0-16-for-the-first-implementation.md)
 - [0005: Use SQLite for the repository store](./docs/adr/0005-use-sqlite-for-the-repository-store.md)
+- [0006: Done is terminal in v1](./docs/adr/0006-done-is-terminal-in-v1.md)
+- [0007: Default worktree path layout](./docs/adr/0007-default-worktree-path-layout.md)
+- [0008: Keep the implementation document compact](./docs/adr/0008-keep-implementation-doc-compact.md)
 
 ## Domain Language
 
