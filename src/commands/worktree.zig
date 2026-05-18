@@ -5,6 +5,7 @@ const clap = @import("clap");
 const cli = @import("../cli.zig");
 const messages = @import("../messages.zig");
 const repository = @import("../store/repository.zig");
+const worktree_scope = @import("../worktree/scope.zig");
 
 /// Dispatcher metadata for `tk worktree`.
 pub const meta: cli.CommandMeta = .{
@@ -23,7 +24,67 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
         if (std.mem.eql(u8, s, "clear")) return try runClear(deps);
         if (std.mem.eql(u8, s, "set")) return try runSet(deps, args_iter);
     }
-    return 0;
+    return try runStatus(deps);
+}
+
+fn runStatus(deps: cli.Deps) !u8 {
+    const open_outcome = repository.openExisting(deps.gpa, deps.runner, deps.cwd) catch |err| {
+        renderStatusStorageError(deps, err);
+        return 1;
+    };
+    const store = switch (open_outcome) {
+        .ok => |store| store,
+        else => {
+            repository.renderOpenFailure(deps.stderr, deps.gpa, "worktree", messages.worktree_status_missing_store, open_outcome);
+            return 1;
+        },
+    };
+    defer store.close();
+
+    const raw = worktree_scope.readGitSide(deps.gpa, deps.runner, deps.cwd) catch |err| {
+        renderStatusStorageError(deps, err);
+        return 1;
+    };
+    defer worktree_scope.freeRaw(deps.gpa, raw);
+
+    const scope_outcome = worktree_scope.resolveAgainstStore(store, deps.gpa, raw) catch |err| {
+        renderStatusStorageError(deps, err);
+        return 1;
+    };
+    switch (scope_outcome) {
+        .none => {
+            try deps.stdout.print("{s}\n", .{messages.worktree_no_scope});
+            return 0;
+        },
+        .scope => |s| {
+            defer s.deinit(deps.gpa);
+            try deps.stdout.print("Scope:  {s} - {s}\n", .{ s.display_id, s.title });
+            switch (s.source) {
+                .configured => try deps.stdout.writeAll("Source: configured\n"),
+                .inferred => try deps.stdout.print(
+                    "Source: inferred from branch '{s}'\n",
+                    .{raw.branch_name.?},
+                ),
+            }
+            return 0;
+        },
+        .configured_unresolved => |stored| {
+            defer deps.gpa.free(stored);
+            deps.stderr.print(
+                "{s}{s}{s}\n",
+                .{ messages.worktree_status_unresolved_prefix, stored, messages.worktree_status_unresolved_suffix },
+            ) catch {};
+            return 1;
+        },
+    }
+}
+
+fn renderStatusStorageError(deps: cli.Deps, err: anyerror) void {
+    repository.renderStorageError(deps.stderr, err, .{
+        .busy_retry = messages.worktree_status_store_busy_retry,
+        .out_of_memory = messages.worktree_status_out_of_memory,
+        .fallback = messages.worktree_status_read_failed,
+    });
 }
 
 fn runSet(deps: cli.Deps, args_iter: anytype) !u8 {
@@ -150,6 +211,87 @@ const StoreFixture = struct {
         self.tmp_store.deinit(gpa);
     }
 };
+
+test "worktree: with configured scope prints two-line block" {
+    const gpa = std.testing.allocator;
+    var fixture = try StoreFixture.init(gpa);
+    defer fixture.deinit(gpa);
+    const conn = try zqlite.open(fixture.tmp_store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try TmpStore.insertFixtureItem(conn, .{ .id = "t1", .display = "project-1", .title = "Implement scope", .created_seq = 1 });
+
+    var h = Harness.initWith(gpa, &.{}, .{ .cwd = fixture.cwd });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
+    try h.fake_runner.expect(&.{ "git", "config", "--worktree", "--get", "tk.scope" }, .{ .exit_code = 0, .stdout = "project-1\n" });
+    try h.fake_runner.expect(&.{ "git", "symbolic-ref" }, .{ .exit_code = 1 });
+
+    try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
+    try std.testing.expectEqualStrings(
+        \\Scope:  project-1 - Implement scope
+        \\Source: configured
+        \\
+    , h.stdout());
+    try std.testing.expectEqualStrings("", h.stderr());
+}
+
+test "worktree: with inferred branch scope prints provenance hint" {
+    const gpa = std.testing.allocator;
+    var fixture = try StoreFixture.init(gpa);
+    defer fixture.deinit(gpa);
+    const conn = try zqlite.open(fixture.tmp_store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try TmpStore.insertFixtureItem(conn, .{ .id = "t1", .display = "project-1", .title = "Implement scope", .created_seq = 1 });
+
+    var h = Harness.initWith(gpa, &.{}, .{ .cwd = fixture.cwd });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
+    try h.fake_runner.expect(&.{ "git", "config", "--worktree", "--get", "tk.scope" }, .{ .exit_code = 1 });
+    try h.fake_runner.expect(&.{ "git", "symbolic-ref" }, .{ .exit_code = 0, .stdout = "tk/project-1-implement-scope\n" });
+
+    try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
+    try std.testing.expectEqualStrings(
+        \\Scope:  project-1 - Implement scope
+        \\Source: inferred from branch 'tk/project-1-implement-scope'
+        \\
+    , h.stdout());
+    try std.testing.expectEqualStrings("", h.stderr());
+}
+
+test "worktree: with unresolved configured scope exits 1 with diagnostic" {
+    const gpa = std.testing.allocator;
+    var fixture = try StoreFixture.init(gpa);
+    defer fixture.deinit(gpa);
+
+    var h = Harness.initWith(gpa, &.{}, .{ .cwd = fixture.cwd });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
+    try h.fake_runner.expect(&.{ "git", "config", "--worktree", "--get", "tk.scope" }, .{ .exit_code = 0, .stdout = "ghost-42\n" });
+    try h.fake_runner.expect(&.{ "git", "symbolic-ref" }, .{ .exit_code = 1 });
+
+    try std.testing.expectEqual(@as(u8, 1), try run(h.deps(), &h.iter));
+    try std.testing.expectEqualStrings("", h.stdout());
+    try std.testing.expectEqualStrings(
+        messages.worktree_status_unresolved_prefix ++ "ghost-42" ++ messages.worktree_status_unresolved_suffix ++ "\n",
+        h.stderr(),
+    );
+}
+
+test "worktree: with no scope prints No Workspace Scope and exits 0" {
+    const gpa = std.testing.allocator;
+    var fixture = try StoreFixture.init(gpa);
+    defer fixture.deinit(gpa);
+
+    var h = Harness.initWith(gpa, &.{}, .{ .cwd = fixture.cwd });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
+    try h.fake_runner.expect(&.{ "git", "config", "--worktree", "--get", "tk.scope" }, .{ .exit_code = 1 });
+    try h.fake_runner.expect(&.{ "git", "symbolic-ref" }, .{ .exit_code = 1 });
+
+    try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
+    try std.testing.expectEqualStrings("No Workspace Scope.\n", h.stdout());
+    try std.testing.expectEqualStrings("", h.stderr());
+}
 
 test "worktree clear: runs git config --unset and prints success" {
     const gpa = std.testing.allocator;

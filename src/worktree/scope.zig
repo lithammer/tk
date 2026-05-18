@@ -21,11 +21,13 @@ const fake_proc = @import("../proc/fake.zig");
 pub const Scope = struct {
     source: enum { configured, inferred },
     display_id: []u8,
+    title: []u8,
 
-    /// Free the resolved Display ID. Held by the caller in the switch arm
-    /// that receives a `.scope` outcome.
+    /// Free the resolved Display ID and title. Held by the caller in the
+    /// switch arm that receives a `.scope` outcome.
     pub fn deinit(self: Scope, gpa: std.mem.Allocator) void {
         gpa.free(self.display_id);
+        gpa.free(self.title);
     }
 };
 
@@ -138,8 +140,7 @@ pub fn resolveAgainstStore(
     if (raw.configured_value) |stored| {
         if (try repository.resolveItemRef(store, gpa, stored)) |resolved| {
             defer resolved.deinit(gpa);
-            const current = try currentDisplayValue(store, gpa, resolved.id);
-            return .{ .scope = .{ .source = .configured, .display_id = current } };
+            return .{ .scope = try loadScope(store, gpa, resolved.id, .configured) };
         }
         return .{ .configured_unresolved = try gpa.dupe(u8, stored) };
     }
@@ -148,12 +149,35 @@ pub fn resolveAgainstStore(
             const tail = branch[ticket_branch_prefix.len..];
             if (try longestPrefixMatch(store, gpa, tail)) |item_id| {
                 defer gpa.free(item_id);
-                const current = try currentDisplayValue(store, gpa, item_id);
-                return .{ .scope = .{ .source = .inferred, .display_id = current } };
+                return .{ .scope = try loadScope(store, gpa, item_id, .inferred) };
             }
         }
     }
     return .none;
+}
+
+fn loadScope(
+    store: repository.Store,
+    gpa: std.mem.Allocator,
+    item_id: []const u8,
+    source: @FieldType(Scope, "source"),
+) ResolveError!Scope {
+    const display_id = try currentDisplayValue(store, gpa, item_id);
+    errdefer gpa.free(display_id);
+    const title = try currentTitle(store, gpa, item_id);
+    return .{ .source = source, .display_id = display_id, .title = title };
+}
+
+fn currentTitle(
+    store: repository.Store,
+    gpa: std.mem.Allocator,
+    item_id: []const u8,
+) ResolveError![]u8 {
+    if (try store.conn.row("select title from items where id = ?1", .{item_id})) |r| {
+        defer r.deinit();
+        return try gpa.dupe(u8, r.text(0));
+    }
+    unreachable;
 }
 
 const ticket_branch_prefix = "tk/";

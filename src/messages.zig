@@ -538,3 +538,28 @@ pub const worktree_set_out_of_memory = "tk worktree set: out of memory";
 /// `tk worktree set`. Caller appends `"\n{s}\n"` for the underlying
 /// `@errorName`.
 pub const worktree_set_read_failed = "tk worktree set: failed to read Repository Store";
+
+/// Stdout line printed by `tk worktree` (no subcommand) when no Workspace
+/// Scope is configured or inferred.
+pub const worktree_no_scope = "No Workspace Scope.";
+
+/// Stderr prefix for a stored `tk.scope` value that no longer resolves. The
+/// caller appends `"{s}" ++ worktree_status_unresolved_suffix ++ "\n"` for the
+/// stored value.
+pub const worktree_status_unresolved_prefix = "tk worktree: Workspace Scope '";
+
+/// Stderr suffix for the unresolved-stored-value diagnostic.
+pub const worktree_status_unresolved_suffix = "' is not a known Display ID or Alias";
+
+/// Stderr line for a missing Repository Store during `tk worktree` status.
+pub const worktree_status_missing_store = "tk worktree: Repository Store not initialized; run 'tk init'";
+
+/// Stderr line for busy/locked Repository Store during `tk worktree` status.
+pub const worktree_status_store_busy_retry = "tk worktree: Repository Store is busy; retry the command";
+
+/// Stderr line when allocation fails during a `tk worktree` status read.
+pub const worktree_status_out_of_memory = "tk worktree: out of memory";
+
+/// Stderr line for non-transient Repository Store read failures during
+/// `tk worktree` status.
+pub const worktree_status_read_failed = "tk worktree: failed to read Repository Store";
