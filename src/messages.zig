@@ -563,3 +563,35 @@ pub const worktree_status_out_of_memory = "tk worktree: out of memory";
 /// Stderr line for non-transient Repository Store read failures during
 /// `tk worktree` status.
 pub const worktree_status_read_failed = "tk worktree: failed to read Repository Store";
+
+/// Stderr line when `tk worktree start` is called without an `<id>` positional.
+pub const worktree_start_id_required = "tk worktree start: missing required <id>; usage: tk worktree start <id> [path] [--no-status]";
+
+/// Stderr prefix when the supplied id does not resolve.
+pub const worktree_start_id_not_found_prefix = "tk worktree start: '";
+
+/// Stderr suffix shared with `worktree set` for unknown-id diagnostics.
+pub const worktree_start_id_not_found_suffix = "' is not a known Display ID or Alias";
+
+/// Stderr prefix for an attempt to start a `done` Ticket. Caller appends
+/// `"Ticket\n"` or `"Epic\n"` based on the resolved item class.
+pub const worktree_start_locked_done_prefix = "tk worktree start: cannot start a done ";
+
+/// Stderr line for non-transient git failures during `tk worktree start`.
+pub const worktree_start_git_failed = "tk worktree start: failed to create worktree";
+
+/// Stdout prefix for the success header. Caller appends
+/// `"<Ticket|Epic>: <display-id> - <title>\n"`.
+pub const worktree_start_success_prefix = "Created worktree for ";
+
+/// Stderr line for a missing Repository Store during `tk worktree start`.
+pub const worktree_start_missing_store = "tk worktree start: Repository Store not initialized; run 'tk init'";
+
+/// Stderr line for busy/locked Repository Store during `tk worktree start`.
+pub const worktree_start_store_busy_retry = "tk worktree start: Repository Store is busy; retry the command";
+
+/// Stderr line when allocation fails during a `tk worktree start` write.
+pub const worktree_start_out_of_memory = "tk worktree start: out of memory";
+
+/// Stderr line for non-transient Repository Store write failures.
+pub const worktree_start_write_failed = "tk worktree start: failed to update Repository Store";

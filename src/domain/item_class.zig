@@ -12,4 +12,13 @@ pub const ItemClass = enum {
             .epic => "epic",
         };
     }
+
+    /// Capitalized noun for user-facing diagnostics, e.g.
+    /// `Created worktree for Ticket: …` or `cannot start a done Epic`.
+    pub fn label(self: ItemClass) []const u8 {
+        return switch (self) {
+            .ticket => "Ticket",
+            .epic => "Epic",
+        };
+    }
 };
