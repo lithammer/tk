@@ -187,6 +187,22 @@ fn runSync(deps: cli.Deps, args_iter: anytype) !u8 {
     const store = repository.openStoreCatching(deps.gpa, deps.runner, deps.cwd, deps.stderr, sync_open_msgs) orelse return 1;
     defer store.close();
 
+    var now_buf: [24]u8 = undefined;
+    const now = deps.clock.nowIso(&now_buf);
+
+    // Commit the skip BEFORE opening the adapter so a broken Remote (e.g.
+    // factory returning NotImplemented in this slice) cannot block the
+    // operator from abandoning a failed Mutation. ticket-17's resolved
+    // design calls this out: markMutationSkipped commits independently of
+    // any surrounding sync run.
+    if (skip_id) |seq| {
+        var skip_diag: Diagnostic = .{};
+        store_sync.markMutationSkipped(store.conn, seq, now, &skip_diag) catch |err| {
+            renderSyncError(deps.stderr, err, &skip_diag, skip_id);
+            return 1;
+        };
+    }
+
     const adapter_opt = factory.openConfigured(store.conn, deps.gpa) catch |err| switch (err) {
         error.NotImplemented => {
             deps.stderr.print("{s}\n", .{messages.sync_adapter_not_implemented}) catch {};
@@ -202,16 +218,13 @@ fn runSync(deps: cli.Deps, args_iter: anytype) !u8 {
         return 1;
     };
 
-    var now_buf: [24]u8 = undefined;
-    const now = deps.clock.nowIso(&now_buf);
-
     var diag: Diagnostic = .{};
     const report = sync_engine.runSync(
         store.conn,
         deps.gpa,
         adapter,
         now,
-        .{ .skip_mutation_id = skip_id, .random = deps.random },
+        .{ .random = deps.random },
         &diag,
     ) catch |err| {
         renderSyncError(deps.stderr, err, &diag, skip_id);
@@ -222,7 +235,7 @@ fn runSync(deps: cli.Deps, args_iter: anytype) !u8 {
         "{s}{d} pulled, {d} applied",
         .{ messages.sync_summary_prefix, report.pulled_count, report.applied_count },
     );
-    if (report.skipped_sequence) |seq| try deps.stdout.print(", skipped {d}", .{seq});
+    if (skip_id) |seq| try deps.stdout.print(", skipped {d}", .{seq});
     if (report.stopped_at_sequence) |seq| try deps.stdout.print(", stopped at {d}", .{seq});
     try deps.stdout.writeAll(".\n");
     return 0;
@@ -495,4 +508,110 @@ test "tk sync log <id>: missing sequence returns 1 with diagnostic" {
 
     try std.testing.expectEqual(@as(u8, 1), try run(h.deps(), &h.iter));
     try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "Mutation 999 not found") != null);
+}
+
+test "tk sync --skip <id>: invalid value returns 2 with diagnostic" {
+    const gpa = std.testing.allocator;
+    var fixture = try StoreFixture.init(gpa);
+    defer fixture.deinit(gpa);
+
+    var h = Harness.initWith(gpa, &.{ "--skip", "abc" }, .{ .cwd = fixture.cwd });
+    defer h.deinit();
+
+    try std.testing.expectEqual(@as(u8, 2), try run(h.deps(), &h.iter));
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), messages.sync_skip_not_integer) != null);
+}
+
+test "tk sync --skip <id>: non-failed mutation renders MutationNotFailed prose" {
+    const gpa = std.testing.allocator;
+    var fixture = try StoreFixture.init(gpa);
+    defer fixture.deinit(gpa);
+
+    // Configure a Remote (otherwise sync exits before reaching the engine).
+    {
+        var h_setup = Harness.initWith(gpa, &.{}, .{ .cwd = fixture.cwd });
+        defer h_setup.deinit();
+    }
+    {
+        const conn = try zqlite.open(fixture.tmp_store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+        defer conn.close();
+        try TmpStore.insertFixtureItem(conn, .{
+            .id = "t1",
+            .display = "gh-1",
+            .title = "T",
+            .origin = "backend",
+            .backend_kind = "github",
+            .backend_key = "1",
+            .created_seq = 1,
+        });
+        try TmpStore.insertFixtureRemote(conn, .{
+            .backend_kind = "github",
+            .config_json = "{\"repo\":\"o/r\"}",
+        });
+        // Seed a PENDING (not failed) mutation; --skip should refuse.
+        try TmpStore.insertFixtureMutation(conn, .{
+            .sequence = 5,
+            .mutation_type = "update_ticket",
+            .item_id = "t1",
+            .payload_json = "{\"title\":\"A\",\"body\":\"\"}",
+            .state = "pending",
+        });
+    }
+
+    var h = Harness.initWith(gpa, &.{ "--skip", "5" }, .{ .cwd = fixture.cwd });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
+
+    try std.testing.expectEqual(@as(u8, 1), try run(h.deps(), &h.iter));
+    // The renderSyncError MutationNotFailed branch produces a human sentence
+    // including the target sequence, not the bare error tag.
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "Mutation 5") != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "not in the failed state") != null);
+}
+
+test "tk sync --skip <id>: failed mutation is transitioned to skipped" {
+    const gpa = std.testing.allocator;
+    var fixture = try StoreFixture.init(gpa);
+    defer fixture.deinit(gpa);
+
+    {
+        const conn = try zqlite.open(fixture.tmp_store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+        defer conn.close();
+        try TmpStore.insertFixtureItem(conn, .{
+            .id = "t1",
+            .display = "gh-1",
+            .title = "T",
+            .origin = "backend",
+            .backend_kind = "github",
+            .backend_key = "1",
+            .created_seq = 1,
+        });
+        try TmpStore.insertFixtureRemote(conn, .{
+            .backend_kind = "github",
+            .config_json = "{\"repo\":\"o/r\"}",
+        });
+        try TmpStore.insertFixtureMutation(conn, .{
+            .sequence = 5,
+            .mutation_type = "update_ticket",
+            .item_id = "t1",
+            .payload_json = "{\"title\":\"A\",\"body\":\"\"}",
+            .state = "failed",
+            .failure_json = "{\"detail\":\"prior\"}",
+        });
+    }
+
+    var h = Harness.initWith(gpa, &.{ "--skip", "5" }, .{ .cwd = fixture.cwd });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
+
+    // The factory returns error.NotImplemented for the github kind in this
+    // slice, so the run returns 1 — but the --skip step commits before Pull
+    // is attempted, so the row should still transition.
+    _ = try run(h.deps(), &h.iter);
+
+    const conn = try zqlite.open(fixture.tmp_store.db_path.ptr, zqlite.OpenFlags.ReadOnly | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    const row = (try conn.row("select state from mutations where sequence = 5", .{})) orelse return error.ExpectedRow;
+    defer row.deinit();
+    try std.testing.expectEqualStrings("skipped", row.text(0));
 }

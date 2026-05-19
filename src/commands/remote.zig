@@ -443,3 +443,27 @@ test "tk remote clear: refuses when pending or failed mutations exist" {
     try std.testing.expectEqual(@as(u8, 1), try run(h.deps(), &h.iter));
     try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "pending or failed") != null);
 }
+
+test "tk remote set jira: round-trips to status" {
+    const gpa = std.testing.allocator;
+    var fixture = try StoreFixture.init(gpa, "project");
+    defer fixture.deinit(gpa);
+
+    {
+        var h = Harness.initWith(gpa, &.{ "set", "jira", "--site", "https://example.atlassian.net", "--project", "PROJ" }, .{ .cwd = fixture.cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
+        try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "jira") != null);
+        try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "PROJ") != null);
+    }
+
+    {
+        var h = Harness.initWith(gpa, &.{}, .{ .cwd = fixture.cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
+        try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "jira") != null);
+        try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "example.atlassian.net") != null);
+    }
+}

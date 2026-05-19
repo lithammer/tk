@@ -13,10 +13,10 @@
 //!    one to `adapter.applyMutation`, then persists the outcome via
 //!    `store_sync.applyMutationOutcome` in a per-mutation transaction.
 //!    On the first `.failure` Outcome the loop stops.
-//! 3. Optional pre-sync skip. `opts.skip_mutation_id` first transitions
-//!    one failed Mutation to skipped via `store_sync.markMutationSkipped`
-//!    in its own transaction. The skip commits even if Pull or Apply
-//!    subsequently aborts.
+//! `tk sync --skip <id>` does NOT pass through the engine — the command
+//! commits the skip directly via `store_sync.markMutationSkipped` BEFORE
+//! invoking the engine so the skip persists even if the Remote's adapter
+//! is unavailable.
 //!
 //! The engine is backend-blind: it never imports `src/remote/github.zig` or
 //! peers. The Adapter trait is the only seam.
@@ -38,11 +38,6 @@ const Outcome = outcome_mod.Outcome;
 
 /// Caller-supplied options for `runSync`.
 pub const RunSyncOptions = struct {
-    /// When non-null, the engine first marks the named Mutation skipped
-    /// (must currently be in `failed` state) before invoking Pull / Apply.
-    /// The skip commits in its own transaction so it persists even if the
-    /// sync run subsequently aborts.
-    skip_mutation_id: ?i64 = null,
     /// Source of randomness for newly-discovered Backend items' internal
     /// `items.id` values. Production callers pass `std.crypto.random` (or
     /// a `std.Random.DefaultPrng.init(seed)` for tests).
@@ -61,9 +56,6 @@ pub const SyncReport = struct {
     /// row now records the detail; the caller should render the sequence
     /// to the user.
     stopped_at_sequence: ?i64,
-    /// When the pre-loop skip succeeded, the sequence that was transitioned.
-    /// Non-null even if Pull or Apply subsequently aborted.
-    skipped_sequence: ?i64,
 };
 
 /// Error set returned by `runSync`.
@@ -98,16 +90,9 @@ pub fn runSync(
         .pulled_count = 0,
         .applied_count = 0,
         .stopped_at_sequence = null,
-        .skipped_sequence = null,
     };
 
-    // Step 1: pre-sync skip (own transaction).
-    if (opts.skip_mutation_id) |seq| {
-        try store_sync.markMutationSkipped(conn, seq, now, diag);
-        report.skipped_sequence = seq;
-    }
-
-    // Step 2: Pull and merge.
+    // Pull and merge.
     const snapshots = try adapter.pullBackendItems(gpa, diag);
     defer {
         for (snapshots) |snap| snap.deinit(gpa);
@@ -120,7 +105,7 @@ pub fn runSync(
         try store_sync.mergeBackendSnapshots(conn, gpa, opts.random, snapshots, now, diag);
     }
 
-    // Step 3: Apply loop.
+    // Apply loop.
     const views = try store_sync.loadApplicableMutations(conn, gpa);
     defer {
         for (views) |v| store_sync.deinitMutationView(v, gpa);
@@ -190,7 +175,6 @@ test "runSync: empty queue and empty Pull is a no-op" {
     try std.testing.expectEqual(@as(usize, 0), report.pulled_count);
     try std.testing.expectEqual(@as(usize, 0), report.applied_count);
     try std.testing.expectEqual(@as(?i64, null), report.stopped_at_sequence);
-    try std.testing.expectEqual(@as(?i64, null), report.skipped_sequence);
 }
 
 test "runSync: Pull inserts a discovered Backend item" {
@@ -453,106 +437,6 @@ test "runSync: Pull recorded_failure propagates with Diagnostic; Apply not invok
     try std.testing.expectEqualStrings("pending", r1.text(0));
 }
 
-test "runSync: --skip transitions failed mutation before Pull" {
-    const gpa = std.testing.allocator;
-    var prng = std.Random.DefaultPrng.init(0);
-
-    const conn = try openMemDb();
-    defer conn.close();
-
-    try TmpStore.insertFixtureItem(conn, .{
-        .id = "t1",
-        .display = "gh-1",
-        .title = "T1",
-        .origin = "backend",
-        .backend_kind = "github",
-        .backend_key = "1",
-        .created_seq = 1,
-    });
-    try TmpStore.insertFixtureRemote(conn, .{
-        .backend_kind = "github",
-        .config_json = "{\"owner\":\"o\",\"repo\":\"r\"}",
-    });
-    try TmpStore.insertFixtureMutation(conn, .{
-        .sequence = 7,
-        .mutation_type = "update_ticket",
-        .item_id = "t1",
-        .payload_json = "{\"title\":\"A\",\"body\":\"\"}",
-        .state = "failed",
-        .failure_json = "{\"detail\":\"old\"}",
-    });
-
-    const empty: []const BackendItemSnapshot = &.{};
-    const pull_script = [_]PullResponse{.{ .snapshots = empty }};
-    const apply_script = [_]ApplyResponse{};
-    var fake = FakeAdapter.init(gpa, &pull_script, &apply_script);
-    defer fake.deinit();
-
-    const report = try runSync(
-        conn,
-        gpa,
-        fake.adapter(),
-        "2026-05-19T00:00:00Z",
-        .{ .skip_mutation_id = 7, .random = prng.random() },
-        null,
-    );
-    try std.testing.expectEqual(@as(?i64, 7), report.skipped_sequence);
-
-    const r = (try conn.row("select state from mutations where sequence = 7", .{})) orelse return error.ExpectedRow;
-    defer r.deinit();
-    try std.testing.expectEqualStrings("skipped", r.text(0));
-}
-
-test "runSync: --skip on non-failed mutation returns MutationNotFailed and aborts" {
-    const gpa = std.testing.allocator;
-    var prng = std.Random.DefaultPrng.init(0);
-
-    const conn = try openMemDb();
-    defer conn.close();
-
-    try TmpStore.insertFixtureItem(conn, .{
-        .id = "t1",
-        .display = "gh-1",
-        .title = "T1",
-        .origin = "backend",
-        .backend_kind = "github",
-        .backend_key = "1",
-        .created_seq = 1,
-    });
-    try TmpStore.insertFixtureMutation(conn, .{
-        .sequence = 7,
-        .mutation_type = "update_ticket",
-        .item_id = "t1",
-        .payload_json = "{\"title\":\"A\",\"body\":\"\"}",
-        .state = "pending",
-    });
-
-    const empty: []const BackendItemSnapshot = &.{};
-    const pull_script = [_]PullResponse{.{ .snapshots = empty }};
-    const apply_script = [_]ApplyResponse{};
-    var fake = FakeAdapter.init(gpa, &pull_script, &apply_script);
-    defer fake.deinit();
-
-    try std.testing.expectError(
-        error.MutationNotFailed,
-        runSync(
-            conn,
-            gpa,
-            fake.adapter(),
-            "2026-05-19T00:00:00Z",
-            .{ .skip_mutation_id = 7, .random = prng.random() },
-            null,
-        ),
-    );
-
-    // No Pull was invoked because skip aborted before reaching Pull.
-    try std.testing.expectEqual(@as(usize, 0), fake.pull_index);
-
-    // Row still pending.
-    const r = (try conn.row("select state from mutations where sequence = 7", .{})) orelse return error.ExpectedRow;
-    defer r.deinit();
-    try std.testing.expectEqualStrings("pending", r.text(0));
-}
 
 test "runSync: failed mutation retried successfully transitions to applied" {
     const gpa = std.testing.allocator;
@@ -650,4 +534,80 @@ test "runSync: Pull snapshot for item with pending mutation is skipped" {
     const r = (try conn.row("select title from items where id = 't1'", .{})) orelse return error.ExpectedRow;
     defer r.deinit();
     try std.testing.expectEqualStrings("Local Edit", r.text(0));
+}
+
+test "runSync: multiple successive Apply successes all transition and advance the cursor" {
+    const gpa = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0);
+
+    const conn = try openMemDb();
+    defer conn.close();
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "t1",
+        .display = "gh-1",
+        .title = "T1",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "1",
+        .created_seq = 1,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "t2",
+        .display = "gh-2",
+        .title = "T2",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "2",
+        .created_seq = 2,
+    });
+    try TmpStore.insertFixtureRemote(conn, .{
+        .backend_kind = "github",
+        .config_json = "{\"owner\":\"o\",\"repo\":\"r\"}",
+    });
+    try TmpStore.insertFixtureMutation(conn, .{
+        .sequence = 1,
+        .mutation_type = "update_ticket",
+        .item_id = "t1",
+        .payload_json = "{\"title\":\"A\",\"body\":\"\"}",
+        .state = "pending",
+    });
+    try TmpStore.insertFixtureMutation(conn, .{
+        .sequence = 2,
+        .mutation_type = "update_ticket",
+        .item_id = "t2",
+        .payload_json = "{\"title\":\"B\",\"body\":\"\"}",
+        .state = "pending",
+    });
+
+    const empty: []const BackendItemSnapshot = &.{};
+    const pull_script = [_]PullResponse{.{ .snapshots = empty }};
+    const apply_script = [_]ApplyResponse{ .success, .success };
+    var fake = FakeAdapter.init(gpa, &pull_script, &apply_script);
+    defer fake.deinit();
+
+    const report = try runSync(conn, gpa, fake.adapter(), "2026-05-19T00:00:00Z", .{ .random = prng.random() }, null);
+    try std.testing.expectEqual(@as(usize, 2), report.applied_count);
+    try std.testing.expectEqual(@as(?i64, null), report.stopped_at_sequence);
+
+    // Both rows now 'applied'.
+    var rows = try conn.rows("select sequence, state from mutations order by sequence asc", .{});
+    defer rows.deinit();
+    var seen: usize = 0;
+    while (rows.next()) |r| : (seen += 1) {
+        try std.testing.expectEqualStrings("applied", r.text(1));
+    }
+    try std.testing.expectEqual(@as(usize, 2), seen);
+
+    // Cursor advanced to the last applied sequence.
+    const cursor_row = (try conn.row(
+        "select last_applied_sequence from sync_cursors where remote_name = 'primary'",
+        .{},
+    )) orelse return error.ExpectedRow;
+    defer cursor_row.deinit();
+    try std.testing.expectEqual(@as(i64, 2), cursor_row.int(0));
+
+    // Both apply script entries were consumed.
+    try std.testing.expectEqual(@as(usize, 2), fake.apply_index);
+    try std.testing.expectEqual(@as(usize, 2), fake.captured_applies.items.len);
 }
