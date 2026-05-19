@@ -166,6 +166,39 @@ owns ordering, Sync Cursors, retries, failures, skips, and conflict policy.
 Adapters call external CLIs such as `gh` and `acli` through the injectable
 subprocess runner.
 
+The module split is one-way: `src/sync/` (engine, log views) imports
+`src/remote/` (adapter trait, factory, fake) and `src/store/`; `src/remote/`
+imports `src/store/` and `src/proc/` but never `src/sync/`. Adapters and the
+engine reach the database through `src/store/repository.zig` helpers rather
+than touching SQL directly. The adapter trait is type-erased (`context:
+*anyopaque` + `vtable`), mirroring `proc.Runner`; the engine decodes
+`mutations.payload_json` into a typed `MutationView` so adapters switch on the
+variant rather than parsing JSON.
+
+Sync failures are split into three categories per [ADR
+0009](./adr/0009-sync-failure-taxonomy.md), distinguished by what the engine
+does with them rather than by speculative classification of subprocess output:
+
+- **Catastrophic env failures** (`ExecutableNotFound`, `SpawnFailed`,
+  `OutOfMemory`) are bare error tags; engine renders to stderr and exits 1
+  with no state change.
+- **Pull failed mid-sync** (`PullError.PullFailed` + `?*Diagnostic` carrying
+  captured stderr) is rendered and stops the sync run; no mutation transitions
+  because Pull is not tied to a specific Mutation row.
+- **Apply failed for a specific Mutation** (`Outcome.failure { detail }`) is
+  persisted to `mutations.failure_json` and stops the sync run. `Failure`'s
+  `detail` field is the forward-compatible placeholder that `ticket-11`
+  graduates into a typed discriminated union without changing the engine
+  persistence step.
+
+Backend Pull merges snapshots into `items` under one transaction per [ADR
+0010](./adr/0010-pull-merge-skips-items-with-pending-mutations.md): if any
+`pending` or `failed` Mutation targets the snapshot's `(item_id, item_class)`,
+skip the whole row and let Apply reconcile; otherwise overwrite `title`,
+`body`, `status`, `updated_at`. Absence from the snapshot list is a no-op —
+v1 does not infer deletions. Container relations (Epic membership) are not
+returned by Pull in v1.
+
 The Remote/sync skeleton is tracked by `ticket-17`; the persisted Mutation
 Failure / Adapter Failure record shape is tracked by `ticket-11`.
 

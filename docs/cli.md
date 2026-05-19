@@ -250,7 +250,13 @@ tk sync log [--pending | --failed | --skipped] [id]
 - Failed Mutations retry on the next sync.
 - `--skip <mutation-id>` marks one failed Mutation skipped and continues sync.
 - v1 has no force-apply mode and no automatic conflict resolution.
-- `tk sync log` inspects pending, failed, skipped, and applied Mutations.
+- `tk sync log` inspects the Mutation Log. Default view shows pending, failed,
+  and skipped Mutations; applied Mutations are recorded but not rendered by
+  default (browsing applied is deferred). The filter flags
+  `--pending | --failed | --skipped` narrow to one state each.
+- `tk sync log [id]` accepts a Mutation Sequence (the same numeric ID used by
+  `tk sync --skip`) and prints one Mutation in detail, including the typed
+  payload and any recorded failure.
 
 ## Worktrees
 
