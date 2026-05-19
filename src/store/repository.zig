@@ -4726,3 +4726,352 @@ test "pendingOrFailedMutationCount: 0, 1 pending, 1 failed, 0 after marking skip
     try markMutationSkipped(conn, 1, "2026-05-19T07:00:00Z", null);
     try std.testing.expectEqual(@as(i64, 0), try pendingOrFailedMutationCount(conn));
 }
+
+test "pendingOrFailedMutationCount: counts both pending and failed simultaneously" {
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "t1",
+        .display = "gh-1",
+        .title = "T1",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "1",
+        .created_seq = 1,
+    });
+
+    try TmpStore.insertFixtureMutation(conn, .{
+        .sequence = 1,
+        .mutation_type = "update_ticket",
+        .item_id = "t1",
+        .payload_json = "{\"title\":\"A\",\"body\":\"\"}",
+        .state = "pending",
+    });
+    try TmpStore.insertFixtureMutation(conn, .{
+        .sequence = 2,
+        .mutation_type = "update_ticket",
+        .item_id = "t1",
+        .payload_json = "{\"title\":\"B\",\"body\":\"\"}",
+        .state = "failed",
+        .failure_json = "{\"detail\":\"x\"}",
+    });
+
+    try std.testing.expectEqual(@as(i64, 2), try pendingOrFailedMutationCount(conn));
+}
+
+test "applyMutationOutcome: applied prior returns MutationNotApplicable, state and cursor unchanged" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "t1",
+        .display = "gh-1",
+        .title = "T1",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "1",
+        .created_seq = 1,
+    });
+    try TmpStore.insertFixtureRemote(conn, .{
+        .backend_kind = "github",
+        .config_json = "{\"owner\":\"o\",\"repo\":\"r\"}",
+        .last_applied_sequence = 0,
+    });
+    try TmpStore.insertFixtureMutation(conn, .{
+        .sequence = 1,
+        .mutation_type = "update_ticket",
+        .item_id = "t1",
+        .payload_json = "{\"title\":\"A\",\"body\":\"\"}",
+        .state = "applied",
+    });
+
+    try std.testing.expectError(
+        error.MutationNotApplicable,
+        applyMutationOutcome(conn, gpa, 1, .{ .success = .{} }, "2026-05-19T00:00:00Z", null),
+    );
+
+    // State still 'applied', cursor still 0.
+    const state_row = (try conn.row("select state from mutations where sequence = 1", .{})) orelse return error.ExpectedRow;
+    defer state_row.deinit();
+    try std.testing.expectEqualStrings("applied", state_row.text(0));
+    const cursor_row = (try conn.row("select last_applied_sequence from sync_cursors where remote_name = 'primary'", .{})) orelse return error.ExpectedRow;
+    defer cursor_row.deinit();
+    try std.testing.expectEqual(@as(i64, 0), cursor_row.int(0));
+}
+
+test "applyMutationOutcome: skipped prior returns MutationNotApplicable" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "t1",
+        .display = "gh-1",
+        .title = "T1",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "1",
+        .created_seq = 1,
+    });
+    try TmpStore.insertFixtureMutation(conn, .{
+        .sequence = 1,
+        .mutation_type = "update_ticket",
+        .item_id = "t1",
+        .payload_json = "{\"title\":\"A\",\"body\":\"\"}",
+        .state = "skipped",
+    });
+
+    try std.testing.expectError(
+        error.MutationNotApplicable,
+        applyMutationOutcome(conn, gpa, 1, .{ .success = .{} }, "2026-05-19T00:00:00Z", null),
+    );
+
+    const row = (try conn.row("select state from mutations where sequence = 1", .{})) orelse return error.ExpectedRow;
+    defer row.deinit();
+    try std.testing.expectEqualStrings("skipped", row.text(0));
+}
+
+test "applyMutationOutcome: missing sequence returns MutationNotFound" {
+    const gpa = std.testing.allocator;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+
+    try std.testing.expectError(
+        error.MutationNotFound,
+        applyMutationOutcome(conn, gpa, 999, .{ .success = .{} }, "2026-05-19T00:00:00Z", null),
+    );
+
+    // Connection still usable (no dangling transaction).
+    const row = (try conn.row("select count(*) from mutations", .{})) orelse return error.ExpectedRow;
+    defer row.deinit();
+    try std.testing.expectEqual(@as(i64, 0), row.int(0));
+}
+
+test "applyMutationOutcome: failure_json round-trips non-UTF-8 detail" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "t1",
+        .display = "gh-1",
+        .title = "T1",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "1",
+        .created_seq = 1,
+    });
+    try TmpStore.insertFixtureMutation(conn, .{
+        .sequence = 1,
+        .mutation_type = "update_ticket",
+        .item_id = "t1",
+        .payload_json = "{\"title\":\"A\",\"body\":\"\"}",
+        .state = "pending",
+    });
+
+    // Lone 0xFF byte plus a backslash would otherwise break json_valid.
+    const detail = try gpa.dupe(u8, &[_]u8{ 'b', 'a', 'd', 0xFF, '\\' });
+    defer gpa.free(detail);
+
+    try applyMutationOutcome(
+        conn,
+        gpa,
+        1,
+        .{ .failure = .{ .detail = detail } },
+        "2026-05-19T00:00:00Z",
+        null,
+    );
+
+    // Row transitioned to failed and failure_json passes json_valid.
+    const row = (try conn.row(
+        "select state, json_valid(failure_json) from mutations where sequence = 1",
+        .{},
+    )) orelse return error.ExpectedRow;
+    defer row.deinit();
+    try std.testing.expectEqualStrings("failed", row.text(0));
+    try std.testing.expectEqual(@as(i64, 1), row.int(1));
+}
+
+test "mergeBackendSnapshots: mid-loop collision rolls back successful insert" {
+    const gpa = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0);
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+
+    // Local item already claims `gh-2` — the second snapshot will collide.
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "local",
+        .display = "gh-2",
+        .title = "Local",
+        .created_seq = 1,
+    });
+    try conn.exec("update sequences set value = 1 where name = 'item_created_seq'", .{});
+
+    const snapshots = [_]BackendItemSnapshot{
+        .{
+            .backend_kind = "github",
+            .backend_key = "1",
+            .display_id = "gh-1",
+            .item_class = .ticket,
+            .ticket_kind = .task,
+            .title = "First",
+            .body = "",
+            .status = .open,
+            .backend_updated_at = "2026-05-19T00:00:00Z",
+        },
+        .{
+            .backend_kind = "github",
+            .backend_key = "2",
+            .display_id = "gh-2",
+            .item_class = .ticket,
+            .ticket_kind = .task,
+            .title = "Second",
+            .body = "",
+            .status = .open,
+            .backend_updated_at = "2026-05-19T00:00:00Z",
+        },
+    };
+
+    var diag: Diagnostic = .{};
+    try std.testing.expectError(
+        error.DisplayIdCollision,
+        mergeBackendSnapshots(conn, gpa, prng.random(), &snapshots, "2026-05-19T00:00:00Z", &diag),
+    );
+
+    // The first snapshot's INSERT was rolled back along with the second
+    // snapshot's constraint failure — only the pre-existing local item remains.
+    const count_row = (try conn.row("select count(*) from items", .{})) orelse return error.ExpectedRow;
+    defer count_row.deinit();
+    try std.testing.expectEqual(@as(i64, 1), count_row.int(0));
+
+    // The created_seq counter should be unchanged after rollback.
+    const seq_row = (try conn.row("select value from sequences where name = 'item_created_seq'", .{})) orelse return error.ExpectedRow;
+    defer seq_row.deinit();
+    try std.testing.expectEqual(@as(i64, 1), seq_row.int(0));
+}
+
+test "mergeBackendSnapshots: applied or skipped mutations do not block overwrite" {
+    const gpa = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0);
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "t1",
+        .display = "gh-1",
+        .title = "Old",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "1",
+        .created_seq = 1,
+    });
+    try conn.exec("update sequences set value = 1 where name = 'item_created_seq'", .{});
+
+    // applied mutation does not block.
+    try TmpStore.insertFixtureMutation(conn, .{
+        .sequence = 1,
+        .mutation_type = "update_ticket",
+        .item_id = "t1",
+        .payload_json = "{\"title\":\"x\",\"body\":\"\"}",
+        .state = "applied",
+    });
+    // skipped mutation does not block.
+    try TmpStore.insertFixtureMutation(conn, .{
+        .sequence = 2,
+        .mutation_type = "update_ticket",
+        .item_id = "t1",
+        .payload_json = "{\"title\":\"y\",\"body\":\"\"}",
+        .state = "skipped",
+    });
+
+    const snapshots = [_]BackendItemSnapshot{
+        .{
+            .backend_kind = "github",
+            .backend_key = "1",
+            .display_id = "gh-1",
+            .item_class = .ticket,
+            .ticket_kind = .task,
+            .title = "New Title From Backend",
+            .body = "New body",
+            .status = .done,
+            .backend_updated_at = "2026-05-19T00:00:00Z",
+        },
+    };
+
+    try mergeBackendSnapshots(conn, gpa, prng.random(), &snapshots, "2026-05-19T00:00:00Z", null);
+
+    const row = (try conn.row(
+        "select title, body, status from items where id = 't1'",
+        .{},
+    )) orelse return error.ExpectedRow;
+    defer row.deinit();
+    try std.testing.expectEqualStrings("New Title From Backend", row.text(0));
+    try std.testing.expectEqualStrings("New body", row.text(1));
+    try std.testing.expectEqualStrings("done", row.text(2));
+}
+
+test "loadApplicableMutations: unknown mutation_type returns MutationTypeUnknown" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "t1",
+        .display = "gh-1",
+        .title = "T1",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "1",
+        .created_seq = 1,
+    });
+
+    // Schema CHECK normally rejects unknown mutation_type values; bypass it
+    // to exercise the schema-drift error path.
+    try conn.execNoArgs("pragma ignore_check_constraints = on");
+    defer conn.execNoArgs("pragma ignore_check_constraints = off") catch {};
+    try TmpStore.insertFixtureMutation(conn, .{
+        .sequence = 1,
+        .mutation_type = "not_a_real_type",
+        .item_id = "t1",
+        .payload_json = "{}",
+        .state = "pending",
+    });
+
+    try std.testing.expectError(
+        error.MutationTypeUnknown,
+        loadApplicableMutations(conn, gpa),
+    );
+}
