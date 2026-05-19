@@ -27,6 +27,7 @@ test {
     _ = @import("store/diagnostic.zig");
     _ = @import("store/migrations.zig");
     _ = @import("store/repository.zig");
+    _ = @import("store/sync.zig");
     _ = @import("commands/worktree.zig");
     _ = @import("worktree/scope.zig");
     _ = @import("testing/script.zig");
