@@ -11,6 +11,8 @@ test {
     _ = @import("commands/prime.zig");
     _ = @import("proc/runner.zig");
     _ = @import("proc/fake.zig");
+    _ = @import("remote/adapter.zig");
+    _ = @import("remote/fake.zig");
     _ = @import("domain/display_prefix.zig");
     _ = @import("domain/item_class.zig");
     _ = @import("domain/origin.zig");
