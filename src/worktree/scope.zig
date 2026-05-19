@@ -1,6 +1,6 @@
 //! Workspace Scope discovery and helpers.
 //!
-//! Per `docs/implementation.md` "Worktrees" section, this module owns
+//! Per `ARCHITECTURE.md` ("Workspace Scope and Worktrees"), this module owns
 //! Workspace Scope storage, discovery (configured + inferred), branch-name
 //! inference, slug derivation, and the git config helpers used by
 //! `tk worktree set`, `clear`, and `start`.
@@ -131,7 +131,7 @@ fn readSingleLine(
 /// Display ID, not the stored string. A stored value that no longer
 /// resolves surfaces as `.configured_unresolved` so callers can render
 /// `tk worktree: Workspace Scope '<stored>' is not a known Display ID or
-/// Alias` (per docs/implementation.md "Worktrees").
+/// Alias` (per ARCHITECTURE.md ("Workspace Scope and Worktrees")).
 pub fn resolveAgainstStore(
     store: repository.Store,
     gpa: std.mem.Allocator,

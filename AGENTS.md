@@ -1,8 +1,8 @@
 # Agent Notes
 
-This repository is still in design. Nothing has been implemented yet.
-
-- Read [README.md](./README.md) for the current project overview.
+- Read [README.md](./README.md) for the project overview.
+- Read [ARCHITECTURE.md](./ARCHITECTURE.md) before changing module boundaries
+  or repository-store invariants.
 - Read [CONTEXT.md](./CONTEXT.md) before changing domain language.
 - Read [docs/adr/](./docs/adr/) before revisiting recorded design decisions.
 
@@ -11,7 +11,7 @@ This repository is still in design. Nothing has been implemented yet.
 - Add doc comments for public functions, structs, methods, constants, and
   important private boundaries as code is introduced or changed.
 - Anchor comments in the project docs: [CONTEXT.md](./CONTEXT.md),
-  [docs/implementation.md](./docs/implementation.md),
+  [ARCHITECTURE.md](./ARCHITECTURE.md),
   [docs/design-questions.md](./docs/design-questions.md), and
   [docs/adr/](./docs/adr/).
 - Use Ticket's domain vocabulary in comments instead of generic terms. For
@@ -71,3 +71,24 @@ reintroduced without a concrete forcing constraint:
   others. Per-variant cleanup pushes ownership tracking onto every
   caller and requires a comment at every call site. Have each switch
   arm free its own payload directly.
+
+## Testing
+
+Use layered tests:
+
+- Zig unit tests for pure domain behavior and store helpers.
+- Command-handler tests with fake stores, fake subprocess runners, fake clocks,
+  and allocating writers.
+- SQLite migration/store tests against temp databases.
+- Inline snapshots for small rendered outputs.
+- txtar-based CLI scenarios for multi-step command behavior.
+- Subprocess smoke tests for linked-binary wiring, embedded payloads, Git
+  subprocess discovery, filesystem writes, and SQLite linkage.
+
+Avoid testing everything through subprocess scenarios. Prefer the narrowest
+layer that can observe the behavior.
+
+The txtar script runner follows the `testscript`-style tokenizer documented in
+`src/testing/script.zig`: whitespace splitting, single-quote literals, comments
+with `#`, `$NAME` / `${NAME}` env expansion, byte-exact output comparison, and
+`TK_UPDATE=1` snapshot rewriting.

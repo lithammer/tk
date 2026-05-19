@@ -1,20 +1,16 @@
-# Implementation Plan
+# Architecture
 
-This document maps the current Zig implementation. It is intentionally compact:
-per [ADR 0008](./adr/0008-keep-implementation-doc-compact.md), shipped slice
-checklists should not live here after code, tests, `CONTEXT.md`, `docs/cli.md`,
-and ADRs carry the durable contracts.
+This document maps how the Ticket codebase is organized — which directory
+owns which role, and the durable invariants the Repository Store preserves.
+It is intentionally compact: per [ADR
+0008](./docs/adr/0008-keep-implementation-doc-compact.md), shipped slice
+checklists should not live here once code, tests, `CONTEXT.md`,
+`docs/cli.md`, and ADRs carry the durable contracts. Onboarding pointers
+live in `README.md`; agent-facing conventions (code documentation, error
+handling, testing) live in `AGENTS.md`; domain vocabulary lives in
+`CONTEXT.md`; the v1 CLI surface is `docs/cli.md`.
 
-## Inputs
-
-- Domain language: [../CONTEXT.md](../CONTEXT.md)
-- CLI surface: [cli.md](./cli.md)
-- Design decisions: [adr/](./adr/)
-- Resolved questions: [design-questions.md](./design-questions.md)
-- Prime command output: [../src/commands/prime.md](../src/commands/prime.md)
-- Current backlog: `./zig-out/bin/tk list`
-
-## Current Module Map
+## Module Map
 
 ```text
 src/
@@ -87,11 +83,11 @@ Exit codes returned by command dispatch:
 ## Repository Store Contracts
 
 The Repository Store is SQLite, per ADRs
-[0001](./adr/0001-untracked-repository-store.md),
-[0003](./adr/0003-use-current-state-store-with-mutation-outbox.md), and
-[0005](./adr/0005-use-sqlite-for-the-repository-store.md). `tk init` creates it
-at `<git-common-dir>/tk/ticket.db`; later commands open that store through the
-shared opener instead of duplicating discovery and validation.
+[0001](./docs/adr/0001-untracked-repository-store.md),
+[0003](./docs/adr/0003-use-current-state-store-with-mutation-outbox.md), and
+[0005](./docs/adr/0005-use-sqlite-for-the-repository-store.md). `tk init`
+creates it at `<git-common-dir>/tk/ticket.db`; later commands open that store
+through the shared opener instead of duplicating discovery and validation.
 
 Migration SQL files are the source of truth for exact table columns and checks.
 Important stable contracts:
@@ -112,8 +108,8 @@ Important stable contracts:
 - `mutations` stores durable backend intent with a monotonic Mutation Sequence,
   state, JSON payload, and optional Mutation Failure JSON. The persisted
   failure JSON shape is `{"detail": "..."}` ([ADR
-  0009](./adr/0009-sync-failure-taxonomy.md)); `ticket-11` graduates this into
-  a typed discriminated union.
+  0009](./docs/adr/0009-sync-failure-taxonomy.md)); `ticket-11` graduates this
+  into a typed discriminated union.
 - `remotes` and `sync_cursors` hold the v1 singleton Remote model.
 - `store_config.display_prefix` controls newly generated local Display IDs.
   Custom prefix configuration is tracked by `ticket-22`.
@@ -125,8 +121,9 @@ Mutations in the same transaction as the visible state change. Priority remains
 a Local Field and does not emit Mutations.
 
 `done` is terminal in v1 per
-[ADR 0006](./adr/0006-done-is-terminal-in-v1.md). Store-facing status changes
-route through `setItemStatus`, and the schema trigger backstops future writers.
+[ADR 0006](./docs/adr/0006-done-is-terminal-in-v1.md). Store-facing status
+changes route through `setItemStatus`, and the schema trigger backstops future
+writers.
 
 ## IDs
 
@@ -147,30 +144,10 @@ worktree creation and after Promotion through Aliases.
 
 `tk worktree start` creates a scoped git worktree and marks the item `active` by
 default unless `--no-status` is used. The default path layout is recorded in
-[ADR 0007](./adr/0007-default-worktree-path-layout.md). Missing preflight checks
-are tracked by `ticket-15`; configurable path layout is tracked by `ticket-16`.
+[ADR 0007](./docs/adr/0007-default-worktree-path-layout.md). Missing preflight
+checks are tracked by `ticket-15`; configurable path layout is tracked by
+`ticket-16`.
 
 Workspace Scope is a selection context, not an implicit item target. Commands
 that inspect, update, or promote a specific item require explicit Display IDs;
 agents should pass IDs selected by `tk next` or `tk list`.
-
-## Testing
-
-Use layered tests:
-
-- Zig unit tests for pure domain behavior and store helpers.
-- Command-handler tests with fake stores, fake subprocess runners, fake clocks,
-  and allocating writers.
-- SQLite migration/store tests against temp databases.
-- Inline snapshots for small rendered outputs.
-- txtar-based CLI scenarios for multi-step command behavior.
-- Subprocess smoke tests for linked-binary wiring, embedded payloads, Git
-  subprocess discovery, filesystem writes, and SQLite linkage.
-
-Avoid testing everything through subprocess scenarios. Prefer the narrowest
-layer that can observe the behavior.
-
-The txtar script runner follows the `testscript`-style tokenizer documented in
-`src/testing/script.zig`: whitespace splitting, single-quote literals, comments
-with `#`, `$NAME` / `${NAME}` env expansion, byte-exact output comparison, and
-`TK_UPDATE=1` snapshot rewriting.

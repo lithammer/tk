@@ -1,6 +1,6 @@
 //! Derives a Local Display ID prefix from a repository basename.
 //!
-//! Algorithm (per `docs/implementation.md`, Storage section):
+//! Algorithm (per `ARCHITECTURE.md` ("Repository Store Contracts")):
 //! - Lowercase.
 //! - Treat underscores as separators.
 //! - Split on separators and punctuation (`-`, `_`, `.`, `/`, `:`, `#`,

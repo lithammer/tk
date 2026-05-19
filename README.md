@@ -6,7 +6,7 @@ The goal is similar in spirit to Beads: make work visible to humans and agents f
 
 ## Current Design
 
-- Ticket will start as a Zig 0.16 implementation.
+- Ticket is implemented in Zig 0.16.
 - **Tickets** are backend-agnostic work items.
 - **Epics** group related Tickets and require explicit closure.
 - New Tickets and Epics are **local by default**, even when a Primary Backend exists.
@@ -54,13 +54,15 @@ Important distinctions:
   omitted entirely.
 - **Workspace Scope** is local-only, is not synced to backends, and is not an implicit item target.
 
-## Open Design Areas
+## Where to Look
 
-Open design work is tracked in [docs/design-questions.md](./docs/design-questions.md).
-
-The v1 CLI surface is documented in [docs/cli.md](./docs/cli.md).
-
-The first implementation plan is documented in [docs/implementation.md](./docs/implementation.md).
+- [ARCHITECTURE.md](./ARCHITECTURE.md) — module map, boundaries, and
+  Repository Store invariants.
+- [AGENTS.md](./AGENTS.md) — agent-facing conventions (code documentation,
+  error handling, testing).
+- [docs/cli.md](./docs/cli.md) — the v1 CLI surface.
+- [docs/adr/](./docs/adr/) — recorded design decisions.
+- [docs/design-questions.md](./docs/design-questions.md) — open design work.
 
 ## Testing Direction
 

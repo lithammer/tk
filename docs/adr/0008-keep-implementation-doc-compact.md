@@ -1,7 +1,9 @@
-# Keep the implementation document compact
+# Keep the architecture document compact
 
-`docs/implementation.md` is an implementation map, not a slice archive. It should describe the current module boundaries, durable implementation contracts, and the small current implementation queue. It should not retain detailed plans for features after those features have shipped.
+`ARCHITECTURE.md` is an architecture map, not a slice archive. It should describe the current module boundaries and durable implementation contracts. It should not retain detailed plans for features after those features have shipped.
 
-Future work belongs in Local Tickets so it appears in `tk list` / `tk next` and can carry tactical implementation detail in the ticket body. Durable product language belongs in `CONTEXT.md`; user-visible CLI contracts belong in `docs/cli.md`; significant design decisions belong in ADRs. Once a slice lands, its checklist-style notes should be deleted from `docs/implementation.md` unless they still explain an active boundary or invariant.
+Future work belongs in Local Tickets so it appears in `tk list` / `tk next` and can carry tactical implementation detail in the ticket body. Durable product language belongs in `CONTEXT.md`; user-visible CLI contracts belong in `docs/cli.md`; significant design decisions belong in ADRs; agent-facing conventions (code documentation, error handling, testing) belong in `AGENTS.md`. Once a slice lands, its checklist-style notes should be deleted from `ARCHITECTURE.md` unless they still explain an active boundary or invariant.
 
-This keeps agent context small and prevents old slice plans from becoming a second, stale source of truth beside code, tests, tickets, and ADRs. The trade-off is that detailed history moves to git history and ticket bodies instead of remaining inline in the implementation guide.
+This keeps agent context small and prevents old slice plans from becoming a second, stale source of truth beside code, tests, tickets, and ADRs. The trade-off is that detailed history moves to git history and ticket bodies instead of remaining inline in the architecture guide.
+
+(Originally written when the document was called `docs/implementation.md`; renamed to `ARCHITECTURE.md` at the repo root after the v1 implementation slices shipped.)

@@ -70,7 +70,7 @@ fn execute(deps: cli.Deps) !u8 {
         deps.stderr.print("tk init: failed to create {s}: {s}\n", .{ tk_dir_path, @errorName(err) }) catch {};
         return 1;
     };
-    // Per docs/implementation.md: when the directory already exists with
+    // Per ARCHITECTURE.md: when the directory already exists with
     // broader permissions, slice 2 uses it as-is and does not chmod it.
     // Only tighten when we're the ones who just created it.
     // TODO(ticket-1): surface a stderr warning when we can't tighten

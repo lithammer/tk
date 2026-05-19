@@ -2,7 +2,7 @@
 //!
 //! `tk init` (and future `tk worktree` commands) need Git's common directory
 //! and toplevel to place or find `<git-common-dir>/tk/ticket.db` (the
-//! Repository Store, per docs/implementation.md). This module owns the
+//! Repository Store, per ARCHITECTURE.md). This module owns the
 //! `git rev-parse` invocation and returns a typed `Outcome` so callers can
 //! render diagnostics without this module reaching for stderr.
 
