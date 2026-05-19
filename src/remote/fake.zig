@@ -14,7 +14,7 @@ const ApplyError = adapter_mod.ApplyError;
 const PullError = adapter_mod.PullError;
 
 const BackendItemSnapshot = @import("../domain/backend_item_snapshot.zig").BackendItemSnapshot;
-const Diagnostic = @import("../store/diagnostic.zig").Diagnostic;
+const Diagnostic = @import("../domain/diagnostic.zig").Diagnostic;
 const MutationType = @import("../domain/mutation_type.zig").MutationType;
 const MutationView = @import("../domain/mutation_view.zig").MutationView;
 const outcome_mod = @import("../domain/outcome.zig");

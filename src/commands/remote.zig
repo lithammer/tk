@@ -12,7 +12,7 @@ const cli = @import("../cli.zig");
 const messages = @import("../messages.zig");
 const repository = @import("../store/repository.zig");
 const store_sync = @import("../store/sync.zig");
-const Diagnostic = @import("../store/diagnostic.zig").Diagnostic;
+const Diagnostic = @import("../domain/diagnostic.zig").Diagnostic;
 
 /// Dispatcher metadata for `tk remote`.
 pub const meta: cli.CommandMeta = .{

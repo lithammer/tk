@@ -14,7 +14,7 @@ const zqlite = @import("zqlite");
 const migrations = @import("migrations.zig");
 const repository = @import("repository.zig");
 const sequences = @import("sequences.zig");
-const Diagnostic = @import("diagnostic.zig").Diagnostic;
+const Diagnostic = @import("../domain/diagnostic.zig").Diagnostic;
 
 const BackendItemSnapshot = @import("../domain/backend_item_snapshot.zig").BackendItemSnapshot;
 const ItemClass = @import("../domain/item_class.zig").ItemClass;

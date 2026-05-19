@@ -27,7 +27,7 @@ test {
     _ = @import("domain/status.zig");
     _ = @import("domain/ticket_kind.zig");
     _ = @import("git/discovery.zig");
-    _ = @import("store/diagnostic.zig");
+    _ = @import("domain/diagnostic.zig");
     _ = @import("store/migrations.zig");
     _ = @import("store/repository.zig");
     _ = @import("store/sync.zig");

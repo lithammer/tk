@@ -17,7 +17,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const Diagnostic = @import("../store/diagnostic.zig").Diagnostic;
+const Diagnostic = @import("../domain/diagnostic.zig").Diagnostic;
 const RunnerError = @import("../proc/runner.zig").Error;
 const BackendItemSnapshot = @import("../domain/backend_item_snapshot.zig").BackendItemSnapshot;
 const MutationView = @import("../domain/mutation_view.zig").MutationView;

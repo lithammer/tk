@@ -15,7 +15,7 @@
 
 const std = @import("std");
 const zqlite = @import("zqlite");
-const Diagnostic = @import("diagnostic.zig").Diagnostic;
+const Diagnostic = @import("../domain/diagnostic.zig").Diagnostic;
 
 /// Repository Store SQLite connection type used by migration helpers.
 pub const Conn = zqlite.Conn;

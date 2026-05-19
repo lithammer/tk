@@ -7,7 +7,7 @@ const zqlite = @import("zqlite");
 const cli = @import("../cli.zig");
 const messages = @import("../messages.zig");
 const migrations = @import("../store/migrations.zig");
-const Diagnostic = @import("../store/diagnostic.zig").Diagnostic;
+const Diagnostic = @import("../domain/diagnostic.zig").Diagnostic;
 const display_prefix = @import("../domain/display_prefix.zig");
 const discovery = @import("../git/discovery.zig");
 
