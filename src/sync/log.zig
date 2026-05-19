@@ -10,6 +10,7 @@ const Allocator = std.mem.Allocator;
 const zqlite = @import("zqlite");
 
 const migrations = @import("../store/migrations.zig");
+const store_sync = @import("../store/sync.zig");
 
 /// Filter applied to `listMutations`. The default view (`.default`) hides
 /// `applied` Mutations to mirror `tk list`'s hide-done convention — browsing
@@ -63,35 +64,17 @@ pub fn listMutations(
         list.deinit(gpa);
     }
 
+    const sql_prefix =
+        \\select m.sequence, m.state, m.mutation_type, i.display_value, m.created_at, m.failure_json
+        \\  from mutations m
+        \\  join items i on i.id = m.item_id and i.item_class = m.item_class
+    ;
+    const sql_suffix = "\n order by m.sequence asc";
     const sql = switch (filter) {
-        .default =>
-        \\select m.sequence, m.state, m.mutation_type, i.display_value, m.created_at, m.failure_json
-        \\  from mutations m
-        \\  join items i on i.id = m.item_id and i.item_class = m.item_class
-        \\ where m.state in ('pending', 'failed', 'skipped')
-        \\ order by m.sequence asc
-        ,
-        .pending =>
-        \\select m.sequence, m.state, m.mutation_type, i.display_value, m.created_at, m.failure_json
-        \\  from mutations m
-        \\  join items i on i.id = m.item_id and i.item_class = m.item_class
-        \\ where m.state = 'pending'
-        \\ order by m.sequence asc
-        ,
-        .failed =>
-        \\select m.sequence, m.state, m.mutation_type, i.display_value, m.created_at, m.failure_json
-        \\  from mutations m
-        \\  join items i on i.id = m.item_id and i.item_class = m.item_class
-        \\ where m.state = 'failed'
-        \\ order by m.sequence asc
-        ,
-        .skipped =>
-        \\select m.sequence, m.state, m.mutation_type, i.display_value, m.created_at, m.failure_json
-        \\  from mutations m
-        \\  join items i on i.id = m.item_id and i.item_class = m.item_class
-        \\ where m.state = 'skipped'
-        \\ order by m.sequence asc
-        ,
+        .default => sql_prefix ++ "\n where m.state in ('pending', 'failed', 'skipped')" ++ sql_suffix,
+        .pending => sql_prefix ++ "\n where m.state = 'pending'" ++ sql_suffix,
+        .failed => sql_prefix ++ "\n where m.state = 'failed'" ++ sql_suffix,
+        .skipped => sql_prefix ++ "\n where m.state = 'skipped'" ++ sql_suffix,
     };
 
     var rows = try conn.rows(sql, .{});
@@ -202,12 +185,12 @@ pub fn showMutation(
     };
 }
 
-/// Decode the `failure_json` text column (always `{"detail": "..."}` in v1,
-/// per applyMutationOutcome) into the bare detail string. Returns a
-/// freshly-allocated copy owned by `gpa`.
+/// Decode the `failure_json` text column into the bare detail string. The
+/// inverse of `store_sync.FailureJsonWrapper` (the wire shape lives there so
+/// encoder and decoder cannot drift). Returns a freshly-allocated copy owned
+/// by `gpa`.
 fn decodeFailureDetail(gpa: Allocator, raw: []const u8) LogError![]u8 {
-    const Wrapper = struct { detail: []const u8 };
-    const parsed = try std.json.parseFromSlice(Wrapper, gpa, raw, .{});
+    const parsed = try std.json.parseFromSlice(store_sync.FailureJsonWrapper, gpa, raw, .{});
     defer parsed.deinit();
     return gpa.dupe(u8, parsed.value.detail);
 }

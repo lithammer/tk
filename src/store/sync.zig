@@ -347,6 +347,18 @@ pub fn advanceSyncCursor(
     , .{ sequence, now });
 }
 
+/// On-disk wire shape for `mutations.failure_json`.
+///
+/// `applyMutationOutcome` writes a `Failure` as
+/// `std.json.Stringify.valueAlloc(gpa, FailureJsonWrapper, .{ .escape_unicode = true })`;
+/// `src/sync/log.zig` reads it back via `std.json.parseFromSlice(FailureJsonWrapper, ...)`.
+/// Keeping the encoder and decoder pinned to one type prevents the two sides
+/// from drifting when ticket-11 graduates the wrapper into a typed
+/// discriminated union.
+pub const FailureJsonWrapper = struct {
+    detail: []const u8,
+};
+
 /// Error set returned by `applyMutationOutcome`.
 pub const ApplyMutationOutcomeError = migrations.QueryError || zqlite.Error || error{
     OutOfMemory,
@@ -415,7 +427,7 @@ pub fn applyMutationOutcome(
             // check.
             const failure_json = try std.json.Stringify.valueAlloc(
                 gpa,
-                .{ .detail = failure.detail },
+                FailureJsonWrapper{ .detail = failure.detail },
                 .{ .escape_unicode = true },
             );
             defer gpa.free(failure_json);

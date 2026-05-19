@@ -35,12 +35,9 @@ pub fn openConfigured(
     const row = (try store_sync.getRemote(conn, gpa)) orelse return null;
     defer row.deinit(gpa);
 
-    if (std.mem.eql(u8, row.backend_kind, "github")) {
-        return error.NotImplemented;
-    }
-    if (std.mem.eql(u8, row.backend_kind, "jira")) {
-        return error.NotImplemented;
-    }
+    // No adapter kinds have real implementations in ticket-17; the dispatch
+    // by `row.backend_kind` lands in a later slice alongside the github /
+    // jira modules.
     return error.NotImplemented;
 }
 

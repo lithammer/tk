@@ -114,7 +114,11 @@ pub fn runSync(
         gpa.free(snapshots);
     }
     report.pulled_count = snapshots.len;
-    try store_sync.mergeBackendSnapshots(conn, gpa, opts.random, snapshots, now, diag);
+    // Skip the merge transaction entirely when the pull was empty so an idle
+    // sync (the common case) doesn't acquire a write lock for a no-op.
+    if (snapshots.len > 0) {
+        try store_sync.mergeBackendSnapshots(conn, gpa, opts.random, snapshots, now, diag);
+    }
 
     // Step 3: Apply loop.
     const views = try store_sync.loadApplicableMutations(conn, gpa);
@@ -125,29 +129,16 @@ pub fn runSync(
 
     for (views) |view| {
         const outcome = try adapter.applyMutation(gpa, view, now);
+        // Free `Outcome.failure.detail` once we're done with the outcome —
+        // applyMutationOutcome reads it but does not take ownership.
+        defer switch (outcome) {
+            .success => {},
+            .failure => |f| f.deinit(gpa),
+        };
+        try store_sync.applyMutationOutcome(conn, gpa, view.sequence, outcome, now, diag);
         switch (outcome) {
-            .success => |receipt| {
-                _ = receipt;
-                try store_sync.applyMutationOutcome(
-                    conn,
-                    gpa,
-                    view.sequence,
-                    outcome,
-                    now,
-                    diag,
-                );
-                report.applied_count += 1;
-            },
-            .failure => |failure| {
-                defer failure.deinit(gpa);
-                try store_sync.applyMutationOutcome(
-                    conn,
-                    gpa,
-                    view.sequence,
-                    outcome,
-                    now,
-                    diag,
-                );
+            .success => report.applied_count += 1,
+            .failure => {
                 report.stopped_at_sequence = view.sequence;
                 return report;
             },

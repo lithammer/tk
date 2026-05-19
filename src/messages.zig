@@ -680,6 +680,19 @@ pub const sync_no_remote = "tk sync: no Remote configured; run 'tk remote set <k
 /// Stderr line when the configured Remote's adapter is not implemented.
 pub const sync_adapter_not_implemented = "tk sync: the configured Remote's adapter is not implemented in this build";
 
+/// Stderr line when `--skip` is given without an argument.
+pub const sync_skip_requires_arg = "tk sync: --skip requires a Mutation Sequence";
+
+/// Stderr line when `--skip` argument is not an integer.
+pub const sync_skip_not_integer = "tk sync: --skip argument must be an integer";
+
+/// Stderr prefix when `tk sync` receives an unknown argument. Caller appends
+/// the argument and a newline.
+pub const sync_unknown_arg_prefix = "tk sync: unknown argument '";
+
+/// Stderr suffix for the unknown-argument diagnostic.
+pub const sync_unknown_arg_suffix = "'";
+
 /// Stderr prefix when a Mutation Pull fails. Caller appends the Diagnostic
 /// message captured from the adapter or the SQL layer.
 pub const sync_failure_prefix = "tk sync: ";

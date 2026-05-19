@@ -150,16 +150,15 @@ fn runSetGithub(deps: cli.Deps, args_iter: anytype) !u8 {
     // Validate prefix collision before writing.
     if (try checkPrefixCollision(store.conn, deps.gpa, "gh", deps.stderr)) return 1;
 
-    const config_json = try std.fmt.allocPrint(deps.gpa, "{{\"repo\":\"{s}\"}}", .{repo_val});
+    const config_json = try std.json.Stringify.valueAlloc(deps.gpa, .{ .repo = repo_val }, .{ .escape_unicode = true });
     defer deps.gpa.free(config_json);
 
     var now_buf: [24]u8 = undefined;
-    const now = formatNow(deps, &now_buf);
+    const now = deps.clock.nowIso(&now_buf);
 
     var diag: Diagnostic = .{};
-    store_sync.setRemote(store.conn, "github", config_json, now, &diag) catch |err| {
-        repository.renderStorageError(deps.stderr, err, set_storage_msgs);
-        if (diag.message().len > 0) deps.stderr.print("{s}\n", .{diag.message()}) catch {};
+    store_sync.setRemote(store.conn, @tagName(BackendKind.github), config_json, now, &diag) catch |err| {
+        renderStorageDiag(deps.stderr, err, set_storage_msgs, &diag);
         return 1;
     };
 
@@ -194,20 +193,19 @@ fn runSetJira(deps: cli.Deps, args_iter: anytype) !u8 {
     defer deps.gpa.free(project_lower);
     if (try checkPrefixCollision(store.conn, deps.gpa, project_lower, deps.stderr)) return 1;
 
-    const config_json = try std.fmt.allocPrint(
+    const config_json = try std.json.Stringify.valueAlloc(
         deps.gpa,
-        "{{\"site\":\"{s}\",\"project\":\"{s}\"}}",
-        .{ site_val, project_val },
+        .{ .site = site_val, .project = project_val },
+        .{ .escape_unicode = true },
     );
     defer deps.gpa.free(config_json);
 
     var now_buf: [24]u8 = undefined;
-    const now = formatNow(deps, &now_buf);
+    const now = deps.clock.nowIso(&now_buf);
 
     var diag: Diagnostic = .{};
-    store_sync.setRemote(store.conn, "jira", config_json, now, &diag) catch |err| {
-        repository.renderStorageError(deps.stderr, err, set_storage_msgs);
-        if (diag.message().len > 0) deps.stderr.print("{s}\n", .{diag.message()}) catch {};
+    store_sync.setRemote(store.conn, @tagName(BackendKind.jira), config_json, now, &diag) catch |err| {
+        renderStorageDiag(deps.stderr, err, set_storage_msgs, &diag);
         return 1;
     };
 
@@ -261,8 +259,7 @@ fn runClear(deps: cli.Deps) !u8 {
 
     var diag: Diagnostic = .{};
     store_sync.clearRemote(store.conn, &diag) catch |err| {
-        repository.renderStorageError(deps.stderr, err, clear_storage_msgs);
-        if (diag.message().len > 0) deps.stderr.print("{s}\n", .{diag.message()}) catch {};
+        renderStorageDiag(deps.stderr, err, clear_storage_msgs, &diag);
         return 1;
     };
 
@@ -270,8 +267,17 @@ fn runClear(deps: cli.Deps) !u8 {
     return 0;
 }
 
-fn formatNow(deps: cli.Deps, buf: *[24]u8) []const u8 {
-    return deps.clock.nowIso(buf);
+/// Render a Repository Store error plus the captured Diagnostic message
+/// (when non-empty). The Diagnostic carries SQLite errmsg captured by
+/// migrations.captureError before the rollback fired.
+fn renderStorageDiag(
+    stderr: *std.Io.Writer,
+    err: anyerror,
+    msgs: repository.StorageErrorMessages,
+    diag: *const Diagnostic,
+) void {
+    repository.renderStorageError(stderr, err, msgs);
+    if (diag.message().len > 0) stderr.print("{s}\n", .{diag.message()}) catch {};
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

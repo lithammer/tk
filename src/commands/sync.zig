@@ -33,10 +33,32 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
         if (std.mem.eql(u8, s, "log")) {
             return try runLog(deps, args_iter);
         }
-        // First arg is part of `tk sync` flag parsing.
-        return try runSync(deps, args_iter, s);
+        return try runSync(deps, peekableArgs(s, args_iter));
     }
-    return try runSync(deps, args_iter, null);
+    return try runSync(deps, peekableArgs(null, args_iter));
+}
+
+/// Build a single-pass iterator that yields `pre` first (when non-null) and
+/// then delegates to the underlying argv iterator. Lets the dispatcher peek
+/// the first arg without forcing the subcommand handler to thread a
+/// `?[]const u8` "already consumed" parameter alongside the iterator.
+fn peekableArgs(pre: ?[]const u8, rest: anytype) PeekableArgs(@TypeOf(rest)) {
+    return .{ .pre = pre, .rest = rest };
+}
+
+fn PeekableArgs(comptime Rest: type) type {
+    return struct {
+        pre: ?[]const u8,
+        rest: Rest,
+
+        pub fn next(self: *@This()) ?[]const u8 {
+            if (self.pre) |p| {
+                self.pre = null;
+                return p;
+            }
+            return self.rest.next();
+        }
+    };
 }
 
 fn writeHelp(deps: cli.Deps) !void {
@@ -86,35 +108,25 @@ const log_open_msgs: repository.OpenMessages = .{
     .storage = log_storage_msgs,
 };
 
-fn runSync(deps: cli.Deps, args_iter: anytype, first: ?[]const u8) !u8 {
+fn runSync(deps: cli.Deps, args_iter: anytype) !u8 {
+    var iter = args_iter;
     var skip_id: ?i64 = null;
-
-    if (first) |s| {
-        if (std.mem.eql(u8, s, "--skip")) {
-            const v = args_iter.next() orelse {
-                deps.stderr.writeAll("tk sync: --skip requires a Mutation Sequence\n") catch {};
+    while (iter.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--skip")) {
+            const v = iter.next() orelse {
+                deps.stderr.print("{s}\n", .{messages.sync_skip_requires_arg}) catch {};
                 return 2;
             };
             skip_id = std.fmt.parseInt(i64, v, 10) catch {
-                deps.stderr.writeAll("tk sync: --skip argument must be an integer\n") catch {};
+                deps.stderr.print("{s}\n", .{messages.sync_skip_not_integer}) catch {};
                 return 2;
             };
         } else {
-            deps.stderr.print("tk sync: unknown argument '{s}'\n", .{s}) catch {};
+            deps.stderr.print(
+                "{s}{s}{s}\n",
+                .{ messages.sync_unknown_arg_prefix, arg, messages.sync_unknown_arg_suffix },
+            ) catch {};
             return 2;
-        }
-    }
-
-    while (args_iter.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--skip")) {
-            const v = args_iter.next() orelse {
-                deps.stderr.writeAll("tk sync: --skip requires a Mutation Sequence\n") catch {};
-                return 2;
-            };
-            skip_id = std.fmt.parseInt(i64, v, 10) catch {
-                deps.stderr.writeAll("tk sync: --skip argument must be an integer\n") catch {};
-                return 2;
-            };
         }
     }
 
