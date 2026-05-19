@@ -154,4 +154,83 @@ pub const TmpStore = struct {
         }
         return 0;
     }
+
+    /// Raw Mutation Log fixture used by sync engine and `tk sync log` tests.
+    ///
+    /// Bypasses production `appendMutation` so slices can seed `failed`,
+    /// `skipped`, and `applied` Mutations before the sync command surface
+    /// exists. Caller picks the `sequence` directly; this helper does not
+    /// touch `sequences.mutation_seq`, so tests that mix fixture inserts
+    /// with live `appendMutation` calls must advance the sequence
+    /// themselves.
+    pub const FixtureMutation = struct {
+        sequence: i64,
+        mutation_type: []const u8,
+        item_id: []const u8,
+        item_class: []const u8 = "ticket",
+        payload_json: []const u8,
+        state: []const u8 = "pending",
+        failure_json: ?[]const u8 = null,
+        created_at: []const u8 = "2026-05-09T00:00:00.000Z",
+        state_changed_at: []const u8 = "2026-05-09T00:00:00.000Z",
+    };
+
+    /// Insert one Mutation Log row.
+    pub fn insertFixtureMutation(conn: zqlite.Conn, args: FixtureMutation) !void {
+        try conn.exec(
+            \\insert into mutations(
+            \\  sequence, mutation_type, item_id, item_class, payload_json,
+            \\  state, failure_json, created_at, state_changed_at
+            \\)
+            \\values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        , .{
+            args.sequence,
+            args.mutation_type,
+            args.item_id,
+            args.item_class,
+            args.payload_json,
+            args.state,
+            args.failure_json,
+            args.created_at,
+            args.state_changed_at,
+        });
+    }
+
+    /// Raw Remote configuration fixture used by `tk remote` and sync tests.
+    ///
+    /// Inserts the singleton `remotes` row and the matching `sync_cursors`
+    /// row so tests can exercise both Remote presence and Sync Cursor
+    /// advancement without going through the (not yet implemented)
+    /// `setRemote` helper.
+    pub const FixtureRemote = struct {
+        backend_kind: []const u8,
+        config_json: []const u8,
+        last_applied_sequence: i64 = 0,
+        created_at: []const u8 = "2026-05-09T00:00:00.000Z",
+        updated_at: []const u8 = "2026-05-09T00:00:00.000Z",
+    };
+
+    /// Insert the v1 single Remote configuration plus its Sync Cursor.
+    pub fn insertFixtureRemote(conn: zqlite.Conn, args: FixtureRemote) !void {
+        try conn.transaction();
+        errdefer conn.rollback();
+        try conn.exec(
+            \\insert into remotes(name, backend_kind, config_json, created_at, updated_at)
+            \\values ('primary', ?1, ?2, ?3, ?4)
+        , .{
+            args.backend_kind,
+            args.config_json,
+            args.created_at,
+            args.updated_at,
+        });
+        try conn.exec(
+            \\insert into sync_cursors(remote_name, backend_kind, last_applied_sequence, updated_at)
+            \\values ('primary', ?1, ?2, ?3)
+        , .{
+            args.backend_kind,
+            args.last_applied_sequence,
+            args.updated_at,
+        });
+        try conn.commit();
+    }
 };
