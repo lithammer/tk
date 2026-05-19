@@ -11,14 +11,16 @@ const Allocator = std.mem.Allocator;
 const adapter_mod = @import("adapter.zig");
 const Adapter = adapter_mod.Adapter;
 const ApplyError = adapter_mod.ApplyError;
-const BackendItemSnapshot = adapter_mod.BackendItemSnapshot;
-const Diagnostic = @import("../store/diagnostic.zig").Diagnostic;
-const Failure = adapter_mod.Failure;
-const MutationView = adapter_mod.MutationView;
-const MutationType = @import("../domain/mutation_type.zig").MutationType;
-const Outcome = adapter_mod.Outcome;
 const PullError = adapter_mod.PullError;
-const Receipt = adapter_mod.Receipt;
+
+const BackendItemSnapshot = @import("../domain/backend_item_snapshot.zig").BackendItemSnapshot;
+const Diagnostic = @import("../store/diagnostic.zig").Diagnostic;
+const MutationType = @import("../domain/mutation_type.zig").MutationType;
+const MutationView = @import("../domain/mutation_view.zig").MutationView;
+const outcome_mod = @import("../domain/outcome.zig");
+const Outcome = outcome_mod.Outcome;
+const Failure = outcome_mod.Failure;
+const Receipt = outcome_mod.Receipt;
 const TicketKind = @import("../domain/ticket_kind.zig").TicketKind;
 
 /// Scripted response for one `pullBackendItems` call.

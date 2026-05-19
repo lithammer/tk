@@ -13,9 +13,13 @@ test {
     _ = @import("proc/fake.zig");
     _ = @import("remote/adapter.zig");
     _ = @import("remote/fake.zig");
+    _ = @import("domain/backend_item_snapshot.zig");
     _ = @import("domain/display_prefix.zig");
     _ = @import("domain/item_class.zig");
+    _ = @import("domain/mutation_payload.zig");
+    _ = @import("domain/mutation_view.zig");
     _ = @import("domain/origin.zig");
+    _ = @import("domain/outcome.zig");
     _ = @import("domain/priority.zig");
     _ = @import("domain/status.zig");
     _ = @import("domain/ticket_kind.zig");
