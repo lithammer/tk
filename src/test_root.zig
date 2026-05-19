@@ -15,6 +15,7 @@ test {
     _ = @import("remote/factory.zig");
     _ = @import("remote/fake.zig");
     _ = @import("commands/remote.zig");
+    _ = @import("commands/sync.zig");
     _ = @import("domain/backend_item_snapshot.zig");
     _ = @import("domain/display_prefix.zig");
     _ = @import("domain/item_class.zig");

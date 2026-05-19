@@ -671,3 +671,65 @@ pub const remote_clear_write_failed = "tk remote clear: failed to update Reposit
 
 /// Stdout line on clear success.
 pub const remote_clear_success = "Cleared Remote configuration.";
+
+// `tk sync` — Mutation Log replay.
+
+/// Stderr line when `tk sync` runs against an empty Remote configuration.
+pub const sync_no_remote = "tk sync: no Remote configured; run 'tk remote set <kind>' first";
+
+/// Stderr line when the configured Remote's adapter is not implemented.
+pub const sync_adapter_not_implemented = "tk sync: the configured Remote's adapter is not implemented in this build";
+
+/// Stderr prefix when a Mutation Pull fails. Caller appends the Diagnostic
+/// message captured from the adapter or the SQL layer.
+pub const sync_failure_prefix = "tk sync: ";
+
+/// Stderr line for a missing Repository Store during `tk sync`.
+pub const sync_missing_store = "tk sync: Repository Store not initialized; run 'tk init'";
+
+/// Stderr line for busy/locked Repository Store during `tk sync`.
+pub const sync_store_busy_retry = "tk sync: Repository Store is busy; retry the command";
+
+/// Stderr line when allocation fails during `tk sync`.
+pub const sync_out_of_memory = "tk sync: out of memory";
+
+/// Stderr line for non-transient Repository Store failures during sync.
+pub const sync_storage_failed = "tk sync: failed to update Repository Store";
+
+/// Stdout prefix for a successful sync summary. Caller appends counts.
+pub const sync_summary_prefix = "Sync complete: ";
+
+// `tk sync log` — read view.
+
+/// Stdout line when the Mutation Log contains nothing matching the filter.
+pub const sync_log_empty_default = "No Mutations recorded.";
+
+/// Stdout line for the empty `--pending` filter.
+pub const sync_log_empty_pending = "No pending Mutations.";
+
+/// Stdout line for the empty `--failed` filter.
+pub const sync_log_empty_failed = "No failed Mutations.";
+
+/// Stdout line for the empty `--skipped` filter.
+pub const sync_log_empty_skipped = "No skipped Mutations.";
+
+/// Stderr prefix for `tk sync log <id>` when the sequence is missing.
+pub const sync_log_not_found_prefix = "tk sync log: Mutation ";
+
+/// Stderr suffix for the not-found diagnostic.
+pub const sync_log_not_found_suffix = " not found";
+
+/// Stderr line when `tk sync log <id>` argument is not a number.
+pub const sync_log_id_not_numeric = "tk sync log: <id> must be a Mutation Sequence (use the integer from the list view)";
+
+/// Stderr line for a missing Repository Store during `tk sync log`.
+pub const sync_log_missing_store = "tk sync log: Repository Store not initialized; run 'tk init'";
+
+/// Stderr line for busy/locked Repository Store during `tk sync log`.
+pub const sync_log_store_busy_retry = "tk sync log: Repository Store is busy; retry the command";
+
+/// Stderr line when allocation fails during `tk sync log`.
+pub const sync_log_out_of_memory = "tk sync log: out of memory";
+
+/// Stderr line for non-transient Repository Store failures during sync log.
+pub const sync_log_storage_failed = "tk sync log: failed to read Repository Store";
