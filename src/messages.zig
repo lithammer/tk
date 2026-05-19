@@ -709,6 +709,29 @@ pub const sync_out_of_memory = "tk sync: out of memory";
 /// Stderr line for non-transient Repository Store failures during sync.
 pub const sync_storage_failed = "tk sync: failed to update Repository Store";
 
+/// Stderr prefix when a Pull or Apply collides with an existing Display ID.
+/// Caller appends the colliding ID and a closing-quote-plus-message.
+pub const sync_display_id_collision_prefix = "tk sync: Display ID '";
+
+/// Stderr suffix shared with the Display ID collision diagnostic.
+pub const sync_display_id_collision_suffix = "' already claimed by an existing Item";
+
+/// Stderr prefix for the --skip wrong-state diagnostic. Caller appends the
+/// target sequence and a closing message.
+pub const sync_skip_not_failed_prefix = "tk sync --skip: Mutation ";
+
+/// Stderr suffix for the --skip wrong-state diagnostic.
+pub const sync_skip_not_failed_suffix = " is not in the failed state; --skip only abandons failed Mutations";
+
+/// Stderr prefix for the --skip missing-sequence diagnostic.
+pub const sync_skip_not_found_prefix = "tk sync --skip: Mutation ";
+
+/// Stderr suffix for the --skip missing-sequence diagnostic.
+pub const sync_skip_not_found_suffix = " not found";
+
+/// Stderr line for schema-drift or enum-drift errors during sync.
+pub const sync_schema_drift = "tk sync: Mutation Log row has an unrecognised mutation kind; this is a Ticket bug — please report it";
+
 /// Stdout prefix for a successful sync summary. Caller appends counts.
 pub const sync_summary_prefix = "Sync complete: ";
 

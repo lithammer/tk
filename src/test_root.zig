@@ -32,7 +32,6 @@ test {
     _ = @import("store/repository.zig");
     _ = @import("store/sync.zig");
     _ = @import("sync/engine.zig");
-    _ = @import("sync/log.zig");
     _ = @import("commands/worktree.zig");
     _ = @import("worktree/scope.zig");
     _ = @import("testing/script.zig");

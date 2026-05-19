@@ -1856,3 +1856,341 @@ test "loadApplicableMutations: unknown mutation_type returns MutationTypeUnknown
         loadApplicableMutations(conn, gpa),
     );
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Mutation Log read views — back the `tk sync log` rendering.
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Filter applied to `listMutationLog`. The default view (`.default`) hides
+/// `applied` Mutations to mirror `tk list`'s hide-done convention — browsing
+/// applied Mutations is deferred.
+pub const LogListFilter = enum {
+    /// Pending + failed + skipped (the default).
+    default,
+    /// Only `state = 'pending'`.
+    pending,
+    /// Only `state = 'failed'`.
+    failed,
+    /// Only `state = 'skipped'`.
+    skipped,
+};
+
+/// One row of the `tk sync log` list view.
+pub const LogListRow = struct {
+    sequence: i64,
+    state: []u8,
+    mutation_type: []u8,
+    target_display_id: []u8,
+    created_at: []u8,
+    /// Set only when `state = 'failed'`; the decoded `failure.detail` from
+    /// the persisted `FailureJsonWrapper`.
+    failure_detail: ?[]u8,
+
+    pub fn deinit(self: LogListRow, gpa: std.mem.Allocator) void {
+        gpa.free(self.state);
+        gpa.free(self.mutation_type);
+        gpa.free(self.target_display_id);
+        gpa.free(self.created_at);
+        if (self.failure_detail) |d| gpa.free(d);
+    }
+};
+
+/// One row of the `tk sync log <sequence>` detail view.
+pub const LogDetailRow = struct {
+    sequence: i64,
+    state: []u8,
+    mutation_type: []u8,
+    target_display_id: []u8,
+    item_class: []u8,
+    payload_json: []u8,
+    failure_detail: ?[]u8,
+    created_at: []u8,
+    state_changed_at: []u8,
+
+    pub fn deinit(self: LogDetailRow, gpa: std.mem.Allocator) void {
+        gpa.free(self.state);
+        gpa.free(self.mutation_type);
+        gpa.free(self.target_display_id);
+        gpa.free(self.item_class);
+        gpa.free(self.payload_json);
+        if (self.failure_detail) |d| gpa.free(d);
+        gpa.free(self.created_at);
+        gpa.free(self.state_changed_at);
+    }
+};
+
+/// Error set returned by `listMutationLog` and `showMutationLog`.
+pub const LogError = migrations.QueryError || zqlite.Error || std.json.ParseError(std.json.Scanner) || error{
+    OutOfMemory,
+    /// No `mutations` row matches the supplied sequence.
+    MutationNotFound,
+};
+
+/// Return Mutation Log rows matching `filter` in ascending sequence order.
+pub fn listMutationLog(
+    conn: zqlite.Conn,
+    gpa: std.mem.Allocator,
+    filter: LogListFilter,
+) LogError![]LogListRow {
+    var list: std.ArrayList(LogListRow) = .empty;
+    errdefer {
+        for (list.items) |row| row.deinit(gpa);
+        list.deinit(gpa);
+    }
+
+    const sql_prefix =
+        \\select m.sequence, m.state, m.mutation_type, i.display_value, m.created_at, m.failure_json
+        \\  from mutations m
+        \\  join items i on i.id = m.item_id and i.item_class = m.item_class
+    ;
+    const sql_suffix = "\n order by m.sequence asc";
+    const sql = switch (filter) {
+        .default => sql_prefix ++ "\n where m.state in ('pending', 'failed', 'skipped')" ++ sql_suffix,
+        .pending => sql_prefix ++ "\n where m.state = 'pending'" ++ sql_suffix,
+        .failed => sql_prefix ++ "\n where m.state = 'failed'" ++ sql_suffix,
+        .skipped => sql_prefix ++ "\n where m.state = 'skipped'" ++ sql_suffix,
+    };
+
+    var rows = try conn.rows(sql, .{});
+    defer rows.deinit();
+
+    while (rows.next()) |r| {
+        const sequence = r.int(0);
+        const state = try gpa.dupe(u8, r.text(1));
+        errdefer gpa.free(state);
+        const mutation_type = try gpa.dupe(u8, r.text(2));
+        errdefer gpa.free(mutation_type);
+        const target = try gpa.dupe(u8, r.text(3));
+        errdefer gpa.free(target);
+        const created_at = try gpa.dupe(u8, r.text(4));
+        errdefer gpa.free(created_at);
+
+        var failure_detail: ?[]u8 = null;
+        if (r.nullableText(5)) |raw| {
+            failure_detail = try decodeFailureDetail(gpa, raw);
+        }
+        errdefer if (failure_detail) |d| gpa.free(d);
+
+        try list.append(gpa, .{
+            .sequence = sequence,
+            .state = state,
+            .mutation_type = mutation_type,
+            .target_display_id = target,
+            .created_at = created_at,
+            .failure_detail = failure_detail,
+        });
+    }
+    if (rows.err) |err| return err;
+
+    return list.toOwnedSlice(gpa);
+}
+
+/// Look up one Mutation Log entry by sequence and return its full detail.
+pub fn showMutationLog(
+    conn: zqlite.Conn,
+    gpa: std.mem.Allocator,
+    sequence: i64,
+) LogError!LogDetailRow {
+    const row = (try conn.row(
+        \\select m.sequence, m.state, m.mutation_type, i.display_value,
+        \\       m.item_class, m.payload_json, m.failure_json,
+        \\       m.created_at, m.state_changed_at
+        \\  from mutations m
+        \\  join items i on i.id = m.item_id and i.item_class = m.item_class
+        \\ where m.sequence = ?1
+    , .{sequence})) orelse return error.MutationNotFound;
+    defer row.deinit();
+
+    const state = try gpa.dupe(u8, row.text(1));
+    errdefer gpa.free(state);
+    const mutation_type = try gpa.dupe(u8, row.text(2));
+    errdefer gpa.free(mutation_type);
+    const target = try gpa.dupe(u8, row.text(3));
+    errdefer gpa.free(target);
+    const item_class = try gpa.dupe(u8, row.text(4));
+    errdefer gpa.free(item_class);
+    const payload_json = try gpa.dupe(u8, row.text(5));
+    errdefer gpa.free(payload_json);
+
+    var failure_detail: ?[]u8 = null;
+    if (row.nullableText(6)) |raw| {
+        failure_detail = try decodeFailureDetail(gpa, raw);
+    }
+    errdefer if (failure_detail) |d| gpa.free(d);
+
+    const created_at = try gpa.dupe(u8, row.text(7));
+    errdefer gpa.free(created_at);
+    const state_changed_at = try gpa.dupe(u8, row.text(8));
+
+    return .{
+        .sequence = row.int(0),
+        .state = state,
+        .mutation_type = mutation_type,
+        .target_display_id = target,
+        .item_class = item_class,
+        .payload_json = payload_json,
+        .failure_detail = failure_detail,
+        .created_at = created_at,
+        .state_changed_at = state_changed_at,
+    };
+}
+
+/// Decode the `failure_json` text column into the bare detail string. The
+/// inverse of `FailureJsonWrapper` — encoder and decoder share one type so
+/// they cannot drift.
+fn decodeFailureDetail(gpa: std.mem.Allocator, raw: []const u8) LogError![]u8 {
+    const parsed = try std.json.parseFromSlice(FailureJsonWrapper, gpa, raw, .{});
+    defer parsed.deinit();
+    return gpa.dupe(u8, parsed.value.detail);
+}
+
+// ── Mutation Log read view tests ─────────────────────────────────────────────
+
+fn logSeedFixture(conn: zqlite.Conn) !void {
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "t1",
+        .display = "gh-1",
+        .title = "T1",
+        .origin = "backend",
+        .backend_kind = "github",
+        .backend_key = "1",
+        .created_seq = 1,
+    });
+    try TmpStore.insertFixtureMutation(conn, .{
+        .sequence = 1,
+        .mutation_type = "update_ticket",
+        .item_id = "t1",
+        .payload_json = "{\"title\":\"P\",\"body\":\"\"}",
+        .state = "pending",
+    });
+    try TmpStore.insertFixtureMutation(conn, .{
+        .sequence = 2,
+        .mutation_type = "set_item_status",
+        .item_id = "t1",
+        .payload_json = "{\"status\":\"done\"}",
+        .state = "failed",
+        .failure_json = "{\"detail\":\"HTTP 422\"}",
+    });
+    try TmpStore.insertFixtureMutation(conn, .{
+        .sequence = 3,
+        .mutation_type = "add_dependency",
+        .item_id = "t1",
+        .payload_json = "{\"blocking_id\":\"t-other\"}",
+        .state = "skipped",
+        .failure_json = "{\"detail\":\"validation\"}",
+    });
+    try TmpStore.insertFixtureMutation(conn, .{
+        .sequence = 4,
+        .mutation_type = "update_ticket",
+        .item_id = "t1",
+        .payload_json = "{\"title\":\"A\",\"body\":\"\"}",
+        .state = "applied",
+    });
+}
+
+fn freeLogListRows(gpa: std.mem.Allocator, rows: []LogListRow) void {
+    for (rows) |r| r.deinit(gpa);
+    gpa.free(rows);
+}
+
+fn openLogTestDb() !zqlite.Conn {
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    errdefer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    return conn;
+}
+
+test "listMutationLog default: pending + failed + skipped (excludes applied)" {
+    const gpa = std.testing.allocator;
+    const conn = try openLogTestDb();
+    defer conn.close();
+    try logSeedFixture(conn);
+
+    const rows = try listMutationLog(conn, gpa, .default);
+    defer freeLogListRows(gpa, rows);
+
+    try std.testing.expectEqual(@as(usize, 3), rows.len);
+    try std.testing.expectEqualStrings("pending", rows[0].state);
+    try std.testing.expectEqualStrings("failed", rows[1].state);
+    try std.testing.expectEqualStrings("skipped", rows[2].state);
+}
+
+test "listMutationLog pending filter returns only pending rows" {
+    const gpa = std.testing.allocator;
+    const conn = try openLogTestDb();
+    defer conn.close();
+    try logSeedFixture(conn);
+
+    const rows = try listMutationLog(conn, gpa, .pending);
+    defer freeLogListRows(gpa, rows);
+
+    try std.testing.expectEqual(@as(usize, 1), rows.len);
+    try std.testing.expectEqualStrings("pending", rows[0].state);
+    try std.testing.expectEqualStrings("gh-1", rows[0].target_display_id);
+    try std.testing.expectEqual(@as(?[]u8, null), rows[0].failure_detail);
+}
+
+test "listMutationLog failed filter decodes failure_detail" {
+    const gpa = std.testing.allocator;
+    const conn = try openLogTestDb();
+    defer conn.close();
+    try logSeedFixture(conn);
+
+    const rows = try listMutationLog(conn, gpa, .failed);
+    defer freeLogListRows(gpa, rows);
+
+    try std.testing.expectEqual(@as(usize, 1), rows.len);
+    const detail = rows[0].failure_detail orelse return error.ExpectedFailureDetail;
+    try std.testing.expectEqualStrings("HTTP 422", detail);
+}
+
+test "listMutationLog skipped filter returns skipped rows" {
+    const gpa = std.testing.allocator;
+    const conn = try openLogTestDb();
+    defer conn.close();
+    try logSeedFixture(conn);
+
+    const rows = try listMutationLog(conn, gpa, .skipped);
+    defer freeLogListRows(gpa, rows);
+
+    try std.testing.expectEqual(@as(usize, 1), rows.len);
+    try std.testing.expectEqualStrings("skipped", rows[0].state);
+}
+
+test "listMutationLog returns empty slice when no Mutations match" {
+    const gpa = std.testing.allocator;
+    const conn = try openLogTestDb();
+    defer conn.close();
+
+    const rows = try listMutationLog(conn, gpa, .default);
+    defer freeLogListRows(gpa, rows);
+    try std.testing.expectEqual(@as(usize, 0), rows.len);
+}
+
+test "showMutationLog returns the row with decoded failure detail" {
+    const gpa = std.testing.allocator;
+    const conn = try openLogTestDb();
+    defer conn.close();
+    try logSeedFixture(conn);
+
+    const detail = try showMutationLog(conn, gpa, 2);
+    defer detail.deinit(gpa);
+
+    try std.testing.expectEqual(@as(i64, 2), detail.sequence);
+    try std.testing.expectEqualStrings("failed", detail.state);
+    try std.testing.expectEqualStrings("set_item_status", detail.mutation_type);
+    try std.testing.expectEqualStrings("gh-1", detail.target_display_id);
+    try std.testing.expectEqualStrings("ticket", detail.item_class);
+    try std.testing.expectEqualStrings("HTTP 422", detail.failure_detail orelse return error.ExpectedFailureDetail);
+}
+
+test "showMutationLog returns MutationNotFound for missing sequence" {
+    const gpa = std.testing.allocator;
+    const conn = try openLogTestDb();
+    defer conn.close();
+    try logSeedFixture(conn);
+
+    try std.testing.expectError(error.MutationNotFound, showMutationLog(conn, gpa, 999));
+}

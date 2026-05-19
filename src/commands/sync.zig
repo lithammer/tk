@@ -7,7 +7,8 @@
 //! test block. Once real adapters land in their own slices this command
 //! becomes the production entry point unchanged.
 //!
-//! `tk sync log` calls the read helpers in src/sync/log.zig.
+//! `tk sync log` calls the read helpers in src/store/sync.zig
+//! (listMutationLog / showMutationLog), keeping all SQL inside src/store/.
 
 const std = @import("std");
 const cli = @import("../cli.zig");
@@ -15,8 +16,8 @@ const messages = @import("../messages.zig");
 const repository = @import("../store/repository.zig");
 const Diagnostic = @import("../store/diagnostic.zig").Diagnostic;
 const factory = @import("../remote/factory.zig");
+const store_sync = @import("../store/sync.zig");
 const sync_engine = @import("../sync/engine.zig");
-const sync_log = @import("../sync/log.zig");
 
 /// Dispatcher metadata for `tk sync`.
 pub const meta: cli.CommandMeta = .{
@@ -59,6 +60,59 @@ fn PeekableArgs(comptime Rest: type) type {
             return self.rest.next();
         }
     };
+}
+
+/// Dispatch one RunSyncError tag to a category-specific stderr message. The
+/// Diagnostic carries the bare value (display ID for DisplayIdCollision,
+/// captured CLI stderr for PullFailed, SQLite errmsg for storage errors) —
+/// this helper wraps it in the right prose so a future reader looking at
+/// `tk sync` output gets a sentence rather than a bare identifier.
+fn renderSyncError(stderr: *std.Io.Writer, err: anyerror, diag: *const Diagnostic, skip_id: ?i64) void {
+    switch (err) {
+        error.DisplayIdCollision => {
+            stderr.print(
+                "{s}{s}{s}\n",
+                .{ messages.sync_display_id_collision_prefix, diag.message(), messages.sync_display_id_collision_suffix },
+            ) catch {};
+        },
+        error.MutationNotFailed => {
+            const seq = skip_id orelse return;
+            stderr.print(
+                "{s}{d}{s}\n",
+                .{ messages.sync_skip_not_failed_prefix, seq, messages.sync_skip_not_failed_suffix },
+            ) catch {};
+        },
+        error.MutationNotFound => {
+            const seq = skip_id orelse return;
+            stderr.print(
+                "{s}{d}{s}\n",
+                .{ messages.sync_skip_not_found_prefix, seq, messages.sync_skip_not_found_suffix },
+            ) catch {};
+        },
+        error.MutationTypeUnknown, error.MutationPayloadVariantMissing => {
+            stderr.print("{s}\n", .{messages.sync_schema_drift}) catch {};
+        },
+        error.PullFailed => {
+            stderr.print("{s}", .{messages.sync_failure_prefix}) catch {};
+            if (diag.message().len > 0) {
+                stderr.print("{s}\n", .{diag.message()}) catch {};
+            } else {
+                stderr.print("Pull failed\n", .{}) catch {};
+            }
+        },
+        else => {
+            // Env failures (ExecutableNotFound, SpawnFailed, OutOfMemory) and
+            // generic SQLite errors fall through here. The Diagnostic captured
+            // the SQLite errmsg before any rollback; render it when present
+            // so the user sees the underlying cause beside the error tag.
+            stderr.print("{s}{s}", .{ messages.sync_failure_prefix, @errorName(err) }) catch {};
+            if (diag.message().len > 0) {
+                stderr.print(" — {s}\n", .{diag.message()}) catch {};
+            } else {
+                stderr.writeAll("\n") catch {};
+            }
+        },
+    }
 }
 
 fn writeHelp(deps: cli.Deps) !void {
@@ -160,12 +214,7 @@ fn runSync(deps: cli.Deps, args_iter: anytype) !u8 {
         .{ .skip_mutation_id = skip_id, .random = deps.random },
         &diag,
     ) catch |err| {
-        deps.stderr.print("{s}", .{messages.sync_failure_prefix}) catch {};
-        if (diag.message().len > 0) {
-            deps.stderr.print("{s}\n", .{diag.message()}) catch {};
-        } else {
-            deps.stderr.print("{s}\n", .{@errorName(err)}) catch {};
-        }
+        renderSyncError(deps.stderr, err, &diag, skip_id);
         return 1;
     };
 
@@ -180,7 +229,7 @@ fn runSync(deps: cli.Deps, args_iter: anytype) !u8 {
 }
 
 fn runLog(deps: cli.Deps, args_iter: anytype) !u8 {
-    var filter: sync_log.ListFilter = .default;
+    var filter: store_sync.LogListFilter = .default;
     var id_arg: ?[]const u8 = null;
     while (args_iter.next()) |arg| {
         if (std.mem.eql(u8, arg, "--pending")) {
@@ -202,7 +251,7 @@ fn runLog(deps: cli.Deps, args_iter: anytype) !u8 {
             deps.stderr.print("{s}\n", .{messages.sync_log_id_not_numeric}) catch {};
             return 2;
         };
-        const detail = sync_log.showMutation(store.conn, deps.gpa, seq) catch |err| switch (err) {
+        const detail = store_sync.showMutationLog(store.conn, deps.gpa, seq) catch |err| switch (err) {
             error.MutationNotFound => {
                 deps.stderr.print(
                     "{s}{d}{s}\n",
@@ -230,7 +279,7 @@ fn runLog(deps: cli.Deps, args_iter: anytype) !u8 {
         return 0;
     }
 
-    const rows = sync_log.listMutations(store.conn, deps.gpa, filter) catch |err| {
+    const rows = store_sync.listMutationLog(store.conn, deps.gpa, filter) catch |err| {
         repository.renderStorageError(deps.stderr, err, log_storage_msgs);
         return 1;
     };
