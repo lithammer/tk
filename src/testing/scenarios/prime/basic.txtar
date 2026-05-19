@@ -14,6 +14,7 @@ Run `tk prime` after compaction, clear, or a new agent session.
 - Promotion and sync are explicit, human-visible operations.
 - Use `tk next` to choose agent work.
 - Use `tk worktree` to inspect the current Workspace Scope.
+- Workspace Scope is not an implicit item target; pass explicit Display IDs to item commands.
 - Use `tk sync log` to inspect pending, failed, skipped, and applied Mutations.
 
 ## Session Start

@@ -155,8 +155,9 @@ default unless `--no-status` is used. The default path layout is recorded in
 [ADR 0007](./adr/0007-default-worktree-path-layout.md). Missing preflight checks
 are tracked by `ticket-15`; configurable path layout is tracked by `ticket-16`.
 
-Optional `[id]` fallback to Workspace Scope for `tk show`, `tk update`,
-`tk start`, `tk stop`, and `tk done` is tracked by `ticket-14`.
+Workspace Scope is a selection context, not an implicit item target. Commands
+that inspect, update, or promote a specific item require explicit Display IDs;
+agents should pass IDs selected by `tk next` or `tk list`.
 
 ## Remote Adapters and Sync
 
@@ -194,10 +195,7 @@ with `#`, `$NAME` / `${NAME}` env expansion, byte-exact output comparison, and
 Continue in small vertical slices. Backlog ownership lives in Local Tickets;
 this section only names the current implementation queue.
 
-1. `ticket-14` — Optional `<id>` wiring for the remaining lifecycle commands.
-   Loosen `tk show`, `tk update`, `tk start`, `tk stop`, and `tk done` to fall
-   back to Workspace Scope when omitted.
-2. `ticket-17` — Remote and sync skeleton. Implement the v1 `tk remote` surface,
+1. `ticket-17` — Remote and sync skeleton. Implement the v1 `tk remote` surface,
    `tk sync log`, and fake Backend Adapter tests before real `gh` or `acli`
    behavior. Coordinate with `ticket-11` for the persisted Mutation Failure /
    Adapter Failure shape.

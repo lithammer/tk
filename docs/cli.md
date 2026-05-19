@@ -5,7 +5,8 @@ This is the v1 command surface for `tk`.
 ## Global Rules
 
 - Any item ID argument resolves a current Display ID or Alias.
-- Commands with optional `[id]` use the current Workspace Scope target when omitted.
+- Workspace Scope constrains scope-aware commands such as `tk next`; it is not an implicit item target.
+- Commands that inspect, update, or promote a specific item require an explicit Display ID. Optional `[id]` forms are filters, not Workspace Scope fallbacks.
 - New Tickets and Epics are local by default.
 - Commands that affect upstream state or sync repair stay explicit.
 
@@ -54,7 +55,7 @@ The first paragraph becomes the title. Later paragraphs become the body.
 ```sh
 tk list [--ready | --blocked | --active] [--local | --remote]
 tk next
-tk show [id]
+tk show <id>
 ```
 
 `tk list` renders a tree:
@@ -79,6 +80,7 @@ tk show [id]
 - `--local` shows only Local Tickets and Local Epics.
 - `--remote` shows only items that have been promoted.
 - `--local` and `--remote` are mutually exclusive and may be combined with one of the readiness filters.
+
 These filters use the stored Origin. `--remote` may be empty before Promotion
 or Backend Pull has introduced backend-origin items.
 When a readiness filter and an Origin filter are combined, the filters compose
@@ -130,7 +132,7 @@ Assignees are not readiness or ordering inputs; Assignee support is deferred
 and may be omitted entirely.
 
 `tk next` does not explain skipped candidates or ranking reasons. Use `tk list
---ready`, `tk list --blocked`, or `tk show` for inspection.
+--ready`, `tk list --blocked`, or `tk show <id>` for inspection.
 
 `tk next` does not filter by Origin. Local Tickets and Backend Tickets compete
 in the same ready-work ordering.
@@ -174,12 +176,12 @@ it instead writes `tk next: no ready Tickets in Workspace Scope`.
 `tk next` is flagless in v1. Global ready-work inspection uses `tk list
 --ready`.
 
-`tk show [id]` shows one Ticket or Epic. If `id` is omitted, it shows the current Workspace Scope target.
+`tk show <id>` shows one Ticket or Epic by Display ID or Alias.
 
 ## Update
 
 ```sh
-tk update [id] [--priority P0..P4] [--parent <epic-id> | --no-parent] (-m <paragraph>... | -F <file | ->)
+tk update <id> [--priority P0..P4] [--parent <epic-id> | --no-parent] (-m <paragraph>... | -F <file | ->)
 ```
 
 Updates title/body, local-only Priority, or Epic membership.
@@ -194,9 +196,9 @@ Updates title/body, local-only Priority, or Epic membership.
 ## Lifecycle
 
 ```sh
-tk start [id]
-tk stop [id]
-tk done [id]
+tk start <id>
+tk stop <id>
+tk done <id>
 ```
 
 - `tk start` marks a Ticket or Epic active.
@@ -226,7 +228,7 @@ Removed Dependency: <blocked-id> no longer blocked by <blocking-id>
 ## Promotion
 
 ```sh
-tk promote [id] [--children]
+tk promote <id> [--children]
 ```
 
 Promotes a Local Ticket or Local Epic through the configured Remote.

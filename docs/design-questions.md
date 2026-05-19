@@ -39,9 +39,9 @@ No open design questions.
 ### DQ-005: How should worktree creation and Workspace Scope inference work?
 
 **Status**: resolved
-**Decision**: Store Workspace Scope in git worktree config for v1. Configured scope takes precedence over read-only branch-name inference. Ticket-created branches use `tk/<display-id>-<slug>`. `tk worktree start <id> [path] [--no-status]` begins scoped work by creating a branch and git worktree, defaulting to a sibling worktree path, and setting status active unless `--no-status` is used. Configurable worktree root/layout is deferred from v1. `tk worktree` reports the active scope and whether its source is configured, inferred, or none. `tk worktree set <id>` writes Worktree Config, and `tk worktree clear` removes configured scope without disabling inferred scope.
+**Decision**: Store Workspace Scope in git worktree config for v1. Configured scope takes precedence over read-only branch-name inference. Ticket-created branches use `tk/<display-id>-<slug>`. `tk worktree start <id> [path] [--no-status]` begins scoped work by creating a branch and git worktree, defaulting to a sibling worktree path, and setting status active unless `--no-status` is used. Configurable worktree root/layout is deferred from v1. `tk worktree` reports the active scope and whether its source is configured, inferred, or none. `tk worktree set <id>` writes Worktree Config, and `tk worktree clear` removes configured scope without disabling inferred scope. Workspace Scope constrains `tk next` selection and worktree reporting; item-targeting commands require explicit Display IDs and do not default from Workspace Scope.
 **Recorded in**: CONTEXT.md.
-**Rationale**: Git worktree config avoids untracked per-workspace files, branch inference keeps manually created Ticket branches usable, and `tk start` provides a single intent command for beginning scoped work while still making git worktrees visible.
+**Rationale**: Git worktree config avoids untracked per-workspace files, branch inference keeps manually created Ticket branches usable, and `tk start` provides a single intent command for beginning scoped work while still making git worktrees visible. Explicit item targets avoid confusing Epic-scoped workspaces with current child Tickets and keep agent command flows predictable.
 
 ### DQ-006: What is the initial Mutation Type vocabulary?
 

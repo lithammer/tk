@@ -17,9 +17,9 @@ The goal is similar in spirit to Beads: make work visible to humans and agents f
 - Backend Adapters expose pull and apply-mutation operations; the sync engine owns ordering, cursors, retries, and failure policy.
 - The **Repository Store** is shared across workspaces for one repository and is untracked local state by default.
 - The Repository Store uses SQLite.
-- **Workspace Scope** is local-only and lets `tk` default reads to the current Ticket or Epic, usually from a git worktree context.
+- **Workspace Scope** is local-only and gives scope-aware commands repository context without becoming an implicit item target.
 - Workspace Scope is stored in git worktree config for v1, with read-only branch-name inference as a fallback.
-- `tk start [id]` marks work active; `tk stop [id]` moves active work back to open.
+- `tk start <id>` marks work active; `tk stop <id>` moves active work back to open.
 - `tk worktree start <id> [path]` creates a Ticket branch and scoped git worktree, defaulting to a sibling worktree path.
 - `tk worktree` reports or changes the current Workspace Scope stored in git worktree config.
 - `tk prime` prints static Markdown embedded from [src/commands/prime.md](./src/commands/prime.md) for new or compacted sessions.
@@ -52,7 +52,7 @@ Important distinctions:
   and External Blockers capture outside blockers.
 - `active` means current work. **Assignee** support is deferred and may be
   omitted entirely.
-- **Workspace Scope** is local-only and is not synced to backends.
+- **Workspace Scope** is local-only, is not synced to backends, and is not an implicit item target.
 
 ## Open Design Areas
 
@@ -89,7 +89,7 @@ tk add --priority P1 -F -               # creates a higher-priority local Ticket
 
 `tk next` selects the ready Ticket with the lowest local-only Priority, then oldest creation order, within the active Workspace Scope. It does not select Epics. The default Priority is `P2`.
 
-Priority is set with `tk add --priority P0..P4` or `tk update [id] --priority P0..P4`; v1 does not have a top-level priority command.
+Priority is set with `tk add --priority P0..P4` or `tk update <id> --priority P0..P4`; v1 does not have a top-level priority command.
 
 `tk list` defaults to a tree view: Epics are top-level rows, child Tickets are nested under their Epic, and unparented Tickets are top-level rows. `tk list --ready` keeps the tree shape and includes non-empty Epics as containers for ready child Tickets. Rows use decorative tree glyphs plus compact status, priority, and kind markers. They do not render Origin as a separate field; Local or Backend origin is normally inferred from the Display ID shape.
 

@@ -262,6 +262,7 @@ _Avoid_: ticket, tickets
   child **Ticket** readiness.
 - A **Workspace** may have zero or one **Workspace Scope**.
 - A **Workspace Scope** references exactly one **Ticket** or **Epic**.
+- **Workspace Scope** provides context for scoped selection and reporting; it is not an implicit target for item commands.
 - Whether **`tk list`** defaults to **Workspace Scope** is deferred from v1.
 - **Workspace Scope** is local-only and is not synced to backends.
 - **Workspace Scope** is stored in **Worktree Config** in v1.
@@ -283,9 +284,10 @@ _Avoid_: ticket, tickets
 - **`tk worktree`** reports the current **Workspace Scope** and **Workspace Scope Source**.
 - **`tk worktree set <id>`** writes **Workspace Scope** to **Worktree Config**.
 - **`tk worktree clear`** removes configured **Workspace Scope** without disabling **Inferred Workspace Scope**.
+- **`tk show`**, **`tk update`**, **`tk start`**, **`tk stop`**, **`tk done`**, and **`tk promote`** require an explicit **Display ID** in v1.
 - **Prime** provides agent workflow guidance, essential commands, and close-out reminders.
 - v1 **Prime** prints static command-owned Markdown embedded from `src/commands/prime.md` with Zig `@embedFile`.
-- Commands that inspect **Workspace Scope** identify the active **Workspace Scope**.
+- Commands that inspect **Workspace Scope** identify the active **Workspace Scope** and **Workspace Scope Source** rather than using scope as a hidden item target.
 - A **Repository Store** is shared by all **Workspaces** for the same version-control repository.
 - A **Workspace Scope** belongs to one **Workspace**, not the **Repository Store**.
 - A **Repository Store** is untracked local state by default.
@@ -369,8 +371,8 @@ _Avoid_: ticket, tickets
   separate from starting work.
 - **`tk next`** has no explicit scope argument; **Workspace Scope** is the
   only scoped selection input.
-- **Repository Store** supports scoped **`tk next`** selection before command
-  wiring for **Workspace Scope** discovery lands.
+- Store-facing **`tk next`** selection accepts a resolved **Workspace Scope**;
+  command code owns **Workspace Scope** discovery.
 - **`tk next`** is flagless in v1.
 - Done-item browsing is deferred until there is a concrete workflow for old
   completed work.
@@ -424,6 +426,9 @@ _Avoid_: ticket, tickets
 >
 > **Dev:** "How does an agent inspect the active **Workspace Scope**?"
 > **Domain expert:** "It runs **`tk worktree`**, which reports the **Workspace Scope** and **Workspace Scope Source**."
+>
+> **Dev:** "In an Epic-scoped **Workspace**, should **`tk done`** without an ID close the **Epic** or guess a child **Ticket**?"
+> **Domain expert:** "No — **Workspace Scope** is context for selection and reporting. Item commands require an explicit **Display ID**; agents should pass the ID from **`tk next`** or **`tk list`**."
 >
 > **Dev:** "Should each git worktree have its own ticket database?"
 > **Domain expert:** "No — all **Workspaces** for a repository share one **Repository Store**, while each **Workspace** has its own **Workspace Scope**."
@@ -500,6 +505,7 @@ _Avoid_: ticket, tickets
 - Dynamic **Prime** output was considered for v1 — resolved: v1 prints static command-owned Markdown from `src/commands/prime.md`.
 - Configurable worktree root and layout were considered for v1 — resolved: **`tk worktree start`** supports default sibling worktrees and explicit paths only.
 - Hiding scope origin was considered — resolved: **`tk worktree`** reports **Workspace Scope Source**.
+- Defaulting item commands from **Workspace Scope** was considered — resolved: **Workspace Scope** is not an implicit item target; commands that inspect, update, or promote a specific item require an explicit **Display ID** in v1.
 - "workspace store" and "global store" were considered for local state — resolved: a **Repository Store** is shared across all **Workspaces** for one repository.
 - Checked-in ticket state was considered for portability — resolved: the **Repository Store** is untracked local state by default.
 - "facade", "provider", and "connector" were considered for integrations — resolved: **Backend Adapter** maps domain concepts to a **Backend**.
