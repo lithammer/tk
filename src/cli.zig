@@ -76,6 +76,7 @@ const all_commands = .{
     @import("commands/unblock.zig"),
     @import("commands/update.zig"),
     @import("commands/worktree.zig"),
+    @import("commands/remote.zig"),
 };
 
 const remote_sync_slice = "Planned: remote and sync skeleton slice.";
@@ -84,7 +85,6 @@ const post_sync_slice = "Planned: later slice once Remote and sync are in place.
 const unimplemented_commands = [_]UnimplementedMeta{
     .{ .name = "promote", .description = "Promote a Local Ticket or Epic through the configured Remote", .tracking = post_sync_slice },
     .{ .name = "sync", .description = "Pull remote state and apply pending Mutations", .tracking = remote_sync_slice },
-    .{ .name = "remote", .description = "Inspect or configure the Remote", .tracking = remote_sync_slice },
 };
 
 /// Top-level subcommand enum generated from `all_commands` and

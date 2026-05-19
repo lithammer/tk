@@ -12,7 +12,9 @@ test {
     _ = @import("proc/runner.zig");
     _ = @import("proc/fake.zig");
     _ = @import("remote/adapter.zig");
+    _ = @import("remote/factory.zig");
     _ = @import("remote/fake.zig");
+    _ = @import("commands/remote.zig");
     _ = @import("domain/backend_item_snapshot.zig");
     _ = @import("domain/display_prefix.zig");
     _ = @import("domain/item_class.zig");

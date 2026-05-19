@@ -595,3 +595,79 @@ pub const worktree_start_out_of_memory = "tk worktree start: out of memory";
 
 /// Stderr line for non-transient Repository Store write failures.
 pub const worktree_start_write_failed = "tk worktree start: failed to update Repository Store";
+
+// `tk remote` — Remote configuration commands.
+
+/// Stdout line when no Remote is configured.
+pub const remote_status_none = "No Remote configured.";
+
+/// Stderr line for a missing Repository Store during `tk remote`.
+pub const remote_status_missing_store = "tk remote: Repository Store not initialized; run 'tk init'";
+
+/// Stderr line for busy/locked Repository Store during `tk remote`.
+pub const remote_status_store_busy_retry = "tk remote: Repository Store is busy; retry the command";
+
+/// Stderr line when allocation fails during a `tk remote` read.
+pub const remote_status_out_of_memory = "tk remote: out of memory";
+
+/// Stderr line for non-transient Repository Store read failures.
+pub const remote_status_read_failed = "tk remote: failed to read Repository Store";
+
+/// Stderr line when `tk remote set` is given an unknown backend kind.
+pub const remote_set_unknown_kind_prefix = "tk remote set: unknown backend kind '";
+
+/// Stderr suffix listing the known kinds.
+pub const remote_set_unknown_kind_suffix = "'; expected 'github' or 'jira'";
+
+/// Stderr line when required flags are missing for `tk remote set github`.
+pub const remote_set_github_repo_required = "tk remote set github: missing required --repo <owner/name>";
+
+/// Stderr line when --repo is malformed.
+pub const remote_set_github_repo_malformed = "tk remote set github: --repo must be 'owner/name'";
+
+/// Stderr line when required flags are missing for `tk remote set jira`.
+pub const remote_set_jira_required = "tk remote set jira: missing required --site <url> and --project <key>";
+
+/// Stderr prefix when the local Display ID prefix collides with the adapter's
+/// namespace. Caller appends the local prefix.
+pub const remote_set_prefix_collision_prefix = "tk remote set: local Display ID prefix '";
+
+/// Stderr suffix shared with the prefix-collision diagnostic.
+pub const remote_set_prefix_collision_suffix = "' collides with the adapter namespace; configurable prefix is tracked by ticket-22";
+
+/// Stderr line for a missing Repository Store during `tk remote set`.
+pub const remote_set_missing_store = "tk remote set: Repository Store not initialized; run 'tk init'";
+
+/// Stderr line for busy/locked Repository Store during `tk remote set`.
+pub const remote_set_store_busy_retry = "tk remote set: Repository Store is busy; retry the command";
+
+/// Stderr line when allocation fails during a `tk remote set` write.
+pub const remote_set_out_of_memory = "tk remote set: out of memory";
+
+/// Stderr line for non-transient Repository Store write failures during set.
+pub const remote_set_write_failed = "tk remote set: failed to update Repository Store";
+
+/// Stdout prefix when set succeeds. Caller appends e.g. "github (owner/repo)\n".
+pub const remote_set_success_prefix = "Configured Remote: ";
+
+/// Stderr prefix when clear is refused because pending or failed mutations exist.
+/// Caller appends the count number.
+pub const remote_clear_refused_prefix = "tk remote clear: ";
+
+/// Stderr suffix shared with the clear-refusal diagnostic.
+pub const remote_clear_refused_suffix = " Mutation(s) are pending or failed; run `tk sync` to apply them or `tk sync --skip <id>` to discard each one before clearing the Remote.";
+
+/// Stderr line for a missing Repository Store during `tk remote clear`.
+pub const remote_clear_missing_store = "tk remote clear: Repository Store not initialized; run 'tk init'";
+
+/// Stderr line for busy/locked Repository Store during `tk remote clear`.
+pub const remote_clear_store_busy_retry = "tk remote clear: Repository Store is busy; retry the command";
+
+/// Stderr line when allocation fails during a `tk remote clear` write.
+pub const remote_clear_out_of_memory = "tk remote clear: out of memory";
+
+/// Stderr line for non-transient Repository Store write failures during clear.
+pub const remote_clear_write_failed = "tk remote clear: failed to update Repository Store";
+
+/// Stdout line on clear success.
+pub const remote_clear_success = "Cleared Remote configuration.";

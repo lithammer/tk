@@ -809,7 +809,7 @@ pub fn createLocalTicket(
     };
 }
 
-fn queryTextAlloc(conn: zqlite.Conn, gpa: std.mem.Allocator, sql: []const u8) (migrations.QueryError || error{OutOfMemory})![]u8 {
+pub fn queryTextAlloc(conn: zqlite.Conn, gpa: std.mem.Allocator, sql: []const u8) (migrations.QueryError || error{OutOfMemory})![]u8 {
     if (try conn.row(sql, .{})) |r| {
         defer r.deinit();
         return gpa.dupe(u8, r.text(0));
