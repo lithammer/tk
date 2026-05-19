@@ -22,10 +22,15 @@ src/
   cli.zig                  top-level dispatch and shared Deps
   messages.zig             stable user-visible substrings
   commands/                per-command parsing and handlers
-  domain/                  pure domain enums and helpers
+  domain/                  pure domain enums and helpers (incl. sync contract
+                           types: MutationPayload, MutationView,
+                           BackendItemSnapshot, Outcome, Diagnostic)
   git/                     Git subprocess discovery façade
   proc/                    subprocess runner abstraction and fakes
-  store/                   Repository Store, migrations, Mutations
+  remote/                  Backend Adapter trait, factory, and FakeAdapter
+  store/                   Repository Store, migrations, Mutation Log, and
+                           sync helpers
+  sync/                    sync engine orchestration
   worktree/                Workspace Scope storage and discovery
   testing/                 CLI harnesses, txtar runner, smoke tests
 ```
@@ -41,16 +46,27 @@ small boundary module after the second caller proves the shape.
 - `cli.zig` owns top-level routing only. The command tuple is the single place
   to register a command module; help text and dispatch derive from it.
 - `commands/<cmd>.zig` owns that command's zig-clap spec, command-specific
-  validation, rendering, and calls into store/worktree/git helpers.
+  validation, rendering, and calls into store/worktree/git/remote/sync helpers.
 - `domain/` stays pure: no SQLite, filesystem paths, Git, subprocesses, or
-  command rendering.
+  command rendering. Houses the Ticket vocabulary types and the
+  infrastructure-free sync contract types shared by `store/`, `remote/`,
+  and `sync/`.
 - `proc/` captures subprocess output for callers to classify. Commands should
   not stream Git or Backend Adapter subprocess output directly to user writers.
 - `git/` classifies Git discovery outcomes and keeps shared Git diagnostic
   phrasing out of command modules.
 - `store/` owns Repository Store opening, migrations, current-state reads and
   writes, Display ID / Alias resolution, sequence allocation, and Mutation Log
-  persistence.
+  persistence. `store/sync.zig` exposes the SQL helpers the sync engine and
+  the `tk sync` / `tk remote` commands compose against.
+- `remote/` owns the type-erased Backend Adapter trait (mirroring
+  `proc.Runner`), the factory that dispatches by configured backend kind, and
+  the FakeAdapter used by engine tests. It imports `store/`, `proc/`, and
+  `domain/` but never `sync/`.
+- `sync/` owns the engine that composes Adapter Pull and Apply with the
+  store's sync helpers. Single entry point `sync.engine.runSync`; the engine
+  reaches the database only through `store/sync.zig` helpers, never via raw
+  SQL.
 - `worktree/` owns Workspace Scope storage, branch-name inference, and slug
   derivation. Commands compose its free functions rather than growing a service
   object prematurely.
@@ -94,9 +110,11 @@ Important stable contracts:
 - `external_blockers` stores blockers with explicit resolution state. The store
   and read views exist; command surface is tracked by `ticket-19`.
 - `mutations` stores durable backend intent with a monotonic Mutation Sequence,
-  state, JSON payload, and optional Mutation Failure JSON.
-- `remotes` and `sync_cursors` are present for the v1 single Remote model;
-  command and sync wiring is tracked by `ticket-17`.
+  state, JSON payload, and optional Mutation Failure JSON. The persisted
+  failure JSON shape is `{"detail": "..."}` ([ADR
+  0009](./adr/0009-sync-failure-taxonomy.md)); `ticket-11` graduates this into
+  a typed discriminated union.
+- `remotes` and `sync_cursors` hold the v1 singleton Remote model.
 - `store_config.display_prefix` controls newly generated local Display IDs.
   Custom prefix configuration is tracked by `ticket-22`.
 
@@ -120,29 +138,6 @@ sequence for Tickets and Epics: `<store-prefix>-<n>`. The prefix identifies the
 local repository context, not item class. Containment lives in `items`, not in
 Display ID structure.
 
-## Command Status
-
-Current command modules exist for:
-
-- `tk prime`
-- `tk init`
-- `tk add`
-- `tk list`
-- `tk next`
-- `tk show`
-- `tk update`
-- `tk start`, `tk stop`, `tk done`
-- `tk block`, `tk unblock`
-- `tk worktree`, `tk worktree set`, `tk worktree clear`, `tk worktree start`
-
-`docs/cli.md` describes the v1 target surface. Some target commands or flags
-remain backlog work; use `./zig-out/bin/tk list` and each ticket body for the
-active implementation plan.
-
-Commands write primary output to stdout and diagnostics to stderr. Stable
-user-observable substrings live in `src/messages.zig` so command code and tests
-share phrasing.
-
 ## Workspace Scope and Worktrees
 
 Workspace Scope is local-only and stored in git Worktree Config in v1. Worktree
@@ -158,49 +153,6 @@ are tracked by `ticket-15`; configurable path layout is tracked by `ticket-16`.
 Workspace Scope is a selection context, not an implicit item target. Commands
 that inspect, update, or promote a specific item require explicit Display IDs;
 agents should pass IDs selected by `tk next` or `tk list`.
-
-## Remote Adapters and Sync
-
-Backend Adapters expose only Backend Pull and Mutation Apply. The sync engine
-owns ordering, Sync Cursors, retries, failures, skips, and conflict policy.
-Adapters call external CLIs such as `gh` and `acli` through the injectable
-subprocess runner.
-
-The module split is one-way: `src/sync/` (engine, log views) imports
-`src/remote/` (adapter trait, factory, fake) and `src/store/`; `src/remote/`
-imports `src/store/` and `src/proc/` but never `src/sync/`. Adapters and the
-engine reach the database through `src/store/repository.zig` helpers rather
-than touching SQL directly. The adapter trait is type-erased (`context:
-*anyopaque` + `vtable`), mirroring `proc.Runner`; the engine decodes
-`mutations.payload_json` into a typed `MutationView` so adapters switch on the
-variant rather than parsing JSON.
-
-Sync failures are split into three categories per [ADR
-0009](./adr/0009-sync-failure-taxonomy.md), distinguished by what the engine
-does with them rather than by speculative classification of subprocess output:
-
-- **Catastrophic env failures** (`ExecutableNotFound`, `SpawnFailed`,
-  `OutOfMemory`) are bare error tags; engine renders to stderr and exits 1
-  with no state change.
-- **Pull failed mid-sync** (`PullError.PullFailed` + `?*Diagnostic` carrying
-  captured stderr) is rendered and stops the sync run; no mutation transitions
-  because Pull is not tied to a specific Mutation row.
-- **Apply failed for a specific Mutation** (`Outcome.failure { detail }`) is
-  persisted to `mutations.failure_json` and stops the sync run. `Failure`'s
-  `detail` field is the forward-compatible placeholder that `ticket-11`
-  graduates into a typed discriminated union without changing the engine
-  persistence step.
-
-Backend Pull merges snapshots into `items` under one transaction per [ADR
-0010](./adr/0010-pull-merge-skips-items-with-pending-mutations.md): if any
-`pending` or `failed` Mutation targets the snapshot's `(item_id, item_class)`,
-skip the whole row and let Apply reconcile; otherwise overwrite `title`,
-`body`, `status`, `updated_at`. Absence from the snapshot list is a no-op —
-v1 does not infer deletions. Container relations (Epic membership) are not
-returned by Pull in v1.
-
-The Remote/sync skeleton is tracked by `ticket-17`; the persisted Mutation
-Failure / Adapter Failure record shape is tracked by `ticket-11`.
 
 ## Testing
 
@@ -222,30 +174,3 @@ The txtar script runner follows the `testscript`-style tokenizer documented in
 `src/testing/script.zig`: whitespace splitting, single-quote literals, comments
 with `#`, `$NAME` / `${NAME}` env expansion, byte-exact output comparison, and
 `TK_UPDATE=1` snapshot rewriting.
-
-## Next Slices
-
-Continue in small vertical slices. Backlog ownership lives in Local Tickets;
-this section only names the current implementation queue.
-
-1. `ticket-17` — Remote and sync skeleton. Implement the v1 `tk remote` surface,
-   `tk sync log`, and fake Backend Adapter tests before real `gh` or `acli`
-   behavior. Coordinate with `ticket-11` for the persisted Mutation Failure /
-   Adapter Failure shape.
-
-## Deferred Backlog
-
-Deferred implementation work is tracked as Local Tickets so it remains visible
-to `tk list` / `tk next` instead of living only in this document. The ticket body
-is the source of truth for each deferred item.
-
-- `ticket-18` — Dynamic `tk prime` sections.
-- `ticket-19` — External Blocker create/resolve CLI.
-- `ticket-20` — Promotion behavior for existing Local Dependencies.
-- `ticket-21` — Comments, labels, and assignees.
-- `ticket-22` — Custom local Display ID prefix configuration.
-- `ticket-23` — Force sync or conflict resolution.
-- `ticket-24` — Multiple Remotes.
-- `ticket-25` — Non-git Workspace Scope storage.
-- `ticket-26` — Cross-repository local import/export.
-- `ticket-16` — Configurable worktree path layout for `tk worktree start`.
