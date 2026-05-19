@@ -9,6 +9,7 @@ const proc = @import("../proc/runner.zig");
 const migrations = @import("migrations.zig");
 const mutations_mod = @import("mutations.zig");
 const sequences = @import("sequences.zig");
+const Diagnostic = @import("diagnostic.zig").Diagnostic;
 const Priority = @import("../domain/priority.zig").Priority;
 const ItemStatus = @import("../domain/status.zig").ItemStatus;
 const TicketKind = @import("../domain/ticket_kind.zig").TicketKind;
@@ -3261,20 +3262,13 @@ test "updateItem: Backend Epic title change emits update_epic Mutation" {
 // Sync helpers (Remote configuration, backend-snapshot merge, Mutation Log)
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Diagnostic out-param for `mergeBackendSnapshots`.
-///
-/// On `MergeError.DisplayIdCollision` the caller passes `&failure` and the
-/// helper writes the offending Display ID (allocated with the caller's `gpa`,
-/// caller frees) so the engine can render which snapshot triggered the
-/// conflict. See AGENTS.md "Mutation Failure record" guidance — this is the
-/// ephemeral on-the-stack shape, not the persisted JSON one.
-pub const MergeFailure = struct {
-    display_id: []const u8,
-};
-
 /// Error set returned by `mergeBackendSnapshots`.
 pub const MergeError = migrations.QueryError || zqlite.Error || error{
     OutOfMemory,
+    /// A snapshot's `display_id` collided with an existing `item_ids.value`
+    /// (a Display ID or Alias already claimed by another Item). The caller's
+    /// optional `?*Diagnostic` carries the colliding Display ID so the engine
+    /// can render `Display ID '<value>' already claimed by an existing Item`.
     DisplayIdCollision,
 };
 
@@ -3286,8 +3280,8 @@ pub const MergeError = migrations.QueryError || zqlite.Error || error{
 ///     `created_seq` allocated from `item_created_seq`. Also INSERT the
 ///     `item_ids` resolver row with `source='display'`. On a unique
 ///     violation against an existing Display ID the helper returns
-///     `MergeError.DisplayIdCollision`; if `failure_out` is non-null it is
-///     populated with a `gpa`-owned copy of the colliding Display ID.
+///     `MergeError.DisplayIdCollision`; if `diag` is non-null it captures
+///     the colliding Display ID for engine rendering.
 ///   - B: match exists AND a pending/failed Mutation references it → SKIP
 ///     UPDATE. The Mutation Log is the source of truth for in-flight edits.
 ///   - C: match exists with no in-flight Mutations → UPDATE title, body,
@@ -3309,10 +3303,18 @@ pub fn mergeBackendSnapshots(
     random: std.Random,
     snapshots: []const BackendItemSnapshot,
     now: []const u8,
-    failure_out: ?*MergeFailure,
+    diag: ?*Diagnostic,
 ) MergeError!void {
     try conn.execNoArgs("begin immediate");
-    errdefer conn.rollback();
+    // On DisplayIdCollision the explicit `diag.capture(snap.display_id)` below
+    // has already written the more useful value; the `collision_captured` flag
+    // tells the errdefer block to skip the generic SQL errmsg capture so we
+    // don't stomp the better diagnostic.
+    var collision_captured: bool = false;
+    errdefer {
+        if (!collision_captured) migrations.captureError(conn, diag);
+        conn.rollback();
+    }
 
     for (snapshots) |snap| {
         const match = try conn.row(
@@ -3320,8 +3322,8 @@ pub fn mergeBackendSnapshots(
         , .{ snap.backend_kind, snap.backend_key });
 
         if (match) |row| {
+            defer row.deinit();
             const item_id = try gpa.dupe(u8, row.text(0));
-            row.deinit();
             defer gpa.free(item_id);
 
             // Scenario B: skip if any pending/failed Mutation targets this Item.
@@ -3394,10 +3396,9 @@ pub fn mergeBackendSnapshots(
             .{ snap.display_id, id, now },
         ) catch |err| switch (err) {
             error.ConstraintUnique, error.ConstraintPrimaryKey => {
-                if (failure_out) |out| {
-                    out.* = .{ .display_id = try gpa.dupe(u8, snap.display_id) };
-                }
-                return MergeError.DisplayIdCollision;
+                if (diag) |d| d.capture(snap.display_id);
+                collision_captured = true;
+                return error.DisplayIdCollision;
             },
             else => return err,
         };
@@ -3405,6 +3406,23 @@ pub fn mergeBackendSnapshots(
 
     try conn.commit();
 }
+
+/// Error set returned by `loadApplicableMutations`.
+pub const LoadApplicableError = migrations.QueryError || zqlite.Error || std.json.ParseError(std.json.Scanner) || error{
+    OutOfMemory,
+    /// SQL CHECK accepted a `mutation_type` text value that the Zig
+    /// `MutationType` enum does not decode — fires when schema and enum
+    /// drift (a future migration widened the CHECK without extending the
+    /// enum).
+    MutationTypeUnknown,
+    /// `mutation_type` decoded to a `MutationType` value, but the
+    /// `MutationPayload` union does not yet have a matching variant. Fires
+    /// today for `promote_ticket`, `promote_epic`, `add_external_blocker`,
+    /// and `resolve_external_blocker` — a forward-compatibility guard so
+    /// future slices that grow `MutationPayload` cannot accidentally cause
+    /// the engine to silently skip undecodable rows.
+    MutationPayloadVariantMissing,
+};
 
 /// Decode the typed Mutation Log entries the engine should attempt to
 /// (re)apply.
@@ -3420,12 +3438,6 @@ pub fn mergeBackendSnapshots(
 /// (`promote_ticket`, `promote_epic`, `add_external_blocker`,
 /// `resolve_external_blocker`) return `error.MutationPayloadVariantMissing`
 /// — the engine recognises the schema-allowed kind but has no projection.
-pub const LoadApplicableError = migrations.QueryError || zqlite.Error || std.json.ParseError(std.json.Scanner) || error{
-    OutOfMemory,
-    MutationTypeUnknown,
-    MutationPayloadVariantMissing,
-};
-
 pub fn loadApplicableMutations(
     conn: zqlite.Conn,
     gpa: std.mem.Allocator,
@@ -3569,7 +3581,10 @@ pub fn advanceSyncCursor(
 /// Error set returned by `applyMutationOutcome`.
 pub const ApplyMutationOutcomeError = migrations.QueryError || zqlite.Error || error{
     OutOfMemory,
+    /// No `mutations` row matches the supplied `sequence`.
     MutationNotFound,
+    /// The matched row's prior state is `applied` or `skipped` — the engine
+    /// must never request a transition out of these terminal states.
     MutationNotApplicable,
 };
 
@@ -3593,24 +3608,24 @@ pub fn applyMutationOutcome(
     sequence: i64,
     outcome: Outcome,
     now: []const u8,
+    diag: ?*Diagnostic,
 ) ApplyMutationOutcomeError!void {
     try conn.execNoArgs("begin immediate");
-    errdefer conn.rollback();
+    errdefer {
+        migrations.captureError(conn, diag);
+        conn.rollback();
+    }
 
     const state_row = (try conn.row(
         "select state from mutations where sequence = ?1",
         .{sequence},
-    )) orelse {
-        conn.rollback();
-        return error.MutationNotFound;
-    };
+    )) orelse return error.MutationNotFound;
     const prior_text = state_row.text(0);
     const prior_is_pending = std.mem.eql(u8, prior_text, "pending");
     const prior_is_failed = std.mem.eql(u8, prior_text, "failed");
     state_row.deinit();
 
     if (!prior_is_pending and !prior_is_failed) {
-        conn.rollback();
         return error.MutationNotApplicable;
     }
 
@@ -3625,10 +3640,14 @@ pub fn applyMutationOutcome(
             try advanceSyncCursor(conn, sequence, now);
         },
         .failure => |failure| {
+            // escape_unicode = true escapes all non-ASCII bytes as \uXXXX so
+            // arbitrary CLI stderr (potentially non-UTF-8 or containing
+            // control bytes) survives the schema's `json_valid(failure_json)`
+            // check.
             const failure_json = try std.json.Stringify.valueAlloc(
                 gpa,
                 .{ .detail = failure.detail },
-                .{},
+                .{ .escape_unicode = true },
             );
             defer gpa.free(failure_json);
 
@@ -3655,7 +3674,10 @@ pub fn applyMutationOutcome(
 
 /// Error set returned by `markMutationSkipped`.
 pub const MarkSkippedError = migrations.QueryError || zqlite.Error || error{
+    /// No `mutations` row matches the supplied `sequence`.
     MutationNotFound,
+    /// The matched row's prior state is not `failed`. Skipping is only a
+    /// curation tool for mutations the backend has already rejected.
     MutationNotFailed,
 };
 
@@ -3670,22 +3692,22 @@ pub fn markMutationSkipped(
     conn: zqlite.Conn,
     sequence: i64,
     now: []const u8,
+    diag: ?*Diagnostic,
 ) MarkSkippedError!void {
     try conn.execNoArgs("begin immediate");
-    errdefer conn.rollback();
+    errdefer {
+        migrations.captureError(conn, diag);
+        conn.rollback();
+    }
 
     const state_row = (try conn.row(
         "select state from mutations where sequence = ?1",
         .{sequence},
-    )) orelse {
-        conn.rollback();
-        return error.MutationNotFound;
-    };
+    )) orelse return error.MutationNotFound;
     const is_failed = std.mem.eql(u8, state_row.text(0), "failed");
     state_row.deinit();
 
     if (!is_failed) {
-        conn.rollback();
         return error.MutationNotFailed;
     }
 
@@ -3712,9 +3734,13 @@ pub fn setRemote(
     backend_kind: []const u8,
     config_json: []const u8,
     now: []const u8,
+    diag: ?*Diagnostic,
 ) SetRemoteError!void {
     try conn.execNoArgs("begin immediate");
-    errdefer conn.rollback();
+    errdefer {
+        migrations.captureError(conn, diag);
+        conn.rollback();
+    }
 
     const existing = try conn.row(
         "select 1 from remotes where name = 'primary'",
@@ -3750,9 +3776,13 @@ pub fn setRemote(
 /// Calling this with neither row present is a no-op.
 pub fn clearRemote(
     conn: zqlite.Conn,
+    diag: ?*Diagnostic,
 ) (migrations.QueryError || zqlite.Error)!void {
     try conn.execNoArgs("begin immediate");
-    errdefer conn.rollback();
+    errdefer {
+        migrations.captureError(conn, diag);
+        conn.rollback();
+    }
 
     try conn.exec(
         "delete from sync_cursors where remote_name = 'primary'",
@@ -3834,13 +3864,6 @@ pub fn pendingOrFailedMutationCount(
 // Sync helper tests
 // ──────────────────────────────────────────────────────────────────────────────
 
-// Tests for sync helpers share a deterministic PRNG so internal IDs are
-// stable across runs. Each test seeds its own instance to keep test order
-// independence intact.
-fn testRandom(prng: *std.Random.DefaultPrng) std.Random {
-    return prng.random();
-}
-
 test "mergeBackendSnapshots: scenario A inserts a new backend-origin item" {
     const gpa = std.testing.allocator;
     var prng = std.Random.DefaultPrng.init(0);
@@ -3863,7 +3886,7 @@ test "mergeBackendSnapshots: scenario A inserts a new backend-origin item" {
             .backend_updated_at = "2026-05-19T00:00:00Z",
         },
     };
-    try mergeBackendSnapshots(conn, gpa, testRandom(&prng), &snapshots, "2026-05-19T00:00:00Z", null);
+    try mergeBackendSnapshots(conn, gpa, prng.random(), &snapshots, "2026-05-19T00:00:00Z", null);
 
     const r = (try conn.row(
         \\select i.display_value, i.title, i.body, i.status, i.origin, i.backend_kind, i.backend_key,
@@ -3951,7 +3974,7 @@ test "mergeBackendSnapshots: scenario B skips items with pending or failed mutat
             .backend_updated_at = "2026-05-19T00:00:00Z",
         },
     };
-    try mergeBackendSnapshots(conn, gpa, testRandom(&prng), &snapshots, "2026-05-19T00:00:00Z", null);
+    try mergeBackendSnapshots(conn, gpa, prng.random(), &snapshots, "2026-05-19T00:00:00Z", null);
 
     const r1 = (try conn.row("select title, status from items where id = 't1'", .{})) orelse return error.ExpectedRow;
     defer r1.deinit();
@@ -3999,7 +4022,7 @@ test "mergeBackendSnapshots: scenario C overwrites title/body/status when no in-
             .backend_updated_at = "2026-05-19T00:00:00Z",
         },
     };
-    try mergeBackendSnapshots(conn, gpa, testRandom(&prng), &snapshots, "2026-05-19T05:00:00Z", null);
+    try mergeBackendSnapshots(conn, gpa, prng.random(), &snapshots, "2026-05-19T05:00:00Z", null);
 
     const r = (try conn.row(
         "select title, body, status, display_value, updated_at from items where id = 't1'",
@@ -4044,14 +4067,14 @@ test "mergeBackendSnapshots: scenario D leaves local backend rows alone when sna
     });
 
     const snapshots = [_]BackendItemSnapshot{};
-    try mergeBackendSnapshots(conn, gpa, testRandom(&prng), &snapshots, "2026-05-19T00:00:00Z", null);
+    try mergeBackendSnapshots(conn, gpa, prng.random(), &snapshots, "2026-05-19T00:00:00Z", null);
 
     const count_row = (try conn.row("select count(*) from items", .{})) orelse return error.ExpectedRow;
     defer count_row.deinit();
     try std.testing.expectEqual(@as(i64, 2), count_row.int(0));
 }
 
-test "mergeBackendSnapshots: DisplayIdCollision populates failure_out and rolls back" {
+test "mergeBackendSnapshots: DisplayIdCollision captures display_id in diag and rolls back" {
     const gpa = std.testing.allocator;
     var prng = std.Random.DefaultPrng.init(0);
     const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
@@ -4087,14 +4110,13 @@ test "mergeBackendSnapshots: DisplayIdCollision populates failure_out and rolls 
         },
     };
 
-    var failure: MergeFailure = .{ .display_id = &.{} };
+    var diag: Diagnostic = .{};
     try std.testing.expectError(
         MergeError.DisplayIdCollision,
-        mergeBackendSnapshots(conn, gpa, testRandom(&prng), &snapshots, "2026-05-19T00:00:00Z", &failure),
+        mergeBackendSnapshots(conn, gpa, prng.random(), &snapshots, "2026-05-19T00:00:00Z", &diag),
     );
-    defer gpa.free(failure.display_id);
 
-    try std.testing.expectEqualStrings("gh-1", failure.display_id);
+    try std.testing.expectEqualStrings("gh-1", diag.message());
 
     // Rollback left only the pre-existing item.
     const count_row = (try conn.row("select count(*) from items", .{})) orelse return error.ExpectedRow;
@@ -4310,7 +4332,7 @@ test "applyMutationOutcome: pending+success → applied, advances Sync Cursor" {
         .state = "pending",
     });
 
-    try applyMutationOutcome(conn, gpa, 1, .{ .success = .{} }, "2026-05-19T01:00:00Z");
+    try applyMutationOutcome(conn, gpa, 1, .{ .success = .{} }, "2026-05-19T01:00:00Z", null);
 
     const r = (try conn.row(
         "select state, failure_json, state_changed_at from mutations where sequence = 1",
@@ -4368,6 +4390,7 @@ test "applyMutationOutcome: pending+failure → failed records detail" {
         1,
         .{ .failure = .{ .detail = detail } },
         "2026-05-19T02:00:00Z",
+        null,
     );
 
     const r = (try conn.row(
@@ -4419,7 +4442,7 @@ test "applyMutationOutcome: failed+success → applied, advances Sync Cursor" {
         .failure_json = "{\"detail\":\"old\"}",
     });
 
-    try applyMutationOutcome(conn, gpa, 1, .{ .success = .{} }, "2026-05-19T03:00:00Z");
+    try applyMutationOutcome(conn, gpa, 1, .{ .success = .{} }, "2026-05-19T03:00:00Z", null);
 
     const r = (try conn.row(
         "select state, failure_json from mutations where sequence = 1",
@@ -4476,6 +4499,7 @@ test "applyMutationOutcome: failed+failure refreshes detail without state change
         1,
         .{ .failure = .{ .detail = detail } },
         "2026-05-19T04:00:00Z",
+        null,
     );
 
     const r = (try conn.row(
@@ -4521,7 +4545,7 @@ test "markMutationSkipped: failed → skipped" {
         .failure_json = "{\"detail\":\"boom\"}",
     });
 
-    try markMutationSkipped(conn, 1, "2026-05-19T05:00:00Z");
+    try markMutationSkipped(conn, 1, "2026-05-19T05:00:00Z", null);
 
     const r = (try conn.row(
         "select state, state_changed_at from mutations where sequence = 1",
@@ -4559,7 +4583,7 @@ test "markMutationSkipped: pending → MutationNotFailed" {
 
     try std.testing.expectError(
         error.MutationNotFailed,
-        markMutationSkipped(conn, 1, "2026-05-19T05:00:00Z"),
+        markMutationSkipped(conn, 1, "2026-05-19T05:00:00Z", null),
     );
 
     const r = (try conn.row("select state from mutations where sequence = 1", .{})) orelse return error.ExpectedRow;
@@ -4575,7 +4599,7 @@ test "markMutationSkipped: missing sequence → MutationNotFound" {
 
     try std.testing.expectError(
         error.MutationNotFound,
-        markMutationSkipped(conn, 42, "2026-05-19T05:00:00Z"),
+        markMutationSkipped(conn, 42, "2026-05-19T05:00:00Z", null),
     );
 }
 
@@ -4587,7 +4611,7 @@ test "setRemote then getRemote: round-trip and replace preserves created_at" {
     try conn.execNoArgs("pragma foreign_keys = on");
     try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
 
-    try setRemote(conn, "github", "{\"owner\":\"o\",\"repo\":\"r\"}", "2026-05-19T00:00:00Z");
+    try setRemote(conn, "github", "{\"owner\":\"o\",\"repo\":\"r\"}", "2026-05-19T00:00:00Z", null);
 
     {
         const got = (try getRemote(conn, gpa)) orelse return error.ExpectedRemote;
@@ -4607,7 +4631,7 @@ test "setRemote then getRemote: round-trip and replace preserves created_at" {
     try std.testing.expectEqualStrings("2026-05-19T00:00:00Z", created_at_1);
 
     // Replace: updated_at advances, created_at is preserved, Sync Cursor untouched.
-    try setRemote(conn, "jira", "{\"project\":\"PROJ\"}", "2026-05-19T06:00:00Z");
+    try setRemote(conn, "jira", "{\"project\":\"PROJ\"}", "2026-05-19T06:00:00Z", null);
 
     {
         const got = (try getRemote(conn, gpa)) orelse return error.ExpectedRemote;
@@ -4647,10 +4671,10 @@ test "clearRemote: deletes both rows; no-op when neither exists" {
     try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
 
     // No-op when nothing is configured.
-    try clearRemote(conn);
+    try clearRemote(conn, null);
 
-    try setRemote(conn, "github", "{\"owner\":\"o\",\"repo\":\"r\"}", "2026-05-19T00:00:00Z");
-    try clearRemote(conn);
+    try setRemote(conn, "github", "{\"owner\":\"o\",\"repo\":\"r\"}", "2026-05-19T00:00:00Z", null);
+    try clearRemote(conn, null);
 
     try std.testing.expectEqual(@as(?RemoteRow, null), try getRemote(conn, gpa));
 
@@ -4699,6 +4723,6 @@ test "pendingOrFailedMutationCount: 0, 1 pending, 1 failed, 0 after marking skip
     , .{});
     try std.testing.expectEqual(@as(i64, 1), try pendingOrFailedMutationCount(conn));
 
-    try markMutationSkipped(conn, 1, "2026-05-19T07:00:00Z");
+    try markMutationSkipped(conn, 1, "2026-05-19T07:00:00Z", null);
     try std.testing.expectEqual(@as(i64, 0), try pendingOrFailedMutationCount(conn));
 }
