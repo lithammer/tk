@@ -22,3 +22,13 @@ jobs:
         with:
           version: 0.16.0
       - run: zig build test --summary all
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # install.sh must stay POSIX (runs under /bin/sh on macOS, Alpine,
+      # etc.) so it is checked with `-s sh`. smoke.sh is bash and uses the
+      # default dialect detected from its shebang.
+      - run: shellcheck -s sh scripts/install.sh
+      - run: shellcheck scripts/smoke.sh
