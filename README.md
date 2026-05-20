@@ -6,6 +6,20 @@ The goal is similar in spirit to Beads: make work visible to humans and agents f
 
 Supported platforms: Linux, Windows, Windows (ARM), and macOS.
 
+## Install
+
+Linux and macOS:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/lithammer/ticket/main/scripts/install.sh | sh
+```
+
+Re-running the same line upgrades to the latest release.
+
+Windows: download the matching `tk-x86_64-windows-gnu.exe` or
+`tk-aarch64-windows-gnu.exe` from the [latest release](https://github.com/lithammer/ticket/releases/latest)
+and place it on your `PATH`.
+
 ## Current Design
 
 - Ticket is implemented in Zig 0.16.
