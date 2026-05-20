@@ -145,3 +145,32 @@ test "smoke: tk add creates a local Ticket from a message file" {
 // directory inside a checkout is awkward. The real-git success path here
 // is the only check that exercises argv plumbing, Git subprocess discovery,
 // filesystem writes, and SQLite linkage end-to-end.
+
+// The release manpage is built into the binary via `@embedFile`. This
+// subprocess test is the only pre-merge layer that catches a regression in
+// that wiring against the linked binary, per the file preamble. The
+// in-process tests in `commands/manpage.zig` cannot observe a build.zig
+// embed regression because they run against the test binary, which sees
+// the same anonymous module.
+test "smoke: tk manpage prints the embedded manpage bytes" {
+    const gpa = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const tk_abs = try absoluteTkPath(gpa);
+    defer gpa.free(tk_abs);
+
+    const tk_manpage = try runProcess(gpa, &.{ tk_abs, "manpage" }, tmp.dir);
+    defer freeRunResult(gpa, tk_manpage);
+    if (!std.meta.eql(tk_manpage.term, std.process.Child.Term{ .exited = 0 })) {
+        std.debug.print("\ntk manpage unexpected exit {any}\nstdout:\n{s}\nstderr:\n{s}\n", .{ tk_manpage.term, tk_manpage.stdout, tk_manpage.stderr });
+        return error.SmokeManpageFailed;
+    }
+    // Two anchors: man-page header macro at the top, EXIT STATUS section
+    // somewhere later. Cheap to maintain and sufficient to prove the bytes
+    // came through the embed pipeline rather than a stub.
+    try std.testing.expect(std.mem.indexOf(u8, tk_manpage.stdout, ".TH TK 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tk_manpage.stdout, "EXIT STATUS") != null);
+    try std.testing.expectEqualStrings("", tk_manpage.stderr);
+}

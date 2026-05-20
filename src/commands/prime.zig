@@ -1,10 +1,11 @@
 const std = @import("std");
 const clap = @import("clap");
 const cli = @import("../cli.zig");
+const embed = @import("../embed.zig");
 
 const prime_md_bytes = @embedFile("prime.md");
 comptime {
-    cli.assertNoCR(prime_md_bytes);
+    embed.assertNoCR(prime_md_bytes);
 }
 const prime_output: []const u8 = std.mem.trimEnd(u8, prime_md_bytes, " \t\r\n") ++ "\n";
 

@@ -1,5 +1,5 @@
 const std = @import("std");
-const cli = @import("../cli.zig");
+const embed = @import("../embed.zig");
 const script = @import("script.zig");
 
 const prime_basic_path = "src/testing/scenarios/prime/basic.txtar";
@@ -17,51 +17,51 @@ const harness_preserve_path = "src/testing/scenarios/_harness/preserve_sections.
 
 const prime_basic = @embedFile("scenarios/prime/basic.txtar");
 comptime {
-    cli.assertNoCR(prime_basic);
+    embed.assertNoCR(prime_basic);
 }
 const add_create_epic_child = @embedFile("scenarios/add/create_epic_child.txtar");
 comptime {
-    cli.assertNoCR(add_create_epic_child);
+    embed.assertNoCR(add_create_epic_child);
 }
 const block_help = @embedFile("scenarios/block/help.txtar");
 comptime {
-    cli.assertNoCR(block_help);
+    embed.assertNoCR(block_help);
 }
 const done_help = @embedFile("scenarios/done/help.txtar");
 comptime {
-    cli.assertNoCR(done_help);
+    embed.assertNoCR(done_help);
 }
 const list_help = @embedFile("scenarios/list/help.txtar");
 comptime {
-    cli.assertNoCR(list_help);
+    embed.assertNoCR(list_help);
 }
 const manpage_basic = @embedFile("scenarios/manpage/basic.txtar");
 comptime {
-    cli.assertNoCR(manpage_basic);
+    embed.assertNoCR(manpage_basic);
 }
 const next_help = @embedFile("scenarios/next/help.txtar");
 comptime {
-    cli.assertNoCR(next_help);
+    embed.assertNoCR(next_help);
 }
 const show_help = @embedFile("scenarios/show/help.txtar");
 comptime {
-    cli.assertNoCR(show_help);
+    embed.assertNoCR(show_help);
 }
 const unblock_help = @embedFile("scenarios/unblock/help.txtar");
 comptime {
-    cli.assertNoCR(unblock_help);
+    embed.assertNoCR(unblock_help);
 }
 const update_help = @embedFile("scenarios/update/help.txtar");
 comptime {
-    cli.assertNoCR(update_help);
+    embed.assertNoCR(update_help);
 }
 const worktree_help = @embedFile("scenarios/worktree/help.txtar");
 comptime {
-    cli.assertNoCR(worktree_help);
+    embed.assertNoCR(worktree_help);
 }
 const harness_preserve = @embedFile("scenarios/_harness/preserve_sections.txtar");
 comptime {
-    cli.assertNoCR(harness_preserve);
+    embed.assertNoCR(harness_preserve);
 }
 
 test "prime/basic" {

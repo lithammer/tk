@@ -10,6 +10,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const clap = @import("clap");
 const cli = @import("../cli.zig");
+const embed = @import("../embed.zig");
 const messages = @import("../messages.zig");
 
 // The manpage source lives at `man/tk.1` in the repository root, outside the
@@ -18,7 +19,7 @@ const messages = @import("../messages.zig");
 // it without per-call-site `..` path tricks.
 const manpage_bytes = @embedFile("manpage_data");
 comptime {
-    cli.assertNoCR(manpage_bytes);
+    embed.assertNoCR(manpage_bytes);
 }
 
 /// Dispatcher metadata for `tk manpage`.
@@ -32,11 +33,6 @@ const params = clap.parseParamsComptime(
     \\    --install  Install the manpage next to the running tk binary.
     \\
 );
-
-/// Trailing fragment appended to every `tk manpage --install` stderr line.
-/// Pinned here so the success/failure rendering and the unit-test substring
-/// stay lock-step (see `messages.manpage_install_failure_prefix`).
-const install_failure_suffix = "; existing file (if any) left unchanged; remove manually if it is stale\n";
 
 /// Parse `tk manpage` flags and dispatch to print or install.
 pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
@@ -69,17 +65,17 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
 /// scripted post-install steps do not fail.
 fn installManpage(deps: cli.Deps) !u8 {
     if (builtin.os.tag == .windows) {
-        deps.stderr.writeAll(messages.manpage_skip_windows) catch {};
+        deps.stderr.writeAll(messages.manpage_skip_windows ++ "\n") catch {};
         return 0;
     }
 
     var exe_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const exe_len = std.process.executablePath(deps.io, &exe_buf) catch |err| {
-        renderInstallFailure(deps, "<exe>", @errorName(err));
+        renderExeResolveFailure(deps, @errorName(err));
         return 1;
     };
     const exe_dir = std.fs.path.dirname(exe_buf[0..exe_len]) orelse {
-        renderInstallFailure(deps, "<exe>", "executable path has no parent directory");
+        renderExeResolveFailure(deps, "executable path has no parent directory");
         return 1;
     };
 
@@ -130,14 +126,25 @@ fn installManpage(deps: cli.Deps) !u8 {
     return 0;
 }
 
-/// Render the canonical install failure line. Centralizes the messages.zig
-/// prefix and the pinned suffix so every install-path branch emits the same
-/// shape, which lets `messages.manpage_install_failure_prefix` plus
-/// "left unchanged" substring matches in tests stay lock-step.
+/// Render a target-path install failure line. Centralizes the messages.zig
+/// prefix and suffix so every install-path branch that reached a concrete
+/// target path emits the same shape, keeping the "left unchanged" contract
+/// honest.
 fn renderInstallFailure(deps: cli.Deps, path: []const u8, reason: []const u8) void {
     deps.stderr.print(
-        messages.manpage_install_failure_prefix ++ "{s}: {s}" ++ install_failure_suffix,
+        messages.manpage_install_failure_prefix ++ "{s}: {s}" ++ messages.manpage_install_failure_suffix ++ "\n",
         .{ path, reason },
+    ) catch {};
+}
+
+/// Render a pre-target install failure line. Used for failures that happen
+/// before any target path has been computed (executable-path resolution
+/// failure, no parent directory). Deliberately does NOT include the
+/// "left unchanged" suffix because no target was identified to leave alone.
+fn renderExeResolveFailure(deps: cli.Deps, reason: []const u8) void {
+    deps.stderr.print(
+        messages.manpage_install_exe_resolve_failure_prefix ++ "{s}\n",
+        .{reason},
     ) catch {};
 }
 
@@ -145,15 +152,10 @@ fn renderInstallFailure(deps: cli.Deps, path: []const u8, reason: []const u8) vo
 /// Returns a slice into `buf`. The 16-byte hex suffix (64 random bits)
 /// makes concurrent installs collision-free without needing pid sniffing.
 fn renderStageName(buf: *[32]u8, random: std.Random) []const u8 {
-    const hex = "0123456789abcdef";
     var rand_bytes: [8]u8 = undefined;
     random.bytes(&rand_bytes);
-    var suffix: [16]u8 = undefined;
-    for (rand_bytes, 0..) |b, i| {
-        suffix[i * 2] = hex[(b >> 4) & 0xf];
-        suffix[i * 2 + 1] = hex[b & 0xf];
-    }
-    return std.fmt.bufPrint(buf, ".tk.1.tmp.{s}", .{suffix[0..]}) catch unreachable;
+    const hex = std.fmt.bytesToHex(rand_bytes, .lower);
+    return std.fmt.bufPrint(buf, ".tk.1.tmp.{s}", .{hex[0..]}) catch unreachable;
 }
 
 fn writeHelp(deps: cli.Deps) !void {
@@ -209,8 +211,21 @@ test "manpage --help prints help to stdout and exits 0" {
     try std.testing.expectEqual(@as(u8, 0), code);
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "tk manpage") != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "Usage:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "--help") != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "--install") != null);
     try std.testing.expectEqualStrings("", h.stderr());
+}
+
+test "renderStageName produces a hex-suffixed name with a stable prefix" {
+    var prng = std.Random.DefaultPrng.init(0);
+    var buf: [32]u8 = undefined;
+    const name = renderStageName(&buf, prng.random());
+    const prefix = ".tk.1.tmp.";
+    try std.testing.expect(std.mem.startsWith(u8, name, prefix));
+    try std.testing.expectEqual(prefix.len + 16, name.len);
+    for (name[prefix.len..]) |b| {
+        try std.testing.expect((b >= '0' and b <= '9') or (b >= 'a' and b <= 'f'));
+    }
 }
 
 test "manpage --install renders success or a structured diagnostic" {
@@ -289,5 +304,5 @@ test "manpage --install is a no-op on Windows" {
     const code = try run(h.deps(), &h.iter);
     try std.testing.expectEqual(@as(u8, 0), code);
     try std.testing.expectEqualStrings("", h.stdout());
-    try std.testing.expectEqualStrings(messages.manpage_skip_windows, h.stderr());
+    try std.testing.expectEqualStrings(messages.manpage_skip_windows ++ "\n", h.stderr());
 }

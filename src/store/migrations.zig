@@ -15,7 +15,7 @@
 
 const std = @import("std");
 const zqlite = @import("zqlite");
-const cli = @import("../cli.zig");
+const embed = @import("../embed.zig");
 const Diagnostic = @import("../domain/diagnostic.zig").Diagnostic;
 
 /// Repository Store SQLite connection type used by migration helpers.
@@ -37,12 +37,12 @@ pub const Migration = struct {
 
 const migration_1_sql = @embedFile("migrations/001_repository_store.sql");
 comptime {
-    cli.assertNoCR(migration_1_sql);
+    embed.assertNoCR(migration_1_sql);
 }
 
 const migration_2_sql = @embedFile("migrations/002_items_no_escape_from_done.sql");
 comptime {
-    cli.assertNoCR(migration_2_sql);
+    embed.assertNoCR(migration_2_sql);
 }
 
 /// V1 Repository Store schema skeleton.

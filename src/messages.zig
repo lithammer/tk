@@ -813,14 +813,24 @@ pub const sync_log_storage_failed = "tk sync log: failed to read Repository Stor
 /// installed path followed by `\n`.
 pub const manpage_install_success = "Installed manpage at ";
 
-/// Stderr prefix for a failed `tk manpage --install`. Callers append the
-/// target path, `": "`, an OS error reason, and the trailing context
-/// `"; existing file (if any) left unchanged; remove manually if it is stale\n"`.
-/// The "left unchanged" clause is part of the contract: the staged tmp file
-/// is removed best-effort, but the existing target is never deleted.
+/// Stderr prefix for a target-path install failure (a rename/write/openDir
+/// failure where the target path was successfully computed). Callers append
+/// the target path, `": "`, an OS error reason, and
+/// `manpage_install_failure_suffix`. The "left unchanged" clause in the
+/// suffix is part of the contract: the staged tmp file is removed
+/// best-effort, but the existing target is never deleted.
 pub const manpage_install_failure_prefix = "tk manpage: install failed at ";
 
-/// Stderr line printed when `tk manpage --install` runs on Windows. Includes
-/// its own trailing newline because the install path otherwise builds its
-/// stderr lines with explicit format suffixes.
-pub const manpage_skip_windows = "tk manpage: skipping install on Windows\n";
+/// Trailing fragment appended to every target-path install-failure line so
+/// the user knows the existing file at the path was not modified.
+pub const manpage_install_failure_suffix = "; existing file (if any) left unchanged; remove manually if it is stale";
+
+/// Stderr prefix for an install failure that happened before any target path
+/// was computed (executable-path resolution failed). Callers append a
+/// reason and a trailing newline. No "left unchanged" suffix because no
+/// target was identified.
+pub const manpage_install_exe_resolve_failure_prefix = "tk manpage: install failed: cannot resolve executable path: ";
+
+/// Stderr line printed when `tk manpage --install` runs on Windows. Callers
+/// append a trailing newline, matching the rest of the file's convention.
+pub const manpage_skip_windows = "tk manpage: skipping install on Windows";
