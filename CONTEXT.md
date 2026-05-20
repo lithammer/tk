@@ -321,6 +321,9 @@ _Avoid_: ticket, tickets
 - A **Backend Epic** is an **Epic**.
 - A **Local Ticket** is not synced to the **Primary Backend** unless explicitly promoted.
 - A **Local Epic** is not synced to the **Primary Backend** unless explicitly promoted.
+- A **Local Ticket** may belong to a **Local Epic** or **Backend Epic** without
+  changing its **Origin**.
+- Adding a **Local Ticket** to an **Epic** does not imply **Promotion**.
 - **Promotion** changes a **Local Ticket** or **Local Epic** into a backend-backed object in place.
 - **Promotion** replaces a local **Display ID** with the backend **Display ID**.
 - The replaced local **Display ID** remains an **Alias**.

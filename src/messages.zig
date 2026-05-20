@@ -58,6 +58,33 @@ pub const add_nul_message = "tk add: message contains NUL byte";
 /// Stderr line when no Repository Store exists for the current repository.
 pub const add_missing_store = "tk add: Repository Store not initialized; run 'tk init'";
 
+/// Stderr line when both message input mechanisms are supplied.
+pub const add_conflicting_message_flags = "tk add: choose at most one of -m/--message or -F/--file";
+
+/// Stderr line when more than one message file is supplied.
+pub const add_repeated_file_flags = "tk add: choose at most one -F/--file";
+
+/// Stderr line when neither non-interactive message input mechanism is supplied.
+pub const add_message_required = "tk add: one of -m/--message or -F/--file is required";
+
+/// Stderr line when more than one item-class flag is supplied.
+pub const add_conflicting_class_flags = "tk add: choose at most one of --bug or --epic";
+
+/// Stderr line when `--priority` is supplied for an Epic.
+pub const add_priority_on_epic = "tk add: --priority cannot be set on an Epic";
+
+/// Stderr line when `--parent` is supplied while creating an Epic.
+pub const add_parent_on_epic = "tk add: --parent is only valid for Tickets";
+
+/// Stderr prefix for any `--parent` diagnostic (unknown id or wrong class).
+pub const add_parent_prefix = "tk add: parent '";
+
+/// Stderr suffix for an unknown `--parent` Display ID.
+pub const add_parent_not_found_suffix = "' is not a known Display ID or Alias";
+
+/// Stderr suffix when `--parent` resolves to a Ticket instead of an Epic.
+pub const add_parent_not_epic_suffix = "' is a Ticket, not an Epic";
+
 /// Stderr prefix for message file read failures. Callers append
 /// `"{s}: {s}\n"` for the user-typed path and error name.
 pub const add_file_read_prefix = "tk add: could not read message file ";
@@ -69,7 +96,7 @@ pub const add_stdin_read_prefix = "tk add: could not read message from stdin: ";
 /// Stderr line for non-transient Repository Store write failures. The caller
 /// appends `"\n{s}\n"` for the underlying `@errorName`. Distinct from the busy
 /// and out-of-memory variants so we only suggest a retry when one is plausible.
-pub const add_create_failed = "tk add: failed to create Ticket";
+pub const add_create_failed = "tk add: failed to create item";
 
 /// Stderr line when allocation fails during a `tk add` Repository Store write.
 pub const add_out_of_memory = "tk add: out of memory";
@@ -81,11 +108,21 @@ pub const add_store_busy_retry = "tk add: Repository Store is busy; retry the co
 /// `"{s} - {s}\n"` for Display ID and title.
 pub const add_created_ticket_prefix = "Created Ticket: ";
 
+/// Stdout prefix for successful Epic creation. Callers append
+/// `"{s} - {s}\n"` for Display ID and title.
+pub const add_created_epic_prefix = "Created Epic: ";
+
+/// Stdout label for the created Ticket's Ticket Kind.
+pub const add_kind_label = "Kind: ";
+
 /// Stdout label for the created Ticket's Priority.
 pub const add_priority_label = "Priority: ";
 
 /// Stdout label for the created Ticket's Item Status.
 pub const add_status_label = "Status: ";
+
+/// Stdout label for a created Ticket's containing Epic.
+pub const add_parent_label = "Parent: ";
 
 // `tk list` — Repository Store reads.
 

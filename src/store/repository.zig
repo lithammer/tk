@@ -50,10 +50,33 @@ pub const CreatedTicket = struct {
     }
 };
 
+/// Result of creating a local Epic.
+pub const CreatedEpic = struct {
+    id: []u8,
+    display_id: []u8,
+    status: ItemStatus,
+    origin: Origin,
+    title: []const u8,
+    body: []const u8,
+
+    /// Free generated values owned by the store helper.
+    pub fn deinit(self: CreatedEpic, gpa: std.mem.Allocator) void {
+        gpa.free(self.id);
+        gpa.free(self.display_id);
+    }
+};
+
 /// Input for local Ticket creation.
 pub const CreateLocalTicketInput = struct {
     kind: TicketKind,
     priority: Priority,
+    parent_id: ?[]const u8 = null,
+    title: []const u8,
+    body: []const u8,
+};
+
+/// Input for local Epic creation.
+pub const CreateLocalEpicInput = struct {
     title: []const u8,
     body: []const u8,
 };
@@ -605,6 +628,22 @@ pub const CreateError = migrations.QueryError || zqlite.Error || error{OutOfMemo
 pub const ListError = migrations.QueryError || zqlite.Error || error{OutOfMemory};
 pub const NextError = migrations.QueryError || zqlite.Error || error{OutOfMemory};
 
+const LocalItemIdentity = struct {
+    id: []u8,
+    display_id: []u8,
+    created_seq: i64,
+    created_at: [24]u8,
+
+    fn deinit(self: LocalItemIdentity, gpa: std.mem.Allocator) void {
+        gpa.free(self.id);
+        gpa.free(self.display_id);
+    }
+
+    fn createdAt(self: *const LocalItemIdentity) []const u8 {
+        return self.created_at[0..];
+    }
+};
+
 /// Shared current-state annotation used by List Tree and next-Ticket reads.
 ///
 /// Keeping readiness and blocking derivation in one CTE gives `tk list` and
@@ -706,6 +745,13 @@ const resolve_item_ref_sql =
     \\ where ids.value = ?1
 ;
 
+const resolve_item_ref_with_display_sql =
+    \\select i.id, i.display_value, i.item_class
+    \\  from item_ids ids
+    \\  join items i on i.id = ids.item_id
+    \\ where ids.value = ?1
+;
+
 /// Read current Repository Store rows for a List Tree.
 pub fn listRows(store: Store, gpa: std.mem.Allocator, options: ListOptions) ListError![]ListRow {
     var result: std.ArrayList(ListRow) = .empty;
@@ -758,11 +804,94 @@ pub fn createLocalTicket(
     random: std.Random,
     input: CreateLocalTicketInput,
 ) CreateError!CreatedTicket {
+    const identity = try beginLocalItemCreate(store, gpa, clock, random);
+    errdefer identity.deinit(gpa);
+    errdefer store.conn.rollback();
+
+    try store.conn.exec(
+        \\insert into items(
+        \\  id, display_value, item_class, ticket_kind, priority, title, body,
+        \\  container_id, container_class, origin, status, created_seq,
+        \\  created_at, updated_at
+        \\)
+        \\values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)
+    , .{
+        identity.id,
+        identity.display_id,
+        ItemClass.ticket.text(),
+        input.kind.text(),
+        input.priority.text(),
+        input.title,
+        input.body,
+        input.parent_id,
+        if (input.parent_id == null) null else ItemClass.epic.text(),
+        Origin.local.text(),
+        ItemStatus.default.text(),
+        identity.created_seq,
+        identity.createdAt(),
+    });
+    try insertDisplayResolver(store, identity);
+
+    try store.conn.commit();
+
+    return .{
+        .id = identity.id,
+        .display_id = identity.display_id,
+        .kind = input.kind,
+        .priority = input.priority,
+        .status = ItemStatus.default,
+        .origin = Origin.local,
+        .title = input.title,
+        .body = input.body,
+    };
+}
+
+/// Create a Local Epic and its current Display ID resolver row.
+pub fn createLocalEpic(
+    store: Store,
+    gpa: std.mem.Allocator,
+    clock: clock_mod.Clock,
+    random: std.Random,
+    input: CreateLocalEpicInput,
+) CreateError!CreatedEpic {
+    const identity = try beginLocalItemCreate(store, gpa, clock, random);
+    errdefer identity.deinit(gpa);
+    errdefer store.conn.rollback();
+
+    try store.conn.exec(
+        \\insert into items(id, display_value, item_class, title, body, origin, status, created_seq, created_at, updated_at)
+        \\values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+    , .{
+        identity.id,
+        identity.display_id,
+        ItemClass.epic.text(),
+        input.title,
+        input.body,
+        Origin.local.text(),
+        ItemStatus.default.text(),
+        identity.created_seq,
+        identity.createdAt(),
+    });
+    try insertDisplayResolver(store, identity);
+
+    try store.conn.commit();
+
+    return .{
+        .id = identity.id,
+        .display_id = identity.display_id,
+        .status = ItemStatus.default,
+        .origin = Origin.local,
+        .title = input.title,
+        .body = input.body,
+    };
+}
+
+fn beginLocalItemCreate(store: Store, gpa: std.mem.Allocator, clock: clock_mod.Clock, random: std.Random) CreateError!LocalItemIdentity {
     const id = try generateInternalId(gpa, random);
     errdefer gpa.free(id);
 
-    var iso_buf: [24]u8 = undefined;
-    const now = clock.nowIso(&iso_buf);
+    var created_at: [24]u8 = undefined;
+    _ = clock.nowIso(&created_at);
 
     try store.conn.execNoArgs("begin immediate");
     errdefer store.conn.rollback();
@@ -772,41 +901,20 @@ pub fn createLocalTicket(
     const prefix = try queryTextAlloc(store.conn, gpa, "select value from store_config where key = 'display_prefix'");
     defer gpa.free(prefix);
     const display_id = try std.fmt.allocPrint(gpa, "{s}-{d}", .{ prefix, display_seq });
-    errdefer gpa.free(display_id);
-
-    try store.conn.exec(
-        \\insert into items(id, display_value, item_class, ticket_kind, priority, title, body, origin, status, created_seq, created_at, updated_at)
-        \\values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)
-    , .{
-        id,
-        display_id,
-        ItemClass.ticket.text(),
-        input.kind.text(),
-        input.priority.text(),
-        input.title,
-        input.body,
-        Origin.local.text(),
-        ItemStatus.default.text(),
-        created_seq,
-        now,
-    });
-    try store.conn.exec(
-        "insert into item_ids(value, source, item_id, created_at) values (?1, 'display', ?2, ?3)",
-        .{ display_id, id, now },
-    );
-
-    try store.conn.commit();
 
     return .{
         .id = id,
         .display_id = display_id,
-        .kind = input.kind,
-        .priority = input.priority,
-        .status = ItemStatus.default,
-        .origin = Origin.local,
-        .title = input.title,
-        .body = input.body,
+        .created_seq = created_seq,
+        .created_at = created_at,
     };
+}
+
+fn insertDisplayResolver(store: Store, identity: LocalItemIdentity) CreateError!void {
+    try store.conn.exec(
+        "insert into item_ids(value, source, item_id, created_at) values (?1, 'display', ?2, ?3)",
+        .{ identity.display_id, identity.id, identity.createdAt() },
+    );
 }
 
 pub fn queryTextAlloc(conn: zqlite.Conn, gpa: std.mem.Allocator, sql: []const u8) (migrations.QueryError || error{OutOfMemory})![]u8 {
@@ -1445,17 +1553,33 @@ fn listRowFromSql(gpa: std.mem.Allocator, row: zqlite.Row) ListError!ListRow {
     };
 }
 
-/// A Display ID or Alias resolved to a stable internal ID and Item class.
+/// A Display ID or Alias resolved to a stable internal ID and Item Class.
 ///
-/// Returned by `resolveItemRef` and `resolveAsEpic`. The caller owns `id`
-/// and must free it with `deinit` in the switch arm that receives the value.
+/// Returned by `resolveItemRef` and `resolveAsEpic`. The caller owns copied
+/// text and must free it with `deinit` in the switch arm that receives the value.
 pub const ResolvedItemRef = struct {
     id: []u8,
     item_class: ItemClass,
 
-    /// Free the internal ID string allocated by the Repository Store resolver.
+    /// Free strings allocated by the Repository Store resolver.
     pub fn deinit(self: ResolvedItemRef, gpa: std.mem.Allocator) void {
         gpa.free(self.id);
+    }
+};
+
+/// A resolved item plus its current Display ID.
+///
+/// Use this only when the caller must print the current Display ID instead of
+/// the user-supplied resolver value.
+pub const ResolvedItemRefWithDisplay = struct {
+    id: []u8,
+    display_id: []u8,
+    item_class: ItemClass,
+
+    /// Free strings allocated by the Repository Store resolver.
+    pub fn deinit(self: ResolvedItemRefWithDisplay, gpa: std.mem.Allocator) void {
+        gpa.free(self.id);
+        gpa.free(self.display_id);
     }
 };
 
@@ -1473,9 +1597,27 @@ pub const ResolveError = migrations.QueryError || zqlite.Error || error{OutOfMem
 pub fn resolveItemRef(store: Store, gpa: std.mem.Allocator, display_arg: []const u8) ResolveError!?ResolvedItemRef {
     if (try store.conn.row(resolve_item_ref_sql, .{display_arg})) |r| {
         defer r.deinit();
+        const id = try gpa.dupe(u8, r.text(0));
         return .{
-            .id = try gpa.dupe(u8, r.text(0)),
+            .id = id,
             .item_class = enumFromText(ItemClass, r.text(1)),
+        };
+    }
+    return null;
+}
+
+/// Look up a Display ID or Alias and return the current Display ID too.
+pub fn resolveItemRefWithDisplay(store: Store, gpa: std.mem.Allocator, display_arg: []const u8) ResolveError!?ResolvedItemRefWithDisplay {
+    if (try store.conn.row(resolve_item_ref_with_display_sql, .{display_arg})) |r| {
+        defer r.deinit();
+        const id = try gpa.dupe(u8, r.text(0));
+        errdefer gpa.free(id);
+        const display_id = try gpa.dupe(u8, r.text(1));
+        errdefer gpa.free(display_id);
+        return .{
+            .id = id,
+            .display_id = display_id,
+            .item_class = enumFromText(ItemClass, r.text(2)),
         };
     }
     return null;
@@ -1495,6 +1637,14 @@ pub const ResolveEpicOutcome = union(enum) {
     not_an_epic: ResolvedItemRef,
 };
 
+/// Outcome of resolving a Display ID or Alias that must refer to an Epic, while
+/// also returning the current Display ID for successful diagnostics.
+pub const ResolveEpicWithDisplayOutcome = union(enum) {
+    epic: ResolvedItemRefWithDisplay,
+    not_found,
+    not_an_epic: ResolvedItemRefWithDisplay,
+};
+
 /// Resolve a Display ID or Alias to an Epic reference.
 ///
 /// Use this for `--parent <epic-id>` validation so the deferred composite
@@ -1502,6 +1652,13 @@ pub const ResolveEpicOutcome = union(enum) {
 /// a raw FK error when the user supplies a Ticket's Display ID.
 pub fn resolveAsEpic(store: Store, gpa: std.mem.Allocator, display_arg: []const u8) ResolveError!ResolveEpicOutcome {
     const resolved = (try resolveItemRef(store, gpa, display_arg)) orelse return .not_found;
+    if (resolved.item_class == .epic) return .{ .epic = resolved };
+    return .{ .not_an_epic = resolved };
+}
+
+/// Resolve a Display ID or Alias to an Epic reference with the current Display ID.
+pub fn resolveAsEpicWithDisplay(store: Store, gpa: std.mem.Allocator, display_arg: []const u8) ResolveError!ResolveEpicWithDisplayOutcome {
+    const resolved = (try resolveItemRefWithDisplay(store, gpa, display_arg)) orelse return .not_found;
     if (resolved.item_class == .epic) return .{ .epic = resolved };
     return .{ .not_an_epic = resolved };
 }
@@ -2002,6 +2159,39 @@ test "resolveAsEpic: routes Tickets, Epics, and unknown ids" {
             .not_found => {},
             else => return error.ExpectedNotFound,
         }
+    }
+}
+
+test "resolveAsEpicWithDisplay: returns the current Display ID for an Alias" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "epic-id",
+        .display = "tk-2",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .title = "An Epic",
+        .created_seq = 1,
+    });
+    try TmpStore.insertAlias(conn, "legacy-epic", "epic-id");
+
+    const outcome = try resolveAsEpicWithDisplay(store, gpa, "legacy-epic");
+    switch (outcome) {
+        .epic => |ref| {
+            defer ref.deinit(gpa);
+            try std.testing.expectEqualStrings("epic-id", ref.id);
+            try std.testing.expectEqualStrings("tk-2", ref.display_id);
+            try std.testing.expectEqual(ItemClass.epic, ref.item_class);
+        },
+        else => return error.ExpectedEpic,
     }
 }
 
@@ -3257,4 +3447,3 @@ test "updateItem: Backend Epic title change emits update_epic Mutation" {
     defer mr.deinit();
     try std.testing.expectEqualStrings("update_epic", mr.text(0));
 }
-

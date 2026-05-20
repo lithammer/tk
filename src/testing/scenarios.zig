@@ -2,6 +2,7 @@ const std = @import("std");
 const script = @import("script.zig");
 
 const prime_basic_path = "src/testing/scenarios/prime/basic.txtar";
+const add_create_epic_child_path = "src/testing/scenarios/add/create_epic_child.txtar";
 const block_help_path = "src/testing/scenarios/block/help.txtar";
 const done_help_path = "src/testing/scenarios/done/help.txtar";
 const list_help_path = "src/testing/scenarios/list/help.txtar";
@@ -13,6 +14,7 @@ const worktree_help_path = "src/testing/scenarios/worktree/help.txtar";
 const harness_preserve_path = "src/testing/scenarios/_harness/preserve_sections.txtar";
 
 const prime_basic = @embedFile("scenarios/prime/basic.txtar");
+const add_create_epic_child = @embedFile("scenarios/add/create_epic_child.txtar");
 const block_help = @embedFile("scenarios/block/help.txtar");
 const done_help = @embedFile("scenarios/done/help.txtar");
 const list_help = @embedFile("scenarios/list/help.txtar");
@@ -25,6 +27,10 @@ const harness_preserve = @embedFile("scenarios/_harness/preserve_sections.txtar"
 
 test "prime/basic" {
     try script.runScenario(std.testing.allocator, prime_basic_path, prime_basic);
+}
+
+test "add/create_epic_child" {
+    try script.runScenario(std.testing.allocator, add_create_epic_child_path, add_create_epic_child);
 }
 
 test "block/help" {

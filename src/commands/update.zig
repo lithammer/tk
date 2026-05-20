@@ -70,31 +70,18 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
         return 2;
     }
 
-    // Read message input if any was supplied.
     var parsed_msg: ?message.ParsedMessage = null;
     defer if (parsed_msg) |pm| pm.deinit(deps.gpa);
 
     if (res.args.message.len > 0) {
-        parsed_msg = message.parseFromParagraphs(deps.gpa, res.args.message) catch |err| {
-            try renderParseError(deps, err);
-            return 1;
+        parsed_msg = switch (try message.readInput(deps, .{ .paragraphs = res.args.message }, input_msgs)) {
+            .parsed => |pm| pm,
+            .user_error => return 1,
         };
     } else if (res.args.file) |path| {
-        const raw = if (std.mem.eql(u8, path, "-"))
-            deps.stdin.allocRemaining(deps.gpa, .unlimited) catch |err| {
-                deps.stderr.print(messages.update_stdin_read_prefix ++ "{s}\n", .{@errorName(err)}) catch {};
-                return 1;
-            }
-        else
-            deps.cwd.readFileAlloc(deps.io, path, deps.gpa, .unlimited) catch |err| {
-                deps.stderr.print(messages.update_file_read_prefix ++ "{s}: {s}\n", .{ path, @errorName(err) }) catch {};
-                return 1;
-            };
-        defer deps.gpa.free(raw);
-
-        parsed_msg = message.parse(deps.gpa, raw) catch |err| {
-            try renderParseError(deps, err);
-            return 1;
+        parsed_msg = switch (try message.readInput(deps, .{ .file = path }, input_msgs)) {
+            .parsed => |pm| pm,
+            .user_error => return 1,
         };
     }
 
@@ -125,8 +112,8 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
 
     // Resolve --parent if supplied.
     var parent_op: repository.ParentOp = .unchanged;
-    var resolved_parent_id: ?[]u8 = null;
-    defer if (resolved_parent_id) |pid| deps.gpa.free(pid);
+    var parent_ref: ?repository.ResolvedItemRef = null;
+    defer if (parent_ref) |ref| ref.deinit(deps.gpa);
 
     if (res.args.parent) |parent_display| {
         const parent_outcome = repository.resolveAsEpic(store, deps.gpa, parent_display) catch |err| {
@@ -135,8 +122,8 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
         };
         switch (parent_outcome) {
             .epic => |ref| {
-                resolved_parent_id = ref.id;
                 parent_op = .{ .set = ref.id };
+                parent_ref = ref;
             },
             .not_found => {
                 deps.stderr.print(
@@ -214,6 +201,13 @@ const storage_msgs: repository.StorageErrorMessages = .{
     .fallback = messages.update_write_failed,
 };
 
+const input_msgs: message.InputMessages = .{
+    .empty_message = messages.update_empty_message,
+    .nul_message = messages.update_nul_message,
+    .file_read_prefix = messages.update_file_read_prefix,
+    .stdin_read_prefix = messages.update_stdin_read_prefix,
+};
+
 const open_msgs: repository.OpenMessages = .{
     .command_name = "update",
     .missing_store = messages.update_missing_store,
@@ -222,14 +216,6 @@ const open_msgs: repository.OpenMessages = .{
 
 fn renderStorageError(deps: cli.Deps, err: anyerror) void {
     repository.renderStorageError(deps.stderr, err, storage_msgs);
-}
-
-fn renderParseError(deps: cli.Deps, err: message.ParseError) !void {
-    switch (err) {
-        error.EmptyMessage => deps.stderr.writeAll(messages.update_empty_message ++ "\n") catch {},
-        error.NulByte => deps.stderr.writeAll(messages.update_nul_message ++ "\n") catch {},
-        error.OutOfMemory => return error.OutOfMemory,
-    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

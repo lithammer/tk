@@ -46,56 +46,75 @@ same repository and is untracked local state.
 .B tk init
 is idempotent. If the store already exists and is current, it reports the
 existing path instead of recreating it.
-.SS Creating Tickets
+.SS Creating Tickets and Epics
 .TP
-\fBtk add\fR \fB\-F\fR \fIfile\fR
+\fBtk add\fR [\fB\-\-bug\fR | \fB\-\-epic\fR] [\fB\-\-parent\fR \fIepic-id\fR] [\fB\-\-priority\fR \fIP0..P4\fR] (\fB\-m\fR \fIparagraph\fR... | \fB\-F\fR \fIfile\fR)
 .TQ
-\fBtk add\fR \fB\-F\fR \fB\-\fR
-.TQ
-\fBtk add\fR \fB\-\-file\fR \fIfile\fR
-.TQ
-\fBtk add\fR \fB\-\-file\fR=\fIfile\fR
-.TQ
-\fBtk add\fR \fB\-\-file\fR \fB\-\fR
-Create a local task Ticket from git-commit-style message input.
+\fBtk add\fR [\fB\-\-bug\fR | \fB\-\-epic\fR] [\fB\-\-parent\fR \fIepic-id\fR] [\fB\-\-priority\fR \fIP0..P4\fR] \fB\-F\fR \fB\-\fR
+Create a local task Ticket by default.
 .PP
+.B \-\-bug
+creates a bug Ticket.
+.B \-\-epic
+creates an Epic.
+.B \-\-bug
+and
+.B \-\-epic
+are mutually exclusive.
+.B \-\-parent
+places a new Ticket under an Epic; it is invalid with
+.BR \-\-epic .
+.B \-\-priority
+sets local-only Priority for Tickets. The default is
+.BR P2 .
+.PP
+.B \-m
+and
+.B \-\-message
+are repeatable message paragraphs.
 .B \-F
 and
 .B \-\-file
 read the message from a file. Use
 .B \-
-to read the message from standard input. Exactly one
-.B \-F
-or
-.B \-\-file
-flag is required in the current binary.
+to read the message from standard input. Editor mode for bare
+.B tk add
+is deferred from v1.
 .PP
-The first paragraph becomes the Ticket title. Later paragraphs become the
-body. An empty message aborts creation. The created Ticket has Priority
-.B P2
-and Item Status
-.BR open .
+The first paragraph becomes the title. Later paragraphs become the body. An
+empty message aborts creation.
 .PP
-On success,
+On successful Ticket creation,
 .B tk add
 prints:
 .PP
 .RS 4
 .nf
 Created Ticket: <display-id> - <title>
-Priority: P2
+Kind: task|bug
+Priority: P0|P1|P2|P3|P4
 Status: open
+Parent: <epic-display-id>
 .fi
 .RE
 .PP
-The current binary does not implement
-.BR \-\-bug ,
-.BR \-\-epic ,
-.BR \-\-priority ,
-.BR \-\-parent ,
-repeatable
-.BR \-m ,
-or editor mode.
+The
+.B Parent:
+line is printed only when
+.B \-\-parent
+is supplied, and it uses the parent Epic's current Display ID even when the
+argument was an Alias.
+.PP
+On successful Epic creation,
+.B tk add
+prints:
+.PP
+.RS 4
+.nf
+Created Epic: <display-id> - <title>
+Status: open
+.fi
+.RE
 .SS Reading the List Tree
 .TP
 \fBtk list\fR [\fB\-\-ready\fR | \fB\-\-blocked\fR | \fB\-\-active\fR] [\fB\-\-local\fR | \fB\-\-remote\fR]
@@ -241,6 +260,15 @@ Investigate flaky login retry
 Repro is intermittent on the staging cluster.
 First seen 2026-04-30.
 EOF
+.fi
+.RE
+.PP
+Create an Epic and a child Ticket:
+.PP
+.RS 4
+.nf
+tk add --epic -m "Jira backend"
+tk add --parent project-1 -m "Map Jira issue fields"
 .fi
 .RE
 .PP

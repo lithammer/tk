@@ -46,9 +46,30 @@ Creates a local task Ticket by default.
 - `--priority` sets local-only Priority. Default is `P2`.
 - `-m/--message` is repeatable and follows git-commit-style paragraph joining.
 - `-F/--file` reads the message from a file, or from stdin with `-F -`.
-- With no message or file, `tk add` opens editor mode.
+- Editor mode for bare `tk add` is deferred from v1.
 
 The first paragraph becomes the title. Later paragraphs become the body.
+
+Successful Ticket creation prints the created Ticket plus the fields selected
+at creation time:
+
+```text
+Created Ticket: <display-id> - <title>
+Kind: task|bug
+Priority: P0|P1|P2|P3|P4
+Status: open
+Parent: <epic-display-id>
+```
+
+The `Parent:` line is printed only when `--parent` is supplied, and it uses the
+parent Epic's current Display ID even when the argument was an Alias.
+
+Successful Epic creation prints only Epic fields:
+
+```text
+Created Epic: <display-id> - <title>
+Status: open
+```
 
 ## Read
 

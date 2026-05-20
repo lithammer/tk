@@ -87,7 +87,10 @@ tk add --bug -F - < rich-bug-report.md  # reads message from stdin
 tk add --priority P1 -F -               # creates a higher-priority local Ticket
 ```
 
-`tk add` uses git-commit-style message input: repeatable `-m/--message`, `-F/--file`, `-F -` for stdin, or editor mode when no message/file is provided. The first paragraph becomes the title and later paragraphs become the body. `--bug` and `--epic` are mutually exclusive. `Epic` is not a Ticket Kind.
+`tk add` uses git-commit-style message input: repeatable `-m/--message`,
+`-F/--file`, or `-F -` for stdin. Editor mode for bare `tk add` is deferred
+from v1. The first paragraph becomes the title and later paragraphs become the
+body. `--bug` and `--epic` are mutually exclusive. `Epic` is not a Ticket Kind.
 
 `tk next` selects the ready Ticket with the lowest local-only Priority, then oldest creation order, within the active Workspace Scope. It does not select Epics. The default Priority is `P2`.
 

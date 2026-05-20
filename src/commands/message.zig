@@ -1,6 +1,7 @@
-//! Git-commit-style message parsing shared by write commands.
+//! Git-commit-style message parsing and loading shared by write commands.
 
 const std = @import("std");
+const cli = @import("../cli.zig");
 
 /// Parsed Ticket message. Title and body are allocator-owned.
 pub const ParsedMessage = struct {
@@ -158,9 +159,9 @@ test "message: normalizes CRLF and CR line endings" {
 
 /// Parse a message from a pre-split slice of paragraph strings.
 ///
-/// Joins the paragraphs with double newlines and delegates to `parse`. Used
-/// by `tk update` when message paragraphs come from repeated `-m` flags
-/// rather than a single file or stdin blob.
+/// Joins the paragraphs with double newlines and delegates to `parse`. Used by
+/// write commands when message paragraphs come from repeated `-m` flags rather
+/// than a single file or stdin blob.
 pub fn parseFromParagraphs(gpa: std.mem.Allocator, paragraphs: []const []const u8) ParseError!ParsedMessage {
     if (paragraphs.len == 0) return error.EmptyMessage;
     var buf: std.ArrayList(u8) = .empty;
@@ -170,6 +171,66 @@ pub fn parseFromParagraphs(gpa: std.mem.Allocator, paragraphs: []const []const u
         try buf.appendSlice(gpa, p);
     }
     return parse(gpa, buf.items);
+}
+
+/// Message source selected by a command after it has validated flag conflicts.
+pub const Input = union(enum) {
+    paragraphs: []const []const u8,
+    file: []const u8,
+};
+
+/// Command-specific diagnostics for message input loading and parsing.
+pub const InputMessages = struct {
+    empty_message: []const u8,
+    nul_message: []const u8,
+    file_read_prefix: []const u8,
+    stdin_read_prefix: []const u8,
+};
+
+/// Result of loading and parsing command message input.
+pub const InputResult = union(enum) {
+    parsed: ParsedMessage,
+    user_error,
+};
+
+/// Load and parse a command message source, rendering command diagnostics.
+pub fn readInput(deps: cli.Deps, input: Input, msgs: InputMessages) !InputResult {
+    switch (input) {
+        .paragraphs => |paragraphs| {
+            const parsed = parseFromParagraphs(deps.gpa, paragraphs) catch |err| {
+                try renderInputParseError(deps.stderr, msgs, err);
+                return .user_error;
+            };
+            return .{ .parsed = parsed };
+        },
+        .file => |path| {
+            const raw = if (std.mem.eql(u8, path, "-"))
+                deps.stdin.allocRemaining(deps.gpa, .unlimited) catch |err| {
+                    deps.stderr.print("{s}{s}\n", .{ msgs.stdin_read_prefix, @errorName(err) }) catch {};
+                    return .user_error;
+                }
+            else
+                deps.cwd.readFileAlloc(deps.io, path, deps.gpa, .unlimited) catch |err| {
+                    deps.stderr.print("{s}{s}: {s}\n", .{ msgs.file_read_prefix, path, @errorName(err) }) catch {};
+                    return .user_error;
+                };
+            defer deps.gpa.free(raw);
+
+            const parsed = parse(deps.gpa, raw) catch |err| {
+                try renderInputParseError(deps.stderr, msgs, err);
+                return .user_error;
+            };
+            return .{ .parsed = parsed };
+        },
+    }
+}
+
+fn renderInputParseError(stderr: *std.Io.Writer, msgs: InputMessages, err: ParseError) !void {
+    switch (err) {
+        error.EmptyMessage => stderr.print("{s}\n", .{msgs.empty_message}) catch {},
+        error.NulByte => stderr.print("{s}\n", .{msgs.nul_message}) catch {},
+        error.OutOfMemory => return error.OutOfMemory,
+    }
 }
 
 test "message: rejects empty and NUL-containing input" {

@@ -214,6 +214,9 @@ fn executeScript(
     var prng = std.Random.DefaultPrng.init(0);
     var pending_stdin: ?[]u8 = null;
     defer if (pending_stdin) |bytes| allocator.free(bytes);
+    var active_cwd = cwd;
+    var active_cwd_owned = false;
+    defer if (active_cwd_owned) active_cwd.close(std.testing.io);
 
     var line_it = std.mem.splitScalar(u8, script_body, '\n');
     while (line_it.next()) |line| {
@@ -222,6 +225,41 @@ fn executeScript(
         defer freeTokens(allocator, argv);
 
         if (argv.len == 0) continue;
+
+        if (std.mem.eql(u8, argv[0], "mkdir")) {
+            if (argv.len != 2) {
+                try appendScriptError(allocator, &result, "script: mkdir requires exactly one path", .{});
+                return result;
+            }
+            validateInputPath(argv[1]) catch {
+                try appendScriptError(allocator, &result, "script: invalid mkdir path: {s}", .{argv[1]});
+                return result;
+            };
+            active_cwd.createDirPath(std.testing.io, argv[1]) catch |err| {
+                try appendScriptError(allocator, &result, "script: mkdir failed: {s}: {s}", .{ argv[1], @errorName(err) });
+                return result;
+            };
+            continue;
+        }
+
+        if (std.mem.eql(u8, argv[0], "cd")) {
+            if (argv.len != 2) {
+                try appendScriptError(allocator, &result, "script: cd requires exactly one path", .{});
+                return result;
+            }
+            validateInputPath(argv[1]) catch {
+                try appendScriptError(allocator, &result, "script: invalid cd path: {s}", .{argv[1]});
+                return result;
+            };
+            const next_cwd = active_cwd.openDir(std.testing.io, argv[1], .{}) catch |err| {
+                try appendScriptError(allocator, &result, "script: cd failed: {s}: {s}", .{ argv[1], @errorName(err) });
+                return result;
+            };
+            if (active_cwd_owned) active_cwd.close(std.testing.io);
+            active_cwd = next_cwd;
+            active_cwd_owned = true;
+            continue;
+        }
 
         if (std.mem.eql(u8, argv[0], "stdin")) {
             if (pending_stdin != null) {
@@ -232,7 +270,19 @@ fn executeScript(
                 try appendScriptError(allocator, &result, "script: stdin requires exactly one source", .{});
                 return result;
             }
-            pending_stdin = (try loadStdinSource(allocator, cwd, argv[1], &result)) orelse return result;
+            pending_stdin = (try loadStdinSource(allocator, active_cwd, argv[1], &result)) orelse return result;
+            continue;
+        }
+
+        if (std.mem.eql(u8, argv[0], "git")) {
+            var run_result = real_runner.runner().run(allocator, .{ .argv = argv, .cwd = active_cwd }) catch |err| {
+                try appendScriptError(allocator, &result, "script: git failed to run: {s}", .{@errorName(err)});
+                return result;
+            };
+            defer run_result.deinit(allocator);
+            result.final_exit = run_result.exit_code;
+            try result.stdout.appendSlice(allocator, run_result.stdout);
+            try result.stderr.appendSlice(allocator, run_result.stderr);
             continue;
         }
 
@@ -253,7 +303,7 @@ fn executeScript(
             .stdin = &stdin_reader,
             .gpa = allocator,
             .io = std.testing.io,
-            .cwd = cwd,
+            .cwd = active_cwd,
             .runner = real_runner.runner(),
             .clock = fake_clock.clock(),
             .random = prng.random(),
@@ -305,22 +355,27 @@ fn rewriteSections(
     return txtar.serialize(allocator, new_sections.items);
 }
 
-fn replaceWork(allocator: std.mem.Allocator, text: []const u8, work_path: []const u8) ![]u8 {
-    return std.mem.replaceOwned(u8, allocator, text, work_path, "$WORK");
+const NormalizedText = struct {
+    text: []const u8,
+    owned: bool,
+
+    fn deinit(self: NormalizedText, allocator: std.mem.Allocator) void {
+        if (self.owned) allocator.free(self.text);
+    }
+};
+
+fn normalizeWork(allocator: std.mem.Allocator, text: []const u8, work_path: []const u8) !NormalizedText {
+    if (std.mem.indexOf(u8, text, work_path) == null) {
+        return .{ .text = text, .owned = false };
+    }
+    return .{
+        .text = try std.mem.replaceOwned(u8, allocator, text, work_path, "$WORK"),
+        .owned = true,
+    };
 }
 
-fn printMismatch(
-    allocator: std.mem.Allocator,
-    label: []const u8,
-    expected: []const u8,
-    actual: []const u8,
-    work_path: []const u8,
-) void {
-    const disp_actual = replaceWork(allocator, actual, work_path) catch actual;
-    defer if (disp_actual.ptr != actual.ptr) allocator.free(disp_actual);
-    const disp_expected = replaceWork(allocator, expected, work_path) catch expected;
-    defer if (disp_expected.ptr != expected.ptr) allocator.free(disp_expected);
-    std.debug.print("\n--- {s} mismatch ---\nexpected:\n{s}\nactual:\n{s}\n", .{ label, disp_expected, disp_actual });
+fn printMismatch(label: []const u8, expected: []const u8, actual: []const u8) void {
+    std.debug.print("\n--- {s} mismatch ---\nexpected:\n{s}\nactual:\n{s}\n", .{ label, expected, actual });
 }
 
 fn compareAndReport(
@@ -333,18 +388,22 @@ fn compareAndReport(
     const expected_stdout = if (txtar.findSection(sections, txtar.section_expected_stdout)) |s| s.body else "";
     const expected_stderr = if (txtar.findSection(sections, txtar.section_expected_stderr)) |s| s.body else "";
     const expected_exit_str = if (txtar.findSection(sections, txtar.section_expected_exit)) |s| s.body else "0\n";
+    const actual_stdout = try normalizeWork(allocator, result.stdout.items, work_path);
+    defer actual_stdout.deinit(allocator);
+    const actual_stderr = try normalizeWork(allocator, result.stderr.items, work_path);
+    defer actual_stderr.deinit(allocator);
 
     const expected_exit = try std.fmt.parseInt(u8, std.mem.trimEnd(u8, expected_exit_str, " \t\r\n"), 10);
 
     var fail = false;
 
-    if (!std.mem.eql(u8, result.stdout.items, expected_stdout)) {
-        if (!quiet) printMismatch(allocator, "stdout", expected_stdout, result.stdout.items, work_path);
+    if (!std.mem.eql(u8, actual_stdout.text, expected_stdout)) {
+        if (!quiet) printMismatch("stdout", expected_stdout, actual_stdout.text);
         fail = true;
     }
 
-    if (!std.mem.eql(u8, result.stderr.items, expected_stderr)) {
-        if (!quiet) printMismatch(allocator, "stderr", expected_stderr, result.stderr.items, work_path);
+    if (!std.mem.eql(u8, actual_stderr.text, expected_stderr)) {
+        if (!quiet) printMismatch("stderr", expected_stderr, actual_stderr.text);
         fail = true;
     }
 
