@@ -1,3 +1,29 @@
-# Sync failures split into three categories distinguished by engine behavior, not by classified cause
+# Sync failures split into three shapes chosen by engine behavior
 
-The sync engine and **Backend Adapters** model failure across three shapes chosen by what the engine *does with the failure*, not by speculative classification of the underlying cause: **catastrophic environment failures** are bare error tags (`ExecutableNotFound`, `SpawnFailed`, `OutOfMemory`) that the engine renders to stderr with no state change — the **Mutation** stays `pending`; **Pull failures mid-sync** return `PullError.PullFailed` paired with a `?*Diagnostic` carrying captured CLI stderr (mirroring `migrations.applyAll`'s pattern in `src/store/diagnostic.zig`) — the engine prints the block and stops the run with no **Mutation** transition because **Backend Pull** is not tied to a specific **Mutation** row; **Apply failures for a specific Mutation** return `Outcome.failure { detail: []const u8 }` which the engine persists as `{"detail": "<captured stderr>"}` into `mutations.failure_json`, transitions the row to `failed`, and stops sync. A typed discriminated-union failure shape (`rate_limited | validation | sync_conflict | auth | transient`) was explicitly rejected for v1 because subprocess CLIs like `gh` and `acli` collapse network/auth/rate-limit/validation failures into "non-zero exit + stderr text" — reverse-engineering classification from stderr phrasing is brittle and re-breaks every CLI release; `ticket-11` will graduate the `Failure { detail }` placeholder into a typed union once the first concrete adapter makes real failure modes visible. The split lives where it does because each category has a different audience and persistence story: catastrophic failures are user-fixable environment problems with no persistent home; Pull failures are ephemeral and rendered once; **Apply** failures are persistent records consumed days later by `tk sync log`. Single-shape designs (one error type or one `Outcome` union for everything) were rejected because they conflate ephemeral render text with persistable JSON and force every caller to handle every category, contrary to the AGENTS.md error-handling rule that each shape match its audience and lifetime.
+The sync engine uses three failure shapes, picked by what the engine
+*does* with the failure rather than by classifying the underlying cause:
+
+- Catastrophic environment failures (`ExecutableNotFound`, `SpawnFailed`,
+  `OutOfMemory`) are bare error tags rendered to stderr; the **Mutation**
+  stays `pending`.
+- **Pull** failures mid-sync return `PullError.PullFailed` paired with a
+  `?*Diagnostic` carrying captured CLI stderr. No **Mutation** transition
+  fires because **Backend Pull** is not tied to a specific row.
+- **Apply** failures for a specific **Mutation** return `Outcome.failure
+  { detail }`, which the engine persists into `mutations.failure_json`
+  and transitions the row to `failed`.
+
+Each shape matches its audience and lifetime: catastrophic failures are
+user-fixable environment problems with no persistent home; Pull failures
+are ephemeral and rendered once; Apply failures are persistent records
+consumed days later by `tk sync log`. A single-shape design would
+conflate ephemeral render text with persistable JSON.
+
+A typed discriminated-union failure (`rate_limited | validation |
+sync_conflict | auth | transient`) was rejected for v1 because
+subprocess CLIs like `gh` and `acli` collapse network/auth/rate-limit/
+validation failures into "non-zero exit + stderr text" — reverse-
+engineering classification from stderr phrasing is brittle and breaks on
+every CLI release. `ticket-11` will graduate `Failure { detail }` into a
+typed union once the first concrete **Backend Adapter** makes real
+failure modes visible.
