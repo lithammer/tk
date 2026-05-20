@@ -11,9 +11,10 @@ on:
         default: dev
 
 # Per ADR 0011, release builds cross-compile all six target triples on a single
-# Linux host and the smoke matrix verifies the artifacts on native runners.
-# Packaging and GitHub Release publishing are intentionally out of scope here
-# and tracked by ticket-31; this workflow currently stops at smoke verification.
+# Linux host and the smoke matrix verifies the artifacts on native runners. On
+# tag push, the publish job uploads the smoke-passing binaries to a GitHub
+# Release; per ADR 0013, the install script and tk self-update both resolve
+# assets via the flat name pattern tk-<triple>[.exe].
 
 jobs:
   build:
@@ -70,3 +71,81 @@ jobs:
       - name: Smoke ${{ matrix.triple }}
         shell: bash
         run: ./scripts/smoke.sh ./zig-out/release/${{ matrix.triple }}/${{ matrix.bin }}
+      # Publish gates per-triple asset upload on smoke success. Each smoke job
+      # writes a marker file and uploads it as a per-triple artifact; the
+      # publish job downloads all markers and renames only the triples that
+      # produced one. The marker step has no `if:` guard, so a failed smoke
+      # short-circuits this step and the marker is absent — that absence is
+      # the "do not publish this triple" signal. Works uniformly for both the
+      # required triples and the experimental aarch64-windows-gnu one (per
+      # ADR 0011, that triple is best-effort and may be omitted from a given
+      # release without failing the workflow).
+      - name: Record smoke pass for ${{ matrix.triple }}
+        shell: bash
+        run: |
+          mkdir -p smoke-markers
+          : > smoke-markers/${{ matrix.triple }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: smoke-pass-${{ matrix.triple }}
+          path: smoke-markers/${{ matrix.triple }}
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: smoke
+    # Only publish on tag pushes. workflow_dispatch still exercises build and
+    # smoke for manual verification but does not create a Release; cutting an
+    # actual release happens by pushing a v* tag.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: tk-release-binaries
+          path: zig-out/release
+      # Collect every smoke-pass-<triple> marker. merge-multiple flattens all
+      # matching artifacts into one directory so the rename loop can iterate
+      # over the marker filenames to learn which triples passed smoke. A
+      # missing marker means that triple's smoke failed (or, for the
+      # experimental aarch64-windows-gnu runner, was unavailable) and its
+      # binary is excluded from this release.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: smoke-pass-*
+          path: smoke-markers
+          merge-multiple: true
+      - name: Flatten binaries for smoke-passing triples
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-flat
+          shopt -s nullglob
+          for marker in smoke-markers/*; do
+            triple="$(basename "$marker")"
+            src_dir="zig-out/release/$triple"
+            if [[ ! -d "$src_dir" ]]; then
+              echo "publish: missing build output for $triple" >&2
+              exit 1
+            fi
+            case "$triple" in
+              *windows*) bin="tk.exe"; asset="tk-${triple}.exe" ;;
+              *)        bin="tk";     asset="tk-${triple}" ;;
+            esac
+            if [[ ! -f "$src_dir/$bin" ]]; then
+              echo "publish: missing $bin in $src_dir" >&2
+              exit 1
+            fi
+            mv "$src_dir/$bin" "release-flat/$asset"
+            echo "publish: staged $asset"
+          done
+          ls -la release-flat
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-flat/tk-*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
