@@ -1,0 +1,2 @@
+[env]
+_.path = ["./zig-out/bin/"]

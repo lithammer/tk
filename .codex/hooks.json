@@ -6,7 +6,7 @@
 				"hooks": [
 					{
 						"type": "command",
-						"command": "./zig-out/bin/tk prime",
+						"command": "tk prime",
 						"statusMessage": "Loading session notes"
 					}
 				]
