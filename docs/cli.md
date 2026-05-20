@@ -30,6 +30,22 @@ tk prime
 
 Prints static command-owned Markdown embedded from `src/commands/prime.md`.
 
+## Manpage
+
+```sh
+tk manpage [--install]
+```
+
+Prints `man/tk.1`, embedded into the binary at build time via Zig
+`@embedFile`.
+
+- Default: writes the manpage to stdout.
+- `--install`: writes the manpage to `<selfexe-dir>/../share/man/man1/tk.1`
+  (FHS convention relative to the running binary). The install script
+  and `tk self-update` invoke this so a `curl | bash` install and every
+  later upgrade keep the manpage current next to the binary. No-op on
+  Windows.
+
 ## Create
 
 ```sh
@@ -313,3 +329,34 @@ V1 supports zero or one configured Remote.
 - `tk remote set <kind>` configures or replaces it.
 - `tk remote clear` removes it when no pending remote Mutations would be orphaned.
 - Authentication is delegated to backend-specific CLIs such as `gh` and `acli`.
+
+## Self-Update
+
+```sh
+tk self-update [--check]
+```
+
+Replaces the running `tk` binary with the latest release.
+
+- Queries `https://api.github.com/repos/lithammer/ticket/releases/latest`,
+  compares `tag_name` against the embedded build version.
+- If newer: downloads `tk-<triple>` (`.exe` for Windows triples) from
+  `releases/latest/download/<asset>`, runs the staged binary's
+  `--version` as smoke verification, then atomically replaces the
+  current binary. On Windows uses the rename-self pattern (current
+  `tk.exe` → `tk.exe.old`, then place new; `.old` cleaned up on next
+  launch).
+- Also updates the embedded manpage in place via the same mechanism
+  as `tk manpage --install`.
+- `--check`: queries the API and prints whether an update is available
+  without downloading. Exit `0` when up to date, exit `1` when newer
+  available.
+- Does not auto-elevate. If write access is missing, fails with a
+  message naming the path so the user can re-run with `sudo`.
+- Disabled on development builds (where the embedded triple is `dev`).
+- Forward-only. Downgrade and Linux ABI variant switching are not
+  supported by self-update; re-run the install script with
+  `TK_VERSION=v0.0.1 curl ... | sh` or `TK_LINUX_ABI=gnu curl ... | sh`.
+
+Rationale and trust-root reasoning is recorded in
+[ADR 0013](./adr/0013-distribute-via-curl-and-self-update-without-signing.md).

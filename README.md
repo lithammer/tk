@@ -43,6 +43,8 @@ Supported platforms: Linux, Windows, Windows (ARM), and macOS.
 - [0009: Sync failure taxonomy](./docs/adr/0009-sync-failure-taxonomy.md)
 - [0010: Pull merge skips items with pending mutations](./docs/adr/0010-pull-merge-skips-items-with-pending-mutations.md)
 - [0011: Release artifacts cross-compile from a single Linux host](./docs/adr/0011-single-host-cross-compile-release.md)
+- [0012: Linkage policy per release triple](./docs/adr/0012-linkage-policy-per-release-triple.md)
+- [0013: Distribute via curl|bash and tk self-update without signing in v1](./docs/adr/0013-distribute-via-curl-and-self-update-without-signing.md)
 
 ## Domain Language
 
