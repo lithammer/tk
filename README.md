@@ -4,6 +4,8 @@ Ticket is an agent-first command-line tool for managing work items through a sim
 
 The goal is similar in spirit to Beads: make work visible to humans and agents from the command line. Ticket deliberately aims for a simpler architecture, local-first capture, and backend adapters for systems like GitHub Issues and Jira.
 
+Supported platforms: Linux, Windows, Windows (ARM), and macOS.
+
 ## Current Design
 
 - Ticket is implemented in Zig 0.16.
@@ -38,6 +40,9 @@ The goal is similar in spirit to Beads: make work visible to humans and agents f
 - [0006: Done is terminal in v1](./docs/adr/0006-done-is-terminal-in-v1.md)
 - [0007: Default worktree path layout](./docs/adr/0007-default-worktree-path-layout.md)
 - [0008: Keep the implementation document compact](./docs/adr/0008-keep-implementation-doc-compact.md)
+- [0009: Sync failure taxonomy](./docs/adr/0009-sync-failure-taxonomy.md)
+- [0010: Pull merge skips items with pending mutations](./docs/adr/0010-pull-merge-skips-items-with-pending-mutations.md)
+- [0011: Release artifacts cross-compile from a single Linux host](./docs/adr/0011-single-host-cross-compile-release.md)
 
 ## Domain Language
 

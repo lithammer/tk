@@ -151,3 +151,23 @@ checks are tracked by `ticket-15`; configurable path layout is tracked by
 Workspace Scope is a selection context, not an implicit item target. Commands
 that inspect, update, or promote a specific item require explicit Display IDs;
 agents should pass IDs selected by `tk next` or `tk list`.
+
+## Release Targets
+
+`tk` ships prebuilt binaries for six target triples produced by a `zig build
+release` step that cross-compiles from a single `ubuntu-latest` runner with
+Zig 0.16.0 pinned exactly:
+
+- `x86_64-linux-musl` and `aarch64-linux-musl` — fully static
+- `x86_64-linux-gnu` — dynamic glibc, floor `2.28`
+- `aarch64-macos` — dynamic `libSystem`, `-mmacos-version-min=11.0`
+- `x86_64-windows-gnu` and `aarch64-windows-gnu` — `-static-libgcc` with
+  dynamic `msvcrt`
+
+Cross-compile rationale, linkage choices, the L2 reproducibility level, and
+the best-effort policy for `aarch64-windows-gnu` are recorded in [ADR
+0011](./docs/adr/0011-single-host-cross-compile-release.md). Smoke
+verification runs the cross-compiled artifact on a matching native GHA runner
+through a minimal `tk init / add / list` scenario; smoke failure (or runner
+unavailability for `windows-11-arm`) gates artifact upload, so a given GitHub
+Release may omit `aarch64-windows-gnu`.
