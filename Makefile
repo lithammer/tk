@@ -27,6 +27,6 @@ release:
 	$(ZIG) build $(ZIGFLAGS) release
 
 clean:
-	$(RM) -r .zig-cache zig-out
+	$(RM) -r .zig-cache zig-out zig-pkg
 
 .PHONY: all test run release clean
