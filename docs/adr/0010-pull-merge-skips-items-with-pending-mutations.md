@@ -1,3 +1,29 @@
-# Backend Pull merge skips whole rows when pending or failed Mutations target them
+# Backend Pull merge skips rows with pending or failed Mutations
 
-When **Backend Pull** returns a `BackendItemSnapshot` whose `(backend_kind, backend_key)` matches an existing local row, the sync engine inspects `mutations` for that `(item_id, item_class)` and **skips the entire row's overwrite** if any `pending` or `failed` **Mutation** targets it; otherwise it updates `title`, `body`, `status`, and `updated_at` from the snapshot in one transaction. `skipped` Mutations do not block overwrite because the user explicitly abandoned that intent; `applied` Mutations do not block because they are history. Three alternatives were considered: **field-level merge** (per-`MutationType` rule for which snapshot fields to keep) was rejected because v1 has no forcing example and the rule set grows with every new `MutationType` — designing it now would be speculation; **always overwrite** was rejected because it momentarily flips local titles to the stale backend value, then **Apply** flips them back, producing visible flicker for the user with no compensating benefit; **per-field timestamps** (compare `items.updated_at` to `snapshot.backend_updated_at`) was rejected because clock skew between local and backend makes the comparison unreliable and the engine has no per-field timestamps anyway. The whole-row skip is a deliberately coarse v1 rule: the cost is that a backend-side body update gets shadowed by a local title edit until **Apply** completes, accepted because the net visual outcome ("your local edits stay visible until **Apply** confirms them") matches user intent and self-heals on the next sync. Pull and Apply are separated into distinct transactions (Pull merges all snapshots in one transaction, then Apply opens one transaction per **Mutation**) so that a Pull rollback never partially commits and a per-Mutation failure cannot poison the Pull merge. Absence-from-snapshot is treated as no-op rather than a delete signal — v1 cannot reliably distinguish "backend deleted this issue" from "the Pull was filtered" or "auth temporarily hid it," so accepting stranded local Backend items is safer than risking data loss on a misread Pull.
+When **Backend Pull** returns a `BackendItemSnapshot` whose
+`(backend_kind, backend_key)` matches an existing local row, the sync
+engine skips the entire row's overwrite if any `pending` or `failed`
+**Mutation** targets it. Otherwise it updates `title`, `body`, `status`,
+and `updated_at` from the snapshot in one transaction. `skipped` and
+`applied` Mutations do not block overwrite — the user explicitly
+abandoned the first, the second is history.
+
+The whole-row skip is deliberately coarse: a backend-side body update is
+shadowed by a local title edit until **Apply** completes. The net
+outcome ("your local edits stay visible until Apply confirms them")
+matches user intent and self-heals on the next sync.
+
+Three alternatives were rejected. A **field-level merge** rule per
+`MutationType` would grow with every new MutationType and v1 has no
+forcing example. **Always overwrite** momentarily flips local titles to
+the stale backend value before **Apply** flips them back, producing
+visible flicker. **Per-field timestamps** is unreliable because of
+clock skew between local and backend, and the engine has no per-field
+timestamps anyway.
+
+Pull and Apply run in distinct transactions so a Pull rollback never
+partially commits and a per-Mutation failure cannot poison the Pull
+merge. Absence from a snapshot is treated as no-op, not a delete signal
+— v1 cannot distinguish "backend deleted" from "Pull was filtered" or
+"auth hid it," so stranded local Backend items are safer than data
+loss on a misread Pull.
