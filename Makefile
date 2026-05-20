@@ -23,7 +23,10 @@ test:
 run:
 	$(ZIG) build $(ZIGFLAGS) run -- $(ARGS)
 
+release:
+	$(ZIG) build $(ZIGFLAGS) release
+
 clean:
 	$(RM) -r .zig-cache zig-out
 
-.PHONY: all test run clean
+.PHONY: all test run release clean
