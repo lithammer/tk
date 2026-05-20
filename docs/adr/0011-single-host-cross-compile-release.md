@@ -1,36 +1,28 @@
 # Release artifacts cross-compile from a single Linux host
 
-Release builds produce all six supported triples — `x86_64-linux-musl`,
-`x86_64-linux-gnu`, `aarch64-linux-musl`, `aarch64-macos`,
-`x86_64-windows-gnu`, `aarch64-windows-gnu` — from one `ubuntu-latest`
-GitHub Actions runner via a `zig build release` step. Zig 0.16.0 is
-pinned exactly so the same source revision produces byte-identical
-outputs across rebuilds. Combined with `ReleaseSafe`, stripped debug
-info, and a `-Drelease-version=` build option, this gives Level-2
-reproducibility (same recipe = same bytes across hosts, but not
-Debian-grade third-party reproducibility, which would require
-`SOURCE_DATE_EPOCH` and path/timestamp normalization).
+Release builds produce all six supported triples from one
+`ubuntu-latest` GitHub Actions runner via `zig build release`, with
+Zig 0.16.0 pinned exactly so the same source revision produces
+byte-identical outputs across rebuilds (Level-2 reproducibility).
+Linkage is fixed per triple: musl static for containers/Alpine, glibc
+dynamic with a 2.28 floor (RHEL 8 / Debian 10 / Ubuntu 18.04), macOS
+dynamic `libSystem` with `-mmacos-version-min=11.0` (Apple forbids
+static linking it), Windows `-static-libgcc` + dynamic `msvcrt` so
+`tk.exe` ships as a single file. Smoke verification runs on
+per-platform native GitHub runners so what gets tested is the shipped
+bytes, not a fresh native rebuild.
 
-The native-per-platform alternative — one CI job per OS each running its
-own `zig build` — was rejected because it makes host the implicit
-variable in the artifact and loses bit-identical rebuilds without
-buying anything `tk` needs: there is no platform-specific toolchain step
-(no Apple codesigning/notarization, no MSVC ABI link, no Windows
-resource compiler), and Zig's cross-compilation supplies libc shims
-natively.
+## Considered Options
 
-Linkage policy is fixed per triple: musl builds are fully static (target
-is containers, Alpine, minimal CI — not "supports old distros"); glibc
-builds are dynamic with a 2.28 floor (RHEL 8 / Debian 10 / Ubuntu 18.04);
-macOS uses dynamic `libSystem` with `-mmacos-version-min=11.0` because
-Apple forbids static linking it; Windows uses `-static-libgcc` with
-dynamic `msvcrt` so `tk.exe` ships as a single file.
+A native-per-platform CI shape — one job per OS each running its own
+`zig build` — was rejected because `tk` needs no platform-specific
+toolchain step (no Apple notarization, no MSVC link, no Windows
+resource compiler), so host would be an implicit variable in the
+artifact with no compensating benefit.
 
-Smoke verification runs per-platform on native GitHub runners by
-downloading the cross-compiled artifact and running a minimal `tk init
-/ add / list` scenario against it — testing the shipped bytes, not a
-fresh native rebuild. The `aarch64-windows-gnu` smoke job is
-`continue-on-error: true` because `windows-11-arm` is in GitHub Actions
-preview; the release-publish step gates artifact upload on smoke
-success, so that triple is best-effort per release until the preview
-graduates.
+## Consequences
+
+`aarch64-windows-gnu` smoke is `continue-on-error: true` while
+`windows-11-arm` is in GitHub Actions preview; the release-publish step
+gates upload on smoke success, so that triple is best-effort per
+release.
