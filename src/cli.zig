@@ -43,6 +43,24 @@ pub const CommandMeta = struct {
     description: []const u8,
 };
 
+/// Compile-time guard that an `@embedFile` payload contains no CR bytes.
+/// Apply at every `@embedFile` call site so a CRLF regression (escaped
+/// `.gitattributes`, contributor with stale local autocrlf working tree)
+/// fails the build instead of shipping a broken binary.
+///
+/// `@setEvalBranchQuota` is bumped per byte because the migration SQL files
+/// (~28 KB) and the manpage (~6 KB) exceed Zig's default 1000-branch quota
+/// when scanned at comptime.
+pub fn assertNoCR(comptime bytes: []const u8) void {
+    @setEvalBranchQuota(bytes.len * 8 + 1000);
+    var i: usize = 0;
+    while (i < bytes.len) : (i += 1) {
+        if (bytes[i] == '\r') {
+            @compileError("embedded file contains CR; check .gitattributes for eol=lf");
+        }
+    }
+}
+
 /// Metadata for a planned subcommand whose surface is documented in `tk prime`
 /// and `docs/cli.md` but whose implementation has not yet shipped.
 ///
@@ -68,6 +86,7 @@ const all_commands = .{
     @import("commands/block.zig"),
     @import("commands/done.zig"),
     @import("commands/list.zig"),
+    @import("commands/manpage.zig"),
     @import("commands/next.zig"),
     @import("commands/prime.zig"),
     @import("commands/show.zig"),
@@ -304,6 +323,7 @@ test "runArgv prints help" {
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "add") != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "done") != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "list") != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "manpage") != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "prime") != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "--version") != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "Planned (not yet implemented):") != null);

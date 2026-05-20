@@ -30,6 +30,13 @@ case "$TK" in
     *) TK="$PWD/$TK" ;;
 esac
 
+# Verify the release binary embeds man/tk.1 byte-for-byte. This must run
+# before the `cd "$WORK"` below because man/tk.1 lives in the repo root.
+MANPAGE_SMOKE="/tmp/tk.1.smoke.$$"
+"$TK" manpage > "$MANPAGE_SMOKE"
+diff "$MANPAGE_SMOKE" man/tk.1
+rm -f "$MANPAGE_SMOKE"
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 cd "$WORK"

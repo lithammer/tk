@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const zqlite = @import("zqlite");
+const cli = @import("../cli.zig");
 const Diagnostic = @import("../domain/diagnostic.zig").Diagnostic;
 
 /// Repository Store SQLite connection type used by migration helpers.
@@ -34,10 +35,20 @@ pub const Migration = struct {
     sql: [*:0]const u8,
 };
 
+const migration_1_sql = @embedFile("migrations/001_repository_store.sql");
+comptime {
+    cli.assertNoCR(migration_1_sql);
+}
+
+const migration_2_sql = @embedFile("migrations/002_items_no_escape_from_done.sql");
+comptime {
+    cli.assertNoCR(migration_2_sql);
+}
+
 /// V1 Repository Store schema skeleton.
 pub const migration_1: Migration = .{
     .version = 1,
-    .sql = @embedFile("migrations/001_repository_store.sql"),
+    .sql = migration_1_sql,
 };
 
 /// Adds the `items_no_escape_from_done` trigger that enforces the
@@ -46,7 +57,7 @@ pub const migration_1: Migration = .{
 /// inherits the protection.
 pub const migration_2: Migration = .{
     .version = 2,
-    .sql = @embedFile("migrations/002_items_no_escape_from_done.sql"),
+    .sql = migration_2_sql,
 };
 
 /// Ordered migration list applied by `applyAll`.

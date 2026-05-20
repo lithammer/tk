@@ -6,6 +6,7 @@ test {
     _ = @import("commands/unblock.zig");
     _ = @import("commands/init.zig");
     _ = @import("commands/list.zig");
+    _ = @import("commands/manpage.zig");
     _ = @import("commands/message.zig");
     _ = @import("commands/next.zig");
     _ = @import("commands/prime.zig");

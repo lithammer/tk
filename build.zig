@@ -98,6 +98,11 @@ pub fn build(b: *std.Build) void {
     });
     root_mod.addImport("clap", clap.module("clap"));
     root_mod.addImport("zqlite", zqlite_module);
+    // The manpage source lives at the repository root in man/tk.1, which is
+    // outside the package boundary set by root_source_file. Expose it as an
+    // anonymous module so commands/manpage.zig can pull it in with
+    // `@embedFile("manpage_data")`.
+    root_mod.addAnonymousImport("manpage_data", .{ .root_source_file = b.path("man/tk.1") });
 
     const exe = b.addExecutable(.{
         .name = "tk",
@@ -121,6 +126,7 @@ pub fn build(b: *std.Build) void {
     });
     test_mod.addImport("clap", clap.module("clap"));
     test_mod.addImport("zqlite", zqlite_module);
+    test_mod.addAnonymousImport("manpage_data", .{ .root_source_file = b.path("man/tk.1") });
 
     const test_options = b.addOptions();
     test_options.addOptionPath("tk_exe_path", exe.getEmittedBin());
@@ -171,6 +177,7 @@ pub fn build(b: *std.Build) void {
         });
         rt_mod.addImport("clap", rt_clap.module("clap"));
         rt_mod.addImport("zqlite", rt_zqlite.module("zqlite"));
+        rt_mod.addAnonymousImport("manpage_data", .{ .root_source_file = b.path("man/tk.1") });
         rt_mod.addOptions("build_options", rt_options);
 
         const rt_exe = b.addExecutable(.{

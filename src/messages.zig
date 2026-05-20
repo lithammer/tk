@@ -806,3 +806,21 @@ pub const sync_log_out_of_memory = "tk sync log: out of memory";
 
 /// Stderr line for non-transient Repository Store failures during sync log.
 pub const sync_log_storage_failed = "tk sync log: failed to read Repository Store";
+
+// `tk manpage` — print or install the embedded `tk(1)` manpage.
+
+/// Stdout prefix for a successful `tk manpage --install`. Callers append the
+/// installed path followed by `\n`.
+pub const manpage_install_success = "Installed manpage at ";
+
+/// Stderr prefix for a failed `tk manpage --install`. Callers append the
+/// target path, `": "`, an OS error reason, and the trailing context
+/// `"; existing file (if any) left unchanged; remove manually if it is stale\n"`.
+/// The "left unchanged" clause is part of the contract: the staged tmp file
+/// is removed best-effort, but the existing target is never deleted.
+pub const manpage_install_failure_prefix = "tk manpage: install failed at ";
+
+/// Stderr line printed when `tk manpage --install` runs on Windows. Includes
+/// its own trailing newline because the install path otherwise builds its
+/// stderr lines with explicit format suffixes.
+pub const manpage_skip_windows = "tk manpage: skipping install on Windows\n";
