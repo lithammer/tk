@@ -16,6 +16,20 @@ on:
 # Release; per ADR 0013, the install script and tk self-update both resolve
 # assets via the flat name pattern tk-<triple>[.exe].
 
+# Serialize publishes for the same tag so a force-push or rapid retry does not
+# race two `softprops/action-gh-release` jobs against the same Release object.
+# cancel-in-progress is false so the in-flight publish finishes before the
+# second starts.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+# Default to read-only GITHUB_TOKEN at the workflow level. The `publish` job
+# re-grants `contents: write` on its own scope so only the release-creating
+# step has the elevated privilege.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -81,11 +95,14 @@ jobs:
       # ADR 0011, that triple is best-effort and may be omitted from a given
       # release without failing the workflow).
       - name: Record smoke pass for ${{ matrix.triple }}
+        if: success()
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p smoke-markers
           : > smoke-markers/${{ matrix.triple }}
-      - uses: actions/upload-artifact@v4
+      - if: success()
+        uses: actions/upload-artifact@v4
         with:
           name: smoke-pass-${{ matrix.triple }}
           path: smoke-markers/${{ matrix.triple }}
@@ -132,7 +149,7 @@ jobs:
             fi
             case "$triple" in
               *windows*) bin="tk.exe"; asset="tk-${triple}.exe" ;;
-              *)        bin="tk";     asset="tk-${triple}" ;;
+              *) bin="tk"; asset="tk-${triple}" ;;
             esac
             if [[ ! -f "$src_dir/$bin" ]]; then
               echo "publish: missing $bin in $src_dir" >&2
@@ -141,7 +158,14 @@ jobs:
             mv "$src_dir/$bin" "release-flat/$asset"
             echo "publish: staged $asset"
           done
-          ls -la release-flat
+          # Fail loudly if no triples passed smoke. needs:smoke short-circuits
+          # the publish job when any required triple fails, so this guard is
+          # defense against a future refactor that drops the implicit
+          # short-circuit (e.g. relaxing a smoke step to continue-on-error).
+          if [ -z "$(ls -A release-flat)" ]; then
+            echo "publish: no smoke-passing binaries; refusing to publish empty release" >&2
+            exit 1
+          fi
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
