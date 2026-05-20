@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version string to embed (e.g., v0.0.2-rc1)'
+        required: true
+        default: dev
+
+# Per ADR 0011, release builds cross-compile all six target triples on a single
+# Linux host and the smoke matrix verifies the artifacts on native runners.
+# Packaging and GitHub Release publishing are intentionally out of scope here
+# and tracked by ticket-31; this workflow currently stops at smoke verification.
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Cross-compile six triples
+        run: zig build release -Drelease-version=${{ inputs.version || github.ref_name }} --summary all
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tk-release-binaries
+          path: zig-out/release/
+          if-no-files-found: error
+          retention-days: 14
+
+  smoke:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - triple: x86_64-linux-musl
+            runner: ubuntu-latest
+            bin: tk
+          - triple: x86_64-linux-gnu
+            runner: ubuntu-latest
+            bin: tk
+          - triple: aarch64-linux-musl
+            runner: ubuntu-24.04-arm
+            bin: tk
+          - triple: aarch64-macos
+            runner: macos-14
+            bin: tk
+          - triple: x86_64-windows-gnu
+            runner: windows-latest
+            bin: tk.exe
+          - triple: aarch64-windows-gnu
+            runner: windows-11-arm
+            bin: tk.exe
+            experimental: true
+    runs-on: ${{ matrix.runner }}
+    # windows-11-arm is in GitHub Actions preview; allow that one smoke job to
+    # fail (or the runner to be unavailable) without blocking the workflow.
+    continue-on-error: ${{ matrix.experimental == true }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: tk-release-binaries
+          path: zig-out/release
+      - name: Smoke ${{ matrix.triple }}
+        shell: bash
+        run: ./scripts/smoke.sh ./zig-out/release/${{ matrix.triple }}/${{ matrix.bin }}
