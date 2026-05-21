@@ -26,9 +26,10 @@ palette.
   closes in the right order. A comptime builder captures this once.
 - *Comptime semantic styles*, the chosen shape. `palette.zig` exposes
   names (`header`, `kind_bug`, `priority_p0`); call sites use the
-  names (`styler.wrap(styles.kind_bug, "[bug]")`). The comptime
-  builder lives only at definition time; the shipped binary has
-  prebaked `open` / `close` byte slices.
+  names (`deps.styler.forStdout().wrap(palette.kind_bug, "[bug]")`).
+  The builder runs at definition time — Zig 0.16 evaluates `pub const`
+  initializers at comptime — so the shipped binary has prebaked
+  `open` / `close` byte slices.
 
 **Policy gate location.** Resolving the policy at flag-parse time in
 `cli.zig` and carrying it on `Deps` was chosen over per-command
@@ -47,6 +48,15 @@ acknowledged in code comments.
 
 ## Consequences
 
+- The resolved per-stream color decision is `std.Io.Terminal.Mode`,
+  reusing stdlib's resolution chain (`NO_COLOR`, `CLICOLOR_FORCE`, VT
+  enable, TTY detection). The stdlib's three-arm union exposes a
+  `windows_api` mode for legacy `cmd.exe`-style consoles that do not
+  understand VT escapes. tk emits SGR bytes only and treats
+  `.windows_api` as `.no_color` (output stays plain). Users on a
+  modern Windows Terminal or a VT-enabled console see colour
+  normally; users on legacy `cmd.exe` get plain output rather than
+  literal escape codes.
 - Nested-safe spans must touch **disjoint SGR families** (foreground
   color vs. bold/dim vs. underline vs. background). Closing an
   attribute resets that family to default; it does not restore a

@@ -28,6 +28,9 @@ test {
     _ = @import("domain/status.zig");
     _ = @import("domain/ticket_kind.zig");
     _ = @import("git/discovery.zig");
+    _ = @import("render/palette.zig");
+    _ = @import("render/style.zig");
+    _ = @import("render/styler.zig");
     _ = @import("domain/diagnostic.zig");
     _ = @import("embed.zig");
     _ = @import("store/migrations.zig");
