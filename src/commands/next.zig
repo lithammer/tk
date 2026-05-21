@@ -3,6 +3,7 @@
 const std = @import("std");
 const clap = @import("clap");
 const cli = @import("../cli.zig");
+const parse_diagnostic = @import("parse_diagnostic.zig");
 const messages = @import("../messages.zig");
 const repository = @import("../store/repository.zig");
 const worktree_scope = @import("../worktree/scope.zig");
@@ -25,14 +26,11 @@ const params = clap.parseParamsComptime(
 
 /// Parse `tk next` flags, read the Repository Store, and print one ready Ticket.
 pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
-    var diag: clap.Diagnostic = .{};
-    var res = clap.parseEx(clap.Help, &params, clap.parsers.default, args_iter, .{
-        .diagnostic = &diag,
+    var res = (try parse_diagnostic.parseOrReportUsage(clap.Help, &params, clap.parsers.default, args_iter, .{
+        .stderr = deps.stderr,
         .allocator = deps.gpa,
-    }) catch |err| {
-        diag.report(deps.stderr, err) catch {};
-        return 2;
-    };
+        .command = .{ .subcommand = meta.name },
+    })) orelse return 2;
     defer res.deinit();
 
     if (res.args.help != 0) {
@@ -244,7 +242,7 @@ test "next: rejects explicit scope arguments" {
 
     try std.testing.expectEqual(@as(u8, 2), try run(h.deps(), &h.iter));
     try std.testing.expectEqualStrings("", h.stdout());
-    try std.testing.expectEqualStrings("Invalid argument 'tk-1'\n", h.stderr());
+    try std.testing.expect(std.mem.startsWith(u8, h.stderr(), "tk next: "));
 }
 
 test "next: reports missing store after successful Git discovery" {

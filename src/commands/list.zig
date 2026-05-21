@@ -3,6 +3,7 @@
 const std = @import("std");
 const clap = @import("clap");
 const cli = @import("../cli.zig");
+const parse_diagnostic = @import("parse_diagnostic.zig");
 const messages = @import("../messages.zig");
 const repository = @import("../store/repository.zig");
 const ItemStatus = @import("../domain/status.zig").ItemStatus;
@@ -34,14 +35,11 @@ const params = clap.parseParamsComptime(
 
 /// Parse `tk list` flags, read the Repository Store, and render the List Tree.
 pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
-    var diag: clap.Diagnostic = .{};
-    var res = clap.parseEx(clap.Help, &params, clap.parsers.default, args_iter, .{
-        .diagnostic = &diag,
+    var res = (try parse_diagnostic.parseOrReportUsage(clap.Help, &params, clap.parsers.default, args_iter, .{
+        .stderr = deps.stderr,
         .allocator = deps.gpa,
-    }) catch |err| {
-        diag.report(deps.stderr, err) catch {};
-        return 2;
-    };
+        .command = .{ .subcommand = meta.name },
+    })) orelse return 2;
     defer res.deinit();
 
     if (res.args.help != 0) {

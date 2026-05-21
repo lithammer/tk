@@ -3,6 +3,7 @@ const clap = @import("clap");
 const proc = @import("proc/runner.zig");
 const clock_mod = @import("clock.zig");
 const render = @import("render/styler.zig");
+const parse_diagnostic = @import("commands/parse_diagnostic.zig");
 
 /// Runtime services available to command handlers.
 ///
@@ -163,22 +164,12 @@ const help_options: clap.HelpOptions = .{
 /// 2 usage error, and propagated unexpected errors for `main.zig` to translate
 /// to exit 3.
 pub fn runArgv(deps: Deps, args_iter: anytype) !u8 {
-    var diag: clap.Diagnostic = .{};
-    // Treat every clap parse error as exit 2. The contract pins
-    // error.OutOfMemory as exit 3, but Zig 0.16 with clap v0.12.0 and our
-    // `enumeration` + `terminating_positional` config has OOM compiled out
-    // of the inferred error set; if a future command's parser becomes able
-    // to allocate fallibly, this catch must be split to let OOM propagate.
-    var res = clap.parseEx(clap.Help, &top_params, top_parsers, args_iter, .{
-        .diagnostic = &diag,
+    var res = (try parse_diagnostic.parseOrReportUsage(clap.Help, &top_params, top_parsers, args_iter, .{
+        .stderr = deps.stderr,
         .allocator = deps.gpa,
+        .command = .top_level,
         .terminating_positional = 0,
-    }) catch |err| {
-        // TODO(tk-2): prefix clap diagnostics with the command name —
-        // applies symmetrically here for top-level parse failures.
-        diag.report(deps.stderr, err) catch {};
-        return 2;
-    };
+    })) orelse return 2;
     defer res.deinit();
 
     if (res.args.help != 0) {
@@ -270,6 +261,12 @@ const Harness = @import("testing/test_cli.zig").Harness;
 const TmpStore = @import("testing/tmp_store.zig").TmpStore;
 const zqlite = @import("zqlite");
 
+fn expectStandardParseDiagnostic(stderr: []const u8, command_prefix: []const u8, hint_line: []const u8) !void {
+    try std.testing.expect(std.mem.startsWith(u8, stderr, command_prefix));
+    try std.testing.expect(std.mem.endsWith(u8, stderr, hint_line));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, stderr, "\n"));
+}
+
 test "runArgv routes prime" {
     var h = Harness.init(std.testing.allocator, &.{"prime"});
     defer h.deinit();
@@ -303,11 +300,13 @@ test "runArgv accepts --color=never before subcommand" {
     try std.testing.expectEqual(@as(u8, 0), code);
 }
 
-test "runArgv rejects invalid --color value with exit 2" {
+test "runArgv rejects invalid --color value with standardized parse diagnostic" {
     var h = Harness.init(std.testing.allocator, &.{ "--color=zebra", "prime" });
     defer h.deinit();
     const code = try runArgv(h.deps(), &h.iter);
     try std.testing.expectEqual(@as(u8, 2), code);
+    try std.testing.expectEqualStrings("", h.stdout());
+    try expectStandardParseDiagnostic(h.stderr(), "tk: ", "tk: run 'tk --help' for usage\n");
 }
 
 test "applyColorFlag: auto and null both pass env_mode through" {
@@ -340,20 +339,21 @@ test "runArgv returns 2 on unknown subcommand" {
 
     const code = try runArgv(h.deps(), &h.iter);
     try std.testing.expectEqual(@as(u8, 2), code);
+    try std.testing.expectEqualStrings("", h.stdout());
     try std.testing.expect(h.stderr().len > 0);
 }
 
 test "runArgv returns 2 on extra positional after a subcommand" {
     // Trailing positionals after a known subcommand surface through the
-    // subcommand parser; this test pins the dispatcher contract once
-    // (exit 2 + non-empty stderr) so individual commands don't each have
-    // to retest it.
+    // subcommand parser; this representative case proves dispatch uses the
+    // shared clap diagnostic wrapper without retesting every command.
     var h = Harness.init(std.testing.allocator, &.{ "prime", "unexpected" });
     defer h.deinit();
 
     const code = try runArgv(h.deps(), &h.iter);
     try std.testing.expectEqual(@as(u8, 2), code);
-    try std.testing.expect(h.stderr().len > 0);
+    try std.testing.expectEqualStrings("", h.stdout());
+    try expectStandardParseDiagnostic(h.stderr(), "tk prime: ", "tk prime: run 'tk prime --help' for usage\n");
 }
 
 test "runArgv returns 2 on missing subcommand" {

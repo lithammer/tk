@@ -43,6 +43,8 @@ Initializes the Repository Store.
 
 User-observable diagnostic and status substrings (for example, `Initialized Repository Store at `, `not a tk Repository Store`, `newer tk version`) are canonicalised in `src/messages.zig`. Source-side call sites build their format strings by `++`-concatenating those constants with the formatting suffix they need, and tests reference the same constants via `messages.<name>`. Any new user-visible phrasing should be added there rather than hardcoded at the call site.
 
+Parser diagnostics emitted by the shared clap parser keep clap's diagnostic body but add command attribution and a usage hint. Top-level parser failures render two stderr lines: `tk: <clap diagnostic>` followed by `tk: run 'tk --help' for usage`. Subcommand parser failures render `tk <command>: <clap diagnostic>` followed by `tk <command>: run 'tk <command> --help' for usage`.
+
 ## Agent Briefing
 
 ```sh

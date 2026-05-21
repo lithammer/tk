@@ -3,6 +3,7 @@
 const std = @import("std");
 const clap = @import("clap");
 const cli = @import("../cli.zig");
+const parse_diagnostic = @import("parse_diagnostic.zig");
 const messages = @import("../messages.zig");
 const message = @import("message.zig");
 const repository = @import("../store/repository.zig");
@@ -33,14 +34,11 @@ const params = clap.parseParamsComptime(
 
 /// Parse `tk update` args, apply field changes, and write the result.
 pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
-    var diag: clap.Diagnostic = .{};
-    var res = clap.parseEx(clap.Help, &params, parsers, args_iter, .{
-        .diagnostic = &diag,
+    var res = (try parse_diagnostic.parseOrReportUsage(clap.Help, &params, parsers, args_iter, .{
+        .stderr = deps.stderr,
         .allocator = deps.gpa,
-    }) catch |err| {
-        diag.report(deps.stderr, err) catch {};
-        return 2;
-    };
+        .command = .{ .subcommand = meta.name },
+    })) orelse return 2;
     defer res.deinit();
 
     if (res.args.help != 0) {
