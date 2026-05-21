@@ -1,8 +1,8 @@
 .{
-    .name = .ticket,
+    .name = .tk,
     .version = "0.0.1",
     .minimum_zig_version = "0.16.0",
-    .fingerprint = 0x97a0ada3d6c0b286,
+    .fingerprint = 0xd0ea16dd7e7907fe,
     .paths = .{
         "src",
         "docs",

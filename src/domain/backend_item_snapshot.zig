@@ -25,7 +25,7 @@ pub const BackendItemSnapshot = struct {
     ///
     /// MUST be in a namespace that cannot collide with the local store prefix.
     /// The github adapter uses `gh-<issue-number>`; the jira adapter uses the
-    /// natural Jira key (e.g. `PROJ-123`). After ticket-22 lands, the
+    /// natural Jira key (e.g. `PROJ-123`). After tk-22 lands, the
     /// prefix-change command must revalidate against the configured adapter;
     /// until then this is enforced by `validateRemoteAgainstLocalPrefix` at
     /// `tk remote set` time.

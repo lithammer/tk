@@ -1,10 +1,10 @@
-# Ticket Workflow Context
+# tk Workflow Context
 
 Run `tk prime` after compaction, clear, or a new agent session.
 
 ## Core Rules
 
-- Use Ticket for repository-local work tracking.
+- Use tk for repository-local work tracking.
 - New Tickets and Epics are local by default.
 - Use `tk add -F -` for self-contained local Tickets with enough context for
   a fresh agent session.

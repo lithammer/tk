@@ -1,8 +1,8 @@
-# Ticket
+# tk
 
-Ticket is an agent-first command-line tool for managing work items through a simple local interface and pluggable issue-tracker backends. The binary is **`tk`**.
+tk (pronounced "ticket") is an agent-first command-line tool for managing work items through a simple local interface and pluggable issue-tracker backends.
 
-The goal is similar in spirit to Beads: make work visible to humans and agents from the command line. Ticket deliberately aims for a simpler architecture, local-first capture, and backend adapters for systems like GitHub Issues and Jira.
+The goal is similar in spirit to Beads: make work visible to humans and agents from the command line. tk deliberately aims for a simpler architecture, local-first capture, and backend adapters for systems like GitHub Issues and Jira.
 
 Supported platforms: Linux, Windows, Windows (ARM), and macOS.
 
@@ -11,25 +11,25 @@ Supported platforms: Linux, Windows, Windows (ARM), and macOS.
 Linux and macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/lithammer/ticket/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/lithammer/tk/main/scripts/install.sh | sh
 ```
 
 Re-running the same line upgrades to the latest release.
 
 Windows: download the matching `tk-x86_64-windows-gnu.exe` or
-`tk-aarch64-windows-gnu.exe` from the [latest release](https://github.com/lithammer/ticket/releases/latest)
+`tk-aarch64-windows-gnu.exe` from the [latest release](https://github.com/lithammer/tk/releases/latest)
 and place it on your `PATH`.
 
 ## Current Design
 
-- Ticket is implemented in Zig 0.16.
+- tk is implemented in Zig 0.16.
 - **Tickets** are backend-agnostic work items.
 - **Epics** group related Tickets and require explicit closure.
 - New Tickets and Epics are **local by default**, even when a Primary Backend exists.
 - **Promotion** explicitly converts a Local Ticket or Local Epic into a backend-backed object.
 - Promotion replaces the visible local ID with the backend ID and keeps the old local ID as an alias.
 - A repo can have zero or one **Primary Backend**.
-- **Backend Adapters** map Ticket domain concepts to backend systems.
+- **Backend Adapters** map tk domain concepts to backend systems.
 - Backend Adapters expose pull and apply-mutation operations; the sync engine owns ordering, cursors, retries, and failure policy.
 - The **Repository Store** is shared across workspaces for one repository and is untracked local state by default.
 - The Repository Store uses SQLite.
@@ -87,7 +87,7 @@ Important distinctions:
 
 ## Testing Direction
 
-Ticket should use layered tests from the start:
+tk should use layered tests from the start:
 
 - Zig unit tests for domain behavior and command handlers.
 - Inline snapshots for small rendered outputs.
@@ -119,7 +119,7 @@ Priority is set with `tk add --priority P0..P4` or `tk update <id> --priority P0
 
 `tk list` defaults to a tree view: Epics are top-level rows, child Tickets are nested under their Epic, and unparented Tickets are top-level rows. `tk list --ready` keeps the tree shape and includes non-empty Epics as containers for ready child Tickets. Rows use decorative tree glyphs plus compact status, priority, and kind markers. They do not render Origin as a separate field; Local or Backend origin is normally inferred from the Display ID shape.
 
-Ticket's default command paths should let agents manage local work safely. Commands that affect upstream state or sync repair, such as `promote` and `sync`, stay explicit and visible.
+tk's default command paths should let agents manage local work safely. Commands that affect upstream state or sync repair, such as `promote` and `sync`, stay explicit and visible.
 
 `tk promote <id>` promotes only the target. `tk promote <epic-id> --children` also promotes directly contained Local Tickets; it does not follow Dependencies.
 

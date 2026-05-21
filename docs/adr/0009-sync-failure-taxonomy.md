@@ -13,5 +13,5 @@ A typed discriminated-union failure (`rate_limited | validation |
 sync_conflict | auth | transient`) was rejected for v1 because
 subprocess CLIs like `gh` and `acli` collapse causes into "non-zero
 exit + stderr text," making classification from stderr brittle.
-`ticket-11` will graduate `Failure { detail }` into a typed union once
+`tk-11` will graduate `Failure { detail }` into a typed union once
 the first concrete Backend Adapter makes real failure modes visible.

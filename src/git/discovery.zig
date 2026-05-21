@@ -1,7 +1,7 @@
 //! Git rev-parse path discovery used to locate the Repository Store.
 //!
 //! `tk init` (and future `tk worktree` commands) need Git's common directory
-//! and toplevel to place or find `<git-common-dir>/tk/ticket.db` (the
+//! and toplevel to place or find `<git-common-dir>/tk/tk.db` (the
 //! Repository Store, per ARCHITECTURE.md). This module owns the
 //! `git rev-parse` invocation and returns a typed `Outcome` so callers can
 //! render diagnostics without this module reaching for stderr.

@@ -18,16 +18,16 @@
 pub const init_success_fresh = "Initialized Repository Store at ";
 
 /// Stdout line emitted when `tk init` is re-run on a Repository Store that
-/// already belongs to Ticket. Trailing space, same reason as above.
+/// already belongs to tk. Trailing space, same reason as above.
 pub const init_success_existing = "Repository Store already initialized at ";
 
 /// Stderr fragment when the candidate path is a SQLite file written by
-/// something other than Ticket. Embedded inside a longer diagnostic.
-pub const init_refuse_foreign = "not a Ticket Repository Store";
+/// something other than tk. Embedded inside a longer diagnostic.
+pub const init_refuse_foreign = "not a tk Repository Store";
 
-/// Stderr fragment when an existing Repository Store was created by a Ticket
+/// Stderr fragment when an existing Repository Store was created by a tk
 /// version newer than this build. Embedded inside a longer diagnostic.
-pub const init_refuse_future_version = "newer Ticket version";
+pub const init_refuse_future_version = "newer tk version";
 
 // `tk init` — Git discovery outcomes.
 
@@ -670,7 +670,7 @@ pub const remote_set_jira_required = "tk remote set jira: missing required --sit
 pub const remote_set_prefix_collision_prefix = "tk remote set: local Display ID prefix '";
 
 /// Stderr suffix shared with the prefix-collision diagnostic.
-pub const remote_set_prefix_collision_suffix = "' collides with the adapter namespace; configurable prefix is tracked by ticket-22";
+pub const remote_set_prefix_collision_suffix = "' collides with the adapter namespace; configurable prefix is tracked by tk-22";
 
 /// Stderr line for a missing Repository Store during `tk remote set`.
 pub const remote_set_missing_store = "tk remote set: Repository Store not initialized; run 'tk init'";

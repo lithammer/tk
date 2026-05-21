@@ -1,7 +1,7 @@
 //! `tk sync` and `tk sync log` — Mutation Log replay and inspection.
 //!
 //! `tk sync` invokes the engine in src/sync/engine.zig with the Adapter
-//! returned by src/remote/factory.zig. In ticket-17 the only real adapter
+//! returned by src/remote/factory.zig. In tk-17 the only real adapter
 //! kinds (github, jira) return error.NotImplemented at factory time; the
 //! engine itself is exercised through the FakeAdapter inside engine.zig's
 //! test block. Once real adapters land in their own slices this command
@@ -192,7 +192,7 @@ fn runSync(deps: cli.Deps, args_iter: anytype) !u8 {
 
     // Commit the skip BEFORE opening the adapter so a broken Remote (e.g.
     // factory returning NotImplemented in this slice) cannot block the
-    // operator from abandoning a failed Mutation. ticket-17's resolved
+    // operator from abandoning a failed Mutation. tk-17's resolved
     // design calls this out: markMutationSkipped commits independently of
     // any surrounding sync run.
     if (skip_id) |seq| {
@@ -376,7 +376,7 @@ test "tk sync: no Remote configured returns 1 with diagnostic" {
     try std.testing.expect(std.mem.indexOf(u8, h.stderr(), messages.sync_no_remote) != null);
 }
 
-test "tk sync: github Remote returns adapter NotImplemented in ticket-17" {
+test "tk sync: github Remote returns adapter NotImplemented in tk-17" {
     const gpa = std.testing.allocator;
     var fixture = try StoreFixture.init(gpa);
     defer fixture.deinit(gpa);

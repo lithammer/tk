@@ -14,7 +14,7 @@
   [ARCHITECTURE.md](./ARCHITECTURE.md),
   [docs/design-questions.md](./docs/design-questions.md), and
   [docs/adr/](./docs/adr/).
-- Use Ticket's domain vocabulary in comments instead of generic terms. For
+- Use tk's domain vocabulary in comments instead of generic terms. For
   example, prefer Repository Store, Workspace Scope, Display ID, Remote,
   Backend Adapter, Mutation, and Mutation Log where those concepts apply.
 - Comments should explain contracts, ownership, lifetimes, invariants, and why
@@ -49,7 +49,7 @@ shapes; pick the one that matches the call site:
 A fourth shape — a **Mutation Failure** record (per CONTEXT.md) —
 arrives with slice 9 Backend Adapters. It is persisted JSON with a
 stable schema, distinct from the ephemeral `Diagnostic`. Don't conflate
-the two; see `tk show ticket-11` for the design holding area.
+the two; see `tk show tk-11` for the design holding area.
 
 Anti-patterns that have been ruled out by review and should not be
 reintroduced without a concrete forcing constraint:

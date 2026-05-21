@@ -7,7 +7,7 @@ tk add --epic -m 'Feature Epic'
 tk add --parent project-1 -m 'Build child Ticket'
 tk list
 -- expected/stdout --
-Initialized Repository Store at $WORK/project/.git/tk/ticket.db
+Initialized Repository Store at $WORK/project/.git/tk/tk.db
 Created Epic: project-1 - Feature Epic
 Status: open
 Created Ticket: project-2 - Build child Ticket

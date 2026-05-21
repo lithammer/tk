@@ -1,7 +1,7 @@
 //! Backend Adapter factory.
 //!
 //! `openConfigured` reads the singleton `remotes` row through
-//! `store.sync.getRemote` and dispatches by `backend_kind`. In ticket-17 only
+//! `store.sync.getRemote` and dispatches by `backend_kind`. In tk-17 only
 //! the `fake` kind has an implementation (used by engine tests directly);
 //! `github` and `jira` return `error.NotImplemented` so real adapter
 //! implementations can land in their own slices.
@@ -35,7 +35,7 @@ pub fn openConfigured(
     const row = (try store_sync.getRemote(conn, gpa)) orelse return null;
     defer row.deinit(gpa);
 
-    // No adapter kinds have real implementations in ticket-17; the dispatch
+    // No adapter kinds have real implementations in tk-17; the dispatch
     // by `row.backend_kind` lands in a later slice alongside the github /
     // jira modules.
     return error.NotImplemented;
@@ -58,7 +58,7 @@ test "openConfigured: returns null when no Remote configured" {
     try std.testing.expectEqual(@as(?Adapter, null), try openConfigured(conn, gpa));
 }
 
-test "openConfigured: github returns NotImplemented in ticket-17" {
+test "openConfigured: github returns NotImplemented in tk-17" {
     const gpa = std.testing.allocator;
     const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
     defer conn.close();
@@ -73,7 +73,7 @@ test "openConfigured: github returns NotImplemented in ticket-17" {
     try std.testing.expectError(error.NotImplemented, openConfigured(conn, gpa));
 }
 
-test "openConfigured: jira returns NotImplemented in ticket-17" {
+test "openConfigured: jira returns NotImplemented in tk-17" {
     const gpa = std.testing.allocator;
     const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
     defer conn.close();

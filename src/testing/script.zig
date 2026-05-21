@@ -206,7 +206,7 @@ fn executeScript(
     };
     errdefer result.deinit(allocator);
 
-    // TODO(ticket-6): decide the script runner's fakeability stance —
+    // TODO(tk-6): decide the script runner's fakeability stance —
     // mixing a real subprocess runner with a fake clock will bite the moment
     // a tk init / tk worktree scenario lands.
     var real_runner = proc.RealRunner.init(std.testing.io);

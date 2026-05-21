@@ -3,7 +3,7 @@
 //! `mutations.state` and `mutations.failure_json`.
 //!
 //! Lives in `src/domain/` because it is pure data with no SQLite, filesystem,
-//! Git, or subprocess dependencies. `Receipt` is empty in ticket-17; the
+//! Git, or subprocess dependencies. `Receipt` is empty in tk-17; the
 //! Promote slice grows it with backend-assigned identifiers returned by a
 //! successful `promote_*` Mutation.
 
@@ -25,7 +25,7 @@ pub const Outcome = union(enum) {
 
 /// Adapter-supplied evidence that a Mutation succeeded.
 ///
-/// Intentionally empty for ticket-17 — the Promote slice grows it with the
+/// Intentionally empty for tk-17 — the Promote slice grows it with the
 /// backend-assigned identifiers (e.g. issue number, Jira key) returned by a
 /// successful `promote_*` Mutation.
 pub const Receipt = struct {};

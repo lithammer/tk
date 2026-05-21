@@ -322,7 +322,7 @@ pub fn openExisting(gpa: std.mem.Allocator, runner: proc.Runner, cwd: std.Io.Dir
     };
     defer paths.deinit(gpa);
 
-    const db_path = try std.fs.path.joinZ(gpa, &.{ paths.git_common_dir, "tk", "ticket.db" });
+    const db_path = try std.fs.path.joinZ(gpa, &.{ paths.git_common_dir, "tk", "tk.db" });
     defer gpa.free(db_path);
 
     const conn = zqlite.open(db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode) catch |err| switch (err) {

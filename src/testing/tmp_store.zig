@@ -35,7 +35,7 @@ pub const TmpStore = struct {
         errdefer gpa.free(common_dir);
         try std.Io.Dir.cwd().createDirPath(std.testing.io, common_dir);
 
-        const db_path = try std.fs.path.joinZ(gpa, &.{ common_dir, "tk", "ticket.db" });
+        const db_path = try std.fs.path.joinZ(gpa, &.{ common_dir, "tk", "tk.db" });
 
         return .{
             .tmp = tmp,

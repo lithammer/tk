@@ -2,7 +2,7 @@
 # Install tk via curl|bash, per ADR 0013.
 #
 # Usage:
-#     curl -fsSL https://raw.githubusercontent.com/lithammer/ticket/main/scripts/install.sh | sh
+#     curl -fsSL https://raw.githubusercontent.com/lithammer/tk/main/scripts/install.sh | sh
 #
 # Environment variables:
 #     TK_VERSION       Release tag to install (e.g. v0.0.1). Defaults to latest.
@@ -15,7 +15,7 @@
 # bashisms. No `set -o pipefail` (not POSIX).
 set -eu
 
-REPO="lithammer/ticket"
+REPO="lithammer/tk"
 
 # --- 1. Detect OS and arch -------------------------------------------------
 
@@ -68,7 +68,7 @@ case "$OS" in
                 ;;
             x86_64)
                 echo "tk: x86_64-macos is not a supported release target." >&2
-                echo "    Build from source: https://github.com/lithammer/ticket#source-build" >&2
+                echo "    Build from source: https://github.com/lithammer/tk#source-build" >&2
                 exit 1
                 ;;
         esac
@@ -78,7 +78,7 @@ esac
 if [ -z "$TRIPLE" ]; then
     echo "tk: unsupported platform: $OS $ARCH" >&2
     echo "    Supported: Linux x86_64, Linux aarch64, Darwin arm64" >&2
-    echo "    Build from source: https://github.com/lithammer/ticket#source-build" >&2
+    echo "    Build from source: https://github.com/lithammer/tk#source-build" >&2
     exit 1
 fi
 

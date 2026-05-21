@@ -1,11 +1,11 @@
 -- script --
 tk manpage
 -- expected/stdout --
-.\" Man page for tk, the Ticket CLI.
+.\" Man page for the tk CLI.
 .\" View with: man -l man/tk.1
-.TH TK 1 "May 2026" "" "Ticket Manual"
+.TH TK 1 "May 2026" "" "tk Manual"
 .SH NAME
-tk \- agent-first Ticket Project command
+tk \- agent-first work tracking command
 .SH SYNOPSIS
 .B tk
 [\fB\-\-help\fR]
@@ -16,9 +16,7 @@ tk \- agent-first Ticket Project command
 [\fIarguments\fR]
 .SH DESCRIPTION
 .B tk
-is the command-line executable for
-.B Ticket Project,
-an agent-first tool for managing backend-agnostic work items through a
+is an agent-first tool for managing backend-agnostic work items through a
 local-first Repository Store and explicit backend Promotion.
 .PP
 This manual documents the command surface available in the current binary.
@@ -43,7 +41,7 @@ Print the current version.
 Initialize the Repository Store for the current git repository.
 .PP
 The Repository Store is a SQLite database at
-\fI<git-common-dir>/tk/ticket.db\fR. It is shared by all git worktrees for the
+\fI<git-common-dir>/tk/tk.db\fR. It is shared by all git worktrees for the
 same repository and is untracked local state.
 .PP
 .B tk init

@@ -63,7 +63,7 @@ test "smoke: tk init in a real git repo creates the store" {
     try std.testing.expect(std.mem.indexOf(u8, tk_init.stdout, messages.init_success_fresh) != null);
 
     // Verify the file is on disk and looks like a SQLite database.
-    const db_path = try std.fs.path.joinZ(gpa, &.{ root, ".git", "tk", "ticket.db" });
+    const db_path = try std.fs.path.joinZ(gpa, &.{ root, ".git", "tk", "tk.db" });
     defer gpa.free(db_path);
 
     var file = try std.Io.Dir.cwd().openFile(std.testing.io, db_path, .{});

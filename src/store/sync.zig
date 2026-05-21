@@ -353,7 +353,7 @@ pub fn advanceSyncCursor(
 /// `std.json.Stringify.valueAlloc(gpa, FailureJsonWrapper, .{ .escape_unicode = true })`;
 /// `src/sync/log.zig` reads it back via `std.json.parseFromSlice(FailureJsonWrapper, ...)`.
 /// Keeping the encoder and decoder pinned to one type prevents the two sides
-/// from drifting when ticket-11 graduates the wrapper into a typed
+/// from drifting when tk-11 graduates the wrapper into a typed
 /// discriminated union.
 pub const FailureJsonWrapper = struct {
     detail: []const u8,

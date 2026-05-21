@@ -249,7 +249,7 @@ test "show: renders a minimal Ticket with no relationships" {
     const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
     defer conn.close();
     try TmpStore.insertFixtureItem(conn, .{
-        .id = "ticket-1",
+        .id = "tk-1",
         .display = "project-1",
         .title = "First Ticket",
         .priority = "P2",

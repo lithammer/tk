@@ -1,4 +1,4 @@
-# Ticket CLI
+# tk CLI
 
 This is the v1 command surface for `tk`.
 
@@ -20,7 +20,7 @@ Initializes the Repository Store.
 
 ## User-Observable Phrasing
 
-User-observable diagnostic and status substrings (for example, `Initialized Repository Store at `, `not a Ticket Repository Store`, `newer Ticket version`) are canonicalised in `src/messages.zig`. Source-side call sites build their format strings by `++`-concatenating those constants with the formatting suffix they need, and tests reference the same constants via `messages.<name>`. Any new user-visible phrasing should be added there rather than hardcoded at the call site.
+User-observable diagnostic and status substrings (for example, `Initialized Repository Store at `, `not a tk Repository Store`, `newer tk version`) are canonicalised in `src/messages.zig`. Source-side call sites build their format strings by `++`-concatenating those constants with the formatting suffix they need, and tests reference the same constants via `messages.<name>`. Any new user-visible phrasing should be added there rather than hardcoded at the call site.
 
 ## Agent Briefing
 
@@ -338,7 +338,7 @@ tk self-update [--check]
 
 Replaces the running `tk` binary with the latest release.
 
-- Queries `https://api.github.com/repos/lithammer/ticket/releases/latest`,
+- Queries `https://api.github.com/repos/lithammer/tk/releases/latest`,
   compares `tag_name` against the embedded build version.
 - If newer: downloads `tk-<triple>` (`.exe` for Windows triples) from
   `releases/latest/download/<asset>`, runs the staged binary's

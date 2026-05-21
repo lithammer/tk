@@ -135,7 +135,7 @@ const help_options: clap.HelpOptions = .{
 
 /// Parse top-level args and dispatch to a command handler.
 ///
-/// Returns Ticket's process exit code contract: 0 success, 1 logical failure,
+/// Returns tk's process exit code contract: 0 success, 1 logical failure,
 /// 2 usage error, and propagated unexpected errors for `main.zig` to translate
 /// to exit 3.
 pub fn runArgv(deps: Deps, args_iter: anytype) !u8 {
@@ -150,7 +150,7 @@ pub fn runArgv(deps: Deps, args_iter: anytype) !u8 {
         .allocator = deps.gpa,
         .terminating_positional = 0,
     }) catch |err| {
-        // TODO(ticket-2): prefix clap diagnostics with the command name —
+        // TODO(tk-2): prefix clap diagnostics with the command name —
         // applies symmetrically here for top-level parse failures.
         diag.report(deps.stderr, err) catch {};
         return 2;

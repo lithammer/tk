@@ -1,6 +1,6 @@
 # Architecture
 
-This document maps how the Ticket codebase is organized — which directory
+This document maps how the tk codebase is organized — which directory
 owns which role, and the durable invariants the Repository Store preserves.
 It is intentionally compact: per [ADR
 0008](./docs/adr/0008-keep-implementation-doc-compact.md), shipped slice
@@ -44,7 +44,7 @@ small boundary module after the second caller proves the shape.
 - `commands/<cmd>.zig` owns that command's zig-clap spec, command-specific
   validation, rendering, and calls into store/worktree/git/remote/sync helpers.
 - `domain/` stays pure: no SQLite, filesystem paths, Git, subprocesses, or
-  command rendering. Houses the Ticket vocabulary types and the
+  command rendering. Houses the tk vocabulary types and the
   infrastructure-free sync contract types shared by `store/`, `remote/`,
   and `sync/`.
 - `proc/` captures subprocess output for callers to classify. Commands should
@@ -86,14 +86,14 @@ The Repository Store is SQLite, per ADRs
 [0001](./docs/adr/0001-untracked-repository-store.md),
 [0003](./docs/adr/0003-use-current-state-store-with-mutation-outbox.md), and
 [0005](./docs/adr/0005-use-sqlite-for-the-repository-store.md). `tk init`
-creates it at `<git-common-dir>/tk/ticket.db`; later commands open that store
+creates it at `<git-common-dir>/tk/tk.db`; later commands open that store
 through the shared opener instead of duplicating discovery and validation.
 
 Migration SQL files are the source of truth for exact table columns and checks.
 Important stable contracts:
 
 - `schema_migrations` and `PRAGMA user_version` track migrations.
-- `PRAGMA application_id = 0x544B4442` identifies Ticket stores.
+- `PRAGMA application_id = 0x544B4442` identifies tk stores.
 - Connections enable foreign keys and a busy timeout; `tk init` enables WAL.
 - `items` stores current Ticket/Epic state. Current state is the read model;
   the Mutation Log is an outbox, not an event-sourced source of truth.
@@ -104,15 +104,15 @@ Important stable contracts:
   rejects cycles. Dependency resolution derives from the Blocking Item's
   current Item Status.
 - `external_blockers` stores blockers with explicit resolution state. The store
-  and read views exist; command surface is tracked by `ticket-19`.
+  and read views exist; command surface is tracked by `tk-19`.
 - `mutations` stores durable backend intent with a monotonic Mutation Sequence,
   state, JSON payload, and optional Mutation Failure JSON. The persisted
   failure JSON shape is `{"detail": "..."}` ([ADR
-  0009](./docs/adr/0009-sync-failure-taxonomy.md)); `ticket-11` graduates this
+  0009](./docs/adr/0009-sync-failure-taxonomy.md)); `tk-11` graduates this
   into a typed discriminated union.
 - `remotes` and `sync_cursors` hold the v1 singleton Remote model.
 - `store_config.display_prefix` controls newly generated local Display IDs.
-  Custom prefix configuration is tracked by `ticket-22`.
+  Custom prefix configuration is tracked by `tk-22`.
 
 Write commands use `BEGIN IMMEDIATE` and commit current-state changes together
 with any required Mutation appends. Origin gates Mutations: Local items update
@@ -145,8 +145,8 @@ worktree creation and after Promotion through Aliases.
 `tk worktree start` creates a scoped git worktree and marks the item `active` by
 default unless `--no-status` is used. The default path layout is recorded in
 [ADR 0007](./docs/adr/0007-default-worktree-path-layout.md). Missing preflight
-checks are tracked by `ticket-15`; configurable path layout is tracked by
-`ticket-16`.
+checks are tracked by `tk-15`; configurable path layout is tracked by
+`tk-16`.
 
 Workspace Scope is a selection context, not an implicit item target. Commands
 that inspect, update, or promote a specific item require explicit Display IDs;

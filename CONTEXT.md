@@ -1,15 +1,15 @@
-# Ticket
+# tk
 
-Ticket is an agent-first command-line tool for managing work items through a simple local interface and pluggable issue-tracker backends.
+tk is an agent-first command-line tool for managing work items through a simple local interface and pluggable issue-tracker backends.
 
 ## Language
 
-**Ticket Project**:
+**tk**:
 The project and domain name for the command-line tool.
-_Avoid_: Tickets
+_Avoid_: Ticket Project, ticket, tickets
 
 **Ticket**:
-A backend-agnostic work item managed through **Ticket Project**.
+A backend-agnostic work item managed through **tk**.
 _Avoid_: Issue, Task, Bead
 
 **Display ID**:
@@ -109,7 +109,7 @@ The way **`tk`** determined the active **Workspace Scope**: configured, inferred
 _Avoid_: Binding Source, Scope Source
 
 **Repository Store**:
-The shared SQLite-backed local state for **Ticket Project** within one version-control repository.
+The shared SQLite-backed local state for **tk** within one version-control repository.
 _Avoid_: Workspace Store, Global Store
 
 **Backend**:
@@ -125,7 +125,7 @@ The single active **Backend** a repository syncs with by default.
 _Avoid_: Active Backend
 
 **Backend Adapter**:
-A component that maps between **Ticket Project** domain concepts and a specific **Backend**.
+A component that maps between **tk** domain concepts and a specific **Backend**.
 _Avoid_: Facade, Provider, Connector
 
 **Backend Pull**:
@@ -165,7 +165,7 @@ The directly contained local items included by `tk promote <id> --children`.
 _Avoid_: Recursive Promotion
 
 **Mutation**:
-A durable local intent to modify backend-backed **Ticket Project** domain state through a **Backend**.
+A durable local intent to modify backend-backed **tk** domain state through a **Backend**.
 _Avoid_: Local Edit, Change, Audit Entry
 
 **Ticket Mutation**:
@@ -226,7 +226,7 @@ _Avoid_: ticket, tickets
 
 ## Relationships
 
-- **`tk`** is the command-line executable for **Ticket Project**.
+- **`tk`** is the command-line executable for **tk**.
 - A **Ticket** may be backed by a GitHub issue, Jira issue, Beads bead, or another backend-specific work item.
 - An **Epic** contains zero or more **Tickets**.
 - An **Epic** does not contain other **Epics** in v1.
@@ -389,7 +389,7 @@ _Avoid_: ticket, tickets
 ## Example dialogue
 
 > **Dev:** "When an agent needs the next **Ticket**, should it call **`tk`** directly?"
-> **Domain expert:** "Yes — **`tk`** is the stable command-line interface for **Ticket Project**, regardless of which backend stores the work item."
+> **Domain expert:** "Yes — **`tk`** is the stable command-line interface, regardless of which backend stores the work item."
 >
 > **Dev:** "When **`tk`** marks a **Backend Ticket** done while offline, where does that intent live?"
 > **Domain expert:** "It is recorded as a **Ticket Mutation** in the **Mutation Log** until a **Backend** can apply it."
@@ -425,7 +425,7 @@ _Avoid_: ticket, tickets
 > **Domain expert:** "**`tk worktree`** reports the **Workspace Scope** and **Workspace Scope Source**."
 >
 > **Dev:** "How should an agent recover workflow context after compaction or a new session?"
-> **Domain expert:** "Run **Prime** to get Ticket's agent workflow guidance and essential commands."
+> **Domain expert:** "Run **Prime** to get **tk**'s agent workflow guidance and essential commands."
 >
 > **Dev:** "How does an agent inspect the active **Workspace Scope**?"
 > **Domain expert:** "It runs **`tk worktree`**, which reports the **Workspace Scope** and **Workspace Scope Source**."
@@ -433,7 +433,7 @@ _Avoid_: ticket, tickets
 > **Dev:** "In an Epic-scoped **Workspace**, should **`tk done`** without an ID close the **Epic** or guess a child **Ticket**?"
 > **Domain expert:** "No — **Workspace Scope** is context for selection and reporting. Item commands require an explicit **Display ID**; agents should pass the ID from **`tk next`** or **`tk list`**."
 >
-> **Dev:** "Should each git worktree have its own ticket database?"
+> **Dev:** "Should each git worktree have its own Repository Store database?"
 > **Domain expert:** "No — all **Workspaces** for a repository share one **Repository Store**, while each **Workspace** has its own **Workspace Scope**."
 >
 > **Dev:** "Should the **Repository Store** be committed to git so agents can review ticket state in diffs?"
@@ -492,7 +492,7 @@ _Avoid_: ticket, tickets
 
 ## Flagged ambiguities
 
-- "ticket" and "tickets" were both considered for the project name — resolved: **Ticket** is the canonical project name, and **`tk`** is the executable.
+- "ticket" and "tickets" were both considered for the project name — resolved: **tk** is the canonical project name, and **`tk`** is the executable.
 - "issue" and "task" were considered for the core work-item object — resolved: **Ticket** is the canonical backend-agnostic object.
 - "type" was considered for ticket category — resolved: **Ticket Kind** is the canonical term, and `task` is a kind rather than the work-item object.
 - Backend priority mapping was considered for v1 — resolved: **Priority** is a local-only **Local Field**.

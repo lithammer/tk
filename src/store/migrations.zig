@@ -22,7 +22,7 @@ const Diagnostic = @import("../domain/diagnostic.zig").Diagnostic;
 pub const Conn = zqlite.Conn;
 
 /// Application ID written to `pragma application_id` so an existing SQLite
-/// file can be identified as a Ticket Repository Store. Spelled `TKDB` in
+/// file can be identified as a tk Repository Store. Spelled `TKDB` in
 /// big-endian ASCII (`0x54 0x4B 0x44 0x42`).
 pub const application_id: i32 = 0x544B4442;
 

@@ -1,4 +1,4 @@
-//! `tk init` — create the Repository Store at `<git-common-dir>/tk/ticket.db`.
+//! `tk init` — create the Repository Store at `<git-common-dir>/tk/tk.db`.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -33,7 +33,7 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
         .diagnostic = &diag,
         .allocator = deps.gpa,
     }) catch |err| {
-        // TODO(ticket-2): prefix clap diagnostics with the command name.
+        // TODO(tk-2): prefix clap diagnostics with the command name.
         diag.report(deps.stderr, err) catch {};
         return 2;
     };
@@ -73,11 +73,11 @@ fn execute(deps: cli.Deps) !u8 {
     // Per ARCHITECTURE.md: when the directory already exists with
     // broader permissions, slice 2 uses it as-is and does not chmod it.
     // Only tighten when we're the ones who just created it.
-    // TODO(ticket-1): surface a stderr warning when we can't tighten
+    // TODO(tk-1): surface a stderr warning when we can't tighten
     // store permissions.
     if (dir_status == .created) setDirMode0700(deps, tk_dir_path) catch {};
 
-    const db_path = try std.fs.path.joinZ(deps.gpa, &.{ tk_dir_path, "ticket.db" });
+    const db_path = try std.fs.path.joinZ(deps.gpa, &.{ tk_dir_path, "tk.db" });
     defer deps.gpa.free(db_path);
 
     const conn = zqlite.open(db_path.ptr, zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode) catch |err| {
@@ -146,14 +146,14 @@ fn execute(deps: cli.Deps) !u8 {
     return 0;
 }
 
-/// Classification of the SQLite file at `<git-common-dir>/tk/ticket.db`.
+/// Classification of the SQLite file at `<git-common-dir>/tk/tk.db`.
 ///
 /// `tk init` inspects before mutating so a foreign SQLite file can be refused
 /// without changing its journal mode or application_id.
 pub const StoreKind = enum {
     /// File was just created by sqlite3_open_v2 and contains no schema yet.
     fresh,
-    /// Existing Ticket Repository Store (matching application_id).
+    /// Existing tk Repository Store (matching application_id).
     ours,
     /// Existing SQLite file written by something else.
     foreign,
@@ -206,7 +206,7 @@ fn writeHelp(deps: cli.Deps) !void {
     try deps.stdout.writeAll(
         \\tk init - initialize the Repository Store
         \\
-        \\Creates <git-common-dir>/tk/ticket.db with the v1 schema. Must be run
+        \\Creates <git-common-dir>/tk/tk.db with the v1 schema. Must be run
         \\from within a Git repository. Idempotent: re-running on a current
         \\store is a no-op.
         \\
@@ -412,7 +412,7 @@ test "classify: a freshly-created database is .fresh" {
     try std.testing.expectEqual(StoreKind.fresh, try classify(conn));
 }
 
-test "classify: a Ticket Repository Store is .ours" {
+test "classify: a tk Repository Store is .ours" {
     const conn = try openMemoryConn();
     defer conn.close();
 
@@ -474,7 +474,7 @@ test "init: surfaces the foreign-store diagnostic on stderr" {
     try std.testing.expect(std.mem.indexOf(u8, h.stderr(), messages.init_refuse_foreign) != null);
 }
 
-test "init: rejects a store created by a future Ticket version" {
+test "init: rejects a store created by a future tk version" {
     // The migration-level test in src/store/migrations.zig covers the
     // future-version detection itself. This test only asserts the
     // user-visible diagnostic phrasing reaches stderr through tk init.

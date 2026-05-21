@@ -2,7 +2,7 @@
 
 Step 1 of release distribution serves bare-binary release assets from
 GitHub Releases through a POSIX install script at
-`raw.githubusercontent.com/lithammer/ticket/main/scripts/install.sh` and
+`raw.githubusercontent.com/lithammer/tk/main/scripts/install.sh` and
 a built-in `tk self-update` that queries the Releases API for the
 latest tag. The trust root is TLS + GitHub; an unsigned `SHA256SUMS`
 shipped alongside the binaries shares its trust root with them and
@@ -11,7 +11,7 @@ checksums nor signatures. The `man/tk.1` manpage is embedded into the
 binary via `@embedFile` and placed by `tk manpage --install` so the
 release asset stays a bare binary; Homebrew/Scoop manifests, minisign
 signing, and a PowerShell install script for Windows are deferred to
-follow-up tickets against ticket-39.
+follow-up tickets against tk-39.
 
 ## Considered Options
 
