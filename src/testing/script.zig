@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
 const cli = @import("../cli.zig");
@@ -115,7 +116,7 @@ fn getEnvFlag(comptime name: []const u8) bool {
     // Zig 0.16.0's `Environ.getPosix` does not compile on Windows because
     // `Environ.Block` resolves to `GlobalBlock`, which has no `view` method.
     // Mirror the OS dispatch used by `Environ.containsUnemptyConstant`.
-    if (@import("builtin").os.tag == .windows) {
+    if (builtin.os.tag == .windows) {
         const name_w = comptime std.unicode.wtf8ToWtf16LeStringLiteral(name);
         const one_w = comptime std.unicode.wtf8ToWtf16LeStringLiteral("1");
         const val = std.testing.environ.getWindows(name_w) orelse return false;
@@ -377,6 +378,28 @@ const NormalizedText = struct {
 };
 
 fn normalizeWork(allocator: Allocator, text: []const u8, work_path: []const u8) !NormalizedText {
+    // On Windows, `realPathFileAlloc` returns the work path with `\`
+    // separators, while `git rev-parse --git-common-dir` emits the same path
+    // with `/`. `std.fs.path.join` then mixes `\` into the joined suffix. The
+    // literal `replaceOwned` below would miss the work-path prefix and the
+    // suffix would still leak native separators. Normalize all separators to
+    // `/` so txtar golden fixtures can stay portable across host OSes.
+    if (builtin.os.tag == .windows) {
+        const text_fwd = try allocator.dupe(u8, text);
+        errdefer allocator.free(text_fwd);
+        std.mem.replaceScalar(u8, text_fwd, '\\', '/');
+
+        const work_fwd = try allocator.dupe(u8, work_path);
+        defer allocator.free(work_fwd);
+        std.mem.replaceScalar(u8, work_fwd, '\\', '/');
+
+        if (std.mem.indexOf(u8, text_fwd, work_fwd) == null) {
+            return .{ .text = text_fwd, .owned = true };
+        }
+        const replaced = try std.mem.replaceOwned(u8, allocator, text_fwd, work_fwd, "$WORK");
+        allocator.free(text_fwd);
+        return .{ .text = replaced, .owned = true };
+    }
     if (std.mem.indexOf(u8, text, work_path) == null) {
         return .{ .text = text, .owned = false };
     }
