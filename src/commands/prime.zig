@@ -65,7 +65,7 @@ fn writeHelp(deps: cli.Deps) !void {
 
 const Harness = @import("../testing/test_cli.zig").Harness;
 
-test "prime writes embedded markdown with one trailing newline" {
+test "prime: writes embedded markdown with one trailing newline" {
     var h = Harness.init(std.testing.allocator, &.{});
     defer h.deinit();
 
@@ -75,7 +75,7 @@ test "prime writes embedded markdown with one trailing newline" {
     try std.testing.expectEqualStrings("", h.stderr());
 }
 
-test "prime rejects unknown flag" {
+test "prime: rejects unknown flag" {
     var h = Harness.init(std.testing.allocator, &.{"--bad-flag"});
     defer h.deinit();
 
@@ -84,7 +84,7 @@ test "prime rejects unknown flag" {
     try std.testing.expect(h.stderr().len > 0);
 }
 
-test "prime --help prints help to stdout, exits 0" {
+test "prime: --help prints help to stdout, exits 0" {
     var h = Harness.init(std.testing.allocator, &.{"--help"});
     defer h.deinit();
 
