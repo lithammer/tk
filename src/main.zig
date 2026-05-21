@@ -2,6 +2,7 @@ const std = @import("std");
 const cli = @import("cli.zig");
 const proc = @import("proc/runner.zig");
 const clock_mod = @import("clock.zig");
+const render = @import("render/styler.zig");
 
 /// Process entrypoint for `tk`.
 ///
@@ -21,6 +22,11 @@ pub fn main(init: std.process.Init) !void {
     var real_clock = clock_mod.RealClock.init(io);
     var random_source = std.Random.IoSource{ .io = io };
 
+    const no_color = init.minimal.environ.containsUnemptyConstant("NO_COLOR");
+    const clicolor_force = init.minimal.environ.containsUnemptyConstant("CLICOLOR_FORCE");
+    const stdout_mode = try render.Mode.detect(io, std.Io.File.stdout(), no_color, clicolor_force);
+    const stderr_mode = try render.Mode.detect(io, std.Io.File.stderr(), no_color, clicolor_force);
+
     const deps = cli.Deps{
         .stdout = &stdout.interface,
         .stderr = &stderr.interface,
@@ -31,6 +37,7 @@ pub fn main(init: std.process.Init) !void {
         .runner = real_runner.runner(),
         .clock = real_clock.clock(),
         .random = random_source.interface(),
+        .styler = .{ .stdout = stdout_mode, .stderr = stderr_mode },
     };
 
     var code = run(deps, init) catch |err| blk: {

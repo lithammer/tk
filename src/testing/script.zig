@@ -307,6 +307,7 @@ fn executeScript(
             .runner = real_runner.runner(),
             .clock = fake_clock.clock(),
             .random = prng.random(),
+            .styler = .{ .stdout = .no_color, .stderr = .no_color },
         };
 
         var iter = SliceArgIter{ .items = argv[1..] };

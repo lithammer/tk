@@ -2,6 +2,7 @@ const std = @import("std");
 const cli = @import("../cli.zig");
 const fake_proc = @import("../proc/fake.zig");
 const clock_mod = @import("../clock.zig");
+const render = @import("../render/styler.zig");
 const SliceArgIter = @import("arg_iter.zig").SliceArgIter;
 
 /// Default fixed instant used by `Harness` so timestamps in command output stay
@@ -33,6 +34,10 @@ pub const Harness = struct {
     prng: std.Random.DefaultPrng,
     /// Optional cwd override for commands that resolve paths.
     cwd_override: ?std.Io.Dir,
+    /// Per-stream color mode propagated into `deps.styler`. Defaults to
+    /// `.no_color`, matching non-TTY test capture.
+    stdout_mode: render.Mode,
+    stderr_mode: render.Mode,
 
     /// Optional harness overrides.
     pub const Options = struct {
@@ -43,6 +48,10 @@ pub const Harness = struct {
         cwd: ?std.Io.Dir = null,
         /// Bytes exposed through `deps.stdin`.
         stdin: []const u8 = "",
+        /// Per-stream color mode for `deps.styler`. Tests that exercise the
+        /// styled path set one or both to `.escape_codes`.
+        stdout_mode: render.Mode = .no_color,
+        stderr_mode: render.Mode = .no_color,
     };
 
     /// Create a harness with default options.
@@ -62,6 +71,8 @@ pub const Harness = struct {
             .fake_clock = clock_mod.FakeClock.init(default_fake_now_ms),
             .prng = std.Random.DefaultPrng.init(0),
             .cwd_override = opts.cwd,
+            .stdout_mode = opts.stdout_mode,
+            .stderr_mode = opts.stderr_mode,
         };
     }
 
@@ -84,6 +95,7 @@ pub const Harness = struct {
             .runner = self.fake_runner.runner(),
             .clock = self.fake_clock.clock(),
             .random = self.prng.random(),
+            .styler = .{ .stdout = self.stdout_mode, .stderr = self.stderr_mode },
         };
     }
 

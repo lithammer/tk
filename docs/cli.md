@@ -10,6 +10,27 @@ This is the v1 command surface for `tk`.
 - New Tickets and Epics are local by default.
 - Commands that affect upstream state or sync repair stay explicit.
 
+## Global Flags
+
+```sh
+tk [--color=auto|always|never] <command> ...
+```
+
+`--color` controls styled output for the whole invocation and must appear
+before the subcommand (trailing `tk list --color=never` is not parsed by
+the top-level dispatcher in v1).
+
+- `auto` (default when the flag is omitted): defer to `NO_COLOR`,
+  `CLICOLOR_FORCE`, and per-stream TTY detection via stdlib's
+  `std.Io.Terminal.Mode.detect`.
+- `always`: emit SGR escape sequences regardless of env or TTY.
+- `never`: produce plain output regardless of env or TTY.
+
+Stdout and stderr resolve independently, so piping stdout into a pager
+does not silence styled stderr. Legacy Windows consoles (`cmd.exe`
+without VT processing) fall back to plain output rather than emit
+literal escape bytes.
+
 ## Setup
 
 ```sh

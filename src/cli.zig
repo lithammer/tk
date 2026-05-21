@@ -2,6 +2,7 @@ const std = @import("std");
 const clap = @import("clap");
 const proc = @import("proc/runner.zig");
 const clock_mod = @import("clock.zig");
+const render = @import("render/styler.zig");
 
 /// Runtime services available to command handlers.
 ///
@@ -33,6 +34,10 @@ pub const Deps = struct {
     clock: clock_mod.Clock,
     /// Random source used for opaque internal IDs.
     random: std.Random,
+    /// Resolved per-stream color mode. Commands that emit styled output
+    /// reach for `deps.styler.forStdout()` / `forStderr()` and let the
+    /// returned sub-styler gate emission. See ADR 0014.
+    styler: render.Styler,
 };
 
 /// Metadata every command module exports for dispatcher registration and help.
@@ -114,9 +119,25 @@ pub const SubCommand = blk: {
 
 const VERSION = "v0.0.1";
 
+/// Parsed `--color` flag value. `null` means the flag was omitted, which
+/// resolves to whatever `Mode.detect` returned (i.e. the env/TTY decision).
+pub const ColorFlag = enum { auto, always, never };
+
+/// Resolve the active Mode given the env/TTY-derived `env_mode` (from
+/// `Mode.detect` in main.zig) and the parsed `--color` flag value. Explicit
+/// `always`/`never` win over env; `auto` and omitted flag both pass through.
+pub fn applyColorFlag(env_mode: render.Mode, flag: ?ColorFlag) render.Mode {
+    return switch (flag orelse .auto) {
+        .auto => env_mode,
+        .always => .escape_codes,
+        .never => .no_color,
+    };
+}
+
 const top_flag_text =
-    \\-h, --help     Display this help and exit.
-    \\-v, --version  Print version and exit.
+    \\-h, --help           Display this help and exit.
+    \\-v, --version        Print version and exit.
+    \\    --color <color>  Color policy: auto, always, or never.
     \\
 ;
 const top_flags = clap.parseParamsComptime(top_flag_text);
@@ -124,7 +145,10 @@ const top_params = clap.parseParamsComptime(top_flag_text ++
     \\<command>
     \\
 );
-const top_parsers = .{ .command = clap.parsers.enumeration(SubCommand) };
+const top_parsers = .{
+    .command = clap.parsers.enumeration(SubCommand),
+    .color = clap.parsers.enumeration(ColorFlag),
+};
 
 const help_options: clap.HelpOptions = .{
     .description_on_new_line = false,
@@ -171,16 +195,20 @@ pub fn runArgv(deps: Deps, args_iter: anytype) !u8 {
         return 2;
     };
 
+    var resolved = deps;
+    resolved.styler.stdout = applyColorFlag(deps.styler.stdout, res.args.color);
+    resolved.styler.stderr = applyColorFlag(deps.styler.stderr, res.args.color);
+
     return switch (subcmd) {
         inline else => |tag| blk: {
             inline for (all_commands) |cmd| {
                 if (comptime std.mem.eql(u8, cmd.meta.name, @tagName(tag))) {
-                    break :blk cmd.run(deps, args_iter);
+                    break :blk cmd.run(resolved, args_iter);
                 }
             }
             inline for (unimplemented_commands) |stub| {
                 if (comptime std.mem.eql(u8, stub.name, @tagName(tag))) {
-                    break :blk runUnimplemented(deps, stub);
+                    break :blk runUnimplemented(resolved, stub);
                 }
             }
             unreachable;
@@ -252,6 +280,60 @@ test "runArgv routes prime" {
     try std.testing.expectEqualStrings("", h.stderr());
 }
 
+test "Deps.styler defaults to no_color on both streams under Harness" {
+    var h = Harness.init(std.testing.allocator, &.{});
+    defer h.deinit();
+    const d = h.deps();
+    try std.testing.expect(d.styler.stdout == .no_color);
+    try std.testing.expect(d.styler.stderr == .no_color);
+}
+
+test "runArgv accepts --color=always before subcommand" {
+    var h = Harness.init(std.testing.allocator, &.{ "--color=always", "prime" });
+    defer h.deinit();
+    const code = try runArgv(h.deps(), &h.iter);
+    try std.testing.expectEqual(@as(u8, 0), code);
+    try std.testing.expect(h.stdout().len > 0);
+}
+
+test "runArgv accepts --color=never before subcommand" {
+    var h = Harness.init(std.testing.allocator, &.{ "--color=never", "prime" });
+    defer h.deinit();
+    const code = try runArgv(h.deps(), &h.iter);
+    try std.testing.expectEqual(@as(u8, 0), code);
+}
+
+test "runArgv rejects invalid --color value with exit 2" {
+    var h = Harness.init(std.testing.allocator, &.{ "--color=zebra", "prime" });
+    defer h.deinit();
+    const code = try runArgv(h.deps(), &h.iter);
+    try std.testing.expectEqual(@as(u8, 2), code);
+}
+
+test "applyColorFlag: auto and null both pass env_mode through" {
+    try std.testing.expect(applyColorFlag(.no_color, .auto) == .no_color);
+    try std.testing.expect(applyColorFlag(.escape_codes, .auto) == .escape_codes);
+    try std.testing.expect(applyColorFlag(.no_color, null) == .no_color);
+    try std.testing.expect(applyColorFlag(.escape_codes, null) == .escape_codes);
+}
+
+test "applyColorFlag: always forces escape_codes; never forces no_color" {
+    try std.testing.expect(applyColorFlag(.no_color, .always) == .escape_codes);
+    try std.testing.expect(applyColorFlag(.escape_codes, .always) == .escape_codes);
+    try std.testing.expect(applyColorFlag(.escape_codes, .never) == .no_color);
+    try std.testing.expect(applyColorFlag(.no_color, .never) == .no_color);
+}
+
+test "Harness.Options overrides the per-stream Mode on Deps.styler" {
+    var h = Harness.initWith(std.testing.allocator, &.{}, .{
+        .stdout_mode = .escape_codes,
+        .stderr_mode = .escape_codes,
+    });
+    defer h.deinit();
+    try std.testing.expect(h.deps().styler.stdout == .escape_codes);
+    try std.testing.expect(h.deps().styler.stderr == .escape_codes);
+}
+
 test "runArgv returns 2 on unknown subcommand" {
     var h = Harness.init(std.testing.allocator, &.{"bogus"});
     defer h.deinit();
@@ -308,6 +390,7 @@ test "runArgv prints help" {
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "manpage") != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "prime") != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "--version") != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "--color") != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "Planned (not yet implemented):") != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "worktree") != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "sync") != null);
