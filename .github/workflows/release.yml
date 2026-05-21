@@ -1,8 +1,8 @@
 name: Release
 
 on:
-  push:
-    tags: ['v*']
+  release:
+    types: [created]
   workflow_dispatch:
     inputs:
       version:
@@ -11,13 +11,15 @@ on:
         default: dev
 
 # Per ADR 0011, release builds cross-compile all six target triples on a single
-# Linux host and the smoke matrix verifies the artifacts on native runners. On
-# tag push, the publish job uploads the smoke-passing binaries to a GitHub
-# Release; per ADR 0013, the install script and tk self-update both resolve
-# assets via the flat name pattern tk-<triple>[.exe].
+# Linux host and the smoke matrix verifies the artifacts on native runners.
+# Releases are authored by a human (or an agent skill) as drafts with a
+# hand-crafted changelog; this workflow attaches smoke-passing binaries to
+# whichever Release fired the `release: created` event. Per ADR 0013, the
+# install script and `tk self-update` resolve assets via the flat name
+# pattern tk-<triple>[.exe].
 
-# Serialize publishes for the same tag so a force-push or rapid retry does not
-# race two `softprops/action-gh-release` jobs against the same Release object.
+# Serialize publishes for the same tag so a force-update or rapid retry does
+# not race two `gh release upload` jobs against the same Release object.
 # cancel-in-progress is false so the in-flight publish finishes before the
 # second starts.
 concurrency:
@@ -25,8 +27,8 @@ concurrency:
   cancel-in-progress: false
 
 # Default to read-only GITHUB_TOKEN at the workflow level. The `publish` job
-# re-grants `contents: write` on its own scope so only the release-creating
-# step has the elevated privilege.
+# re-grants `contents: write` on its own scope so only the asset-upload step
+# has the elevated privilege.
 permissions:
   contents: read
 
@@ -88,12 +90,11 @@ jobs:
       # Publish gates per-triple asset upload on smoke success. Each smoke job
       # writes a marker file and uploads it as a per-triple artifact; the
       # publish job downloads all markers and renames only the triples that
-      # produced one. The marker step has no `if:` guard, so a failed smoke
-      # short-circuits this step and the marker is absent — that absence is
-      # the "do not publish this triple" signal. Works uniformly for both the
-      # required triples and the experimental aarch64-windows-gnu one (per
-      # ADR 0011, that triple is best-effort and may be omitted from a given
-      # release without failing the workflow).
+      # produced one. `if: success()` makes the gate explicit so a future
+      # `if: always()` step added between smoke and marker cannot accidentally
+      # publish a binary that failed smoke. Works uniformly for the required
+      # triples and the experimental aarch64-windows-gnu one (per ADR 0011,
+      # that triple is best-effort and may be omitted from a given release).
       - name: Record smoke pass for ${{ matrix.triple }}
         if: success()
         shell: bash
@@ -111,10 +112,10 @@ jobs:
 
   publish:
     needs: smoke
-    # Only publish on tag pushes. workflow_dispatch still exercises build and
-    # smoke for manual verification but does not create a Release; cutting an
-    # actual release happens by pushing a v* tag.
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    # Only attach assets when triggered by a Release event. workflow_dispatch
+    # still exercises build and smoke for manual verification but does not
+    # touch an existing Release.
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -142,34 +143,24 @@ jobs:
           shopt -s nullglob
           for marker in smoke-markers/*; do
             triple="$(basename "$marker")"
-            src_dir="zig-out/release/$triple"
-            if [[ ! -d "$src_dir" ]]; then
-              echo "publish: missing build output for $triple" >&2
-              exit 1
-            fi
             case "$triple" in
               *windows*) bin="tk.exe"; asset="tk-${triple}.exe" ;;
               *) bin="tk"; asset="tk-${triple}" ;;
             esac
-            if [[ ! -f "$src_dir/$bin" ]]; then
-              echo "publish: missing $bin in $src_dir" >&2
-              exit 1
-            fi
-            mv "$src_dir/$bin" "release-flat/$asset"
+            mv "zig-out/release/$triple/$bin" "release-flat/$asset"
             echo "publish: staged $asset"
           done
-          # Fail loudly if no triples passed smoke. needs:smoke short-circuits
-          # the publish job when any required triple fails, so this guard is
-          # defense against a future refactor that drops the implicit
-          # short-circuit (e.g. relaxing a smoke step to continue-on-error).
+          # needs:smoke short-circuits the publish job when any required
+          # triple fails, so this guard exists for the residual case where a
+          # future refactor (relaxing a smoke step to continue-on-error, or
+          # dropping the needs: dependency) lets publish run with no markers.
+          # Without it, `gh release upload` on an empty file list would
+          # succeed silently and the Release would stay asset-less.
           if [ -z "$(ls -A release-flat)" ]; then
-            echo "publish: no smoke-passing binaries; refusing to publish empty release" >&2
+            echo "publish: no smoke-passing binaries; refusing to attach to release" >&2
             exit 1
           fi
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: release-flat/tk-*
-          fail_on_unmatched_files: true
-          generate_release_notes: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
+      - name: Attach release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.event.release.tag_name }}" release-flat/tk-* --clobber
