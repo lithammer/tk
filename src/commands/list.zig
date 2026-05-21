@@ -212,11 +212,11 @@ fn priorityStyle(priority: Priority) Style {
 }
 
 fn renderRow(stdout: *std.Io.Writer, row: *const repository.ListRow, tree_prefix: []const u8, styler: styler_mod.SubStyler) !void {
+    try stdout.writeAll(tree_prefix);
+
     if (row.has_unresolved_blocker) {
         try stdout.writeAll(styler.open(palette.blocked_row));
     }
-
-    try stdout.writeAll(tree_prefix);
 
     const status_style = switch (row.status) {
         .open => palette.status_open,
