@@ -143,12 +143,14 @@ test "palette emits expected bytes under each mode" {
         .{ .name = "status_open", .style = palette.status_open, .on_open = "", .on_close = "" },
         .{ .name = "status_active", .style = palette.status_active, .on_open = "\x1b[33m", .on_close = "\x1b[39m" },
         .{ .name = "status_done", .style = palette.status_done, .on_open = "\x1b[32m", .on_close = "\x1b[39m" },
-        .{ .name = "blocked", .style = palette.blocked, .on_open = "\x1b[31m", .on_close = "\x1b[39m" },
-        .{ .name = "priority_p0", .style = palette.priority_p0, .on_open = "\x1b[31m\x1b[1m", .on_close = "\x1b[22m\x1b[39m" },
-        .{ .name = "priority_p1", .style = palette.priority_p1, .on_open = "\x1b[31m", .on_close = "\x1b[39m" },
-        .{ .name = "priority_p2", .style = palette.priority_p2, .on_open = "\x1b[33m", .on_close = "\x1b[39m" },
-        .{ .name = "priority_p3", .style = palette.priority_p3, .on_open = "\x1b[34m", .on_close = "\x1b[39m" },
-        .{ .name = "priority_p4", .style = palette.priority_p4, .on_open = "\x1b[2m", .on_close = "\x1b[22m" },
+        .{ .name = "blocked", .style = palette.blocked, .on_open = "", .on_close = "" },
+        .{ .name = "blocked_row", .style = palette.blocked_row, .on_open = "\x1b[2m", .on_close = "\x1b[22m" },
+        .{ .name = "separator", .style = palette.separator, .on_open = "\x1b[2m", .on_close = "\x1b[22m" },
+        .{ .name = "priority_p0", .style = palette.priority_p0, .on_open = "\x1b[31m", .on_close = "\x1b[39m" },
+        .{ .name = "priority_p1", .style = palette.priority_p1, .on_open = "\x1b[33m", .on_close = "\x1b[39m" },
+        .{ .name = "priority_p2", .style = palette.priority_p2, .on_open = "", .on_close = "" },
+        .{ .name = "priority_p3", .style = palette.priority_p3, .on_open = "", .on_close = "" },
+        .{ .name = "priority_p4", .style = palette.priority_p4, .on_open = "", .on_close = "" },
     };
 
     const on: SubStyler = .{ .mode = .escape_codes };

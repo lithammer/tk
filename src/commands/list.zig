@@ -11,6 +11,10 @@ const init_command = @import("init.zig");
 const add_command = @import("add.zig");
 const Harness = @import("../testing/test_cli.zig").Harness;
 const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+const styler_mod = @import("../render/styler.zig");
+const palette = @import("../render/palette.zig");
+const Priority = @import("../domain/priority.zig").Priority;
+const Style = @import("../render/style.zig").Style;
 
 /// Dispatcher metadata for `tk list`.
 pub const meta: cli.CommandMeta = .{
@@ -55,7 +59,7 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
     };
     defer repository.freeListRows(deps.gpa, rows);
 
-    try render(deps.stdout, rows, options);
+    try render(deps.stdout, rows, options, deps.styler.forStdout());
     return 0;
 }
 
@@ -110,58 +114,75 @@ fn writeHelp(deps: cli.Deps) !void {
     );
 }
 
-fn render(stdout: *std.Io.Writer, rows: []const repository.ListRow, options: repository.ListOptions) !void {
+fn render(stdout: *std.Io.Writer, rows: []const repository.ListRow, options: repository.ListOptions, styler: styler_mod.SubStyler) !void {
     if (rows.len == 0) {
         try stdout.print("{s}\n", .{emptyMessage(options)});
         return;
     }
 
     var counts: StatusCounts = .{};
-    for (rows) |row| {
+    for (rows) |*row| {
         counts.add(row.status);
     }
 
-    for (rows) |row| {
+    for (rows) |*row| {
         if (parentIsRendered(rows, row)) continue;
-        try renderRow(stdout, row, "");
-        try renderChildren(stdout, rows, row);
+        try renderRow(stdout, row, "", styler);
+        try renderChildren(stdout, rows, row, styler);
     }
 
-    try stdout.writeAll("--------------------------------------------------------------------------------\n");
+    // Cleanly print separator using styler.wrap
+    try styler.wrap(palette.separator, "--------------------------------------------------------------------------------").format(stdout);
+    try stdout.writeAll("\n");
+
     try renderTotal(stdout, rows.len, counts);
     try stdout.writeAll("\n");
-    try stdout.writeAll(messages.list_status_label ++ "○ open  ◐ active  ✓ done\n");
-    try stdout.writeAll("Blocked: ⊘ blocked\n");
+
+    try stdout.writeAll(messages.list_status_label);
+
+    // Render status icons using canonical glyphs and SubStyler wrappers
+    try styler.wrap(palette.status_open, ItemStatus.open.glyph()).format(stdout);
+    try stdout.writeAll(" open  ");
+
+    try styler.wrap(palette.status_active, ItemStatus.active.glyph()).format(stdout);
+    try stdout.writeAll(" active  ");
+
+    try styler.wrap(palette.status_done, ItemStatus.done.glyph()).format(stdout);
+    try stdout.writeAll(" done\n");
+
+    try stdout.writeAll("Blocked: ");
+    try styler.wrap(palette.blocked, "⊘").format(stdout);
+    try stdout.writeAll(" blocked\n");
 }
 
-fn renderChildren(stdout: *std.Io.Writer, rows: []const repository.ListRow, parent: repository.ListRow) !void {
+fn renderChildren(stdout: *std.Io.Writer, rows: []const repository.ListRow, parent: *const repository.ListRow, styler: styler_mod.SubStyler) !void {
     const child_count = countRenderedChildren(rows, parent.id);
     var child_index: usize = 0;
-    for (rows) |child| {
+    for (rows) |*child| {
         const container_id = child.container_id orelse continue;
         if (!std.mem.eql(u8, container_id, parent.id)) continue;
         child_index += 1;
         const prefix = if (child_index == child_count) "└── " else "├── ";
-        try renderRow(stdout, child, prefix);
+        try renderRow(stdout, child, prefix, styler);
     }
 }
 
-fn parentIsRendered(rows: []const repository.ListRow, row: repository.ListRow) bool {
+fn parentIsRendered(rows: []const repository.ListRow, row: *const repository.ListRow) bool {
     const container_id = row.container_id orelse return false;
     return findRowById(rows, container_id) != null;
 }
 
 fn countRenderedChildren(rows: []const repository.ListRow, parent_id: []const u8) usize {
     var count: usize = 0;
-    for (rows) |row| {
+    for (rows) |*row| {
         const container_id = row.container_id orelse continue;
         if (std.mem.eql(u8, container_id, parent_id)) count += 1;
     }
     return count;
 }
 
-fn findRowById(rows: []const repository.ListRow, id: []const u8) ?repository.ListRow {
-    for (rows) |row| {
+fn findRowById(rows: []const repository.ListRow, id: []const u8) ?*const repository.ListRow {
+    for (rows) |*row| {
         if (std.mem.eql(u8, row.id, id)) return row;
     }
     return null;
@@ -180,18 +201,71 @@ fn emptyMessage(options: repository.ListOptions) []const u8 {
     };
 }
 
-fn renderRow(stdout: *std.Io.Writer, row: repository.ListRow, tree_prefix: []const u8) !void {
-    try stdout.print("{s}{s} {s}", .{ tree_prefix, row.status.glyph(), row.display_id });
-    if (row.has_unresolved_blocker) try stdout.writeAll(" ⊘");
+fn priorityStyle(priority: Priority) Style {
+    return switch (priority) {
+        .P0 => palette.priority_p0,
+        .P1 => palette.priority_p1,
+        .P2 => palette.priority_p2,
+        .P3 => palette.priority_p3,
+        .P4 => palette.priority_p4,
+    };
+}
+
+fn renderRow(stdout: *std.Io.Writer, row: *const repository.ListRow, tree_prefix: []const u8, styler: styler_mod.SubStyler) !void {
+    if (row.has_unresolved_blocker) {
+        try stdout.writeAll(styler.open(palette.blocked_row));
+    }
+
+    try stdout.writeAll(tree_prefix);
+
+    const status_style = switch (row.status) {
+        .open => palette.status_open,
+        .active => palette.status_active,
+        .done => palette.status_done,
+    };
+    try styler.wrap(status_style, row.status.glyph()).format(stdout);
+    try stdout.writeAll(" ");
+
+    const id_style = switch (row.item_class) {
+        .epic => palette.id_epic,
+        .ticket => palette.id_ticket,
+    };
+    try styler.wrap(id_style, row.display_id).format(stdout);
+
+    if (row.has_unresolved_blocker) {
+        try stdout.writeAll(" ");
+        try styler.wrap(palette.blocked, "⊘").format(stdout);
+    }
+
     switch (row.item_class) {
         .ticket => {
             const priority = row.priority orelse unreachable;
-            try stdout.print(" ● {s}", .{priority.text()});
-            if (row.ticket_kind == TicketKind.bug) try stdout.writeAll(" [bug]");
-            try stdout.print(" {s}\n", .{row.title});
+            const p_style = priorityStyle(priority);
+
+            try stdout.writeAll(" ");
+            try styler.wrap(p_style, "●").format(stdout);
+            try stdout.writeAll(" ");
+            try styler.wrap(p_style, priority.text()).format(stdout);
+
+            if (row.ticket_kind == TicketKind.bug) {
+                try stdout.writeAll(" ");
+                try styler.wrap(palette.kind_bug, "[bug]").format(stdout);
+            }
+            try stdout.writeAll(" ");
+            try stdout.writeAll(row.title);
         },
-        .epic => try stdout.print(" [epic] {s}\n", .{row.title}),
+        .epic => {
+            try stdout.writeAll(" ");
+            try styler.wrap(palette.kind_epic, "[epic]").format(stdout);
+            try stdout.writeAll(" ");
+            try stdout.writeAll(row.title);
+        },
     }
+
+    if (row.has_unresolved_blocker) {
+        try stdout.writeAll(styler.close(palette.blocked_row));
+    }
+    try stdout.writeAll("\n");
 }
 
 fn renderTotal(stdout: *std.Io.Writer, total: usize, counts: StatusCounts) !void {
@@ -629,4 +703,94 @@ test "list: validates mutually exclusive filters" {
         try std.testing.expectEqualStrings("", h.stdout());
         try std.testing.expectEqualStrings(messages.list_conflicting_origin_filters ++ "\n", h.stderr());
     }
+}
+
+test "list: renders styled output with correct ANSI sequences under escape_codes" {
+    const gpa = std.testing.allocator;
+    var store = try TmpStore.init(gpa, "project");
+    defer store.deinit(gpa);
+
+    var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, store.toplevel_path, .{});
+    defer cwd.close(std.testing.io);
+
+    const rev_parse = try store.gitRevParseStdout(gpa);
+    defer gpa.free(rev_parse);
+
+    {
+        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
+    }
+
+    const zqlite = @import("zqlite");
+    const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+
+    // 1. P0 bug ticket
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "ticket-p0-bug",
+        .display = "project-1",
+        .title = "Critical bug",
+        .priority = "P0",
+        .ticket_kind = "bug",
+        .created_seq = 1,
+    });
+
+    // 2. Active ticket
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "ticket-active",
+        .display = "project-2",
+        .title = "Active task",
+        .status = "active",
+        .created_seq = 2,
+    });
+
+    // 3. Blocked ticket
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "ticket-blocked",
+        .display = "project-3",
+        .title = "Blocked task",
+        .created_seq = 3,
+    });
+    try TmpStore.insertExternalBlocker(conn, "ext-blocker", "ticket-blocked", null);
+
+    // Initialize harness with stdout_mode = .escape_codes
+    var h = Harness.initWith(gpa, &.{}, .{
+        .cwd = cwd,
+        .stdout_mode = .escape_codes,
+    });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+
+    try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
+
+    const out = h.stdout();
+
+    // Assert correct color codes are present
+    // Yellow status glyph for active: "◐" (active) wrapped in \x1b[33m ... \x1b[39m
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[33m\xe2\x97\x90\x1b[39m") != null);
+
+    // Red priority dot and text for P0: "●" and "P0" wrapped in \x1b[31m ... \x1b[39m
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[31m\xe2\x97\x8f\x1b[39m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[31mP0\x1b[39m") != null);
+
+    // Red bug tag: "[bug]" wrapped in \x1b[31m ... \x1b[39m
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[31m[bug]\x1b[39m") != null);
+
+    // Blocked ticket has whole-row dimming: \x1b[2m at the start of the row, closed with \x1b[22m
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[2m\xe2\x97\x8b project-3 \xe2\x8a\x98") != null);
+
+    // Separator line has dimming sequences: \x1b[2m--------------------------------------------------------------------------------\x1b[22m
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[2m--------------------------------------------------------------------------------\x1b[22m") != null);
+
+    // Status legend glyphs:
+    // "○" (open) is styled with status_open (style.none()), so it remains unstyled.
+    // "◐" (active) is wrapped in status_active (style.yellow() -> \x1b[33m ... \x1b[39m)
+    // "✓" (done) is wrapped in status_done (style.green() -> \x1b[32m ... \x1b[39m)
+    try std.testing.expect(std.mem.indexOf(u8, out, "Status: \xe2\x97\x8b open  \x1b[33m\xe2\x97\x90\x1b[39m active  \x1b[32m\xe2\x9c\x93\x1b[39m done") != null);
+
+    // Blocker legend glyph:
+    // "⊘" (blocked) is styled with blocked (style.none()), so it remains unstyled.
+    try std.testing.expect(std.mem.indexOf(u8, out, "Blocked: \xe2\x8a\x98 blocked") != null);
 }

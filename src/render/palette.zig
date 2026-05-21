@@ -28,10 +28,12 @@ pub const status_open = style.none();
 pub const status_active = style.yellow();
 pub const status_done = style.green();
 
-pub const blocked = style.red();
+pub const blocked = style.none();
+pub const blocked_row = style.dim();
+pub const separator = style.dim();
 
-pub const priority_p0 = style.red().bold();
-pub const priority_p1 = style.red();
-pub const priority_p2 = style.yellow();
-pub const priority_p3 = style.blue();
-pub const priority_p4 = style.dim();
+pub const priority_p0 = style.red();
+pub const priority_p1 = style.yellow();
+pub const priority_p2 = style.none();
+pub const priority_p3 = style.none();
+pub const priority_p4 = style.none();
