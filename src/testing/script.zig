@@ -111,7 +111,16 @@ pub fn tokenizeLine(
     return tokens.toOwnedSlice(allocator);
 }
 
-fn getEnvFlag(name: []const u8) bool {
+fn getEnvFlag(comptime name: []const u8) bool {
+    // Zig 0.16.0's `Environ.getPosix` does not compile on Windows because
+    // `Environ.Block` resolves to `GlobalBlock`, which has no `view` method.
+    // Mirror the OS dispatch used by `Environ.containsUnemptyConstant`.
+    if (@import("builtin").os.tag == .windows) {
+        const name_w = comptime std.unicode.wtf8ToWtf16LeStringLiteral(name);
+        const one_w = comptime std.unicode.wtf8ToWtf16LeStringLiteral("1");
+        const val = std.testing.environ.getWindows(name_w) orelse return false;
+        return std.mem.eql(u16, val, one_w);
+    }
     const val = std.testing.environ.getPosix(name) orelse return false;
     return std.mem.eql(u8, val, "1");
 }
