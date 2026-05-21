@@ -141,6 +141,18 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
 
+    // https://zigtools.org/zls/guides/build-on-save/.
+    const exe_check = b.addExecutable(.{
+        .name = "tk",
+        .root_module = root_mod,
+    });
+    const tests_check = b.addTest(.{
+        .root_module = test_mod,
+    });
+    const check_step = b.step("check", "Compile tk and tests without emitting binaries");
+    check_step.dependOn(&exe_check.step);
+    check_step.dependOn(&tests_check.step);
+
     // Release step: cross-compile tk for every supported triple. Outputs land
     // under `zig-out/release/<triple>/tk[.exe]` so the release workflow can
     // upload one artifact per row. See ADR 0011 for the strategy.

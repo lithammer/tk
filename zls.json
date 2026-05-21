@@ -1,0 +1,5 @@
+{
+	"$schema": "https://raw.githubusercontent.com/zigtools/zls/refs/tags/0.16.0/schema.json",
+	"warn_style": true,
+	"build_on_save_args": ["-fincremental"]
+}
