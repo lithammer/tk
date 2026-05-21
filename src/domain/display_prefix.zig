@@ -14,6 +14,7 @@
 //! Vowels are not stripped. Output is always lowercase ASCII.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 
 /// Maximum length of the stored local Display ID prefix.
 pub const max_prefix_len: usize = 12;
@@ -22,7 +23,7 @@ const separators = "-_./:# \t";
 
 /// Returns a newly-allocated, lowercase prefix derived from `basename`.
 /// Caller owns the returned slice.
-pub fn derive(gpa: std.mem.Allocator, basename: []const u8) ![]u8 {
+pub fn derive(gpa: Allocator, basename: []const u8) ![]u8 {
     const lowered = try std.ascii.allocLowerString(gpa, basename);
     defer gpa.free(lowered);
 
@@ -50,7 +51,7 @@ pub fn derive(gpa: std.mem.Allocator, basename: []const u8) ![]u8 {
     return result;
 }
 
-fn chooseShape(gpa: std.mem.Allocator, segments: []const []u8) ![]u8 {
+fn chooseShape(gpa: Allocator, segments: []const []u8) ![]u8 {
     const joined_all = try std.mem.join(gpa, "-", segments);
     if (joined_all.len > 0 and joined_all.len <= max_prefix_len) return joined_all;
     defer gpa.free(joined_all);
@@ -67,7 +68,7 @@ fn chooseShape(gpa: std.mem.Allocator, segments: []const []u8) ![]u8 {
     return gpa.dupe(u8, concat[0..upper]);
 }
 
-fn filterAlnum(gpa: std.mem.Allocator, segment: []const u8) ![]u8 {
+fn filterAlnum(gpa: Allocator, segment: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
     for (segment) |b| {

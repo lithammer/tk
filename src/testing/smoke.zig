@@ -8,6 +8,8 @@
 //! bytes via the same module imports.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+
 const build_options = @import("build_options");
 const messages = @import("../messages.zig");
 
@@ -17,21 +19,21 @@ const tk_exe_path: []const u8 = build_options.tk_exe_path;
 /// build system. The smoke tests `cd` into a temp directory before spawning
 /// the binary, so the relative path becomes meaningless. Resolve it to an
 /// absolute path once at test start. Caller frees with the same allocator.
-fn absoluteTkPath(gpa: std.mem.Allocator) ![]u8 {
+fn absoluteTkPath(gpa: Allocator) ![]u8 {
     if (std.fs.path.isAbsolute(tk_exe_path)) return gpa.dupe(u8, tk_exe_path);
     var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = try std.Io.Dir.cwd().realPathFile(std.testing.io, tk_exe_path, &buf);
     return gpa.dupe(u8, buf[0..n]);
 }
 
-fn runProcess(gpa: std.mem.Allocator, argv: []const []const u8, cwd: std.Io.Dir) !std.process.RunResult {
+fn runProcess(gpa: Allocator, argv: []const []const u8, cwd: std.Io.Dir) !std.process.RunResult {
     return std.process.run(gpa, std.testing.io, .{
         .argv = argv,
         .cwd = .{ .dir = cwd },
     });
 }
 
-fn freeRunResult(gpa: std.mem.Allocator, r: std.process.RunResult) void {
+fn freeRunResult(gpa: Allocator, r: std.process.RunResult) void {
     gpa.free(r.stdout);
     gpa.free(r.stderr);
 }

@@ -9,6 +9,8 @@
 //! SQL on the items / mutations / item_ids / remotes / sync_cursors tables.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+
 const zqlite = @import("zqlite");
 
 const migrations = @import("migrations.zig");
@@ -68,7 +70,7 @@ pub const MergeError = migrations.QueryError || zqlite.Error || error{
 /// `std.Random` (real or seeded test PRNG) into helpers that mint IDs.
 pub fn mergeBackendSnapshots(
     conn: zqlite.Conn,
-    gpa: std.mem.Allocator,
+    gpa: Allocator,
     random: std.Random,
     snapshots: []const BackendItemSnapshot,
     now: []const u8,
@@ -209,7 +211,7 @@ pub const LoadApplicableError = migrations.QueryError || zqlite.Error || std.jso
 /// — the engine recognises the schema-allowed kind but has no projection.
 pub fn loadApplicableMutations(
     conn: zqlite.Conn,
-    gpa: std.mem.Allocator,
+    gpa: Allocator,
 ) LoadApplicableError![]MutationView {
     var list: std.ArrayList(MutationView) = .empty;
     errdefer {
@@ -268,7 +270,7 @@ pub fn loadApplicableMutations(
 /// Free the owned slices on a `MutationView` returned by
 /// `loadApplicableMutations`. The view's payload variant determines which
 /// nested slices must be freed.
-pub fn deinitMutationView(view: MutationView, gpa: std.mem.Allocator) void {
+pub fn deinitMutationView(view: MutationView, gpa: Allocator) void {
     gpa.free(view.item_id);
     if (view.backend_kind) |s| gpa.free(s);
     if (view.backend_key) |s| gpa.free(s);
@@ -279,7 +281,7 @@ pub fn deinitMutationView(view: MutationView, gpa: std.mem.Allocator) void {
 /// variant the `MutationType` selects. All returned slices are owned by
 /// `gpa` and freed via `freeMutationPayload`.
 fn decodeMutationPayload(
-    gpa: std.mem.Allocator,
+    gpa: Allocator,
     mutation_type: MutationType,
     payload_text: []const u8,
 ) LoadApplicableError!MutationPayload {
@@ -318,7 +320,7 @@ fn decodeMutationPayload(
     };
 }
 
-fn freeMutationPayload(payload: MutationPayload, gpa: std.mem.Allocator) void {
+fn freeMutationPayload(payload: MutationPayload, gpa: Allocator) void {
     switch (payload) {
         .update_title_body => |p| {
             gpa.free(p.title);
@@ -385,7 +387,7 @@ pub const ApplyMutationOutcomeError = migrations.QueryError || zqlite.Error || e
 /// Missing rows return `error.MutationNotFound`.
 pub fn applyMutationOutcome(
     conn: zqlite.Conn,
-    gpa: std.mem.Allocator,
+    gpa: Allocator,
     sequence: i64,
     outcome: Outcome,
     now: []const u8,
@@ -586,7 +588,7 @@ pub const RemoteRow = struct {
     config_json: []u8,
     last_applied_sequence: i64,
 
-    pub fn deinit(self: RemoteRow, gpa: std.mem.Allocator) void {
+    pub fn deinit(self: RemoteRow, gpa: Allocator) void {
         gpa.free(self.backend_kind);
         gpa.free(self.config_json);
     }
@@ -602,7 +604,7 @@ pub const GetRemoteError = migrations.QueryError || zqlite.Error || error{OutOfM
 /// without a second round-trip.
 pub fn getRemote(
     conn: zqlite.Conn,
-    gpa: std.mem.Allocator,
+    gpa: Allocator,
 ) GetRemoteError!?RemoteRow {
     const row = try conn.row(
         \\select r.backend_kind, r.config_json, c.last_applied_sequence
@@ -1886,7 +1888,7 @@ pub const LogListRow = struct {
     /// the persisted `FailureJsonWrapper`.
     failure_detail: ?[]u8,
 
-    pub fn deinit(self: LogListRow, gpa: std.mem.Allocator) void {
+    pub fn deinit(self: LogListRow, gpa: Allocator) void {
         gpa.free(self.state);
         gpa.free(self.mutation_type);
         gpa.free(self.target_display_id);
@@ -1907,7 +1909,7 @@ pub const LogDetailRow = struct {
     created_at: []u8,
     state_changed_at: []u8,
 
-    pub fn deinit(self: LogDetailRow, gpa: std.mem.Allocator) void {
+    pub fn deinit(self: LogDetailRow, gpa: Allocator) void {
         gpa.free(self.state);
         gpa.free(self.mutation_type);
         gpa.free(self.target_display_id);
@@ -1929,7 +1931,7 @@ pub const LogError = migrations.QueryError || zqlite.Error || std.json.ParseErro
 /// Return Mutation Log rows matching `filter` in ascending sequence order.
 pub fn listMutationLog(
     conn: zqlite.Conn,
-    gpa: std.mem.Allocator,
+    gpa: Allocator,
     filter: LogListFilter,
 ) LogError![]LogListRow {
     var list: std.ArrayList(LogListRow) = .empty;
@@ -1988,7 +1990,7 @@ pub fn listMutationLog(
 /// Look up one Mutation Log entry by sequence and return its full detail.
 pub fn showMutationLog(
     conn: zqlite.Conn,
-    gpa: std.mem.Allocator,
+    gpa: Allocator,
     sequence: i64,
 ) LogError!LogDetailRow {
     const row = (try conn.row(
@@ -2038,7 +2040,7 @@ pub fn showMutationLog(
 /// Decode the `failure_json` text column into the bare detail string. The
 /// inverse of `FailureJsonWrapper` — encoder and decoder share one type so
 /// they cannot drift.
-fn decodeFailureDetail(gpa: std.mem.Allocator, raw: []const u8) LogError![]u8 {
+fn decodeFailureDetail(gpa: Allocator, raw: []const u8) LogError![]u8 {
     const parsed = try std.json.parseFromSlice(FailureJsonWrapper, gpa, raw, .{});
     defer parsed.deinit();
     return gpa.dupe(u8, parsed.value.detail);
@@ -2089,7 +2091,7 @@ fn logSeedFixture(conn: zqlite.Conn) !void {
     });
 }
 
-fn freeLogListRows(gpa: std.mem.Allocator, rows: []LogListRow) void {
+fn freeLogListRows(gpa: Allocator, rows: []LogListRow) void {
     for (rows) |r| r.deinit(gpa);
     gpa.free(rows);
 }

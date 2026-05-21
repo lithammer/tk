@@ -1,6 +1,8 @@
 //! Git-commit-style message parsing and loading shared by write commands.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+
 const cli = @import("../cli.zig");
 
 /// Parsed Ticket message. Title and body are allocator-owned.
@@ -9,7 +11,7 @@ pub const ParsedMessage = struct {
     body: []u8,
 
     /// Free title/body buffers returned by `parse`.
-    pub fn deinit(self: ParsedMessage, gpa: std.mem.Allocator) void {
+    pub fn deinit(self: ParsedMessage, gpa: Allocator) void {
         gpa.free(self.title);
         gpa.free(self.body);
     }
@@ -32,7 +34,7 @@ const Line = struct {
 /// Line endings are normalized to LF. Title lines are trimmed and folded with
 /// single spaces; body text is otherwise preserved after trimming outer blank
 /// lines.
-pub fn parse(gpa: std.mem.Allocator, raw: []const u8) ParseError!ParsedMessage {
+pub fn parse(gpa: Allocator, raw: []const u8) ParseError!ParsedMessage {
     if (std.mem.indexOfScalar(u8, raw, 0) != null) return error.NulByte;
 
     const normalized = try normalizeLineEndings(gpa, raw);
@@ -75,7 +77,7 @@ pub fn parse(gpa: std.mem.Allocator, raw: []const u8) ParseError!ParsedMessage {
     };
 }
 
-fn normalizeLineEndings(gpa: std.mem.Allocator, raw: []const u8) ![]u8 {
+fn normalizeLineEndings(gpa: Allocator, raw: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
 
@@ -94,7 +96,7 @@ fn normalizeLineEndings(gpa: std.mem.Allocator, raw: []const u8) ![]u8 {
     return out.toOwnedSlice(gpa);
 }
 
-fn collectLines(gpa: std.mem.Allocator, input: []const u8, lines: *std.ArrayList(Line)) !void {
+fn collectLines(gpa: Allocator, input: []const u8, lines: *std.ArrayList(Line)) !void {
     var start: usize = 0;
     var i: usize = 0;
     while (i < input.len) : (i += 1) {
@@ -162,7 +164,7 @@ test "message: normalizes CRLF and CR line endings" {
 /// Joins the paragraphs with double newlines and delegates to `parse`. Used by
 /// write commands when message paragraphs come from repeated `-m` flags rather
 /// than a single file or stdin blob.
-pub fn parseFromParagraphs(gpa: std.mem.Allocator, paragraphs: []const []const u8) ParseError!ParsedMessage {
+pub fn parseFromParagraphs(gpa: Allocator, paragraphs: []const []const u8) ParseError!ParsedMessage {
     if (paragraphs.len == 0) return error.EmptyMessage;
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(gpa);

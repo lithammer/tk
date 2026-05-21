@@ -7,6 +7,8 @@
 //! by the other sequence counters in the Repository Store.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+
 const zqlite = @import("zqlite");
 const migrations = @import("migrations.zig");
 const sequences = @import("sequences.zig");
@@ -29,7 +31,7 @@ pub const AppendError = migrations.QueryError || zqlite.Error || error{OutOfMemo
 /// state `pending`.
 pub fn appendMutation(
     conn: zqlite.Conn,
-    gpa: std.mem.Allocator,
+    gpa: Allocator,
     mutation_type: MutationType,
     item_id: []const u8,
     item_class: ItemClass,

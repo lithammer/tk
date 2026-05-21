@@ -1,4 +1,6 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+
 const clap = @import("clap");
 const proc = @import("proc/runner.zig");
 const clock_mod = @import("clock.zig");
@@ -19,7 +21,7 @@ pub const Deps = struct {
     /// explicitly accepts stdin, such as `tk add -F -`.
     stdin: *std.Io.Reader,
     /// Allocator used for parsing and short-lived command work.
-    gpa: std.mem.Allocator,
+    gpa: Allocator,
     /// I/O implementation handle, threaded through filesystem and subprocess
     /// calls. Tests use `std.testing.io`; main uses the runtime's init.io.
     io: std.Io,

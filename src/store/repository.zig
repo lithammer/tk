@@ -1,6 +1,8 @@
 //! Repository Store open and write helpers.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+
 const zqlite = @import("zqlite");
 const clock_mod = @import("../clock.zig");
 const discovery = @import("../git/discovery.zig");
@@ -44,7 +46,7 @@ pub const CreatedTicket = struct {
     body: []const u8,
 
     /// Free generated values owned by the store helper.
-    pub fn deinit(self: CreatedTicket, gpa: std.mem.Allocator) void {
+    pub fn deinit(self: CreatedTicket, gpa: Allocator) void {
         gpa.free(self.id);
         gpa.free(self.display_id);
     }
@@ -60,7 +62,7 @@ pub const CreatedEpic = struct {
     body: []const u8,
 
     /// Free generated values owned by the store helper.
-    pub fn deinit(self: CreatedEpic, gpa: std.mem.Allocator) void {
+    pub fn deinit(self: CreatedEpic, gpa: Allocator) void {
         gpa.free(self.id);
         gpa.free(self.display_id);
     }
@@ -99,7 +101,7 @@ pub const ListRow = struct {
     has_unresolved_blocker: bool,
 
     /// Free text copied out of SQLite's statement-owned row buffers.
-    pub fn deinit(self: ListRow, gpa: std.mem.Allocator) void {
+    pub fn deinit(self: ListRow, gpa: Allocator) void {
         gpa.free(self.id);
         gpa.free(self.display_id);
         gpa.free(self.title);
@@ -108,7 +110,7 @@ pub const ListRow = struct {
 };
 
 /// Free a slice returned by `listRows`.
-pub fn freeListRows(gpa: std.mem.Allocator, rows: []ListRow) void {
+pub fn freeListRows(gpa: Allocator, rows: []ListRow) void {
     for (rows) |row| row.deinit(gpa);
     gpa.free(rows);
 }
@@ -156,7 +158,7 @@ pub const NextTicket = struct {
     display_id: []u8,
 
     /// Free text copied out of SQLite's statement-owned row buffers.
-    pub fn deinit(self: NextTicket, gpa: std.mem.Allocator) void {
+    pub fn deinit(self: NextTicket, gpa: Allocator) void {
         gpa.free(self.display_id);
     }
 };
@@ -211,7 +213,7 @@ pub const OpenError = discovery.Error || migrations.QueryError || zqlite.Error |
 /// so `messages.zig` remains the single source of stable strings.
 pub fn renderOpenFailure(
     stderr: *std.Io.Writer,
-    gpa: std.mem.Allocator,
+    gpa: Allocator,
     command_name: []const u8,
     missing_store: []const u8,
     outcome: OpenOutcome,
@@ -277,7 +279,7 @@ pub const OpenMessages = struct {
 /// failures (e.g. zig-clap OOM that bypasses command rendering) reach the
 /// exit-3 catch-all in `main.zig`.
 pub fn openStoreCatching(
-    gpa: std.mem.Allocator,
+    gpa: Allocator,
     runner: proc.Runner,
     cwd: std.Io.Dir,
     stderr: *std.Io.Writer,
@@ -314,7 +316,7 @@ pub fn isBusyError(err: anyerror) bool {
 }
 
 /// Open the existing Repository Store for the current Git repository.
-pub fn openExisting(gpa: std.mem.Allocator, runner: proc.Runner, cwd: std.Io.Dir) OpenError!OpenOutcome {
+pub fn openExisting(gpa: Allocator, runner: proc.Runner, cwd: std.Io.Dir) OpenError!OpenOutcome {
     const outcome = try discovery.discoverPaths(gpa, runner, cwd);
     var paths = switch (outcome) {
         .ok => |ok| ok,
@@ -361,7 +363,7 @@ pub const ItemSummary = struct {
     priority: ?Priority,
 
     /// Free allocator-owned fields.
-    pub fn deinit(self: ItemSummary, gpa: std.mem.Allocator) void {
+    pub fn deinit(self: ItemSummary, gpa: Allocator) void {
         gpa.free(self.display_id);
         gpa.free(self.title);
     }
@@ -372,7 +374,7 @@ pub const ExternalBlockerSummary = struct {
     reason: []u8,
 
     /// Free allocator-owned fields.
-    pub fn deinit(self: ExternalBlockerSummary, gpa: std.mem.Allocator) void {
+    pub fn deinit(self: ExternalBlockerSummary, gpa: Allocator) void {
         gpa.free(self.reason);
     }
 };
@@ -401,7 +403,7 @@ pub const ItemDetail = struct {
     external_blockers: []ExternalBlockerSummary,
 
     /// Free all allocator-owned fields.
-    pub fn deinit(self: ItemDetail, gpa: std.mem.Allocator) void {
+    pub fn deinit(self: ItemDetail, gpa: Allocator) void {
         gpa.free(self.id);
         gpa.free(self.display_id);
         gpa.free(self.title);
@@ -429,7 +431,7 @@ pub const ShowError = ResolveError;
 /// Resolves `display_arg` via the `item_ids` table (Display ID or Alias).
 /// Returns `null` when the Display ID or Alias does not resolve. The caller
 /// is responsible for freeing the returned `ItemDetail` via `deinit`.
-pub fn showItem(store: Store, gpa: std.mem.Allocator, display_arg: []const u8) ShowError!?ItemDetail {
+pub fn showItem(store: Store, gpa: Allocator, display_arg: []const u8) ShowError!?ItemDetail {
     const ref = (try resolveItemRef(store, gpa, display_arg)) orelse return null;
     defer ref.deinit(gpa);
 
@@ -634,7 +636,7 @@ const LocalItemIdentity = struct {
     created_seq: i64,
     created_at: [24]u8,
 
-    fn deinit(self: LocalItemIdentity, gpa: std.mem.Allocator) void {
+    fn deinit(self: LocalItemIdentity, gpa: Allocator) void {
         gpa.free(self.id);
         gpa.free(self.display_id);
     }
@@ -753,7 +755,7 @@ const resolve_item_ref_with_display_sql =
 ;
 
 /// Read current Repository Store rows for a List Tree.
-pub fn listRows(store: Store, gpa: std.mem.Allocator, options: ListOptions) ListError![]ListRow {
+pub fn listRows(store: Store, gpa: Allocator, options: ListOptions) ListError![]ListRow {
     var result: std.ArrayList(ListRow) = .empty;
     errdefer {
         for (result.items) |row| row.deinit(gpa);
@@ -772,7 +774,7 @@ pub fn listRows(store: Store, gpa: std.mem.Allocator, options: ListOptions) List
 }
 
 /// Select the next ready Ticket from current Repository Store state.
-pub fn nextReadyTicket(store: Store, gpa: std.mem.Allocator, options: NextOptions) NextError!NextOutcome {
+pub fn nextReadyTicket(store: Store, gpa: Allocator, options: NextOptions) NextError!NextOutcome {
     var scope_mode: []const u8 = "all";
     var scope_id: []const u8 = "";
 
@@ -799,7 +801,7 @@ pub fn nextReadyTicket(store: Store, gpa: std.mem.Allocator, options: NextOption
 /// Create a Local Ticket and its current Display ID resolver row.
 pub fn createLocalTicket(
     store: Store,
-    gpa: std.mem.Allocator,
+    gpa: Allocator,
     clock: clock_mod.Clock,
     random: std.Random,
     input: CreateLocalTicketInput,
@@ -849,7 +851,7 @@ pub fn createLocalTicket(
 /// Create a Local Epic and its current Display ID resolver row.
 pub fn createLocalEpic(
     store: Store,
-    gpa: std.mem.Allocator,
+    gpa: Allocator,
     clock: clock_mod.Clock,
     random: std.Random,
     input: CreateLocalEpicInput,
@@ -886,7 +888,7 @@ pub fn createLocalEpic(
     };
 }
 
-fn beginLocalItemCreate(store: Store, gpa: std.mem.Allocator, clock: clock_mod.Clock, random: std.Random) CreateError!LocalItemIdentity {
+fn beginLocalItemCreate(store: Store, gpa: Allocator, clock: clock_mod.Clock, random: std.Random) CreateError!LocalItemIdentity {
     const id = try generateInternalId(gpa, random);
     errdefer gpa.free(id);
 
@@ -917,7 +919,7 @@ fn insertDisplayResolver(store: Store, identity: LocalItemIdentity) CreateError!
     );
 }
 
-pub fn queryTextAlloc(conn: zqlite.Conn, gpa: std.mem.Allocator, sql: []const u8) (migrations.QueryError || error{OutOfMemory})![]u8 {
+pub fn queryTextAlloc(conn: zqlite.Conn, gpa: Allocator, sql: []const u8) (migrations.QueryError || error{OutOfMemory})![]u8 {
     if (try conn.row(sql, .{})) |r| {
         defer r.deinit();
         return gpa.dupe(u8, r.text(0));
@@ -961,7 +963,7 @@ const CurrentItem = struct {
     priority: ?[]u8,
     container_id: ?[]u8,
 
-    fn deinit(self: CurrentItem, gpa: std.mem.Allocator) void {
+    fn deinit(self: CurrentItem, gpa: Allocator) void {
         gpa.free(self.title);
         gpa.free(self.body);
         if (self.priority) |p| gpa.free(p);
@@ -976,7 +978,7 @@ pub const UpdatedItem = struct {
     item_class: ItemClass,
 
     /// Free allocator-owned fields.
-    pub fn deinit(self: UpdatedItem, gpa: std.mem.Allocator) void {
+    pub fn deinit(self: UpdatedItem, gpa: Allocator) void {
         gpa.free(self.display_id);
         gpa.free(self.title);
     }
@@ -1010,7 +1012,7 @@ pub const StatusChangedItem = struct {
     status: ItemStatus,
 
     /// Free allocator-owned fields copied from the Repository Store.
-    pub fn deinit(self: StatusChangedItem, gpa: std.mem.Allocator) void {
+    pub fn deinit(self: StatusChangedItem, gpa: Allocator) void {
         gpa.free(self.display_id);
         gpa.free(self.title);
     }
@@ -1078,7 +1080,7 @@ pub const RemoveDependencyError = migrations.QueryError || zqlite.Error || mutat
 /// `updated_at` is bumped only when at least one field actually changes.
 pub fn updateItem(
     store: Store,
-    gpa: std.mem.Allocator,
+    gpa: Allocator,
     clock: clock_mod.Clock,
     req: UpdateRequest,
 ) UpdateError!UpdateOutcome {
@@ -1288,7 +1290,7 @@ pub fn updateItem(
 /// as defense-in-depth for write paths that do not pre-read.
 pub fn setItemStatus(
     store: Store,
-    gpa: std.mem.Allocator,
+    gpa: Allocator,
     clock: clock_mod.Clock,
     req: SetStatusRequest,
 ) SetStatusError!SetStatusOutcome {
@@ -1372,7 +1374,7 @@ pub fn setItemStatus(
 /// the Mutation Log.
 pub fn addDependency(
     store: Store,
-    gpa: std.mem.Allocator,
+    gpa: Allocator,
     clock: clock_mod.Clock,
     req: AddDependencyRequest,
 ) AddDependencyError!AddDependencyOutcome {
@@ -1467,7 +1469,7 @@ pub fn addDependency(
 /// desired-state cleanup command.
 pub fn removeDependency(
     store: Store,
-    gpa: std.mem.Allocator,
+    gpa: Allocator,
     clock: clock_mod.Clock,
     req: RemoveDependencyRequest,
 ) RemoveDependencyError!void {
@@ -1522,14 +1524,14 @@ pub fn removeDependency(
     try store.conn.commit();
 }
 
-pub fn generateInternalId(gpa: std.mem.Allocator, random: std.Random) ![]u8 {
+pub fn generateInternalId(gpa: Allocator, random: std.Random) ![]u8 {
     var bytes: [16]u8 = undefined;
     random.bytes(&bytes);
     const hex = std.fmt.bytesToHex(bytes, .lower);
     return gpa.dupe(u8, &hex);
 }
 
-fn listRowFromSql(gpa: std.mem.Allocator, row: zqlite.Row) ListError!ListRow {
+fn listRowFromSql(gpa: Allocator, row: zqlite.Row) ListError!ListRow {
     const id = try gpa.dupe(u8, row.text(0));
     errdefer gpa.free(id);
     const display_id = try gpa.dupe(u8, row.text(1));
@@ -1562,7 +1564,7 @@ pub const ResolvedItemRef = struct {
     item_class: ItemClass,
 
     /// Free strings allocated by the Repository Store resolver.
-    pub fn deinit(self: ResolvedItemRef, gpa: std.mem.Allocator) void {
+    pub fn deinit(self: ResolvedItemRef, gpa: Allocator) void {
         gpa.free(self.id);
     }
 };
@@ -1577,7 +1579,7 @@ pub const ResolvedItemRefWithDisplay = struct {
     item_class: ItemClass,
 
     /// Free strings allocated by the Repository Store resolver.
-    pub fn deinit(self: ResolvedItemRefWithDisplay, gpa: std.mem.Allocator) void {
+    pub fn deinit(self: ResolvedItemRefWithDisplay, gpa: Allocator) void {
         gpa.free(self.id);
         gpa.free(self.display_id);
     }
@@ -1594,7 +1596,7 @@ pub const ResolveError = migrations.QueryError || zqlite.Error || error{OutOfMem
 ///
 /// The `item_ids` table uses a case-insensitive collation, so `TK-1` and
 /// `tk-1` resolve identically. Returns `null` when no matching row exists.
-pub fn resolveItemRef(store: Store, gpa: std.mem.Allocator, display_arg: []const u8) ResolveError!?ResolvedItemRef {
+pub fn resolveItemRef(store: Store, gpa: Allocator, display_arg: []const u8) ResolveError!?ResolvedItemRef {
     if (try store.conn.row(resolve_item_ref_sql, .{display_arg})) |r| {
         defer r.deinit();
         const id = try gpa.dupe(u8, r.text(0));
@@ -1607,7 +1609,7 @@ pub fn resolveItemRef(store: Store, gpa: std.mem.Allocator, display_arg: []const
 }
 
 /// Look up a Display ID or Alias and return the current Display ID too.
-pub fn resolveItemRefWithDisplay(store: Store, gpa: std.mem.Allocator, display_arg: []const u8) ResolveError!?ResolvedItemRefWithDisplay {
+pub fn resolveItemRefWithDisplay(store: Store, gpa: Allocator, display_arg: []const u8) ResolveError!?ResolvedItemRefWithDisplay {
     if (try store.conn.row(resolve_item_ref_with_display_sql, .{display_arg})) |r| {
         defer r.deinit();
         const id = try gpa.dupe(u8, r.text(0));
@@ -1650,20 +1652,20 @@ pub const ResolveEpicWithDisplayOutcome = union(enum) {
 /// Use this for `--parent <epic-id>` validation so the deferred composite
 /// foreign key on `items(container_id, container_class)` does not surface as
 /// a raw FK error when the user supplies a Ticket's Display ID.
-pub fn resolveAsEpic(store: Store, gpa: std.mem.Allocator, display_arg: []const u8) ResolveError!ResolveEpicOutcome {
+pub fn resolveAsEpic(store: Store, gpa: Allocator, display_arg: []const u8) ResolveError!ResolveEpicOutcome {
     const resolved = (try resolveItemRef(store, gpa, display_arg)) orelse return .not_found;
     if (resolved.item_class == .epic) return .{ .epic = resolved };
     return .{ .not_an_epic = resolved };
 }
 
 /// Resolve a Display ID or Alias to an Epic reference with the current Display ID.
-pub fn resolveAsEpicWithDisplay(store: Store, gpa: std.mem.Allocator, display_arg: []const u8) ResolveError!ResolveEpicWithDisplayOutcome {
+pub fn resolveAsEpicWithDisplay(store: Store, gpa: Allocator, display_arg: []const u8) ResolveError!ResolveEpicWithDisplayOutcome {
     const resolved = (try resolveItemRefWithDisplay(store, gpa, display_arg)) orelse return .not_found;
     if (resolved.item_class == .epic) return .{ .epic = resolved };
     return .{ .not_an_epic = resolved };
 }
 
-fn nextTicketFromSql(gpa: std.mem.Allocator, row: zqlite.Row) NextError!NextTicket {
+fn nextTicketFromSql(gpa: Allocator, row: zqlite.Row) NextError!NextTicket {
     const display_id = try gpa.dupe(u8, row.text(0));
     return .{
         .display_id = display_id,

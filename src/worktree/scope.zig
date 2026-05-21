@@ -6,6 +6,8 @@
 //! `tk worktree set`, `clear`, and `start`.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+
 const zqlite = @import("zqlite");
 const proc = @import("../proc/runner.zig");
 const repository = @import("../store/repository.zig");
@@ -25,7 +27,7 @@ pub const Scope = struct {
 
     /// Free the resolved Display ID and title. Held by the caller in the
     /// switch arm that receives a `.scope` outcome.
-    pub fn deinit(self: Scope, gpa: std.mem.Allocator) void {
+    pub fn deinit(self: Scope, gpa: Allocator) void {
         gpa.free(self.display_id);
         gpa.free(self.title);
     }
@@ -46,7 +48,7 @@ pub const Raw = struct {
 
 /// Free populated slices on a `Raw` returned by `readGitSide`. Safe on an
 /// all-null `Raw`. Do not call on a literal-built `Raw` from tests.
-pub fn freeRaw(gpa: std.mem.Allocator, raw: Raw) void {
+pub fn freeRaw(gpa: Allocator, raw: Raw) void {
     if (raw.configured_value) |s| gpa.free(s);
     if (raw.branch_name) |s| gpa.free(s);
 }
@@ -80,7 +82,7 @@ pub const ResolveError = repository.ResolveError;
 /// Populated slices in the returned `Raw` are gpa-owned; free them with
 /// `freeRaw`.
 pub fn readGitSide(
-    gpa: std.mem.Allocator,
+    gpa: Allocator,
     runner: proc.Runner,
     cwd: std.Io.Dir,
 ) error{OutOfMemory}!Raw {
@@ -106,7 +108,7 @@ pub fn readGitSide(
 /// `null` so caller can collapse it into "no info" without distinguishing
 /// failure shapes.
 fn readSingleLine(
-    gpa: std.mem.Allocator,
+    gpa: Allocator,
     runner: proc.Runner,
     cwd: std.Io.Dir,
     argv: []const []const u8,
@@ -134,7 +136,7 @@ fn readSingleLine(
 /// Alias` (per ARCHITECTURE.md ("Workspace Scope and Worktrees")).
 pub fn resolveAgainstStore(
     store: repository.Store,
-    gpa: std.mem.Allocator,
+    gpa: Allocator,
     raw: Raw,
 ) ResolveError!ResolveOutcome {
     if (raw.configured_value) |stored| {
@@ -158,7 +160,7 @@ pub fn resolveAgainstStore(
 
 fn loadScope(
     store: repository.Store,
-    gpa: std.mem.Allocator,
+    gpa: Allocator,
     item_id: []const u8,
     source: @FieldType(Scope, "source"),
 ) ResolveError!Scope {
@@ -189,7 +191,7 @@ const longest_prefix_match_sql =
 
 fn longestPrefixMatch(
     store: repository.Store,
-    gpa: std.mem.Allocator,
+    gpa: Allocator,
     tail: []const u8,
 ) ResolveError!?[]u8 {
     if (tail.len == 0) return null;
@@ -209,7 +211,7 @@ fn longestPrefixMatch(
 /// when the input contains no `[a-z0-9]` characters after lowercasing.
 ///
 /// Caller owns the returned slice and frees it through `gpa`.
-pub fn sanitize(gpa: std.mem.Allocator, title: []const u8, max_len: usize) ![]u8 {
+pub fn sanitize(gpa: Allocator, title: []const u8, max_len: usize) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
 

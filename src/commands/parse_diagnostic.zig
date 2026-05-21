@@ -1,6 +1,8 @@
 //! Shared parsing and diagnostic rendering for clap-backed command handlers.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+
 const clap = @import("clap");
 
 const usage_hint_prefix = "run '";
@@ -14,7 +16,7 @@ pub const Command = union(enum) {
 
 pub const ParseOptions = struct {
     stderr: *std.Io.Writer,
-    allocator: std.mem.Allocator,
+    allocator: Allocator,
     command: Command,
     terminating_positional: usize = std.math.maxInt(usize),
 };

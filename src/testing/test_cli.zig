@@ -1,4 +1,6 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+
 const cli = @import("../cli.zig");
 const fake_proc = @import("../proc/fake.zig");
 const clock_mod = @import("../clock.zig");
@@ -25,7 +27,7 @@ pub const Harness = struct {
     /// Slice-backed iterator over command args.
     iter: SliceArgIter,
     /// Allocator threaded into `cli.Deps`.
-    gpa: std.mem.Allocator,
+    gpa: Allocator,
     /// Strict fake subprocess runner used by default.
     fake_runner: fake_proc.FakeRunner,
     /// Deterministic clock used by default.
@@ -55,12 +57,12 @@ pub const Harness = struct {
     };
 
     /// Create a harness with default options.
-    pub fn init(allocator: std.mem.Allocator, args: []const []const u8) Harness {
+    pub fn init(allocator: Allocator, args: []const []const u8) Harness {
         return initWith(allocator, args, .{});
     }
 
     /// Create a harness with an optional cwd override.
-    pub fn initWith(allocator: std.mem.Allocator, args: []const []const u8, opts: Options) Harness {
+    pub fn initWith(allocator: Allocator, args: []const []const u8, opts: Options) Harness {
         return .{
             .stdout_buf = .init(allocator),
             .stderr_buf = .init(allocator),

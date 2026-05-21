@@ -7,6 +7,8 @@
 //! and (c) the absolute paths threaded through a faked `git rev-parse` result.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+
 const zqlite = @import("zqlite");
 
 /// On-disk scaffolding for a fake Repository Store. Caller drives `init` and
@@ -21,7 +23,7 @@ pub const TmpStore = struct {
     /// determines the seeded Display Prefix because `tk init` derives the
     /// prefix from `std.fs.path.basename(toplevel)` — choosing a known
     /// basename lets tests pin the expected Display ID.
-    pub fn init(gpa: std.mem.Allocator, basename: []const u8) !TmpStore {
+    pub fn init(gpa: Allocator, basename: []const u8) !TmpStore {
         var tmp = std.testing.tmpDir(.{});
         errdefer tmp.cleanup();
         const tmp_root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", gpa);
@@ -45,7 +47,7 @@ pub const TmpStore = struct {
         };
     }
 
-    pub fn deinit(self: *TmpStore, gpa: std.mem.Allocator) void {
+    pub fn deinit(self: *TmpStore, gpa: Allocator) void {
         gpa.free(self.common_dir_path);
         gpa.free(self.toplevel_path);
         gpa.free(self.db_path);
@@ -55,7 +57,7 @@ pub const TmpStore = struct {
     /// Build the stdout payload that a real `git rev-parse --git-common-dir
     /// --show-toplevel` would print for this temporary repo. Tests feed this
     /// to `FakeRunner.expect` so the open path sees the same shape Git emits.
-    pub fn gitRevParseStdout(self: TmpStore, gpa: std.mem.Allocator) ![]u8 {
+    pub fn gitRevParseStdout(self: TmpStore, gpa: Allocator) ![]u8 {
         return std.fmt.allocPrint(gpa, "{s}\n{s}\n", .{ self.common_dir_path, self.toplevel_path });
     }
 

@@ -8,6 +8,8 @@
 //!                                 Mutations would be orphaned.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+
 const cli = @import("../cli.zig");
 const messages = @import("../messages.zig");
 const repository = @import("../store/repository.zig");
@@ -217,7 +219,7 @@ fn runSetJira(deps: cli.Deps, args_iter: anytype) !u8 {
 /// adapter's namespace prefix.
 fn checkPrefixCollision(
     conn: anytype,
-    gpa: std.mem.Allocator,
+    gpa: Allocator,
     adapter_prefix: []const u8,
     stderr: *std.Io.Writer,
 ) !bool {
@@ -294,7 +296,7 @@ const StoreFixture = struct {
     cwd: std.Io.Dir,
     rev_parse: []u8,
 
-    fn init(gpa: std.mem.Allocator, basename: []const u8) !StoreFixture {
+    fn init(gpa: Allocator, basename: []const u8) !StoreFixture {
         var tmp_store = try TmpStore.init(gpa, basename);
         errdefer tmp_store.deinit(gpa);
         var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, tmp_store.toplevel_path, .{});
@@ -312,7 +314,7 @@ const StoreFixture = struct {
         return .{ .tmp_store = tmp_store, .cwd = cwd, .rev_parse = rev_parse };
     }
 
-    fn deinit(self: *StoreFixture, gpa: std.mem.Allocator) void {
+    fn deinit(self: *StoreFixture, gpa: Allocator) void {
         gpa.free(self.rev_parse);
         self.cwd.close(std.testing.io);
         self.tmp_store.deinit(gpa);

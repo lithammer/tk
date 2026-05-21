@@ -1,6 +1,8 @@
 //! `tk worktree` — inspect and configure Workspace Scope.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+
 const cli = @import("../cli.zig");
 const messages = @import("../messages.zig");
 const repository = @import("../store/repository.zig");
@@ -141,7 +143,7 @@ const StartTarget = struct {
     item_class: ItemClass,
     status: ItemStatus,
 
-    fn deinit(self: StartTarget, gpa: std.mem.Allocator) void {
+    fn deinit(self: StartTarget, gpa: Allocator) void {
         gpa.free(self.id);
         gpa.free(self.display_id);
         gpa.free(self.title);
@@ -150,7 +152,7 @@ const StartTarget = struct {
 
 fn lookupStartTarget(
     store: repository.Store,
-    gpa: std.mem.Allocator,
+    gpa: Allocator,
     display_arg: []const u8,
 ) repository.ResolveError!?StartTarget {
     const row = (try store.conn.row(
@@ -261,7 +263,7 @@ fn runStart(deps: cli.Deps, args_iter: anytype) !u8 {
     return 0;
 }
 
-fn buildBranch(gpa: std.mem.Allocator, display_id: []const u8, slug: []const u8) ![]u8 {
+fn buildBranch(gpa: Allocator, display_id: []const u8, slug: []const u8) ![]u8 {
     if (slug.len == 0) return try std.fmt.allocPrint(gpa, "tk/{s}", .{display_id});
     return try std.fmt.allocPrint(gpa, "tk/{s}-{s}", .{ display_id, slug });
 }
@@ -386,7 +388,7 @@ const StoreFixture = struct {
     cwd: std.Io.Dir,
     rev_parse: []u8,
 
-    fn init(gpa: std.mem.Allocator) !StoreFixture {
+    fn init(gpa: Allocator) !StoreFixture {
         var tmp_store = try TmpStore.init(gpa, "project");
         errdefer tmp_store.deinit(gpa);
         var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, tmp_store.toplevel_path, .{});
@@ -404,7 +406,7 @@ const StoreFixture = struct {
         return .{ .tmp_store = tmp_store, .cwd = cwd, .rev_parse = rev_parse };
     }
 
-    fn deinit(self: *StoreFixture, gpa: std.mem.Allocator) void {
+    fn deinit(self: *StoreFixture, gpa: Allocator) void {
         gpa.free(self.rev_parse);
         self.cwd.close(std.testing.io);
         self.tmp_store.deinit(gpa);

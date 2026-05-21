@@ -1,4 +1,6 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+
 const cli = @import("../cli.zig");
 const proc = @import("../proc/runner.zig");
 const clock_mod = @import("../clock.zig");
@@ -8,7 +10,7 @@ const SliceArgIter = @import("arg_iter.zig").SliceArgIter;
 const Section = txtar.Section;
 
 /// Free a token slice returned by `tokenizeLine`.
-pub fn freeTokens(allocator: std.mem.Allocator, tokens: []const []const u8) void {
+pub fn freeTokens(allocator: Allocator, tokens: []const []const u8) void {
     for (tokens) |t| allocator.free(t);
     allocator.free(tokens);
 }
@@ -20,7 +22,7 @@ pub fn freeTokens(allocator: std.mem.Allocator, tokens: []const []const u8) void
 /// and `$NAME` / `${NAME}` expand from `env`. Undefined variables are preserved
 /// with their leading `$`.
 pub fn tokenizeLine(
-    allocator: std.mem.Allocator,
+    allocator: Allocator,
     line: []const u8,
     env: std.StringHashMap([]const u8),
 ) ![][]const u8 {
@@ -122,7 +124,7 @@ const ScriptResult = struct {
     /// final command's status, mirroring how a shell pipeline's `$?` works.
     final_exit: u8,
 
-    fn deinit(self: *ScriptResult, allocator: std.mem.Allocator) void {
+    fn deinit(self: *ScriptResult, allocator: Allocator) void {
         self.stdout.deinit(allocator);
         self.stderr.deinit(allocator);
     }
@@ -150,7 +152,7 @@ fn materializeInputs(tmp_dir: std.Io.Dir, sections: []const Section) !void {
 }
 
 fn appendScriptError(
-    allocator: std.mem.Allocator,
+    allocator: Allocator,
     result: *ScriptResult,
     comptime fmt: []const u8,
     args: anytype,
@@ -162,7 +164,7 @@ fn appendScriptError(
 }
 
 fn loadStdinSource(
-    allocator: std.mem.Allocator,
+    allocator: Allocator,
     cwd: std.Io.Dir,
     source: []const u8,
     result: *ScriptResult,
@@ -192,7 +194,7 @@ fn loadStdinSource(
 }
 
 fn executeScript(
-    allocator: std.mem.Allocator,
+    allocator: Allocator,
     sections: []const Section,
     env: std.StringHashMap([]const u8),
     cwd: std.Io.Dir,
@@ -331,7 +333,7 @@ fn executeScript(
 }
 
 fn rewriteSections(
-    allocator: std.mem.Allocator,
+    allocator: Allocator,
     sections: []const Section,
     result: ScriptResult,
 ) ![]u8 {
@@ -360,12 +362,12 @@ const NormalizedText = struct {
     text: []const u8,
     owned: bool,
 
-    fn deinit(self: NormalizedText, allocator: std.mem.Allocator) void {
+    fn deinit(self: NormalizedText, allocator: Allocator) void {
         if (self.owned) allocator.free(self.text);
     }
 };
 
-fn normalizeWork(allocator: std.mem.Allocator, text: []const u8, work_path: []const u8) !NormalizedText {
+fn normalizeWork(allocator: Allocator, text: []const u8, work_path: []const u8) !NormalizedText {
     if (std.mem.indexOf(u8, text, work_path) == null) {
         return .{ .text = text, .owned = false };
     }
@@ -380,7 +382,7 @@ fn printMismatch(label: []const u8, expected: []const u8, actual: []const u8) vo
 }
 
 fn compareAndReport(
-    allocator: std.mem.Allocator,
+    allocator: Allocator,
     sections: []const Section,
     result: ScriptResult,
     work_path: []const u8,
@@ -428,7 +430,7 @@ pub const RunOptions = struct {
 
 /// Run a txtar scenario using `TK_UPDATE` and `TK_TESTWORK` environment flags.
 pub fn runScenario(
-    allocator: std.mem.Allocator,
+    allocator: Allocator,
     fixture_path: ?[]const u8,
     txtar_bytes: []const u8,
 ) !void {
@@ -445,7 +447,7 @@ const Staged = struct {
     tmp: std.testing.TmpDir,
     result: ScriptResult,
 
-    fn deinit(self: *Staged, allocator: std.mem.Allocator, keep_work: bool) void {
+    fn deinit(self: *Staged, allocator: Allocator, keep_work: bool) void {
         self.result.deinit(allocator);
         allocator.free(self.work_path);
         allocator.free(self.sections);
@@ -453,7 +455,7 @@ const Staged = struct {
     }
 };
 
-fn stage(allocator: std.mem.Allocator, txtar_bytes: []const u8) !Staged {
+fn stage(allocator: Allocator, txtar_bytes: []const u8) !Staged {
     const sections = try txtar.parse(allocator, txtar_bytes);
     errdefer allocator.free(sections);
 
@@ -478,7 +480,7 @@ fn stage(allocator: std.mem.Allocator, txtar_bytes: []const u8) !Staged {
 /// Scenarios execute in-process against `cli.runArgv`, aggregate stdout/stderr
 /// from every `tk` command, and compare the final command's exit code.
 pub fn runScenarioWith(
-    allocator: std.mem.Allocator,
+    allocator: Allocator,
     fixture_path: ?[]const u8,
     txtar_bytes: []const u8,
     opts: RunOptions,
@@ -506,7 +508,7 @@ pub fn runScenarioWith(
 
 /// Return a rewritten txtar fixture with expected sections updated from an
 /// in-process scenario run.
-pub fn rewriteScenarioBytes(allocator: std.mem.Allocator, txtar_bytes: []const u8) ![]u8 {
+pub fn rewriteScenarioBytes(allocator: Allocator, txtar_bytes: []const u8) ![]u8 {
     var staged = try stage(allocator, txtar_bytes);
     defer staged.deinit(allocator, false);
     return rewriteSections(allocator, staged.sections, staged.result);

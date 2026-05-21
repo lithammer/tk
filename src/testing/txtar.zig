@@ -1,4 +1,5 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 
 /// One parsed txtar section.
 pub const Section = struct {
@@ -34,7 +35,7 @@ const PRELUDE = "";
 /// The returned slice is owned by `allocator`, while section names and bodies
 /// point into `data`; callers must keep `data` alive for as long as they use
 /// the parsed sections.
-pub fn parse(allocator: std.mem.Allocator, data: []const u8) ![]Section {
+pub fn parse(allocator: Allocator, data: []const u8) ![]Section {
     var sections: std.ArrayList(Section) = .empty;
     errdefer sections.deinit(allocator);
 
@@ -78,7 +79,7 @@ fn isSectionHeader(line: []const u8) ?[]const u8 {
 
 /// Serialize sections back to txtar bytes, adding a trailing newline to each
 /// non-empty section body when needed.
-pub fn serialize(allocator: std.mem.Allocator, sections: []const Section) ![]u8 {
+pub fn serialize(allocator: Allocator, sections: []const Section) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     for (sections) |sec| {

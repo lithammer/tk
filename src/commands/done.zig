@@ -1,6 +1,8 @@
 //! `tk done` — mark one Ticket or Epic done.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+
 const clap = @import("clap");
 const cli = @import("../cli.zig");
 const parse_diagnostic = @import("parse_diagnostic.zig");
@@ -125,7 +127,7 @@ const StoreFixture = struct {
     cwd: std.Io.Dir,
     rev_parse: []u8,
 
-    fn init(gpa: std.mem.Allocator) !StoreFixture {
+    fn init(gpa: Allocator) !StoreFixture {
         var tmp_store = try TmpStore.init(gpa, "project");
         errdefer tmp_store.deinit(gpa);
         var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, tmp_store.toplevel_path, .{});
@@ -143,7 +145,7 @@ const StoreFixture = struct {
         return .{ .tmp_store = tmp_store, .cwd = cwd, .rev_parse = rev_parse };
     }
 
-    fn deinit(self: *StoreFixture, gpa: std.mem.Allocator) void {
+    fn deinit(self: *StoreFixture, gpa: Allocator) void {
         gpa.free(self.rev_parse);
         self.cwd.close(std.testing.io);
         self.tmp_store.deinit(gpa);
