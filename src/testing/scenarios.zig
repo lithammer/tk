@@ -15,54 +15,28 @@ const update_help_path = "src/testing/scenarios/update/help.txtar";
 const worktree_help_path = "src/testing/scenarios/worktree/help.txtar";
 const harness_preserve_path = "src/testing/scenarios/_harness/preserve_sections.txtar";
 
-const prime_basic = @embedFile("scenarios/prime/basic.txtar");
-comptime {
-    embed.assertNoCR(prime_basic);
+// `@embedFile`'s path is resolved relative to the file containing the call,
+// so this helper must live in the same source file as the scenario embeds.
+// Hoisting it into `embed.zig` would resolve every path against that file's
+// directory instead.
+fn embedScenario(comptime path: []const u8) []const u8 {
+    const bytes = @embedFile(path);
+    comptime embed.assertNoCR(bytes);
+    return bytes;
 }
-const add_create_epic_child = @embedFile("scenarios/add/create_epic_child.txtar");
-comptime {
-    embed.assertNoCR(add_create_epic_child);
-}
-const block_help = @embedFile("scenarios/block/help.txtar");
-comptime {
-    embed.assertNoCR(block_help);
-}
-const done_help = @embedFile("scenarios/done/help.txtar");
-comptime {
-    embed.assertNoCR(done_help);
-}
-const list_help = @embedFile("scenarios/list/help.txtar");
-comptime {
-    embed.assertNoCR(list_help);
-}
-const manpage_basic = @embedFile("scenarios/manpage/basic.txtar");
-comptime {
-    embed.assertNoCR(manpage_basic);
-}
-const next_help = @embedFile("scenarios/next/help.txtar");
-comptime {
-    embed.assertNoCR(next_help);
-}
-const show_help = @embedFile("scenarios/show/help.txtar");
-comptime {
-    embed.assertNoCR(show_help);
-}
-const unblock_help = @embedFile("scenarios/unblock/help.txtar");
-comptime {
-    embed.assertNoCR(unblock_help);
-}
-const update_help = @embedFile("scenarios/update/help.txtar");
-comptime {
-    embed.assertNoCR(update_help);
-}
-const worktree_help = @embedFile("scenarios/worktree/help.txtar");
-comptime {
-    embed.assertNoCR(worktree_help);
-}
-const harness_preserve = @embedFile("scenarios/_harness/preserve_sections.txtar");
-comptime {
-    embed.assertNoCR(harness_preserve);
-}
+
+const prime_basic = embedScenario("scenarios/prime/basic.txtar");
+const add_create_epic_child = embedScenario("scenarios/add/create_epic_child.txtar");
+const block_help = embedScenario("scenarios/block/help.txtar");
+const done_help = embedScenario("scenarios/done/help.txtar");
+const list_help = embedScenario("scenarios/list/help.txtar");
+const manpage_basic = embedScenario("scenarios/manpage/basic.txtar");
+const next_help = embedScenario("scenarios/next/help.txtar");
+const show_help = embedScenario("scenarios/show/help.txtar");
+const unblock_help = embedScenario("scenarios/unblock/help.txtar");
+const update_help = embedScenario("scenarios/update/help.txtar");
+const worktree_help = embedScenario("scenarios/worktree/help.txtar");
+const harness_preserve = embedScenario("scenarios/_harness/preserve_sections.txtar");
 
 test "prime/basic" {
     try script.runScenario(std.testing.allocator, prime_basic_path, prime_basic);

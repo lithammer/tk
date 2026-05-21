@@ -148,6 +148,10 @@ fn renderExeResolveFailure(deps: cli.Deps, reason: []const u8) void {
     ) catch {};
 }
 
+/// Fixed prefix of `renderStageName`'s output; shared with the unit test
+/// so a future tweak to the stage-filename shape stays lock-step.
+const stage_name_prefix = ".tk.1.tmp.";
+
 /// Build the hex-suffixed staged filename used by `tk manpage --install`.
 /// Returns a slice into `buf`. The 16-byte hex suffix (64 random bits)
 /// makes concurrent installs collision-free without needing pid sniffing.
@@ -155,7 +159,7 @@ fn renderStageName(buf: *[32]u8, random: std.Random) []const u8 {
     var rand_bytes: [8]u8 = undefined;
     random.bytes(&rand_bytes);
     const hex = std.fmt.bytesToHex(rand_bytes, .lower);
-    return std.fmt.bufPrint(buf, ".tk.1.tmp.{s}", .{hex[0..]}) catch unreachable;
+    return std.fmt.bufPrint(buf, stage_name_prefix ++ "{s}", .{hex[0..]}) catch unreachable;
 }
 
 fn writeHelp(deps: cli.Deps) !void {
@@ -220,10 +224,9 @@ test "renderStageName produces a hex-suffixed name with a stable prefix" {
     var prng = std.Random.DefaultPrng.init(0);
     var buf: [32]u8 = undefined;
     const name = renderStageName(&buf, prng.random());
-    const prefix = ".tk.1.tmp.";
-    try std.testing.expect(std.mem.startsWith(u8, name, prefix));
-    try std.testing.expectEqual(prefix.len + 16, name.len);
-    for (name[prefix.len..]) |b| {
+    try std.testing.expect(std.mem.startsWith(u8, name, stage_name_prefix));
+    try std.testing.expectEqual(stage_name_prefix.len + 16, name.len);
+    for (name[stage_name_prefix.len..]) |b| {
         try std.testing.expect((b >= '0' and b <= '9') or (b >= 'a' and b <= 'f'));
     }
 }
@@ -277,8 +280,6 @@ test "manpage --install writes the embedded bytes to the resolved target" {
     const code = try run(h.deps(), &h.iter);
     if (code != 0) return; // covered by the previous test's failure branch
 
-    // Recover the installed path from stdout. The success line ends with
-    // `<path>\n`; trim the prefix and the trailing newline.
     const stdout = h.stdout();
     const prefix = messages.manpage_install_success;
     const start = (std.mem.indexOf(u8, stdout, prefix) orelse return error.MissingPrefix) + prefix.len;

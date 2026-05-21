@@ -119,7 +119,7 @@ else
     DEST_DIR="${HOME}/.local/bin"
 fi
 
-# --- 4 & 5. Build asset URL ------------------------------------------------
+# --- 4. Build asset URL ----------------------------------------------------
 
 ASSET="tk-${TRIPLE}"
 if [ -n "${TK_VERSION:-}" ]; then
@@ -128,7 +128,7 @@ else
     URL="https://github.com/${REPO}/releases/latest/download/${ASSET}"
 fi
 
-# --- 6. Preflight write check (BEFORE any download) ------------------------
+# --- 5. Preflight write check (BEFORE any download) ------------------------
 
 if [ ! -d "$DEST_DIR" ]; then
     if ! mkdir -p "$DEST_DIR"; then
@@ -150,7 +150,7 @@ if ! touch "$WRITE_TEST"; then
 fi
 rm -f "$WRITE_TEST"
 
-# --- 7. Download to staging (same filesystem as final destination) ---------
+# --- 6. Download to staging (same filesystem as final destination) ---------
 #
 # Stage inside a private mktemp directory under DEST_DIR. mktemp creates the
 # directory with mode 0700, defeating symlink-pre-plant attacks on shared-
@@ -193,7 +193,7 @@ if [ "$DOWNLOAD_OK" -ne 1 ]; then
     exit 1
 fi
 
-# --- 8. Smoke verification before placing ----------------------------------
+# --- 7. Smoke verification before placing ----------------------------------
 
 chmod +x "$STAGING"
 
@@ -208,18 +208,18 @@ if ! NEW_VERSION="$("$STAGING" --version 2>&1)" || [ -z "$NEW_VERSION" ]; then
     exit 1
 fi
 
-# --- 9. Detect prior install ----------------------------------------------
+# --- 8. Detect prior install ----------------------------------------------
 
 OLD_VERSION=""
 if [ -x "$DEST_DIR/tk" ]; then
     OLD_VERSION="$("$DEST_DIR/tk" --version 2>/dev/null || true)"
 fi
 
-# --- 10. Atomic placement --------------------------------------------------
+# --- 9. Atomic placement ---------------------------------------------------
 
 mv "$STAGING" "$DEST_DIR/tk"
 
-# --- 11. Install manpage (warn-and-continue) -------------------------------
+# --- 10. Install manpage (warn-and-continue) ------------------------------
 #
 # Redirect tk manpage --install's stdout to stderr so this script's stdout
 # stays reserved for the success line in section 12. Failure is non-fatal:
@@ -228,7 +228,7 @@ if ! "$DEST_DIR/tk" manpage --install >&2; then
     echo "tk: warning: failed to install manpage; binary install succeeded" >&2
 fi
 
-# --- 12. Render success line ----------------------------------------------
+# --- 11. Render success line ----------------------------------------------
 
 if [ -z "$OLD_VERSION" ]; then
     echo "Installed tk $NEW_VERSION at $DEST_DIR/tk"
@@ -238,7 +238,7 @@ else
     echo "Upgraded tk: $OLD_VERSION -> $NEW_VERSION at $DEST_DIR/tk"
 fi
 
-# --- 13. PATH advice (stderr, informational) -------------------------------
+# --- 12. PATH advice (stderr, informational) ------------------------------
 
 case ":${PATH:-}:" in
     *":$DEST_DIR:"*) ;;

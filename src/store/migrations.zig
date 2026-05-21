@@ -35,15 +35,16 @@ pub const Migration = struct {
     sql: [*:0]const u8,
 };
 
-const migration_1_sql = @embedFile("migrations/001_repository_store.sql");
-comptime {
-    embed.assertNoCR(migration_1_sql);
+// `@embedFile`'s path is resolved relative to the file containing the call,
+// so this helper must live in the same source file as the migration embeds.
+fn embedMigration(comptime path: []const u8) [*:0]const u8 {
+    const bytes = @embedFile(path);
+    comptime embed.assertNoCR(bytes);
+    return bytes;
 }
 
-const migration_2_sql = @embedFile("migrations/002_items_no_escape_from_done.sql");
-comptime {
-    embed.assertNoCR(migration_2_sql);
-}
+const migration_1_sql = embedMigration("migrations/001_repository_store.sql");
+const migration_2_sql = embedMigration("migrations/002_items_no_escape_from_done.sql");
 
 /// V1 Repository Store schema skeleton.
 pub const migration_1: Migration = .{
