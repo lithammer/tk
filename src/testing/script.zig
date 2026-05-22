@@ -393,18 +393,56 @@ fn normalizeWork(allocator: Allocator, text: []const u8, work_path: []const u8) 
     return .{ .text = owned, .owned = true };
 }
 
-/// Rewrite `\` to `/` inside each `$WORK`-prefixed path token up to the
-/// next whitespace. Mutates the buffer in place.
+/// Rewrite `\` to `/` inside each `$WORK`-prefixed path token. Mutates the
+/// buffer in place.
+///
+/// Two safeguards keep this surgical:
+///
+/// 1. The byte immediately after `$WORK` must be a path separator or a
+///    terminator (whitespace / end of buffer). This avoids matching
+///    identifiers that merely share the prefix (e.g. `$WORKSPACE`,
+///    `$WORKDIR`, or a `$WORK_other` left over when one work-rooted path
+///    is a strict prefix of another).
+/// 2. The walk over each span stops at the first non-path byte rather
+///    than at the first whitespace. Quotes, commas, semicolons, and the
+///    like terminate the span so that backslashes appearing later on the
+///    same line (e.g. inside a quoted literal printed alongside the
+///    path) are not collateral-damaged.
 fn normalizeWorkSpans(buf: []u8) void {
     const marker = "$WORK";
     var i: usize = 0;
     while (std.mem.indexOfPos(u8, buf, i, marker)) |hit| {
-        var j = hit + marker.len;
-        while (j < buf.len and !std.ascii.isWhitespace(buf[j])) : (j += 1) {
+        const after = hit + marker.len;
+        if (!isWorkBoundary(buf, after)) {
+            i = after;
+            continue;
+        }
+        var j = after;
+        while (j < buf.len and isPathByte(buf[j])) : (j += 1) {
             if (buf[j] == '\\') buf[j] = '/';
         }
         i = j;
     }
+}
+
+/// `$WORK` is a complete token when followed by a path separator or by
+/// any non-path terminator (whitespace, punctuation, end of buffer).
+fn isWorkBoundary(buf: []const u8, after: usize) bool {
+    if (after == buf.len) return true;
+    const c = buf[after];
+    return c == '/' or c == '\\' or !isPathByte(c);
+}
+
+/// Bytes that may appear inside a filesystem path the test runner cares
+/// about: ASCII alphanumerics plus the few punctuation characters that
+/// surface in tk's emitted paths (drive prefixes, separators, dotted file
+/// names, dash/underscore-bearing display IDs, tilde-prefixed home
+/// references).
+fn isPathByte(c: u8) bool {
+    return switch (c) {
+        'a'...'z', 'A'...'Z', '0'...'9', '/', '\\', '.', '_', '-', ':', '~' => true,
+        else => false,
+    };
 }
 
 fn printMismatch(label: []const u8, expected: []const u8, actual: []const u8) void {
@@ -830,4 +868,43 @@ test "validateInputPath: rejects parent escapes and absolute paths" {
     try std.testing.expectError(error.InvalidInputPath, validateInputPath("a/../b"));
     try validateInputPath("a/b/c");
     try validateInputPath("file.md");
+}
+
+test "normalizeWorkSpans: rewrites only inside genuine $WORK path tokens" {
+    const allocator = std.testing.allocator;
+
+    // Happy path: substituted work path with native separators is converted
+    // to the fixture's forward-slash form.
+    {
+        const buf = try allocator.dupe(u8, "store at $WORK\\project\\.git\\tk.db\n");
+        defer allocator.free(buf);
+        normalizeWorkSpans(buf);
+        try std.testing.expectEqualStrings("store at $WORK/project/.git/tk.db\n", buf);
+    }
+
+    // Prefix-collision: `$WORKSPACE` shares the `$WORK` prefix but is a
+    // distinct identifier. Its backslashes must not be rewritten.
+    {
+        const buf = try allocator.dupe(u8, "$WORKSPACE\\foo\\bar\n");
+        defer allocator.free(buf);
+        normalizeWorkSpans(buf);
+        try std.testing.expectEqualStrings("$WORKSPACE\\foo\\bar\n", buf);
+    }
+
+    // Adjacent prose on the same line: the span ends at the first non-path
+    // byte, so a quoted literal following the path keeps its backslashes.
+    {
+        const buf = try allocator.dupe(u8, "path $WORK\\foo 'lit\\eral'\n");
+        defer allocator.free(buf);
+        normalizeWorkSpans(buf);
+        try std.testing.expectEqualStrings("path $WORK/foo 'lit\\eral'\n", buf);
+    }
+
+    // Multiple `$WORK` occurrences on separate lines are each rewritten.
+    {
+        const buf = try allocator.dupe(u8, "$WORK\\a\n$WORK\\b\n");
+        defer allocator.free(buf);
+        normalizeWorkSpans(buf);
+        try std.testing.expectEqualStrings("$WORK/a\n$WORK/b\n", buf);
+    }
 }
