@@ -20,3 +20,11 @@ pub const is_windows: bool = builtin.os.tag == .windows;
 pub inline fn skipOnWindows() error{SkipZigTest}!void {
     if (is_windows) return error.SkipZigTest;
 }
+
+/// Skip the calling test on non-Windows targets. Counterpart to
+/// `skipOnWindows`; use for tests that pin Windows-only behaviour (e.g.
+/// the `tk manpage --install` no-op contract) so they report as
+/// `skipped` rather than silently `passed` on POSIX hosts.
+pub inline fn skipOnPosix() error{SkipZigTest}!void {
+    if (!is_windows) return error.SkipZigTest;
+}

@@ -244,7 +244,7 @@ test "manpage --install renders success or a structured diagnostic" {
     //
     // This is the narrowest layer that observes the install plumbing
     // without faking the executable-path resolution.
-    if (platform.is_windows) return;
+    try platform.skipOnWindows();
 
     var h = Harness.init(std.testing.allocator, &.{"--install"});
     defer h.deinit();
@@ -270,7 +270,7 @@ test "manpage --install writes the embedded bytes to the resolved target" {
     // pins the stage-and-rename plumbing — a regression that wrote the
     // wrong content (e.g. an off-by-one slice) would slip past a substring
     // check on the stdout message.
-    if (platform.is_windows) return;
+    try platform.skipOnWindows();
 
     var h = Harness.init(std.testing.allocator, &.{"--install"});
     defer h.deinit();
@@ -295,7 +295,7 @@ test "manpage --install writes the embedded bytes to the resolved target" {
 }
 
 test "manpage --install is a no-op on Windows" {
-    if (!platform.is_windows) return;
+    try platform.skipOnPosix();
 
     var h = Harness.init(std.testing.allocator, &.{"--install"});
     defer h.deinit();
