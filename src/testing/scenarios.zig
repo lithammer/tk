@@ -59,6 +59,12 @@ test "list/help" {
 }
 
 test "manpage/basic" {
+    // The fixture's expected stdout contains troff escapes (`\-`, `\fB`,
+    // `\fR`, `.\"`) that the Windows branch of `script.normalizeWork` would
+    // rewrite to forward slashes, producing a spurious mismatch. Windows has
+    // no `man` pager and the embedded manpage bytes are identical across
+    // platforms, so POSIX coverage is sufficient.
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     try script.runScenario(std.testing.allocator, manpage_basic_path, manpage_basic);
 }
 

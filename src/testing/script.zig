@@ -384,6 +384,11 @@ fn normalizeWork(allocator: Allocator, text: []const u8, work_path: []const u8) 
     // literal `replaceOwned` below would miss the work-path prefix and the
     // suffix would still leak native separators. Normalize all separators to
     // `/` so txtar golden fixtures can stay portable across host OSes.
+    //
+    // Caveat: this rewrites every `\` in actual output, not just the ones
+    // inside path tokens. Scenarios whose expected output legitimately
+    // contains non-path backslashes (e.g. troff escapes from `tk manpage`)
+    // must skip themselves on Windows; see `scenarios.zig:test "manpage/basic"`.
     if (builtin.os.tag == .windows) {
         const text_fwd = try allocator.dupe(u8, text);
         errdefer allocator.free(text_fwd);
