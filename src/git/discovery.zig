@@ -7,6 +7,7 @@
 //! render diagnostics without this module reaching for stderr.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const proc = @import("../proc/runner.zig");
 const messages = @import("../messages.zig");
 
@@ -91,6 +92,17 @@ pub fn discoverPaths(gpa: Allocator, runner: proc.Runner, cwd: std.Io.Dir) Error
     const toplevel_owned = try gpa.dupe(u8, std.mem.trim(u8, toplevel, " \t\r\n"));
     errdefer gpa.free(toplevel_owned);
 
+    // Git emits forward slashes on every OS, but the rest of the codebase
+    // joins these paths with `std.fs.path.join`, which uses the native
+    // separator. Without this conversion, Windows-side printed paths come
+    // out mixed (e.g. `D:/repo/.git\tk\tk.db`). Normalize to native
+    // separators at the boundary so downstream code can assume a single
+    // form. No-op on POSIX where Git's `/` is already native.
+    if (comptime builtin.os.tag == .windows) {
+        std.mem.replaceScalar(u8, common_owned, '/', std.fs.path.sep);
+        std.mem.replaceScalar(u8, toplevel_owned, '/', std.fs.path.sep);
+    }
+
     return .{ .ok = .{ .git_common_dir = common_owned, .toplevel = toplevel_owned } };
 }
 
@@ -131,6 +143,9 @@ test "discoverPaths: returns .ok with both paths on success" {
     const gpa = std.testing.allocator;
     var fake = fake_proc.FakeRunner.init(gpa);
     defer fake.deinit();
+    // Git always emits forward slashes; this stub mirrors that behaviour
+    // verbatim. The function normalises to native separators before
+    // returning, so the expectations below use `std.fs.path.sep_str`.
     try fake.expect(&.{ "git", "rev-parse" }, .{
         .exit_code = 0,
         .stdout = "/repo/.git\n/repo\n",
@@ -140,8 +155,9 @@ test "discoverPaths: returns .ok with both paths on success" {
     if (outcome != .ok) return error.UnexpectedOutcome;
     var paths = outcome.ok;
     defer paths.deinit(gpa);
-    try std.testing.expectEqualStrings("/repo/.git", paths.git_common_dir);
-    try std.testing.expectEqualStrings("/repo", paths.toplevel);
+    const sep = std.fs.path.sep_str;
+    try std.testing.expectEqualStrings(sep ++ "repo" ++ sep ++ ".git", paths.git_common_dir);
+    try std.testing.expectEqualStrings(sep ++ "repo", paths.toplevel);
 }
 
 test "discoverPaths: returns .git_rejected with trimmed stderr on exit 128" {
