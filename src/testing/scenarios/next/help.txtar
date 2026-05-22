@@ -8,6 +8,17 @@ Usage:
 
 Options:
   -h, --help  Display this help and exit.
+
+Ordering:
+  Ranks ready Tickets by Effective Priority (lowest first), then
+  own Priority, then created_seq, within the active Workspace
+  Scope. Effective Priority lifts a ready Ticket above its own
+  Priority when it transitively blocks a higher-Priority item.
+
+Output:
+  Prints one Display ID to stdout. When the pick's Effective
+  Priority is lower than its own Priority, also writes a
+  rationale line to stderr (suppress with 2>/dev/null).
 -- expected/stderr --
 -- expected/exit --
 0

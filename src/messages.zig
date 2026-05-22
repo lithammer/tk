@@ -234,6 +234,17 @@ pub const next_scope_not_found = "tk next: Workspace Scope does not resolve to a
 pub const next_scope_unresolved_prefix = "tk next: Workspace Scope '";
 pub const next_scope_unresolved_suffix = "' is not a known Display ID or Alias";
 
+/// Stderr fragments for the `tk next` Effective Priority rationale. The line
+/// rendered by the command is
+/// `"{display}: Effective Priority {ep} (via {contributor})\n"` so
+/// `id="$(tk next)"` keeps a clean stdout while interactive callers see the
+/// reason for a non-obvious pick. The contributor reaches the candidate
+/// through transitive `blocked_by` Dependencies or Epic-membership, so the
+/// neutral "via" reads correctly in both shapes. See ADR 0015.
+pub const next_rationale_infix_effective = ": Effective Priority ";
+pub const next_rationale_infix_via = " (via ";
+pub const next_rationale_suffix = ")";
+
 /// Stderr line for non-transient Repository Store read failures. The caller
 /// appends `"\n{s}\n"` for the underlying `@errorName`.
 pub const next_read_failed = "tk next: failed to read Repository Store";

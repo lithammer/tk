@@ -32,6 +32,10 @@ _Avoid_: Unsynced Field, Sync Excluded Field
 A local-only ranking for a **Ticket**: `P0`, `P1`, `P2`, `P3`, or `P4`.
 _Avoid_: Severity
 
+**Effective Priority**:
+The priority used to order a candidate **Ticket** in **`tk next`**, derived from its own **Priority** and the **Priorities** of items it transitively blocks within the active **Workspace Scope**. Selection-only; not stored, not displayed by **`tk show`** or **`tk list`**, not synced to **Backends**.
+_Avoid_: Inherited Priority, Critical Path Priority, Derived Priority
+
 **List Tree**:
 The default **`tk list`** view that renders **Epics** and their child **Tickets** as a tree.
 _Avoid_: Flat List
@@ -238,6 +242,11 @@ _Avoid_: ticket, tickets
 - **Priority** is a **Local Field** in v1.
 - The default **Priority** is `P2`.
 - Lower **Priority** numbers sort before higher **Priority** numbers.
+- A candidate **Ticket**'s **Effective Priority** is the lowest of its own **Priority** and the **Effective Priorities** of every unfinished **Blocked Item** (**Item Status** `open` or `active`) it reaches through transitive `blocked_by` **Dependencies** within the active **Workspace Scope**.
+- A `done` **Blocked Item** resolves the **Dependency** and does not contribute to **Effective Priority**.
+- An **Epic** in the **Effective Priority** chain contributes the lowest **Effective Priority** over its unfinished child **Tickets**.
+- **Effective Priority** propagation stops at the **Workspace Scope** boundary; items outside the active **Workspace Scope** do not contribute.
+- **External Blockers** carry no **Priority** and do not interrupt **Effective Priority** propagation.
 - **Labels** are descriptive facets and do not replace **Priority**, **Ticket Kind**, **Epic** membership, **Item Status**, **Dependencies**, or **External Blockers**.
 - **Labels** are deferred from v1.
 - A **Ticket** has exactly one **Item Status**.
@@ -354,12 +363,11 @@ _Avoid_: ticket, tickets
 - The **Repository Store** keeps current **Ticket** and **Epic** state.
 - The **Mutation Log** records replayable backend intent and is not the primary
   read model or a general local edit history.
-- **`tk next`** selects the ready **Ticket** with the lowest **Priority**, then
-  lowest `created_seq`, within the active **Workspace Scope**.
+- **`tk next`** selects the ready **Ticket** with the lowest **Effective Priority**, then lowest own **Priority**, then lowest `created_seq`, within the active **Workspace Scope**.
 - **`tk next`** is deterministic and does not randomize among candidates.
 - **Ticket Kind** does not affect **`tk next`** ordering.
 - **Assignees** do not affect **`tk next`** readiness or ordering.
-- **`tk next`** does not explain skipped candidates or ranking reasons.
+- **`tk next`** does not explain skipped candidates, but may render a rationale for the selected **Ticket** when its **Effective Priority** comes from a **Blocked Item** rather than its own **Priority**. The rationale names the **Ticket** whose **Priority** drives the **Effective Priority** signal, which is not always the item the candidate directly unblocks — in an **Epic**-mediated chain, the named **Ticket** is a child of an **Epic** the candidate blocks, not a direct **Blocked Item**.
 - **`tk next`** has no JSON or structured-output mode in v1.
 - When there is no active **Workspace Scope**, **`tk next`** searches ready **Tickets** across the **Repository Store**.
 - When **Workspace Scope** references an **Epic**, **`tk next`** searches only
@@ -479,7 +487,7 @@ _Avoid_: ticket, tickets
 > **Domain expert:** "No — **Epic** is separate from **Ticket**; only **Tickets** have **Ticket Kind**."
 >
 > **Dev:** "How can **`tk next`** choose work without guessing?"
-> **Domain expert:** "It uses local **Priority** first, then creation order, within the active **Workspace Scope**."
+> **Domain expert:** "It uses **Effective Priority** first, then own **Priority**, then creation order, within the active **Workspace Scope**. **Effective Priority** lets a ready **Blocking Item** outrank lower-priority direct work when finishing it would unblock a higher-priority **Ticket**."
 >
 > **Dev:** "Should **`tk list`** be a flat table?"
 > **Domain expert:** "No — **`tk list`** uses a **List Tree** so **Epics** and child **Tickets** are visible together."
@@ -496,6 +504,8 @@ _Avoid_: ticket, tickets
 - "issue" and "task" were considered for the core work-item object — resolved: **Ticket** is the canonical backend-agnostic object.
 - "type" was considered for ticket category — resolved: **Ticket Kind** is the canonical term, and `task` is a kind rather than the work-item object.
 - Backend priority mapping was considered for v1 — resolved: **Priority** is a local-only **Local Field**.
+- Sorting **`tk next`** by own **Priority** only was considered — resolved: **`tk next`** uses **Effective Priority** so a ready blocker can bubble above lower-priority direct work when it gates a higher-priority **Blocked Item**.
+- Propagating **Effective Priority** across **Workspace Scope** boundaries was considered — resolved: propagation stops at the scope boundary so feature-branch work stays ordered by what is internal to that scope.
 - "group", "batch", and "umbrella" were considered for related work — resolved: **Epic** is the canonical backend-agnostic grouping term.
 - "parent" and "child" were considered for blocking relationships — resolved: **Dependency** links a **Blocking Item** to a **Blocked Item**.
 - "worktree" was considered for local checkout scope — resolved: **Workspace** is the domain term because git worktrees are the main implementation, not the concept itself.

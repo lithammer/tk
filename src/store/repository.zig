@@ -151,15 +151,31 @@ pub const ListOptions = struct {
 /// One ready Ticket selected by `tk next`.
 ///
 /// The Repository Store owns readiness, Workspace Scope interpretation after
-/// the caller supplies a scope argument, Priority ordering, and creation-order
-/// tie breaks. The command renderer owns the compact stdout row, so this
-/// payload is narrowed to the Display ID the command prints.
+/// the caller supplies a scope argument, Effective Priority computation, and
+/// creation-order tie breaks. The command renderer owns the compact stdout
+/// row plus the optional stderr rationale, so this payload carries the
+/// Display ID the command prints and an optional `Rationale` populated only
+/// when Effective Priority < own Priority.
 pub const NextTicket = struct {
     display_id: []u8,
+    rationale: ?Rationale = null,
+
+    /// Selection rationale, present only when Effective Priority comes from
+    /// a Blocked Item rather than the candidate's own Priority. Per ADR
+    /// 0015, the command renders this on stderr so `id="$(tk next)"`
+    /// scripting stays uncluttered.
+    pub const Rationale = struct {
+        effective_priority: []u8,
+        blocked_display_id: []u8,
+    };
 
     /// Free text copied out of SQLite's statement-owned row buffers.
     pub fn deinit(self: NextTicket, gpa: Allocator) void {
         gpa.free(self.display_id);
+        if (self.rationale) |r| {
+            gpa.free(r.effective_priority);
+            gpa.free(r.blocked_display_id);
+        }
     }
 };
 
@@ -724,19 +740,121 @@ const list_rows_sql = annotated_current_items_cte ++
 /// SQL for `tk next`. Bound with:
 ///   `?1` — scope mode: `all`, `ticket`, or `epic`.
 ///   `?2` — internal stable ID for the scoped Ticket or Epic.
-const next_ready_ticket_sql = annotated_current_items_cte ++ "\n" ++
-    \\select display_value
-    \\  from annotated
-    \\ where item_class = 'ticket'
-    \\   and status = 'open'
-    \\   and not has_unresolved_dependency
-    \\   and not has_unresolved_external_blocker
+///
+/// Each ready candidate's Effective Priority is the minimum of its own
+/// Priority and the Priorities of every Ticket reachable through unresolved
+/// `blocked_by` Dependencies and Epic-membership edges, walking only within
+/// the active Workspace Scope. Selection orders by `effective_priority asc,
+/// own_priority asc, created_seq asc` per ADR 0015.
+///
+/// `prop_edge` carries the two propagation edges: Dependency edges
+/// (blocking_id -> blocked_id, only when the Blocked Item is not `done`) and
+/// Epic-membership edges (epic.id -> unfinished child Ticket.id) so an Epic
+/// in the chain contributes the lowest Effective Priority over its
+/// unfinished children. The scope predicate is duplicated across edges so
+/// out-of-scope items neither serve as walk destinations nor leak their
+/// priority back to in-scope candidates.
+///
+/// `reachable` carries a path string (`,id1,id2,...,`) per row and refuses
+/// to extend an edge whose destination is already in the path. Without this
+/// guard the union of Dependency and Epic-membership edges is not acyclic
+/// — a Ticket may block its containing Epic, producing a `dep → membership`
+/// round trip — and a multi-child Epic with back-deps would materialize
+/// exponentially many paths through `union all`. The depth bound at 1024
+/// stays as a defense in depth against a malformed schema.
+const next_ready_ticket_sql =
+    \\with recursive
+    \\  annotated as (
+    \\      select i.id, i.display_value, i.item_class, i.priority, i.status,
+    \\             i.container_id, i.created_seq,
+    \\             exists (
+    \\                 select 1
+    \\                   from dependencies d
+    \\                   join items blocking on blocking.id = d.blocking_id
+    \\                  where d.blocked_id = i.id
+    \\                    and blocking.status <> 'done'
+    \\             ) as has_unresolved_dependency,
+    \\             exists (
+    \\                 select 1
+    \\                   from external_blockers eb
+    \\                  where eb.item_id = i.id
+    \\                    and eb.resolved_at is null
+    \\             ) as has_unresolved_external_blocker
+    \\        from items i
+    \\  ),
+    \\  prop_edge(src, dst) as (
+    \\      select d.blocking_id, d.blocked_id
+    \\        from dependencies d
+    \\        join items b on b.id = d.blocked_id
+    \\       where b.status <> 'done'
+    \\         and (
+    \\             ?1 = 'all'
+    \\             or (?1 = 'ticket' and b.id = ?2)
+    \\             or (?1 = 'epic' and (b.id = ?2 or b.container_id = ?2))
+    \\         )
+    \\      union all
+    \\      select i.container_id, i.id
+    \\        from items i
+    \\       where i.container_class = 'epic'
+    \\         and i.item_class = 'ticket'
+    \\         and i.status <> 'done'
+    \\         and (
+    \\             ?1 = 'all'
+    \\             or (?1 = 'ticket' and i.id = ?2)
+    \\             or (?1 = 'epic' and (i.id = ?2 or i.container_id = ?2))
+    \\         )
+    \\  ),
+    \\  reachable(start_id, node_id, path, depth) as (
+    \\      select id, id, ',' || id || ',', 0
+    \\        from items
+    \\       where item_class = 'ticket'
+    \\         and status = 'open'
+    \\         and (
+    \\             ?1 = 'all'
+    \\             or (?1 = 'ticket' and id = ?2)
+    \\             or (?1 = 'epic' and container_id = ?2)
+    \\         )
+    \\      union all
+    \\      select r.start_id, e.dst, r.path || e.dst || ',', r.depth + 1
+    \\        from reachable r
+    \\        join prop_edge e on e.src = r.node_id
+    \\       where r.depth < 1024
+    \\         and instr(r.path, ',' || e.dst || ',') = 0
+    \\  ),
+    \\  eff(start_id, ep) as (
+    \\      select r.start_id, min(i.priority)
+    \\        from reachable r
+    \\        join items i on i.id = r.node_id
+    \\       where i.item_class = 'ticket'
+    \\         and i.status <> 'done'
+    \\         and i.priority is not null
+    \\       group by r.start_id
+    \\  )
+    \\select ann.display_value, ann.priority, eff.ep,
+    \\       (
+    \\           select contributor.display_value
+    \\             from reachable r2
+    \\             join items contributor on contributor.id = r2.node_id
+    \\            where r2.start_id = ann.id
+    \\              and contributor.item_class = 'ticket'
+    \\              and contributor.status <> 'done'
+    \\              and contributor.priority = eff.ep
+    \\              and r2.node_id <> ann.id
+    \\            order by contributor.created_seq asc
+    \\            limit 1
+    \\       ) as contributor_display
+    \\  from annotated ann
+    \\  join eff on eff.start_id = ann.id
+    \\ where ann.item_class = 'ticket'
+    \\   and ann.status = 'open'
+    \\   and not ann.has_unresolved_dependency
+    \\   and not ann.has_unresolved_external_blocker
     \\   and (
     \\       ?1 = 'all'
-    \\       or (?1 = 'ticket' and id = ?2)
-    \\       or (?1 = 'epic' and container_id = ?2)
+    \\       or (?1 = 'ticket' and ann.id = ?2)
+    \\       or (?1 = 'epic' and ann.container_id = ?2)
     \\   )
-    \\ order by priority asc, created_seq asc
+    \\ order by eff.ep asc, ann.priority asc, ann.created_seq asc
     \\ limit 1
 ;
 
@@ -1667,8 +1785,37 @@ pub fn resolveAsEpicWithDisplay(store: Store, gpa: Allocator, display_arg: []con
 
 fn nextTicketFromSql(gpa: Allocator, row: zqlite.Row) NextError!NextTicket {
     const display_id = try gpa.dupe(u8, row.text(0));
+    errdefer gpa.free(display_id);
+
+    const own_priority_text = row.text(1);
+    const effective_priority_text = row.text(2);
+    // SQL ordering already guarantees `eff.ep <= ann.priority`; a byte
+    // inequality therefore means EP came from a Blocked Item and a
+    // rationale is owed.
+    const needs_rationale = !std.mem.eql(u8, own_priority_text, effective_priority_text);
+    if (!needs_rationale) {
+        return .{ .display_id = display_id };
+    }
+
+    // When Effective Priority comes purely through the candidate itself the
+    // contributor subquery yields SQL NULL. `row.nullableText` distinguishes
+    // that from a zero-length Display ID so an empty `display_value` in
+    // future data does not silently suppress a real rationale.
+    const contributor_display = row.nullableText(3) orelse {
+        return .{ .display_id = display_id };
+    };
+
+    const eff = try gpa.dupe(u8, effective_priority_text);
+    errdefer gpa.free(eff);
+    const blocked = try gpa.dupe(u8, contributor_display);
+    errdefer gpa.free(blocked);
+
     return .{
         .display_id = display_id,
+        .rationale = .{
+            .effective_priority = eff,
+            .blocked_display_id = blocked,
+        },
     };
 }
 
@@ -1737,13 +1884,13 @@ test "nextReadyTicket: selects ready Tickets by Priority then creation order" {
     try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
     const store: Store = .{ .conn = conn };
 
+    // Blocker-bubbles-up behavior is exercised by the dedicated Effective
+    // Priority tests; this fixture stays free of Dependency edges so the
+    // assertion isolates own-Priority + created_seq ordering.
     try TmpStore.insertFixtureItem(conn, .{ .id = "old-p2", .display = "tk-1", .title = "Older P2", .priority = "P2", .created_seq = 1 });
     try TmpStore.insertFixtureItem(conn, .{ .id = "first-p1", .display = "tk-2", .title = "First P1", .priority = "P1", .created_seq = 2 });
     try TmpStore.insertFixtureItem(conn, .{ .id = "second-p1", .display = "tk-3", .title = "Second P1", .priority = "P1", .created_seq = 3 });
     try TmpStore.insertFixtureItem(conn, .{ .id = "active-p0", .display = "tk-4", .title = "Active P0", .priority = "P0", .status = "active", .created_seq = 4 });
-    try TmpStore.insertFixtureItem(conn, .{ .id = "blocked-p0", .display = "tk-5", .title = "Blocked P0", .priority = "P0", .created_seq = 5 });
-    try TmpStore.insertFixtureItem(conn, .{ .id = "blocker", .display = "tk-6", .title = "Blocker", .priority = "P4", .created_seq = 6 });
-    try TmpStore.insertDependency(conn, "blocker", "blocked-p0");
     try TmpStore.insertFixtureItem(conn, .{
         .id = "epic",
         .display = "tk-7",
@@ -2853,6 +3000,533 @@ test "setItemStatus: completing a blocker makes the blocked Ticket ready" {
         const blocked_rows = try listRows(store, gpa, .{ .view = .blocked });
         defer freeListRows(gpa, blocked_rows);
         try std.testing.expectEqual(@as(usize, 0), blocked_rows.len);
+    }
+}
+
+test "nextReadyTicket: returns a rationale when Effective Priority comes from a Blocked Item" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    try TmpStore.insertFixtureItem(conn, .{ .id = "blocker", .display = "tk-A", .title = "Blocker", .priority = "P3", .created_seq = 1 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "blocked", .display = "tk-B", .title = "Blocked P1", .priority = "P1", .created_seq = 2 });
+    try TmpStore.insertDependency(conn, "blocker", "blocked");
+
+    const outcome = try nextReadyTicket(store, gpa, .{});
+    switch (outcome) {
+        .ticket => |ticket| {
+            defer ticket.deinit(gpa);
+            try std.testing.expectEqualStrings("tk-A", ticket.display_id);
+            const rationale = ticket.rationale orelse return error.ExpectedRationale;
+            try std.testing.expectEqualStrings("P1", rationale.effective_priority);
+            try std.testing.expectEqualStrings("tk-B", rationale.blocked_display_id);
+        },
+        else => return error.UnexpectedOutcome,
+    }
+}
+
+test "nextReadyTicket: rationale names the Epic-mediated contributor" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    // tk-A blocks Epic tk-E; tk-E's active P0 child tk-C is the priority
+    // contributor. The rationale's `blocked_display_id` must name tk-C even
+    // though tk-C is reached via Epic-membership rather than a direct
+    // `blocked_by` edge — `(via tk-C)` reads correctly in both shapes.
+    try TmpStore.insertFixtureItem(conn, .{ .id = "a", .display = "tk-A", .title = "Blocker", .priority = "P3", .created_seq = 1 });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "epic",
+        .display = "tk-E",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .title = "Epic in the chain",
+        .created_seq = 2,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "child",
+        .display = "tk-C",
+        .title = "Active P0 child",
+        .priority = "P0",
+        .status = "active",
+        .container_id = "epic",
+        .created_seq = 3,
+    });
+    try TmpStore.insertDependency(conn, "a", "epic");
+
+    const outcome = try nextReadyTicket(store, gpa, .{});
+    switch (outcome) {
+        .ticket => |ticket| {
+            defer ticket.deinit(gpa);
+            try std.testing.expectEqualStrings("tk-A", ticket.display_id);
+            const rationale = ticket.rationale orelse return error.ExpectedRationale;
+            try std.testing.expectEqualStrings("P0", rationale.effective_priority);
+            try std.testing.expectEqualStrings("tk-C", rationale.blocked_display_id);
+        },
+        else => return error.UnexpectedOutcome,
+    }
+}
+
+test "nextReadyTicket: rationale is null when Effective Priority equals own Priority" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    try TmpStore.insertFixtureItem(conn, .{ .id = "solo", .display = "tk-A", .title = "Standalone P1", .priority = "P1", .created_seq = 1 });
+
+    const outcome = try nextReadyTicket(store, gpa, .{});
+    switch (outcome) {
+        .ticket => |ticket| {
+            defer ticket.deinit(gpa);
+            try std.testing.expectEqualStrings("tk-A", ticket.display_id);
+            try std.testing.expectEqual(@as(?NextTicket.Rationale, null), ticket.rationale);
+        },
+        else => return error.UnexpectedOutcome,
+    }
+}
+
+test "nextReadyTicket: External Blocker on an intermediate item does not interrupt propagation" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    // tk-B carries an unresolved External Blocker on top of its Dependency
+    // on tk-A. External Blockers do not carry Priority and do not gate the
+    // walk — tk-A's Effective Priority must still inherit P0.
+    try TmpStore.insertFixtureItem(conn, .{ .id = "a", .display = "tk-A", .title = "Blocker", .priority = "P3", .created_seq = 1 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "b", .display = "tk-B", .title = "Doubly blocked P0", .priority = "P0", .created_seq = 2 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "d", .display = "tk-D", .title = "Unrelated P1", .priority = "P1", .created_seq = 3 });
+    try TmpStore.insertDependency(conn, "a", "b");
+    try TmpStore.insertExternalBlocker(conn, "eb-1", "b", null);
+
+    const outcome = try nextReadyTicket(store, gpa, .{});
+    switch (outcome) {
+        .ticket => |ticket| {
+            defer ticket.deinit(gpa);
+            try std.testing.expectEqualStrings("tk-A", ticket.display_id);
+        },
+        else => return error.UnexpectedOutcome,
+    }
+}
+
+test "nextReadyTicket: scope=ticket collapses Effective Priority to own Priority" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    // Workspace Scope = tk-A (a single Ticket). tk-A blocks tk-B (P0,
+    // outside scope). Per CONTEXT.md the walk stops at the scope boundary,
+    // so tk-A's Effective Priority must equal its own Priority and no
+    // rationale is rendered. The candidate set is also `{tk-A}`, so the
+    // outcome is tk-A by definition; this test pins the EP collapse + null
+    // rationale contract so a future change broadening ticket-scope cannot
+    // silently leak out-of-scope signals.
+    try TmpStore.insertFixtureItem(conn, .{ .id = "a", .display = "tk-A", .title = "Scoped Ticket", .priority = "P3", .created_seq = 1 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "b", .display = "tk-B", .title = "Out-of-scope P0", .priority = "P0", .created_seq = 2 });
+    try TmpStore.insertDependency(conn, "a", "b");
+
+    const outcome = try nextReadyTicket(store, gpa, .{ .scope = .{ .display_arg = "tk-A" } });
+    switch (outcome) {
+        .ticket => |ticket| {
+            defer ticket.deinit(gpa);
+            try std.testing.expectEqualStrings("tk-A", ticket.display_id);
+            try std.testing.expectEqual(@as(?NextTicket.Rationale, null), ticket.rationale);
+        },
+        else => return error.UnexpectedOutcome,
+    }
+}
+
+test "nextReadyTicket: Effective Priority propagation stops at the Workspace Scope boundary" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    // Epic tk-E contains tk-A (P3) and tk-A2 (P2). tk-A blocks the
+    // out-of-scope tk-X (P0). Within Workspace Scope = tk-E, tk-A's walk
+    // must stop at the boundary so its Effective Priority stays P3, letting
+    // tk-A2 win on own Priority. Without the scope clamp, tk-A would have
+    // inherited P0 and beaten tk-A2.
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "epic",
+        .display = "tk-E",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .title = "Scoped epic",
+        .created_seq = 1,
+    });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "a", .display = "tk-A", .title = "Scoped blocker", .priority = "P3", .container_id = "epic", .created_seq = 2 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "a2", .display = "tk-A2", .title = "Scoped chore P2", .priority = "P2", .container_id = "epic", .created_seq = 3 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "x", .display = "tk-X", .title = "Out-of-scope P0", .priority = "P0", .created_seq = 4 });
+    try TmpStore.insertDependency(conn, "a", "x");
+
+    const outcome = try nextReadyTicket(store, gpa, .{ .scope = .{ .display_arg = "tk-E" } });
+    switch (outcome) {
+        .ticket => |ticket| {
+            defer ticket.deinit(gpa);
+            try std.testing.expectEqualStrings("tk-A2", ticket.display_id);
+            try std.testing.expectEqual(@as(?NextTicket.Rationale, null), ticket.rationale);
+        },
+        else => return error.UnexpectedOutcome,
+    }
+}
+
+test "nextReadyTicket: active Blocked Items contribute to Effective Priority" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    // tk-B is active rather than open — still unfinished, still benefits
+    // from tk-A completing. tk-A's Effective Priority must inherit P0 and
+    // outrank the unrelated P1.
+    try TmpStore.insertFixtureItem(conn, .{ .id = "a", .display = "tk-A", .title = "Blocker", .priority = "P3", .created_seq = 1 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "b", .display = "tk-B", .title = "Active P0", .priority = "P0", .status = "active", .created_seq = 2 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "d", .display = "tk-D", .title = "Unrelated P1", .priority = "P1", .created_seq = 3 });
+    try TmpStore.insertDependency(conn, "a", "b");
+
+    const outcome = try nextReadyTicket(store, gpa, .{});
+    switch (outcome) {
+        .ticket => |ticket| {
+            defer ticket.deinit(gpa);
+            try std.testing.expectEqualStrings("tk-A", ticket.display_id);
+        },
+        else => return error.UnexpectedOutcome,
+    }
+}
+
+test "nextReadyTicket: done Blocked Items do not contribute to Effective Priority" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    // tk-A "blocks" tk-B, but tk-B is already done — the Dependency is
+    // resolved, so tk-A's Effective Priority must equal its own Priority.
+    // The unrelated tk-D wins by own Priority.
+    try TmpStore.insertFixtureItem(conn, .{ .id = "a", .display = "tk-A", .title = "Stale blocker", .priority = "P3", .created_seq = 1 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "b", .display = "tk-B", .title = "Already done P0", .priority = "P0", .status = "done", .created_seq = 2 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "d", .display = "tk-D", .title = "Unrelated P1", .priority = "P1", .created_seq = 3 });
+    try TmpStore.insertDependency(conn, "a", "b");
+
+    const outcome = try nextReadyTicket(store, gpa, .{});
+    switch (outcome) {
+        .ticket => |ticket| {
+            defer ticket.deinit(gpa);
+            try std.testing.expectEqualStrings("tk-D", ticket.display_id);
+            try std.testing.expectEqual(@as(?NextTicket.Rationale, null), ticket.rationale);
+        },
+        else => return error.UnexpectedOutcome,
+    }
+}
+
+test "nextReadyTicket: an Epic in the chain contributes the lowest of its unfinished children" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    // tk-A blocks Epic tk-E. tk-E has two active children at different
+    // Priorities (P1 and P0). The Epic's contribution must be the lowest
+    // (P0), so tk-A's Effective Priority bubbles to P0 and the rationale
+    // names tk-C0. If the `eff` aggregation regressed from `min` to `max`,
+    // tk-A's EP would stay at P3 (own) and the unrelated tk-D (P2) would
+    // win — the single-child Epic test (above) cannot catch this.
+    try TmpStore.insertFixtureItem(conn, .{ .id = "a", .display = "tk-A", .title = "Blocker", .priority = "P3", .created_seq = 1 });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "epic",
+        .display = "tk-E",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .title = "Hub with mixed priorities",
+        .created_seq = 2,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "child-p1",
+        .display = "tk-C1",
+        .title = "Active P1 child",
+        .priority = "P1",
+        .status = "active",
+        .container_id = "epic",
+        .created_seq = 3,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "child-p0",
+        .display = "tk-C0",
+        .title = "Active P0 child",
+        .priority = "P0",
+        .status = "active",
+        .container_id = "epic",
+        .created_seq = 4,
+    });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "d", .display = "tk-D", .title = "Unrelated P2", .priority = "P2", .created_seq = 5 });
+    try TmpStore.insertDependency(conn, "a", "epic");
+
+    const outcome = try nextReadyTicket(store, gpa, .{});
+    switch (outcome) {
+        .ticket => |ticket| {
+            defer ticket.deinit(gpa);
+            try std.testing.expectEqualStrings("tk-A", ticket.display_id);
+            const rationale = ticket.rationale orelse return error.ExpectedRationale;
+            try std.testing.expectEqualStrings("P0", rationale.effective_priority);
+            try std.testing.expectEqualStrings("tk-C0", rationale.blocked_display_id);
+        },
+        else => return error.UnexpectedOutcome,
+    }
+}
+
+test "nextReadyTicket: an Epic in the chain contributes its open children's Priority" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    // tk-A (P3, ready) blocks Epic tk-E. tk-E has an active P0 child
+    // tk-C1. Active status keeps tk-C1 out of the candidate set so the
+    // assertion isolates the Epic-membership propagation edge from a
+    // direct-P0 selection.
+    try TmpStore.insertFixtureItem(conn, .{ .id = "a", .display = "tk-A", .title = "Blocker", .priority = "P3", .created_seq = 1 });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "epic",
+        .display = "tk-E",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .title = "Epic in the chain",
+        .created_seq = 2,
+    });
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "child",
+        .display = "tk-C1",
+        .title = "Active P0 child",
+        .priority = "P0",
+        .status = "active",
+        .container_id = "epic",
+        .created_seq = 3,
+    });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "unrelated", .display = "tk-D", .title = "Unrelated P1", .priority = "P1", .created_seq = 4 });
+    try TmpStore.insertDependency(conn, "a", "epic");
+
+    const outcome = try nextReadyTicket(store, gpa, .{});
+    switch (outcome) {
+        .ticket => |ticket| {
+            defer ticket.deinit(gpa);
+            try std.testing.expectEqualStrings("tk-A", ticket.display_id);
+        },
+        else => return error.UnexpectedOutcome,
+    }
+}
+
+test "nextReadyTicket: propagates Effective Priority through a transitive blocked_by chain" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    // tk-A (P3, ready) blocks tk-B (P2), which blocks tk-C (P0).
+    // tk-D (P1, ready) is unrelated. tk-A's Effective Priority must walk
+    // through tk-B to reach tk-C's P0, beating tk-D.
+    try TmpStore.insertFixtureItem(conn, .{ .id = "a", .display = "tk-A", .title = "Hop 0", .priority = "P3", .created_seq = 1 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "b", .display = "tk-B", .title = "Hop 1", .priority = "P2", .created_seq = 2 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "c", .display = "tk-C", .title = "Hop 2 (deep P0)", .priority = "P0", .created_seq = 3 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "d", .display = "tk-D", .title = "Unrelated P1", .priority = "P1", .created_seq = 4 });
+    try TmpStore.insertDependency(conn, "a", "b");
+    try TmpStore.insertDependency(conn, "b", "c");
+
+    const outcome = try nextReadyTicket(store, gpa, .{});
+    switch (outcome) {
+        .ticket => |ticket| {
+            defer ticket.deinit(gpa);
+            try std.testing.expectEqualStrings("tk-A", ticket.display_id);
+        },
+        else => return error.UnexpectedOutcome,
+    }
+}
+
+test "nextReadyTicket: direct P1 beats a P2 blocker with the same Effective Priority" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    // tk-X (P1, ready) is direct work. tk-Y (P2, ready) blocks tk-Z (P1).
+    // Both have Effective Priority P1; the own-Priority tiebreaker should
+    // pick the direct P1 over the indirect one.
+    try TmpStore.insertFixtureItem(conn, .{ .id = "direct", .display = "tk-X", .title = "Direct P1", .priority = "P1", .created_seq = 1 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "indirect", .display = "tk-Y", .title = "Indirect P2 blocker", .priority = "P2", .created_seq = 2 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "blocked-by-indirect", .display = "tk-Z", .title = "Blocked P1", .priority = "P1", .created_seq = 3 });
+    try TmpStore.insertDependency(conn, "indirect", "blocked-by-indirect");
+
+    const outcome = try nextReadyTicket(store, gpa, .{});
+    switch (outcome) {
+        .ticket => |ticket| {
+            defer ticket.deinit(gpa);
+            try std.testing.expectEqualStrings("tk-X", ticket.display_id);
+            try std.testing.expectEqual(@as(?NextTicket.Rationale, null), ticket.rationale);
+        },
+        else => return error.UnexpectedOutcome,
+    }
+}
+
+test "nextReadyTicket: tolerates dep + Epic-membership cross-cycles" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    // Epic E with 10 open child Tickets, each blocking E. The dep edge and
+    // the Epic-membership edge form a 2-cycle through every child, so a
+    // naive UNION ALL recursive CTE materializes ~9^(depth/2) paths. Cycle
+    // detection must keep the walk bounded by the number of distinct
+    // reachable nodes regardless of branching.
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "epic",
+        .display = "tk-E",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .title = "Hub",
+        .created_seq = 1,
+    });
+    inline for (.{ "a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9", "a10" }, 0..) |id, i| {
+        try TmpStore.insertFixtureItem(conn, .{
+            .id = id,
+            .display = "tk-" ++ id,
+            .title = "child",
+            .priority = if (i == 0) "P0" else "P3",
+            .container_id = "epic",
+            .created_seq = @as(i64, @intCast(i)) + 2,
+        });
+        try TmpStore.insertDependency(conn, id, "epic");
+    }
+
+    // a1 has its own dep to E; a1 is ready (no inbound dep), P0 — direct
+    // selection. The point of this test is that nextReadyTicket returns
+    // *some* answer in a fixed bounded time rather than blowing out
+    // SQLite's recursion working set.
+    const outcome = try nextReadyTicket(store, gpa, .{});
+    switch (outcome) {
+        .ticket => |ticket| ticket.deinit(gpa),
+        else => return error.UnexpectedOutcome,
+    }
+}
+
+test "nextReadyTicket: a blocked Ticket with the best own Priority is excluded from candidates" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    // tk-X (P3, ready, unrelated) competes against tk-Y (P3, ready) which
+    // blocks tk-Z (P0, blocked). Correct behavior: tk-Z is excluded as a
+    // candidate (`has_unresolved_dependency`), tk-Y's Effective Priority
+    // inherits P0 from tk-Z and wins. If `has_unresolved_dependency`
+    // polarity ever flipped, tk-Z would become a candidate and outrank
+    // tk-Y on own Priority — the assertion catches that regression.
+    try TmpStore.insertFixtureItem(conn, .{ .id = "x", .display = "tk-X", .title = "Unrelated P3", .priority = "P3", .created_seq = 1 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "y", .display = "tk-Y", .title = "Blocker P3", .priority = "P3", .created_seq = 2 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "z", .display = "tk-Z", .title = "Blocked P0", .priority = "P0", .created_seq = 3 });
+    try TmpStore.insertDependency(conn, "y", "z");
+
+    const outcome = try nextReadyTicket(store, gpa, .{});
+    switch (outcome) {
+        .ticket => |ticket| {
+            defer ticket.deinit(gpa);
+            try std.testing.expectEqualStrings("tk-Y", ticket.display_id);
+        },
+        else => return error.UnexpectedOutcome,
+    }
+}
+
+test "nextReadyTicket: surfaces a P3 blocker when it blocks a P1" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    // tk-A (P3, ready) blocks tk-B (P1, blocked); tk-C (P2, ready) is
+    // unrelated. Today's own-Priority-only sort picks tk-C; Effective
+    // Priority must surface tk-A as the critical-path work.
+    try TmpStore.insertFixtureItem(conn, .{ .id = "blocker", .display = "tk-A", .title = "Blocker", .priority = "P3", .created_seq = 1 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "blocked", .display = "tk-B", .title = "Blocked P1", .priority = "P1", .created_seq = 2 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "chore", .display = "tk-C", .title = "Unrelated P2", .priority = "P2", .created_seq = 3 });
+    try TmpStore.insertDependency(conn, "blocker", "blocked");
+
+    const outcome = try nextReadyTicket(store, gpa, .{});
+    switch (outcome) {
+        .ticket => |ticket| {
+            defer ticket.deinit(gpa);
+            try std.testing.expectEqualStrings("tk-A", ticket.display_id);
+        },
+        else => return error.UnexpectedOutcome,
     }
 }
 

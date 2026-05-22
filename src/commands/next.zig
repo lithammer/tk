@@ -76,6 +76,21 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
         .ticket => |ticket| {
             defer ticket.deinit(deps.gpa);
             try deps.stdout.print("{s}\n", .{ticket.display_id});
+            if (ticket.rationale) |r| {
+                // Per ADR 0015, rationale lands on stderr so
+                // `id="$(tk next)"` keeps a clean stdout capture.
+                deps.stderr.print(
+                    "{s}{s}{s}{s}{s}{s}\n",
+                    .{
+                        ticket.display_id,
+                        messages.next_rationale_infix_effective,
+                        r.effective_priority,
+                        messages.next_rationale_infix_via,
+                        r.blocked_display_id,
+                        messages.next_rationale_suffix,
+                    },
+                ) catch {};
+            }
             return 0;
         },
         .no_ready_ticket => {
@@ -100,6 +115,17 @@ fn writeHelp(deps: cli.Deps) !void {
         \\
         \\Options:
         \\  -h, --help  Display this help and exit.
+        \\
+        \\Ordering:
+        \\  Ranks ready Tickets by Effective Priority (lowest first), then
+        \\  own Priority, then created_seq, within the active Workspace
+        \\  Scope. Effective Priority lifts a ready Ticket above its own
+        \\  Priority when it transitively blocks a higher-Priority item.
+        \\
+        \\Output:
+        \\  Prints one Display ID to stdout. When the pick's Effective
+        \\  Priority is lower than its own Priority, also writes a
+        \\  rationale line to stderr (suppress with 2>/dev/null).
         \\
     );
 }
@@ -233,6 +259,73 @@ test "next: returns exit 1 when no ready Ticket exists" {
 fn expectNoWorkspaceScope(h: *Harness) !void {
     try h.fake_runner.expect(&.{ "git", "config", "--worktree", "--get", "tk.scope" }, .{ .exit_code = 1 });
     try h.fake_runner.expect(&.{ "git", "symbolic-ref" }, .{ .exit_code = 1 });
+}
+
+test "next: prints stderr rationale when Effective Priority comes from a Blocked Item" {
+    const gpa = std.testing.allocator;
+    var tmp_store = try TmpStore.init(gpa, "project");
+    defer tmp_store.deinit(gpa);
+    var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, tmp_store.toplevel_path, .{});
+    defer cwd.close(std.testing.io);
+    const rev_parse = try tmp_store.gitRevParseStdout(gpa);
+    defer gpa.free(rev_parse);
+
+    {
+        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
+    }
+
+    // Direct fixture inserts skip the absent `tk block` Mutation surface and
+    // exercise the Effective Priority SQL through the command renderer.
+    const conn = try zqlite.open(tmp_store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try TmpStore.insertFixtureItem(conn, .{ .id = "blocker", .display = "project-1", .title = "Blocker", .priority = "P3", .created_seq = 1 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "blocked", .display = "project-2", .title = "Blocked P1", .priority = "P1", .created_seq = 2 });
+    try TmpStore.insertDependency(conn, "blocker", "blocked");
+
+    var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+    try expectNoWorkspaceScope(&h);
+
+    try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
+    try std.testing.expectEqualStrings("project-1\n", h.stdout());
+    try std.testing.expectEqualStrings(
+        "project-1: Effective Priority P1 (via project-2)\n",
+        h.stderr(),
+    );
+}
+
+test "next: no stderr rationale when Effective Priority equals own Priority" {
+    const gpa = std.testing.allocator;
+    var tmp_store = try TmpStore.init(gpa, "project");
+    defer tmp_store.deinit(gpa);
+    var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, tmp_store.toplevel_path, .{});
+    defer cwd.close(std.testing.io);
+    const rev_parse = try tmp_store.gitRevParseStdout(gpa);
+    defer gpa.free(rev_parse);
+
+    {
+        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
+    }
+
+    const conn = try zqlite.open(tmp_store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try TmpStore.insertFixtureItem(conn, .{ .id = "solo", .display = "project-1", .title = "Standalone", .priority = "P1", .created_seq = 1 });
+
+    var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+    try expectNoWorkspaceScope(&h);
+
+    try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
+    try std.testing.expectEqualStrings("project-1\n", h.stdout());
+    try std.testing.expectEqualStrings("", h.stderr());
 }
 
 test "next: rejects explicit scope arguments" {
