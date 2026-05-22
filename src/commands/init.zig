@@ -1,13 +1,13 @@
 //! `tk init` — create the Repository Store at `<git-common-dir>/tk/tk.db`.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const clap = @import("clap");
 const zqlite = @import("zqlite");
 const cli = @import("../cli.zig");
 const parse_diagnostic = @import("parse_diagnostic.zig");
 const messages = @import("../messages.zig");
 const migrations = @import("../store/migrations.zig");
+const platform = @import("../platform.zig");
 const Diagnostic = @import("../domain/diagnostic.zig").Diagnostic;
 const display_prefix = @import("../domain/display_prefix.zig");
 const discovery = @import("../git/discovery.zig");
@@ -195,7 +195,7 @@ fn seedDisplayPrefix(deps: cli.Deps, conn: zqlite.Conn, toplevel: []const u8) !v
 /// Tighten a freshly-created Repository Store directory on platforms that
 /// expose Unix-style permissions.
 fn setDirMode0700(deps: cli.Deps, path: []const u8) !void {
-    if (builtin.os.tag == .windows) return;
+    if (platform.is_windows) return;
     try std.Io.Dir.cwd().setFilePermissions(deps.io, path, @enumFromInt(0o700), .{});
 }
 
@@ -223,7 +223,6 @@ fn writeHelp(deps: cli.Deps) !void {
 
 const Harness = @import("../testing/test_cli.zig").Harness;
 const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
-const platform = @import("../testing/platform.zig");
 
 test "init: returns exit 1 with diagnostic when not in a git repo" {
     var h = Harness.init(std.testing.allocator, &.{});

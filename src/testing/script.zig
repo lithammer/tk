@@ -1,8 +1,8 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
 const cli = @import("../cli.zig");
+const platform = @import("../platform.zig");
 const proc = @import("../proc/runner.zig");
 const clock_mod = @import("../clock.zig");
 const txtar = @import("txtar.zig");
@@ -116,7 +116,7 @@ fn getEnvFlag(comptime name: []const u8) bool {
     // Zig 0.16.0's `Environ.getPosix` does not compile on Windows because
     // `Environ.Block` resolves to `GlobalBlock`, which has no `view` method.
     // Mirror the OS dispatch used by `Environ.containsUnemptyConstant`.
-    if (comptime builtin.os.tag == .windows) {
+    if (platform.is_windows) {
         const name_w = comptime std.unicode.wtf8ToWtf16LeStringLiteral(name);
         const one_w = comptime std.unicode.wtf8ToWtf16LeStringLiteral("1");
         const val = std.testing.environ.getWindows(name_w) orelse return false;
@@ -389,7 +389,7 @@ fn normalizeWork(allocator: Allocator, text: []const u8, work_path: []const u8) 
     // gap here -- but only inside `$WORK`-prefixed spans, to avoid
     // mangling legitimate backslashes elsewhere in the stream (e.g. troff
     // escapes printed by `tk manpage`).
-    if (comptime builtin.os.tag == .windows) normalizeWorkSpans(owned);
+    if (platform.is_windows) normalizeWorkSpans(owned);
     return .{ .text = owned, .owned = true };
 }
 

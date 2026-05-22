@@ -7,7 +7,7 @@
 //! render diagnostics without this module reaching for stderr.
 
 const std = @import("std");
-const builtin = @import("builtin");
+const platform = @import("../platform.zig");
 const proc = @import("../proc/runner.zig");
 const messages = @import("../messages.zig");
 
@@ -98,7 +98,7 @@ pub fn discoverPaths(gpa: Allocator, runner: proc.Runner, cwd: std.Io.Dir) Error
     // out mixed (e.g. `D:/repo/.git\tk\tk.db`). Normalize to native
     // separators at the boundary so downstream code can assume a single
     // form. No-op on POSIX where Git's `/` is already native.
-    if (comptime builtin.os.tag == .windows) {
+    if (platform.is_windows) {
         std.mem.replaceScalar(u8, common_owned, '/', std.fs.path.sep);
         std.mem.replaceScalar(u8, toplevel_owned, '/', std.fs.path.sep);
     }

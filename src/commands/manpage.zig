@@ -7,7 +7,7 @@
 //! that never deletes an existing target on failure.
 
 const std = @import("std");
-const builtin = @import("builtin");
+const platform = @import("../platform.zig");
 const clap = @import("clap");
 const cli = @import("../cli.zig");
 const parse_diagnostic = @import("parse_diagnostic.zig");
@@ -62,7 +62,7 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
 /// is left untouched. On Windows the install is a documented no-op so
 /// scripted post-install steps do not fail.
 fn installManpage(deps: cli.Deps) !u8 {
-    if (builtin.os.tag == .windows) {
+    if (platform.is_windows) {
         deps.stderr.writeAll(messages.manpage_skip_windows ++ "\n") catch {};
         return 0;
     }
@@ -244,7 +244,7 @@ test "manpage --install renders success or a structured diagnostic" {
     //
     // This is the narrowest layer that observes the install plumbing
     // without faking the executable-path resolution.
-    if (builtin.os.tag == .windows) return;
+    if (platform.is_windows) return;
 
     var h = Harness.init(std.testing.allocator, &.{"--install"});
     defer h.deinit();
@@ -270,7 +270,7 @@ test "manpage --install writes the embedded bytes to the resolved target" {
     // pins the stage-and-rename plumbing — a regression that wrote the
     // wrong content (e.g. an off-by-one slice) would slip past a substring
     // check on the stdout message.
-    if (builtin.os.tag == .windows) return;
+    if (platform.is_windows) return;
 
     var h = Harness.init(std.testing.allocator, &.{"--install"});
     defer h.deinit();
@@ -295,7 +295,7 @@ test "manpage --install writes the embedded bytes to the resolved target" {
 }
 
 test "manpage --install is a no-op on Windows" {
-    if (builtin.os.tag != .windows) return;
+    if (!platform.is_windows) return;
 
     var h = Harness.init(std.testing.allocator, &.{"--install"});
     defer h.deinit();
