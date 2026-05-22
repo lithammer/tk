@@ -346,18 +346,31 @@ fn rewriteSections(
     allocator: Allocator,
     sections: []const Section,
     result: ScriptResult,
+    work_path: []const u8,
 ) ![]u8 {
     const new_exit = try std.fmt.allocPrint(allocator, "{d}\n", .{result.final_exit});
     defer allocator.free(new_exit);
+
+    // Route the captured streams through the same normaliser the compare
+    // path uses so `TK_UPDATE=1` produces fixtures that match the convention
+    // checked at read time: the absolute work directory is substituted with
+    // `$WORK` and Windows native `\` separators inside `$WORK\…` spans are
+    // rewritten to `/`. Without this, a Windows developer running
+    // `TK_UPDATE=1` would commit a fixture full of host-specific absolute
+    // paths that no other runner could match.
+    const stdout_norm = try normalizeWork(allocator, result.stdout.items, work_path);
+    defer stdout_norm.deinit(allocator);
+    const stderr_norm = try normalizeWork(allocator, result.stderr.items, work_path);
+    defer stderr_norm.deinit(allocator);
 
     var new_sections: std.ArrayList(Section) = .empty;
     defer new_sections.deinit(allocator);
 
     for (sections) |sec| {
         const body = if (std.mem.eql(u8, sec.name, txtar.section_expected_stdout))
-            result.stdout.items
+            stdout_norm.text
         else if (std.mem.eql(u8, sec.name, txtar.section_expected_stderr))
-            result.stderr.items
+            stderr_norm.text
         else if (std.mem.eql(u8, sec.name, txtar.section_expected_exit))
             new_exit
         else
@@ -559,7 +572,7 @@ pub fn runScenarioWith(
     if (opts.keep_work) std.debug.print("WORK={s}\n", .{staged.work_path});
 
     if (opts.update) {
-        const rewritten = try rewriteSections(allocator, staged.sections, staged.result);
+        const rewritten = try rewriteSections(allocator, staged.sections, staged.result, staged.work_path);
         defer allocator.free(rewritten);
 
         const path = fixture_path orelse {
@@ -579,7 +592,7 @@ pub fn runScenarioWith(
 pub fn rewriteScenarioBytes(allocator: Allocator, txtar_bytes: []const u8) ![]u8 {
     var staged = try stage(allocator, txtar_bytes);
     defer staged.deinit(allocator, false);
-    return rewriteSections(allocator, staged.sections, staged.result);
+    return rewriteSections(allocator, staged.sections, staged.result, staged.work_path);
 }
 
 test "tokenizer: basic words" {
@@ -868,6 +881,38 @@ test "validateInputPath: rejects parent escapes and absolute paths" {
     try std.testing.expectError(error.InvalidInputPath, validateInputPath("a/../b"));
     try validateInputPath("a/b/c");
     try validateInputPath("file.md");
+}
+
+test "rewriteSections: substitutes work_path in stdout and stderr bodies" {
+    const allocator = std.testing.allocator;
+
+    const sections = [_]Section{
+        .{ .name = "expected/stdout", .body = "old\n" },
+        .{ .name = "expected/stderr", .body = "old\n" },
+        .{ .name = "expected/exit", .body = "1\n" },
+    };
+
+    var result: ScriptResult = .{
+        .stdout = .empty,
+        .stderr = .empty,
+        .final_exit = 0,
+    };
+    defer result.deinit(allocator);
+    try result.stdout.appendSlice(allocator, "store at /tmp/abc/project/.git/tk.db\n");
+    try result.stderr.appendSlice(allocator, "wrote /tmp/abc/project/note\n");
+
+    const rewritten = try rewriteSections(allocator, &sections, result, "/tmp/abc");
+    defer allocator.free(rewritten);
+
+    const parsed = try txtar.parse(allocator, rewritten);
+    defer allocator.free(parsed);
+
+    try std.testing.expectEqualStrings("expected/stdout", parsed[0].name);
+    try std.testing.expectEqualStrings("store at $WORK/project/.git/tk.db\n", parsed[0].body);
+    try std.testing.expectEqualStrings("expected/stderr", parsed[1].name);
+    try std.testing.expectEqualStrings("wrote $WORK/project/note\n", parsed[1].body);
+    try std.testing.expectEqualStrings("expected/exit", parsed[2].name);
+    try std.testing.expectEqualStrings("0\n", parsed[2].body);
 }
 
 test "normalizeWorkSpans: rewrites only inside genuine $WORK path tokens" {
