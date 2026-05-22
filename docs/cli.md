@@ -184,15 +184,28 @@ An empty `tk list` result is exit code `0`. The default view prints
 or `No remote items.`
 
 `tk next` selects only ready Tickets, never Epics. It picks the ready Ticket
-with lowest local-only Priority, then lowest Repository Store `created_seq`,
-within the active Workspace Scope. Backend Tickets use local import order for
-this tie break, not backend-native creation time. Ticket Kind does not affect
-ordering. Selection is deterministic and does not randomize among candidates.
-Assignees are not readiness or ordering inputs; Assignee support is deferred
-and may be omitted entirely.
+with lowest Effective Priority, then lowest own Priority, then lowest
+Repository Store `created_seq`, within the active Workspace Scope. Effective
+Priority is the lowest of a candidate's own Priority and the Priorities of
+every unfinished item it transitively blocks (`blocked_by` Dependencies plus
+the Epic-membership edge from an Epic in the chain to its unfinished child
+Tickets), so a ready Ticket that gates a higher-Priority Blocked Item
+outranks lower-priority direct work. Effective Priority does not cross the
+Workspace Scope boundary. Backend Tickets use local import order for the
+`created_seq` tie break, not backend-native creation time. Ticket Kind does
+not affect ordering. Selection is deterministic and does not randomize among
+candidates. Assignees are not readiness or ordering inputs; Assignee support
+is deferred and may be omitted entirely.
 
-`tk next` does not explain skipped candidates or ranking reasons. Use `tk list
---ready`, `tk list --blocked`, or `tk show <id>` for inspection.
+`tk next` prints the selected Display ID to stdout. When the selected
+Ticket's Effective Priority is lower than its own Priority, `tk next` also
+writes a rationale line to stderr in the form
+`<id>: Effective Priority <P> (via <contributor-id>)` so the surprising pick
+is explainable without a follow-up `tk show`. Stdout stays a single Display
+ID line so `id="$(tk next)"` scripting continues to work; redirect stderr
+with `2>/dev/null` to suppress the rationale. `tk next` does not otherwise
+explain skipped candidates or ranking reasons — use `tk list --ready`,
+`tk list --blocked`, or `tk show <id>` for inspection.
 
 `tk next` does not filter by Origin. Local Tickets and Backend Tickets compete
 in the same ready-work ordering.

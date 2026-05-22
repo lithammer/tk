@@ -113,7 +113,7 @@ tk add --priority P1 -F -               # creates a higher-priority local Ticket
 from v1. The first paragraph becomes the title and later paragraphs become the
 body. `--bug` and `--epic` are mutually exclusive. `Epic` is not a Ticket Kind.
 
-`tk next` selects the ready Ticket with the lowest local-only Priority, then oldest creation order, within the active Workspace Scope. It does not select Epics. The default Priority is `P2`.
+`tk next` selects the ready Ticket with the lowest Effective Priority, then lowest own Priority, then oldest creation order, within the active Workspace Scope. Effective Priority lifts a ready Ticket above its own Priority when it transitively blocks a higher-Priority Ticket, so a P3 chore that gates a P1 outranks an unrelated P2. The pick prints to stdout; when Effective Priority is lower than own Priority, a `<id>: Effective Priority <P> (via <id>)` rationale prints to stderr so `id="$(tk next)"` scripting stays clean. `tk next` does not select Epics. The default Priority is `P2`.
 
 Priority is set with `tk add --priority P0..P4` or `tk update <id> --priority P0..P4`; v1 does not have a top-level priority command.
 
