@@ -116,7 +116,7 @@ fn getEnvFlag(comptime name: []const u8) bool {
     // Zig 0.16.0's `Environ.getPosix` does not compile on Windows because
     // `Environ.Block` resolves to `GlobalBlock`, which has no `view` method.
     // Mirror the OS dispatch used by `Environ.containsUnemptyConstant`.
-    if (builtin.os.tag == .windows) {
+    if (comptime builtin.os.tag == .windows) {
         const name_w = comptime std.unicode.wtf8ToWtf16LeStringLiteral(name);
         const one_w = comptime std.unicode.wtf8ToWtf16LeStringLiteral("1");
         const val = std.testing.environ.getWindows(name_w) orelse return false;
@@ -378,40 +378,33 @@ const NormalizedText = struct {
 };
 
 fn normalizeWork(allocator: Allocator, text: []const u8, work_path: []const u8) !NormalizedText {
-    // On Windows, `realPathFileAlloc` returns the work path with `\`
-    // separators, while `git rev-parse --git-common-dir` emits the same path
-    // with `/`. `std.fs.path.join` then mixes `\` into the joined suffix. The
-    // literal `replaceOwned` below would miss the work-path prefix and the
-    // suffix would still leak native separators. Normalize all separators to
-    // `/` so txtar golden fixtures can stay portable across host OSes.
-    //
-    // Caveat: this rewrites every `\` in actual output, not just the ones
-    // inside path tokens. Scenarios whose expected output legitimately
-    // contains non-path backslashes (e.g. troff escapes from `tk manpage`)
-    // must skip themselves on Windows; see `scenarios.zig:test "manpage/basic"`.
-    if (builtin.os.tag == .windows) {
-        const text_fwd = try allocator.dupe(u8, text);
-        errdefer allocator.free(text_fwd);
-        std.mem.replaceScalar(u8, text_fwd, '\\', '/');
-
-        const work_fwd = try allocator.dupe(u8, work_path);
-        defer allocator.free(work_fwd);
-        std.mem.replaceScalar(u8, work_fwd, '\\', '/');
-
-        if (std.mem.indexOf(u8, text_fwd, work_fwd) == null) {
-            return .{ .text = text_fwd, .owned = true };
-        }
-        const replaced = try std.mem.replaceOwned(u8, allocator, text_fwd, work_fwd, "$WORK");
-        allocator.free(text_fwd);
-        return .{ .text = replaced, .owned = true };
-    }
     if (std.mem.indexOf(u8, text, work_path) == null) {
         return .{ .text = text, .owned = false };
     }
-    return .{
-        .text = try std.mem.replaceOwned(u8, allocator, text, work_path, "$WORK"),
-        .owned = true,
-    };
+    const owned = try std.mem.replaceOwned(u8, allocator, text, work_path, "$WORK");
+    // On Windows the substituted path still uses native `\` separators
+    // (Git's `/` output is normalized to native at the discovery boundary,
+    // and `std.fs.path.join` already emits native). txtar fixtures use `/`
+    // as the canonical work-relative separator, so bridge the convention
+    // gap here -- but only inside `$WORK`-prefixed spans, to avoid
+    // mangling legitimate backslashes elsewhere in the stream (e.g. troff
+    // escapes printed by `tk manpage`).
+    if (comptime builtin.os.tag == .windows) normalizeWorkSpans(owned);
+    return .{ .text = owned, .owned = true };
+}
+
+/// Rewrite `\` to `/` inside each `$WORK`-prefixed path token up to the
+/// next whitespace. Mutates the buffer in place.
+fn normalizeWorkSpans(buf: []u8) void {
+    const marker = "$WORK";
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, buf, i, marker)) |hit| {
+        var j = hit + marker.len;
+        while (j < buf.len and !std.ascii.isWhitespace(buf[j])) : (j += 1) {
+            if (buf[j] == '\\') buf[j] = '/';
+        }
+        i = j;
+    }
 }
 
 fn printMismatch(label: []const u8, expected: []const u8, actual: []const u8) void {
