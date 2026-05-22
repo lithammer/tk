@@ -391,6 +391,12 @@ const NormalizedText = struct {
 };
 
 fn normalizeWork(allocator: Allocator, text: []const u8, work_path: []const u8) !NormalizedText {
+    // `std.mem.indexOf` treats an empty needle as matched at index 0, so an
+    // empty `work_path` would slip past the guard below and into
+    // `replaceOwned`, which asserts on a zero-length needle. Real callers
+    // always pass an absolute temp directory, but a defensive early return
+    // makes the contract explicit and survives a refactored caller.
+    if (work_path.len == 0) return .{ .text = text, .owned = false };
     if (std.mem.indexOf(u8, text, work_path) == null) {
         return .{ .text = text, .owned = false };
     }
@@ -881,6 +887,15 @@ test "validateInputPath: rejects parent escapes and absolute paths" {
     try std.testing.expectError(error.InvalidInputPath, validateInputPath("a/../b"));
     try validateInputPath("a/b/c");
     try validateInputPath("file.md");
+}
+
+test "normalizeWork: empty work_path returns the input untouched" {
+    const allocator = std.testing.allocator;
+    const text = "no substitution should happen here";
+    const result = try normalizeWork(allocator, text, "");
+    defer result.deinit(allocator);
+    try std.testing.expectEqualStrings(text, result.text);
+    try std.testing.expect(!result.owned);
 }
 
 test "rewriteSections: substitutes work_path in stdout and stderr bodies" {
