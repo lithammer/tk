@@ -223,6 +223,7 @@ fn writeHelp(deps: cli.Deps) !void {
 
 const Harness = @import("../testing/test_cli.zig").Harness;
 const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+const platform = @import("../testing/platform.zig");
 
 test "init: returns exit 1 with diagnostic when not in a git repo" {
     var h = Harness.init(std.testing.allocator, &.{});
@@ -300,7 +301,12 @@ test "init: success creates store, applies migration, seeds prefix" {
 }
 
 test "init: only tightens permissions on directories it created" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    // POSIX-only: this test asserts `0700` directory mode bits and that
+    // `setDirMode0700` no-ops when the directory already exists with broader
+    // permissions. Windows uses ACLs, not POSIX mode bits, so
+    // `setFilePermissions(0o700)` has no meaningful semantics there and the
+    // mode-bit assertion below would not be reproducible.
+    try platform.skipOnWindows();
 
     const gpa = std.testing.allocator;
 

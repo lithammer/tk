@@ -1,5 +1,6 @@
 const std = @import("std");
 const embed = @import("../embed.zig");
+const platform = @import("platform.zig");
 const script = @import("script.zig");
 
 const prime_basic_path = "src/testing/scenarios/prime/basic.txtar";
@@ -64,7 +65,7 @@ test "manpage/basic" {
     // rewrite to forward slashes, producing a spurious mismatch. Windows has
     // no `man` pager and the embedded manpage bytes are identical across
     // platforms, so POSIX coverage is sufficient.
-    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    try platform.skipOnWindows();
     try script.runScenario(std.testing.allocator, manpage_basic_path, manpage_basic);
 }
 
