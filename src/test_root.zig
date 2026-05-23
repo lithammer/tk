@@ -10,12 +10,15 @@ test {
     _ = @import("commands/message.zig");
     _ = @import("commands/next.zig");
     _ = @import("commands/prime.zig");
+    _ = @import("http/client.zig");
+    _ = @import("http/fake.zig");
     _ = @import("proc/runner.zig");
     _ = @import("proc/fake.zig");
     _ = @import("remote/adapter.zig");
     _ = @import("remote/factory.zig");
     _ = @import("remote/fake.zig");
     _ = @import("commands/remote.zig");
+    _ = @import("commands/self_update.zig");
     _ = @import("commands/sync.zig");
     _ = @import("domain/backend_item_snapshot.zig");
     _ = @import("domain/display_prefix.zig");

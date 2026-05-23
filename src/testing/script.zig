@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 
 const cli = @import("../cli.zig");
 const platform = @import("../platform.zig");
+const fake_http = @import("../http/fake.zig");
 const proc = @import("../proc/runner.zig");
 const clock_mod = @import("../clock.zig");
 const txtar = @import("txtar.zig");
@@ -222,6 +223,11 @@ fn executeScript(
     // mixing a real subprocess runner with a fake clock will bite the moment
     // a tk init / tk worktree scenario lands.
     var real_runner = proc.RealRunner.init(std.testing.io);
+    // Scenarios don't call HTTP today; an unmatched URL panics, mirroring
+    // the strict `fake_runner` stance. Scenarios that need to exercise
+    // `tk self-update` will register URL expectations before the call.
+    var fake_http_client = fake_http.FakeHttpClient.init(allocator);
+    defer fake_http_client.deinit();
     var fake_clock = clock_mod.FakeClock.init(0);
     var prng = std.Random.DefaultPrng.init(0);
     var pending_stdin: ?[]u8 = null;
@@ -317,6 +323,7 @@ fn executeScript(
             .io = std.testing.io,
             .cwd = active_cwd,
             .runner = real_runner.runner(),
+            .http = fake_http_client.http(),
             .clock = fake_clock.clock(),
             .random = prng.random(),
             .styler = .{ .stdout = .no_color, .stderr = .no_color },
@@ -733,7 +740,7 @@ test "TK_UPDATE preserves section order" {
     var found_stdout = false;
     for (sections_after) |sec| {
         if (std.mem.eql(u8, sec.name, "expected/stdout")) {
-            try std.testing.expectEqualStrings("v0.0.1\n", sec.body);
+            try std.testing.expectEqualStrings("dev (dev)\n", sec.body);
             found_stdout = true;
         }
     }
@@ -765,7 +772,7 @@ test "runScenario: detects exit-code mismatch" {
         \\-- script --
         \\tk --version
         \\-- expected/stdout --
-        \\v0.0.1
+        \\dev (dev)
         \\-- expected/stderr --
         \\
         \\-- expected/exit --
@@ -869,8 +876,8 @@ test "runScenario: stdin stdout is consumed by the next tk command" {
         \\tk --version
         \\
         \\-- expected/stdout --
-        \\v0.0.1
-        \\v0.0.1
+        \\dev (dev)
+        \\dev (dev)
         \\-- expected/stderr --
         \\-- expected/exit --
         \\0

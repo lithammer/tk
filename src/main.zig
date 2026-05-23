@@ -1,8 +1,15 @@
 const std = @import("std");
+const build_options = @import("build_options");
 const cli = @import("cli.zig");
+const http_mod = @import("http/client.zig");
 const proc = @import("proc/runner.zig");
 const clock_mod = @import("clock.zig");
 const render = @import("render/styler.zig");
+
+/// User-Agent string sent on every HTTP request the real client makes.
+/// Encodes the binary's embedded version and triple so GitHub server logs
+/// identify the client and which release is fetching.
+const user_agent = "tk/" ++ build_options.version ++ " (" ++ build_options.triple ++ ")";
 
 /// Process entrypoint for `tk`.
 ///
@@ -19,6 +26,8 @@ pub fn main(init: std.process.Init) !void {
     var stdin = std.Io.File.stdin().reader(io, &stdin_buf);
 
     var real_runner = proc.RealRunner.init(io);
+    var real_http = http_mod.RealHttp.init(init.gpa, io, user_agent);
+    defer real_http.deinit();
     var real_clock = clock_mod.RealClock.init(io);
     var random_source = std.Random.IoSource{ .io = io };
 
@@ -35,6 +44,7 @@ pub fn main(init: std.process.Init) !void {
         .io = io,
         .cwd = std.Io.Dir.cwd(),
         .runner = real_runner.runner(),
+        .http = real_http.http(),
         .clock = real_clock.clock(),
         .random = random_source.interface(),
         .styler = .{ .stdout = stdout_mode, .stderr = stderr_mode },

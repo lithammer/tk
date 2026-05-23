@@ -80,6 +80,14 @@ Exit codes returned by command dispatch:
 - `2` usage error
 - `3` unexpected internal error caught at the process boundary
 
+Query subcommands may overload `0` and `1` as a yes/no result code in the
+style of `diff -q` or `grep -q` — for example, `tk self-update --check`
+exits `1` to mean "newer release available", not "command failed". Real
+failures from these subcommands still surface on stderr; scripts that need
+to distinguish "newer" from "broken" check whether stderr is empty. Each
+such command spells the convention out in its own help text and in
+`docs/cli.md`.
+
 ## Repository Store Contracts
 
 The Repository Store is SQLite, per ADRs

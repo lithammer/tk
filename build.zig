@@ -74,6 +74,23 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Version and triple are embedded into `build_options` so the running
+    // binary can identify itself for `tk --version` and gate `tk self-update`
+    // on the difference between release builds and local `zig build` runs.
+    // Non-release builds default both to "dev"; the release workflow passes
+    // `-Drelease-version=<tag>` and the release loop overrides triple per
+    // target. See ADR 0011 and ADR 0013.
+    const release_version = b.option(
+        []const u8,
+        "release-version",
+        "Version string embedded in build_options.version (defaults to \"dev\")",
+    ) orelse "dev";
+    const release_triple = b.option(
+        []const u8,
+        "release-triple",
+        "Triple string embedded in build_options.triple for non-release exes (defaults to \"dev\"; the release loop overrides per target)",
+    ) orelse "dev";
+
     const clap = b.dependency("clap", .{
         .target = target,
         .optimize = optimize,
@@ -104,6 +121,11 @@ pub fn build(b: *std.Build) void {
     // `@embedFile("manpage_data")`.
     root_mod.addAnonymousImport("manpage_data", .{ .root_source_file = b.path("man/tk.1") });
 
+    const exe_options = b.addOptions();
+    exe_options.addOption([]const u8, "version", release_version);
+    exe_options.addOption([]const u8, "triple", release_triple);
+    root_mod.addOptions("build_options", exe_options);
+
     const exe = b.addExecutable(.{
         .name = "tk",
         .root_module = root_mod,
@@ -129,6 +151,8 @@ pub fn build(b: *std.Build) void {
     test_mod.addAnonymousImport("manpage_data", .{ .root_source_file = b.path("man/tk.1") });
 
     const test_options = b.addOptions();
+    test_options.addOption([]const u8, "version", release_version);
+    test_options.addOption([]const u8, "triple", release_triple);
     test_options.addOptionPath("tk_exe_path", exe.getEmittedBin());
     test_mod.addOptions("build_options", test_options);
 
@@ -157,11 +181,6 @@ pub fn build(b: *std.Build) void {
     // under `zig-out/release/<triple>/tk[.exe]` so the release workflow can
     // upload one artifact per row. See ADR 0011 for the strategy.
     const release_step = b.step("release", "Cross-compile tk for all release triples");
-    const release_version = b.option(
-        []const u8,
-        "release-version",
-        "Version string embedded in release binaries (defaults to \"dev\")",
-    ) orelse "dev";
 
     for (release_targets) |rt| {
         const rt_target = b.resolveTargetQuery(rt.query);
@@ -179,6 +198,7 @@ pub fn build(b: *std.Build) void {
 
         const rt_options = b.addOptions();
         rt_options.addOption([]const u8, "version", release_version);
+        rt_options.addOption([]const u8, "triple", rt.triple);
 
         const rt_mod = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),

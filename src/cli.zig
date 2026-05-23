@@ -1,7 +1,9 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+const build_options = @import("build_options");
 const clap = @import("clap");
+const http_mod = @import("http/client.zig");
 const proc = @import("proc/runner.zig");
 const clock_mod = @import("clock.zig");
 const render = @import("render/styler.zig");
@@ -32,6 +34,10 @@ pub const Deps = struct {
     /// Captured-output subprocess runner. Real impl wraps `std.process.run`;
     /// tests inject a `FakeRunner`.
     runner: proc.Runner,
+    /// Type-erased HTTP client. Real impl wraps `std.http.Client.fetch`;
+    /// tests inject a `FakeHttpClient` from `http/fake.zig`. Used by
+    /// `tk self-update`; see ADR 0013 for the trust-root rationale.
+    http: http_mod.Http,
     /// UTC millisecond clock. Tests inject a `FakeClock` so timestamps stay
     /// deterministic.
     clock: clock_mod.Clock,
@@ -86,6 +92,7 @@ const all_commands = .{
     @import("commands/update.zig"),
     @import("commands/worktree.zig"),
     @import("commands/remote.zig"),
+    @import("commands/self_update.zig"),
     @import("commands/sync.zig"),
 };
 
@@ -119,8 +126,6 @@ pub const SubCommand = blk: {
     }
     break :blk @Enum(Tag, .exhaustive, &names, &values);
 };
-
-const VERSION = "v0.0.1";
 
 /// Parsed `--color` flag value. `null` means the flag was omitted, which
 /// resolves to whatever `Mode.detect` returned (i.e. the env/TTY decision).
@@ -179,7 +184,7 @@ pub fn runArgv(deps: Deps, args_iter: anytype) !u8 {
         return 0;
     }
     if (res.args.version != 0) {
-        deps.stdout.print(VERSION ++ "\n", .{}) catch {};
+        deps.stdout.print("{s} ({s})\n", .{ build_options.version, build_options.triple }) catch {};
         return 0;
     }
 
@@ -367,13 +372,16 @@ test "runArgv returns 2 on missing subcommand" {
     try std.testing.expect(h.stderr().len > 0);
 }
 
-test "runArgv prints version" {
+test "runArgv prints version with embedded triple" {
     var h = Harness.init(std.testing.allocator, &.{"--version"});
     defer h.deinit();
 
     const code = try runArgv(h.deps(), &h.iter);
     try std.testing.expectEqual(@as(u8, 0), code);
-    try std.testing.expectEqualStrings("v0.0.1\n", h.stdout());
+    // The test binary's build_options defaults both fields to "dev".
+    // Release builds override per-target via `-Drelease-version` and the
+    // release-loop's hardcoded triple; cli renders `<version> (<triple>)`.
+    try std.testing.expectEqualStrings("dev (dev)\n", h.stdout());
     try std.testing.expectEqualStrings("", h.stderr());
 }
 

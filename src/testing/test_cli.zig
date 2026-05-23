@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const cli = @import("../cli.zig");
+const fake_http = @import("../http/fake.zig");
 const fake_proc = @import("../proc/fake.zig");
 const clock_mod = @import("../clock.zig");
 const render = @import("../render/styler.zig");
@@ -30,6 +31,10 @@ pub const Harness = struct {
     gpa: Allocator,
     /// Strict fake subprocess runner used by default.
     fake_runner: fake_proc.FakeRunner,
+    /// Strict fake HTTP client used by default. Tests register scripted
+    /// responses via `harness.fake_http.expect(url, ...)` before calling
+    /// the command. An unmatched URL panics, mirroring `fake_runner`.
+    fake_http: fake_http.FakeHttpClient,
     /// Deterministic clock used by default.
     fake_clock: clock_mod.FakeClock,
     /// Deterministic PRNG used for opaque internal IDs in command tests.
@@ -70,6 +75,7 @@ pub const Harness = struct {
             .iter = .{ .items = args },
             .gpa = allocator,
             .fake_runner = fake_proc.FakeRunner.init(allocator),
+            .fake_http = fake_http.FakeHttpClient.init(allocator),
             .fake_clock = clock_mod.FakeClock.init(default_fake_now_ms),
             .prng = std.Random.DefaultPrng.init(0),
             .cwd_override = opts.cwd,
@@ -83,6 +89,7 @@ pub const Harness = struct {
         self.stdout_buf.deinit();
         self.stderr_buf.deinit();
         self.fake_runner.deinit();
+        self.fake_http.deinit();
     }
 
     /// Build the `cli.Deps` value to pass into a command under test.
@@ -95,6 +102,7 @@ pub const Harness = struct {
             .io = std.testing.io,
             .cwd = self.cwd_override orelse std.Io.Dir.cwd(),
             .runner = self.fake_runner.runner(),
+            .http = self.fake_http.http(),
             .clock = self.fake_clock.clock(),
             .random = self.prng.random(),
             .styler = .{ .stdout = self.stdout_mode, .stderr = self.stderr_mode },

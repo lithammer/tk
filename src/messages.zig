@@ -845,3 +845,58 @@ pub const manpage_install_exe_resolve_failure_prefix = "tk manpage: install fail
 /// Stderr line printed when `tk manpage --install` runs on Windows. Callers
 /// append a trailing newline, matching the rest of the file's convention.
 pub const manpage_skip_windows = "tk manpage: skipping install on Windows";
+
+// `tk self-update` — binary replacement against GitHub Releases.
+
+/// Stderr line printed when `tk self-update` or `tk self-update --check`
+/// runs on a development build (`build_options.triple == "dev"`). Refusal
+/// is symmetric across both invocations because a dev build has no
+/// canonical upstream tag to compare against. See ADR 0013 and tk-32.
+pub const self_update_dev_build = "tk self-update: development builds cannot self-update; install a release via the curl|bash script in README.md";
+
+/// Stdout prefix for `tk self-update --check` when the embedded version
+/// equals the latest published tag. Callers append the tag followed by a
+/// newline.
+pub const self_update_check_up_to_date_prefix = "tk self-update: already on latest release ";
+
+/// Stdout prefix for `tk self-update --check` when a strictly newer release
+/// is available. Callers append `<latest> (current: <embedded>)\n`.
+pub const self_update_check_newer_available_prefix = "tk self-update: newer release available: ";
+
+/// Stdout prefix for `tk self-update --check` when the local embedded version
+/// is strictly newer than the latest published tag. Callers append the rest
+/// of the diagnostic; exit code is 0 because there is nothing to do.
+pub const self_update_check_ahead_prefix = "tk self-update: local build ";
+
+/// Stderr prefix for an API-query transport-layer failure (TCP connect or
+/// DNS issue surfaced as `http.Error.NetworkError`). Callers append a
+/// trailing newline.
+pub const self_update_query_network = "tk self-update: failed to query GitHub Releases API: network error";
+
+/// Stderr prefix for an API-query TLS-layer failure. Callers append a
+/// trailing newline.
+pub const self_update_query_tls = "tk self-update: failed to query GitHub Releases API: TLS handshake failed";
+
+/// Stderr prefix when the API returns a non-2xx HTTP status. Callers append
+/// the status code (e.g. `503`) followed by a trailing newline.
+pub const self_update_query_http_status_prefix = "tk self-update: GitHub Releases API returned HTTP ";
+
+/// Stderr prefix when the API body cannot be parsed as JSON. Callers append
+/// a trailing newline. Body is not echoed because GitHub's error pages can
+/// be large and the parsed-fields contract is internal.
+pub const self_update_query_malformed = "tk self-update: GitHub Releases API returned an unparseable response";
+
+/// Stderr line when the API response parsed but tag_name was empty or
+/// absent. Callers append a trailing newline.
+pub const self_update_query_missing_tag = "tk self-update: GitHub Releases API response did not include a tag_name";
+
+/// Stderr prefix when the embedded version cannot be parsed as semver.
+/// Callers append the offending string and a newline. Should be impossible
+/// in practice because the release workflow controls the value; loud
+/// failure surfaces the misconfiguration.
+pub const self_update_embedded_unparseable_prefix = "tk self-update: embedded version is not valid semver: ";
+
+/// Stderr prefix when the latest tag cannot be parsed as semver. Callers
+/// append the offending string and a newline. Could happen if the project
+/// publishes a non-`vX.Y.Z` release tag in the future.
+pub const self_update_latest_unparseable_prefix = "tk self-update: latest release tag is not valid semver: ";
