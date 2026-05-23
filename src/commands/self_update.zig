@@ -497,6 +497,13 @@ pub fn cleanupStaleExe(io: std.Io) void {
 
 /// Variant of `cleanupStaleExe` that takes the exe path explicitly so
 /// tests can run against a tmpdir without `std.process.executablePath`.
+///
+/// The literal `tk.exe.old` matches the file `commitInstall` produces
+/// when the canonical Windows binary is `tk.exe`. If a user renames the
+/// shipped binary (rare; not part of the supported install paths),
+/// `commitInstall` will produce `<their-name>.old` and this cleanup
+/// helper will not find it. That mismatch is intentional — the literal
+/// `tk.exe.old` is the cross-launch contract.
 fn cleanupStaleExeAt(io: std.Io, exe_path: []const u8) void {
     const exe_dir = std.fs.path.dirname(exe_path) orelse return;
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -840,6 +847,52 @@ test "self-update full: manpage subprocess failure warns but preserves binary sw
     // Manpage-failure warning surfaced on stderr with the retry hint.
     try std.testing.expect(std.mem.indexOf(u8, h.stderr(), messages.self_update_manpage_failure_prefix) != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "exit 1") != null);
+}
+
+test "self-update full: AccessDenied at stage create fast-fails before download" {
+    try platform.skipOnWindows();
+    const gpa = std.testing.allocator;
+
+    var h = Harness.init(gpa, &.{});
+    defer h.deinit();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Use a subdirectory so cleanup can restore writable perms before
+    // `tmp.cleanup()` runs and we don't deadlock the outer dir.
+    try tmp.dir.createDirPath(std.testing.io, "ro");
+    var ro_dir = try tmp.dir.openDir(std.testing.io, "ro", .{});
+    defer ro_dir.close(std.testing.io);
+
+    const ro_path = try tmp.dir.realPathFileAlloc(std.testing.io, "ro", gpa);
+    defer gpa.free(ro_path);
+
+    // Make the subdir read-only. `defer` runs LIFO so the chmod-back
+    // executes before `tmp.cleanup()` and the tree can be torn down.
+    try tmp.dir.setFilePermissions(
+        std.testing.io,
+        "ro",
+        std.Io.File.Permissions.fromMode(0o555),
+        .{},
+    );
+    defer tmp.dir.setFilePermissions(
+        std.testing.io,
+        "ro",
+        std.Io.File.Permissions.fromMode(0o755),
+        .{},
+    ) catch {};
+
+    // No HTTP expectation registered — the test verifies that the
+    // AccessDenied path fast-fails before any network traffic. An
+    // unexpected http call would panic via FakeHttpClient's strict
+    // mode.
+    const code = try performUpdate(h.deps(), ro_path, "tk", "x86_64-linux-musl", "v0.6.0");
+    try std.testing.expectEqual(@as(u8, 1), code);
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), messages.self_update_no_write_access_prefix) != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "permission denied") != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), ro_path) != null);
+    try std.testing.expectEqualStrings("", h.stdout());
 }
 
 test "self-update full: asset 404 renders unified missing-asset diagnostic" {
