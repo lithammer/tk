@@ -2,9 +2,11 @@ const std = @import("std");
 const build_options = @import("build_options");
 const cli = @import("cli.zig");
 const http_mod = @import("http/client.zig");
+const platform = @import("platform.zig");
 const proc = @import("proc/runner.zig");
 const clock_mod = @import("clock.zig");
 const render = @import("render/styler.zig");
+const self_update = @import("commands/self_update.zig");
 
 /// User-Agent string sent on every HTTP request the real client makes.
 /// Encodes the binary's embedded version and triple so GitHub server logs
@@ -18,6 +20,12 @@ const user_agent = "tk/" ++ build_options.version ++ " (" ++ build_options.tripl
 /// so command behavior stays testable without spawning a process.
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
+
+    // Best-effort cleanup of a stale `tk.exe.old` left behind by a
+    // previous Windows self-update. POSIX builds inline-eliminate this
+    // call because `platform.is_windows` is comptime-false there.
+    if (platform.is_windows) self_update.cleanupStaleExe(io);
+
     var stdout_buf: [4096]u8 = undefined;
     var stderr_buf: [1024]u8 = undefined;
     var stdin_buf: [4096]u8 = undefined;

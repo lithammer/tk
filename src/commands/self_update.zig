@@ -11,6 +11,7 @@ const build_options = @import("build_options");
 const clap = @import("clap");
 const cli = @import("../cli.zig");
 const messages = @import("../messages.zig");
+const platform = @import("../platform.zig");
 const parse_diagnostic = @import("parse_diagnostic.zig");
 
 /// Triple-string sentinel value embedded in non-release builds. The dev
@@ -24,6 +25,20 @@ pub const dev_triple = "dev";
 /// embedded triple and fetched via the stable
 /// `releases/latest/download/<asset>` redirect.
 pub const api_url = "https://api.github.com/repos/lithammer/tk/releases/latest";
+
+/// Browser-facing base URL for a release tag. Used both to construct the
+/// asset download URL (`<base>/latest/download/<asset>`) and the manual-
+/// install diagnostic when an asset is 404 (`<base>/tag/<tag>`).
+pub const releases_base_url = "https://github.com/lithammer/tk/releases";
+
+/// Stage-file prefix used inside the exe directory. Hidden-dot keeps the
+/// staged binary out of `ls` output, mirroring `commands/manpage.zig`'s
+/// `.tk.1.tmp.` convention. The hex suffix is 64 random bits via
+/// `deps.random`.
+pub const stage_name_prefix = ".tk.tmp.";
+
+/// Stage-name buffer size: prefix + 16 hex characters.
+const stage_name_buf_size = stage_name_prefix.len + 16;
 
 /// Dispatcher metadata for `tk self-update`.
 pub const meta: cli.CommandMeta = .{
@@ -87,11 +102,18 @@ fn runWith(
                 renderVersionParseFailure(deps, err, embedded_version, tag);
                 return 1;
             };
+
+            // `--check` is purely a query: render the comparison result
+            // and exit per the query-subcommand 0/1 convention.
             if (check_only) return renderCheckResult(deps, cmp, embedded_version, tag);
 
-            // Slice E and beyond: stage / download / smoke / rename.
-            deps.stderr.writeAll("tk self-update: full update flow not yet implemented\n") catch {};
-            return 1;
+            // Non-`--check`: `.up_to_date` and `.ahead` still print the
+            // diagnostic and exit 0; only `.newer_available` triggers the
+            // download / smoke / rename flow.
+            switch (cmp) {
+                .up_to_date, .ahead => return renderCheckResult(deps, cmp, embedded_version, tag),
+                .newer_available => return performFullUpdate(deps, embedded_triple, tag),
+            }
         },
         .network_error => {
             deps.stderr.writeAll(messages.self_update_query_network ++ "\n") catch {};
@@ -219,6 +241,294 @@ fn renderCheckResult(
             return 0;
         },
     }
+}
+
+/// Resolve the running binary's path via `std.process.executablePath`,
+/// split into directory + basename, and dispatch to `performUpdate`.
+///
+/// This is the only thin layer that's hard to unit-test: tests call
+/// `performUpdate` directly with a tmpdir as the target. The exe-path
+/// resolution itself is exercised by integration through the real
+/// binary in smoke / scenario tests.
+fn performFullUpdate(deps: cli.Deps, embedded_triple: []const u8, latest_tag: []const u8) !u8 {
+    var exe_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const exe_len = std.process.executablePath(deps.io, &exe_buf) catch |err| {
+        deps.stderr.print(messages.self_update_exe_resolve_failure_prefix ++ "{s}\n", .{@errorName(err)}) catch {};
+        return 1;
+    };
+    const exe_path = exe_buf[0..exe_len];
+    const target_dir_path = std.fs.path.dirname(exe_path) orelse {
+        deps.stderr.writeAll(messages.self_update_exe_resolve_failure_prefix ++ "no parent directory\n") catch {};
+        return 1;
+    };
+    const target_name = std.fs.path.basename(exe_path);
+    return performUpdate(deps, target_dir_path, target_name, embedded_triple, latest_tag);
+}
+
+/// Stage → download → smoke → atomic rename. Pure of `executablePath` so
+/// tests can pass a tmpdir as `target_dir_path` and exercise the full
+/// pipeline without relying on the running test-binary's location.
+///
+/// On POSIX, the rename is atomic and the running inode stays alive
+/// through the swap. On Windows (Slice G) the same flow is followed
+/// through smoke, then a rename-self pattern takes over.
+fn performUpdate(
+    deps: cli.Deps,
+    target_dir_path: []const u8,
+    target_name: []const u8,
+    embedded_triple: []const u8,
+    latest_tag: []const u8,
+) !u8 {
+    // Compute the stage and target paths up-front so error messages
+    // can name the would-be target.
+    var stage_name_buf: [stage_name_buf_size]u8 = undefined;
+    const stage_name = renderStageName(&stage_name_buf, deps.random);
+
+    const target_path = try std.fs.path.join(deps.gpa, &.{ target_dir_path, target_name });
+    defer deps.gpa.free(target_path);
+    const stage_path = try std.fs.path.join(deps.gpa, &.{ target_dir_path, stage_name });
+    defer deps.gpa.free(stage_path);
+
+    // Open the target directory. Failures here are not the user's
+    // permission problem; they mean the resolved exe path is bogus.
+    var target_dir = std.Io.Dir.cwd().openDir(deps.io, target_dir_path, .{}) catch |err| {
+        deps.stderr.print(messages.self_update_exe_resolve_failure_prefix ++ "{s}: {s}\n", .{ target_dir_path, @errorName(err) }) catch {};
+        return 1;
+    };
+    defer target_dir.close(deps.io);
+
+    // Stage file create is the write-access test. `executable_file`
+    // permissions (0o777 modulo umask on POSIX) let the smoke
+    // subprocess exec the staged binary directly without a follow-up
+    // chmod call. AccessDenied is the canonical "no write here" path
+    // and fast-fails before any network traffic.
+    var stage_file = target_dir.createFile(deps.io, stage_name, .{
+        .exclusive = true,
+        .permissions = .executable_file,
+    }) catch |err| switch (err) {
+        error.AccessDenied => {
+            deps.stderr.print(messages.self_update_no_write_access_prefix ++ "{s}: permission denied\n", .{target_path}) catch {};
+            return 1;
+        },
+        else => {
+            deps.stderr.print(messages.self_update_stage_failure_prefix ++ "{s}: {s}\n", .{ stage_path, @errorName(err) }) catch {};
+            return 1;
+        },
+    };
+
+    // Build the asset URL from the embedded triple. `.exe` is appended
+    // for Windows triples so Windows users download a runnable file.
+    const asset_name = try buildAssetName(deps.gpa, embedded_triple);
+    defer deps.gpa.free(asset_name);
+    const asset_url = try std.fmt.allocPrint(
+        deps.gpa,
+        releases_base_url ++ "/latest/download/{s}",
+        .{asset_name},
+    );
+    defer deps.gpa.free(asset_url);
+
+    // Stream the download into the stage file, buffered through a
+    // small fixed-size writer. Any failure during this step deletes
+    // the stage file before returning.
+    var stage_writer_buf: [4096]u8 = undefined;
+    var stage_writer = stage_file.writer(deps.io, &stage_writer_buf);
+    const dl_status = deps.http.download(deps.gpa, asset_url, &stage_writer.interface) catch |err| {
+        stage_file.close(deps.io);
+        target_dir.deleteFile(deps.io, stage_name) catch {};
+        switch (err) {
+            error.NetworkError, error.WriteFailed, error.OutOfMemory => {
+                deps.stderr.writeAll(messages.self_update_download_network ++ "\n") catch {};
+            },
+            error.TlsError => {
+                deps.stderr.writeAll(messages.self_update_download_tls ++ "\n") catch {};
+            },
+            error.MalformedResponse => {
+                deps.stderr.writeAll(messages.self_update_download_network ++ "\n") catch {};
+            },
+        }
+        return 1;
+    };
+    stage_writer.interface.flush() catch {
+        stage_file.close(deps.io);
+        target_dir.deleteFile(deps.io, stage_name) catch {};
+        deps.stderr.writeAll(messages.self_update_download_network ++ "\n") catch {};
+        return 1;
+    };
+    stage_file.close(deps.io);
+
+    if (dl_status == 404) {
+        target_dir.deleteFile(deps.io, stage_name) catch {};
+        deps.stderr.print(
+            messages.self_update_asset_missing_prefix ++ "{s} is not in release {s}. Install manually from " ++ releases_base_url ++ "/tag/{s}\n",
+            .{ asset_name, latest_tag, latest_tag },
+        ) catch {};
+        return 1;
+    }
+    if (dl_status < 200 or dl_status >= 300) {
+        target_dir.deleteFile(deps.io, stage_name) catch {};
+        deps.stderr.print(messages.self_update_download_http_status_prefix ++ "{d}\n", .{dl_status}) catch {};
+        return 1;
+    }
+
+    // Smoke verify: run `<stage> --version`. Pass requires exit 0
+    // AND stdout containing both the tag string and the expected
+    // triple as substrings (tk-32 design notes, Q7). Substring
+    // containment (not exact match) keeps the check forward-compatible
+    // across `--version` format changes between releases.
+    const smoke_argv: []const []const u8 = &.{ stage_path, "--version" };
+    var smoke = deps.runner.run(deps.gpa, .{ .argv = smoke_argv }) catch |err| {
+        target_dir.deleteFile(deps.io, stage_name) catch {};
+        deps.stderr.print(messages.self_update_smoke_exit_prefix ++ "spawn failed ({s})\n", .{@errorName(err)}) catch {};
+        return 1;
+    };
+    defer smoke.deinit(deps.gpa);
+
+    if (smoke.exit_code != 0) {
+        target_dir.deleteFile(deps.io, stage_name) catch {};
+        deps.stderr.print(messages.self_update_smoke_exit_prefix ++ "{d}\n", .{smoke.exit_code}) catch {};
+        return 1;
+    }
+    if (std.mem.indexOf(u8, smoke.stdout, latest_tag) == null) {
+        target_dir.deleteFile(deps.io, stage_name) catch {};
+        deps.stderr.print(messages.self_update_smoke_version_mismatch_prefix ++ "{s}\n", .{latest_tag}) catch {};
+        return 1;
+    }
+    if (std.mem.indexOf(u8, smoke.stdout, embedded_triple) == null) {
+        target_dir.deleteFile(deps.io, stage_name) catch {};
+        deps.stderr.print(messages.self_update_smoke_triple_mismatch_prefix ++ "{s}\n", .{embedded_triple}) catch {};
+        return 1;
+    }
+
+    // Commit the binary swap. POSIX uses a single atomic rename within
+    // the directory; the running inode stays alive through the swap.
+    // Windows uses the rename-self pattern (target → target+".old",
+    // stage → target) because Windows forbids overwriting a running
+    // `.exe`. The `.old` file is cleaned up at next launch by
+    // `cleanupStaleExe` in main.zig.
+    commitInstall(deps, target_dir, stage_name, target_name, platform.is_windows) catch |err| {
+        target_dir.deleteFile(deps.io, stage_name) catch {};
+        deps.stderr.print(messages.self_update_rename_failure_prefix ++ "{s}\n", .{@errorName(err)}) catch {};
+        return 1;
+    };
+
+    // Binary swap committed. Print success unconditionally before the
+    // manpage step so the user sees what happened even when the
+    // follow-up manpage subprocess fails.
+    deps.stdout.print(messages.self_update_install_success_prefix ++ "{s}\n", .{latest_tag}) catch {};
+
+    // Delegate the manpage install to the newly-installed binary so the
+    // bytes from its `@embedFile` get written (matched-version docs).
+    // Failure here is warn-and-continue per tk-32 design notes:
+    // the binary swap stands; the user gets a clear stderr warning with
+    // a retry suggestion and exit 1.
+    var manpage = deps.runner.run(deps.gpa, .{
+        .argv = &.{ target_path, "manpage", "--install" },
+    }) catch |err| {
+        deps.stderr.print(messages.self_update_manpage_failure_prefix ++ "spawn failed: {s}\n", .{@errorName(err)}) catch {};
+        return 1;
+    };
+    defer manpage.deinit(deps.gpa);
+
+    if (manpage.exit_code != 0) {
+        deps.stderr.print(messages.self_update_manpage_failure_prefix ++ "exit {d}\n", .{manpage.exit_code}) catch {};
+        return 1;
+    }
+
+    return 0;
+}
+
+/// Commit a staged binary into place. On POSIX, one atomic rename does
+/// the job; the running process's inode stays alive across the swap. On
+/// Windows (`use_windows_pattern = true`), the running `.exe` cannot be
+/// overwritten directly, so a rename-self pattern is used: the current
+/// target is moved aside to `<target>.old` first, then the stage is
+/// renamed into place. A second-rename failure rolls back by renaming
+/// `.old` back to the target name. The `.old` file is cleaned up at
+/// next launch by `cleanupStaleExe`.
+///
+/// The Windows branch is exercised on POSIX by setting
+/// `use_windows_pattern = true` explicitly in tests. POSIX rename
+/// semantics happen to support the rename-self steps too, so the rename
+/// mechanics are testable without a Windows host. Actual Windows
+/// open-handle semantics still need a Windows runner.
+fn commitInstall(
+    deps: cli.Deps,
+    target_dir: std.Io.Dir,
+    stage_name: []const u8,
+    target_name: []const u8,
+    use_windows_pattern: bool,
+) !void {
+    if (!use_windows_pattern) {
+        try std.Io.Dir.rename(target_dir, stage_name, target_dir, target_name, deps.io);
+        return;
+    }
+
+    var old_name_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const old_name = try std.fmt.bufPrint(&old_name_buf, "{s}.old", .{target_name});
+
+    // Step 1: move current target aside. A missing target file is OK —
+    // first-time installs land in directories without a prior `tk.exe`,
+    // and the rename simply has nothing to move.
+    std.Io.Dir.rename(target_dir, target_name, target_dir, old_name, deps.io) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => |e| return e,
+    };
+
+    // Step 2: place new bytes at the target name. On failure, undo
+    // step 1 so the user is left with a working binary at the original
+    // path rather than a missing one.
+    std.Io.Dir.rename(target_dir, stage_name, target_dir, target_name, deps.io) catch |err| {
+        std.Io.Dir.rename(target_dir, old_name, target_dir, target_name, deps.io) catch {};
+        return err;
+    };
+}
+
+/// Best-effort cleanup of a stale `<exe-dir>/tk.exe.old` left behind by a
+/// previous Windows self-update. Called early from `main.zig` under
+/// `platform.is_windows`. Failure is silent because the file may not
+/// exist, may be held open by another process, or the user may lack
+/// permission — none of those should block a normal `tk` run. Mirrors
+/// `tk.exe.old` literal name used by `commitInstall`.
+pub fn cleanupStaleExe(io: std.Io) void {
+    var exe_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const exe_len = std.process.executablePath(io, &exe_buf) catch return;
+    cleanupStaleExeAt(io, exe_buf[0..exe_len]);
+}
+
+/// Variant of `cleanupStaleExe` that takes the exe path explicitly so
+/// tests can run against a tmpdir without `std.process.executablePath`.
+fn cleanupStaleExeAt(io: std.Io, exe_path: []const u8) void {
+    const exe_dir = std.fs.path.dirname(exe_path) orelse return;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const old_path = std.fmt.bufPrint(
+        &path_buf,
+        "{s}{c}tk.exe.old",
+        .{ exe_dir, std.fs.path.sep },
+    ) catch return;
+    std.Io.Dir.cwd().deleteFile(io, old_path) catch {};
+}
+
+/// Construct the asset basename for the running triple. `.exe` is
+/// appended for windows-gnu triples so the manual download URL matches
+/// what GitHub serves and the Windows CreateProcessW path finds the
+/// staged file by extension.
+fn buildAssetName(gpa: Allocator, triple: []const u8) ![]u8 {
+    const ext: []const u8 = if (isWindowsTriple(triple)) ".exe" else "";
+    return std.fmt.allocPrint(gpa, "tk-{s}{s}", .{ triple, ext });
+}
+
+fn isWindowsTriple(triple: []const u8) bool {
+    return std.mem.endsWith(u8, triple, "-windows-gnu");
+}
+
+/// Build the staged binary's filename: `.tk.tmp.<8-byte-hex>`. Hex suffix
+/// uses 64 random bits from `deps.random` so concurrent self-updates
+/// against the same exe directory cannot collide on a stage path.
+pub fn renderStageName(buf: *[stage_name_buf_size]u8, random: std.Random) []const u8 {
+    var rand_bytes: [8]u8 = undefined;
+    random.bytes(&rand_bytes);
+    const hex = std.fmt.bytesToHex(rand_bytes, .lower);
+    return std.fmt.bufPrint(buf, stage_name_prefix ++ "{s}", .{hex[0..]}) catch unreachable;
 }
 
 fn renderVersionParseFailure(
@@ -406,4 +716,425 @@ test "self-update --check: unparseable embedded version surfaces version" {
     try std.testing.expectEqual(@as(u8, 1), code);
     try std.testing.expect(std.mem.indexOf(u8, h.stderr(), messages.self_update_embedded_unparseable_prefix) != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "not-semver") != null);
+}
+
+// -- Slice E: POSIX full update tests --------------------------------------
+//
+// These exercise `performUpdate` directly with a tmpdir as the target
+// directory. The Harness's PRNG (`DefaultPrng.init(0)`) is mirrored at
+// the test side so we can predict the staged filename and register the
+// matching FakeRunner argv_prefix for the smoke subprocess. Each test
+// derives the same `expected_stage_name` from a freshly seeded PRNG.
+
+/// Mirror the harness's `DefaultPrng.init(0)` to compute the stage name
+/// `performUpdate` will produce. Tests use this to register the
+/// FakeRunner expectation against the predicted stage path.
+fn predictStageName(buf: *[stage_name_buf_size]u8) []const u8 {
+    var prng = std.Random.DefaultPrng.init(0);
+    return renderStageName(buf, prng.random());
+}
+
+/// Helper that wires the asset URL string from a triple + tag the same
+/// way `performUpdate` does, so tests don't drift if `releases_base_url`
+/// or the asset-name layout ever changes.
+fn predictAssetUrl(gpa: Allocator, triple: []const u8) ![]u8 {
+    const ext: []const u8 = if (isWindowsTriple(triple)) ".exe" else "";
+    return std.fmt.allocPrint(
+        gpa,
+        releases_base_url ++ "/latest/download/tk-{s}{s}",
+        .{ triple, ext },
+    );
+}
+
+test "self-update full: POSIX happy path streams asset into target" {
+    try platform.skipOnWindows();
+    const gpa = std.testing.allocator;
+
+    var h = Harness.init(gpa, &.{});
+    defer h.deinit();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const target_dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", gpa);
+    defer gpa.free(target_dir_path);
+
+    var stage_name_buf: [stage_name_buf_size]u8 = undefined;
+    const expected_stage_name = predictStageName(&stage_name_buf);
+    const expected_stage_path = try std.fs.path.join(gpa, &.{ target_dir_path, expected_stage_name });
+    defer gpa.free(expected_stage_path);
+
+    const asset_url = try predictAssetUrl(gpa, "x86_64-linux-musl");
+    defer gpa.free(asset_url);
+
+    const expected_target_path = try std.fs.path.join(gpa, &.{ target_dir_path, "tk" });
+    defer gpa.free(expected_target_path);
+
+    const new_binary_bytes = "fake-new-tk-binary-bytes-v0.6.0";
+    try h.fake_http.expect(asset_url, .{ .status = 200, .body = new_binary_bytes });
+    try h.fake_runner.expect(
+        &.{ expected_stage_path, "--version" },
+        .{ .exit_code = 0, .stdout = "v0.6.0 (x86_64-linux-musl)\n" },
+    );
+    try h.fake_runner.expect(
+        &.{ expected_target_path, "manpage", "--install" },
+        .{ .exit_code = 0, .stdout = "Installed manpage at /irrelevant/path\n" },
+    );
+
+    const code = try performUpdate(h.deps(), target_dir_path, "tk", "x86_64-linux-musl", "v0.6.0");
+    try std.testing.expectEqual(@as(u8, 0), code);
+    try std.testing.expect(std.mem.indexOf(u8, h.stdout(), messages.self_update_install_success_prefix) != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "v0.6.0") != null);
+    try std.testing.expectEqualStrings("", h.stderr());
+
+    // Stage file was renamed into place; the target now holds the
+    // downloaded bytes and no stage file is left behind.
+    const installed = try tmp.dir.readFileAlloc(std.testing.io, "tk", gpa, .unlimited);
+    defer gpa.free(installed);
+    try std.testing.expectEqualStrings(new_binary_bytes, installed);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, expected_stage_name, .{}));
+}
+
+test "self-update full: manpage subprocess failure warns but preserves binary swap" {
+    try platform.skipOnWindows();
+    const gpa = std.testing.allocator;
+
+    var h = Harness.init(gpa, &.{});
+    defer h.deinit();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const target_dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", gpa);
+    defer gpa.free(target_dir_path);
+
+    var stage_name_buf: [stage_name_buf_size]u8 = undefined;
+    const expected_stage_name = predictStageName(&stage_name_buf);
+    const expected_stage_path = try std.fs.path.join(gpa, &.{ target_dir_path, expected_stage_name });
+    defer gpa.free(expected_stage_path);
+    const expected_target_path = try std.fs.path.join(gpa, &.{ target_dir_path, "tk" });
+    defer gpa.free(expected_target_path);
+
+    const asset_url = try predictAssetUrl(gpa, "x86_64-linux-musl");
+    defer gpa.free(asset_url);
+
+    const new_binary_bytes = "fake-new-tk-binary-bytes-v0.6.0";
+    try h.fake_http.expect(asset_url, .{ .status = 200, .body = new_binary_bytes });
+    try h.fake_runner.expect(
+        &.{ expected_stage_path, "--version" },
+        .{ .exit_code = 0, .stdout = "v0.6.0 (x86_64-linux-musl)\n" },
+    );
+    try h.fake_runner.expect(
+        &.{ expected_target_path, "manpage", "--install" },
+        .{ .exit_code = 1, .stderr = "tk manpage: install failed at /some/path: ...\n" },
+    );
+
+    const code = try performUpdate(h.deps(), target_dir_path, "tk", "x86_64-linux-musl", "v0.6.0");
+    try std.testing.expectEqual(@as(u8, 1), code);
+
+    // Binary swap stood: success line on stdout, target file holds the
+    // new bytes.
+    try std.testing.expect(std.mem.indexOf(u8, h.stdout(), messages.self_update_install_success_prefix) != null);
+    const installed = try tmp.dir.readFileAlloc(std.testing.io, "tk", gpa, .unlimited);
+    defer gpa.free(installed);
+    try std.testing.expectEqualStrings(new_binary_bytes, installed);
+
+    // Manpage-failure warning surfaced on stderr with the retry hint.
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), messages.self_update_manpage_failure_prefix) != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "exit 1") != null);
+}
+
+test "self-update full: asset 404 renders unified missing-asset diagnostic" {
+    try platform.skipOnWindows();
+    const gpa = std.testing.allocator;
+
+    var h = Harness.init(gpa, &.{});
+    defer h.deinit();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const target_dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", gpa);
+    defer gpa.free(target_dir_path);
+
+    const asset_url = try predictAssetUrl(gpa, "aarch64-windows-gnu");
+    defer gpa.free(asset_url);
+    try h.fake_http.expect(asset_url, .{ .status = 404, .body = "" });
+
+    const code = try performUpdate(h.deps(), target_dir_path, "tk", "aarch64-windows-gnu", "v0.6.0");
+    try std.testing.expectEqual(@as(u8, 1), code);
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "tk-aarch64-windows-gnu.exe is not in release v0.6.0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), releases_base_url ++ "/tag/v0.6.0") != null);
+
+    // Stage file was cleaned up; the target was never created.
+    var stage_name_buf: [stage_name_buf_size]u8 = undefined;
+    const expected_stage_name = predictStageName(&stage_name_buf);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, expected_stage_name, .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "tk", .{}));
+}
+
+test "self-update full: asset HTTP 5xx surfaces status code" {
+    try platform.skipOnWindows();
+    const gpa = std.testing.allocator;
+
+    var h = Harness.init(gpa, &.{});
+    defer h.deinit();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const target_dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", gpa);
+    defer gpa.free(target_dir_path);
+
+    const asset_url = try predictAssetUrl(gpa, "x86_64-linux-musl");
+    defer gpa.free(asset_url);
+    try h.fake_http.expect(asset_url, .{ .status = 503, .body = "" });
+
+    const code = try performUpdate(h.deps(), target_dir_path, "tk", "x86_64-linux-musl", "v0.6.0");
+    try std.testing.expectEqual(@as(u8, 1), code);
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), messages.self_update_download_http_status_prefix) != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "503") != null);
+}
+
+test "self-update full: download network error cleans up stage" {
+    try platform.skipOnWindows();
+    const gpa = std.testing.allocator;
+
+    var h = Harness.init(gpa, &.{});
+    defer h.deinit();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const target_dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", gpa);
+    defer gpa.free(target_dir_path);
+
+    const asset_url = try predictAssetUrl(gpa, "x86_64-linux-musl");
+    defer gpa.free(asset_url);
+    try h.fake_http.expect(asset_url, .{ .err = error.NetworkError });
+
+    const code = try performUpdate(h.deps(), target_dir_path, "tk", "x86_64-linux-musl", "v0.6.0");
+    try std.testing.expectEqual(@as(u8, 1), code);
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), messages.self_update_download_network) != null);
+
+    var stage_name_buf: [stage_name_buf_size]u8 = undefined;
+    const expected_stage_name = predictStageName(&stage_name_buf);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, expected_stage_name, .{}));
+}
+
+test "self-update full: smoke exit-nonzero leaves target untouched" {
+    try platform.skipOnWindows();
+    const gpa = std.testing.allocator;
+
+    var h = Harness.init(gpa, &.{});
+    defer h.deinit();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const target_dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", gpa);
+    defer gpa.free(target_dir_path);
+
+    var stage_name_buf: [stage_name_buf_size]u8 = undefined;
+    const expected_stage_name = predictStageName(&stage_name_buf);
+    const expected_stage_path = try std.fs.path.join(gpa, &.{ target_dir_path, expected_stage_name });
+    defer gpa.free(expected_stage_path);
+
+    const asset_url = try predictAssetUrl(gpa, "x86_64-linux-musl");
+    defer gpa.free(asset_url);
+    try h.fake_http.expect(asset_url, .{ .status = 200, .body = "junk-bytes" });
+    try h.fake_runner.expect(
+        &.{ expected_stage_path, "--version" },
+        .{ .exit_code = 7, .stdout = "" },
+    );
+
+    const code = try performUpdate(h.deps(), target_dir_path, "tk", "x86_64-linux-musl", "v0.6.0");
+    try std.testing.expectEqual(@as(u8, 1), code);
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), messages.self_update_smoke_exit_prefix) != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "7") != null);
+
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, expected_stage_name, .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "tk", .{}));
+}
+
+test "self-update full: smoke version-mismatch leaves target untouched" {
+    try platform.skipOnWindows();
+    const gpa = std.testing.allocator;
+
+    var h = Harness.init(gpa, &.{});
+    defer h.deinit();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const target_dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", gpa);
+    defer gpa.free(target_dir_path);
+
+    var stage_name_buf: [stage_name_buf_size]u8 = undefined;
+    const expected_stage_name = predictStageName(&stage_name_buf);
+    const expected_stage_path = try std.fs.path.join(gpa, &.{ target_dir_path, expected_stage_name });
+    defer gpa.free(expected_stage_path);
+
+    const asset_url = try predictAssetUrl(gpa, "x86_64-linux-musl");
+    defer gpa.free(asset_url);
+    try h.fake_http.expect(asset_url, .{ .status = 200, .body = "bytes" });
+    try h.fake_runner.expect(
+        &.{ expected_stage_path, "--version" },
+        .{ .exit_code = 0, .stdout = "v9.9.9 (x86_64-linux-musl)\n" },
+    );
+
+    const code = try performUpdate(h.deps(), target_dir_path, "tk", "x86_64-linux-musl", "v0.6.0");
+    try std.testing.expectEqual(@as(u8, 1), code);
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), messages.self_update_smoke_version_mismatch_prefix) != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "v0.6.0") != null);
+
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "tk", .{}));
+}
+
+test "self-update full: smoke triple-mismatch leaves target untouched" {
+    try platform.skipOnWindows();
+    const gpa = std.testing.allocator;
+
+    var h = Harness.init(gpa, &.{});
+    defer h.deinit();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const target_dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", gpa);
+    defer gpa.free(target_dir_path);
+
+    var stage_name_buf: [stage_name_buf_size]u8 = undefined;
+    const expected_stage_name = predictStageName(&stage_name_buf);
+    const expected_stage_path = try std.fs.path.join(gpa, &.{ target_dir_path, expected_stage_name });
+    defer gpa.free(expected_stage_path);
+
+    const asset_url = try predictAssetUrl(gpa, "x86_64-linux-musl");
+    defer gpa.free(asset_url);
+    try h.fake_http.expect(asset_url, .{ .status = 200, .body = "bytes" });
+    try h.fake_runner.expect(
+        &.{ expected_stage_path, "--version" },
+        .{ .exit_code = 0, .stdout = "v0.6.0 (aarch64-macos)\n" },
+    );
+
+    const code = try performUpdate(h.deps(), target_dir_path, "tk", "x86_64-linux-musl", "v0.6.0");
+    try std.testing.expectEqual(@as(u8, 1), code);
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), messages.self_update_smoke_triple_mismatch_prefix) != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "x86_64-linux-musl") != null);
+
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "tk", .{}));
+}
+
+test "buildAssetName: appends .exe only for windows-gnu triples" {
+    const gpa = std.testing.allocator;
+    const cases = [_]struct { triple: []const u8, expected: []const u8 }{
+        .{ .triple = "x86_64-linux-musl", .expected = "tk-x86_64-linux-musl" },
+        .{ .triple = "aarch64-linux-musl", .expected = "tk-aarch64-linux-musl" },
+        .{ .triple = "x86_64-linux-gnu", .expected = "tk-x86_64-linux-gnu" },
+        .{ .triple = "aarch64-macos", .expected = "tk-aarch64-macos" },
+        .{ .triple = "x86_64-windows-gnu", .expected = "tk-x86_64-windows-gnu.exe" },
+        .{ .triple = "aarch64-windows-gnu", .expected = "tk-aarch64-windows-gnu.exe" },
+    };
+    for (cases) |c| {
+        const got = try buildAssetName(gpa, c.triple);
+        defer gpa.free(got);
+        try std.testing.expectEqualStrings(c.expected, got);
+    }
+}
+
+test "commitInstall: POSIX pattern atomically replaces target" {
+    const gpa = std.testing.allocator;
+    _ = gpa;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".tk.tmp.aaaa", .data = "new-bytes" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "tk", .data = "old-bytes" });
+
+    var h = Harness.init(std.testing.allocator, &.{});
+    defer h.deinit();
+
+    try commitInstall(h.deps(), tmp.dir, ".tk.tmp.aaaa", "tk", false);
+
+    const installed = try tmp.dir.readFileAlloc(std.testing.io, "tk", std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(installed);
+    try std.testing.expectEqualStrings("new-bytes", installed);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, ".tk.tmp.aaaa", .{}));
+    // POSIX pattern leaves no `.old` sidecar.
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "tk.old", .{}));
+}
+
+test "commitInstall: Windows pattern moves current to .old then places stage" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".tk.tmp.bbbb", .data = "new-bytes" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "tk.exe", .data = "old-bytes" });
+
+    var h = Harness.init(std.testing.allocator, &.{});
+    defer h.deinit();
+
+    try commitInstall(h.deps(), tmp.dir, ".tk.tmp.bbbb", "tk.exe", true);
+
+    // New bytes at target, old bytes preserved as `.old` sidecar for
+    // the next-launch cleanup hook to delete.
+    const installed = try tmp.dir.readFileAlloc(std.testing.io, "tk.exe", std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(installed);
+    try std.testing.expectEqualStrings("new-bytes", installed);
+
+    const sidecar = try tmp.dir.readFileAlloc(std.testing.io, "tk.exe.old", std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(sidecar);
+    try std.testing.expectEqualStrings("old-bytes", sidecar);
+
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, ".tk.tmp.bbbb", .{}));
+}
+
+test "commitInstall: Windows pattern tolerates absent target (first install)" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".tk.tmp.cccc", .data = "first-bytes" });
+    // No existing tk.exe at all.
+
+    var h = Harness.init(std.testing.allocator, &.{});
+    defer h.deinit();
+
+    try commitInstall(h.deps(), tmp.dir, ".tk.tmp.cccc", "tk.exe", true);
+
+    const installed = try tmp.dir.readFileAlloc(std.testing.io, "tk.exe", std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(installed);
+    try std.testing.expectEqualStrings("first-bytes", installed);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "tk.exe.old", .{}));
+}
+
+test "cleanupStaleExeAt: deletes a stale .old file next to the exe" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "tk.exe.old", .data = "stale" });
+    const exe_dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(exe_dir_path);
+    const exe_path = try std.fs.path.join(std.testing.allocator, &.{ exe_dir_path, "tk.exe" });
+    defer std.testing.allocator.free(exe_path);
+
+    cleanupStaleExeAt(std.testing.io, exe_path);
+
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "tk.exe.old", .{}));
+}
+
+test "cleanupStaleExeAt: no-op when .old file is absent" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const exe_dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(exe_dir_path);
+    const exe_path = try std.fs.path.join(std.testing.allocator, &.{ exe_dir_path, "tk.exe" });
+    defer std.testing.allocator.free(exe_path);
+
+    // Should not panic, throw, or leave any side effect.
+    cleanupStaleExeAt(std.testing.io, exe_path);
+}
+
+test "renderStageName: prefix + 16 lowercase hex chars" {
+    var prng = std.Random.DefaultPrng.init(42);
+    var buf: [stage_name_buf_size]u8 = undefined;
+    const name = renderStageName(&buf, prng.random());
+    try std.testing.expect(std.mem.startsWith(u8, name, stage_name_prefix));
+    try std.testing.expectEqual(stage_name_prefix.len + 16, name.len);
+    for (name[stage_name_prefix.len..]) |b| {
+        try std.testing.expect((b >= '0' and b <= '9') or (b >= 'a' and b <= 'f'));
+    }
 }

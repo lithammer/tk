@@ -900,3 +900,74 @@ pub const self_update_embedded_unparseable_prefix = "tk self-update: embedded ve
 /// append the offending string and a newline. Could happen if the project
 /// publishes a non-`vX.Y.Z` release tag in the future.
 pub const self_update_latest_unparseable_prefix = "tk self-update: latest release tag is not valid semver: ";
+
+/// Stderr prefix when `std.process.executablePath` fails or returns a path
+/// with no parent directory. Callers append the underlying error name.
+pub const self_update_exe_resolve_failure_prefix = "tk self-update: cannot resolve current binary path: ";
+
+/// Stderr prefix when the staged binary cannot be created because the exe
+/// directory is not writable. Callers append the would-be target path,
+/// followed by `\n`. The fast-fail happens before any network traffic per
+/// tk-32 design notes — the exclusive `createFile` itself is the write-
+/// access probe.
+pub const self_update_no_write_access_prefix = "tk self-update: cannot write to ";
+
+/// Stderr prefix for a stage-file create failure that is not
+/// AccessDenied (disk full, EROFS, etc.). Callers append the stage path,
+/// `": "`, an OS error reason, and a newline.
+pub const self_update_stage_failure_prefix = "tk self-update: failed to stage download at ";
+
+/// Stderr prefix for an asset-download transport-layer failure.
+/// Callers append a trailing newline.
+pub const self_update_download_network = "tk self-update: failed to download release asset: network error";
+
+/// Stderr prefix for an asset-download TLS failure. Callers append a
+/// trailing newline.
+pub const self_update_download_tls = "tk self-update: failed to download release asset: TLS handshake failed";
+
+/// Stderr prefix for a non-404 non-2xx HTTP status on the asset download.
+/// Callers append the status code and a trailing newline.
+pub const self_update_download_http_status_prefix = "tk self-update: asset download returned HTTP ";
+
+/// Stderr prefix for the 404 unified message naming the missing asset,
+/// the release tag, and the manual-install URL. Callers append
+/// `<asset> is not in release <tag>. Install manually from <url>\n` —
+/// the prefix here is the shared lead-in.
+pub const self_update_asset_missing_prefix = "tk self-update: ";
+
+/// Stderr prefix for a smoke verification that exited non-zero. Callers
+/// append the exit code and a trailing newline.
+pub const self_update_smoke_exit_prefix = "tk self-update: staged binary smoke check failed: exit ";
+
+/// Stderr prefix when the staged binary's `--version` output does not
+/// include the latest tag string. Defends against asset-swap and version-
+/// skew between the release tag and the binary's embedded version.
+/// Callers append the expected tag and a newline.
+pub const self_update_smoke_version_mismatch_prefix = "tk self-update: staged binary did not report expected version: ";
+
+/// Stderr prefix when the staged binary's `--version` output does not
+/// include the embedded triple. Defends against triple-swap between the
+/// fetched asset and the running binary's expected ABI.
+/// Callers append the expected triple and a newline.
+pub const self_update_smoke_triple_mismatch_prefix = "tk self-update: staged binary did not report expected triple: ";
+
+/// Stderr prefix for a rename failure (very rare — POSIX rename within a
+/// single directory is atomic). Callers append the OS error name and a
+/// trailing newline. On POSIX no rollback is needed because the failure
+/// means the rename did not happen; on Windows, Slice G handles
+/// rollback through the `.exe.old` pattern.
+pub const self_update_rename_failure_prefix = "tk self-update: failed to install new binary: ";
+
+/// Stdout prefix for a successful binary swap. Callers append the new
+/// version tag and a newline. Manpage update is silent on success;
+/// failures are surfaced separately on stderr without rolling back the
+/// binary swap.
+pub const self_update_install_success_prefix = "tk self-update: updated to ";
+
+/// Stderr prefix when the manpage subprocess (`<new-binary> manpage
+/// --install`) fails after the binary swap committed. Callers append a
+/// short reason (`exit <code>` or `spawn failed: <err>`) and a newline.
+/// Per tk-32 design notes, the binary update is preserved; the manpage
+/// is allowed to lag and can be re-installed by re-running
+/// `tk manpage --install` manually.
+pub const self_update_manpage_failure_prefix = "tk self-update: manpage update failed; run `tk manpage --install` to retry: ";
