@@ -890,6 +890,18 @@ pub const self_update_query_malformed = "tk self-update: GitHub Releases API ret
 /// absent. Callers append a trailing newline.
 pub const self_update_query_missing_tag = "tk self-update: GitHub Releases API response did not include a tag_name";
 
+/// Stderr line for a local memory exhaustion failure during query or
+/// staging. Distinguished from network so the user does not retry
+/// against GitHub for a problem they can fix by closing tabs / freeing
+/// RAM. Callers append a trailing newline.
+pub const self_update_out_of_memory = "tk self-update: out of memory";
+
+/// Stderr prefix for a local stage I/O failure (flush / write into the
+/// staged binary) — distinct from `self_update_download_network` because
+/// the download succeeded but the local sink failed. Callers append a
+/// reason and a trailing newline.
+pub const self_update_stage_io_failure_prefix = "tk self-update: failed to write staged binary: ";
+
 /// Stderr prefix when the embedded version cannot be parsed as semver.
 /// Callers append the offending string and a newline. Should be impossible
 /// in practice because the release workflow controls the value; loud
@@ -925,6 +937,12 @@ pub const self_update_download_network = "tk self-update: failed to download rel
 /// trailing newline.
 pub const self_update_download_tls = "tk self-update: failed to download release asset: TLS handshake failed";
 
+/// Stderr line for an asset-download response that the HTTP client could
+/// not parse (oversized headers, redirect loop, unsupported encoding,
+/// etc.). Distinct from `self_update_download_network` because retrying
+/// against a different network will not fix a server-shape problem.
+pub const self_update_download_malformed = "tk self-update: failed to download release asset: server returned an unparseable response (redirect loop or invalid headers)";
+
 /// Stderr prefix for a non-404 non-2xx HTTP status on the asset download.
 /// Callers append the status code and a trailing newline.
 pub const self_update_download_http_status_prefix = "tk self-update: asset download returned HTTP ";
@@ -954,9 +972,17 @@ pub const self_update_smoke_triple_mismatch_prefix = "tk self-update: staged bin
 /// Stderr prefix for a rename failure (very rare — POSIX rename within a
 /// single directory is atomic). Callers append the OS error name and a
 /// trailing newline. On POSIX no rollback is needed because the failure
-/// means the rename did not happen; on Windows, Slice G handles
-/// rollback through the `.exe.old` pattern.
+/// means the rename did not happen; on Windows, the `.exe.old` rollback
+/// path is used and a successful rollback adds a "rolled back" suffix.
 pub const self_update_rename_failure_prefix = "tk self-update: failed to install new binary: ";
+
+/// Stderr prefix for the catastrophic Windows rollback-also-failed path:
+/// step 2 (stage → target) failed AND the rollback rename (.old →
+/// target) also failed. The user's original binary survives at
+/// `<target>.old`. Callers append both error names + a manual recovery
+/// instruction. Distinct from `self_update_rename_failure_prefix` so a
+/// log reader can grep for this specifically.
+pub const self_update_rollback_failure_prefix = "tk self-update: cannot recover from rename failure: ";
 
 /// Stdout prefix for a successful binary swap. Callers append the new
 /// version tag and a newline. Manpage update is silent on success;

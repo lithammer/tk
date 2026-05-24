@@ -85,10 +85,17 @@ pub fn build(b: *std.Build) void {
         "release-version",
         "Version string embedded in build_options.version (defaults to \"dev\")",
     ) orelse "dev";
+    // Note: the `release` step iterates `release_targets` and overrides
+    // this value per target with the entry's hardcoded `.triple` field,
+    // so `-Drelease-triple=...` only affects the local `zig build` exe
+    // and the test binary's embedded triple. The release-publishing
+    // workflow does NOT pass this flag; it relies on the loop overrides.
+    // Naming the flag this way still surfaces a useful knob for testing
+    // self-update against a real triple from a local build.
     const release_triple = b.option(
         []const u8,
         "release-triple",
-        "Triple string embedded in build_options.triple for non-release exes (defaults to \"dev\"; the release loop overrides per target)",
+        "Triple embedded in build_options.triple for the local `zig build` exe and unit tests (defaults to \"dev\"). The `zig build release` loop ignores this and uses each release-target row's hardcoded triple.",
     ) orelse "dev";
 
     const clap = b.dependency("clap", .{

@@ -138,6 +138,12 @@ pub const RealHttp = struct {
     /// taxonomy. Status-code-bearing failures (4xx/5xx) do not appear
     /// here — `fetch` returns success with a non-2xx `result.status`,
     /// and the wrapper surfaces that through the response value.
+    ///
+    /// Server- or response-shape failures (redirect loops, malformed
+    /// headers, oversized headers, unsupported transfer/compression)
+    /// route to `MalformedResponse` rather than `NetworkError` so the
+    /// caller's diagnostic does not blame the network for a problem
+    /// the user cannot fix by switching connectivity.
     fn mapFetchError(err: anyerror) Error {
         return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
@@ -145,7 +151,23 @@ pub const RealHttp = struct {
             error.CertificateBundleLoadFailure,
             => error.TlsError,
             error.WriteFailed => error.WriteFailed,
-            error.UnsupportedCompressionMethod => error.MalformedResponse,
+            error.UnsupportedCompressionMethod,
+            error.StreamTooLong,
+            error.HttpHeadersInvalid,
+            error.HttpHeadersOversize,
+            error.HttpChunkInvalid,
+            error.HttpChunkTruncated,
+            error.HttpHeaderContinuationsUnsupported,
+            error.HttpTransferEncodingUnsupported,
+            error.HttpConnectionHeaderUnsupported,
+            error.HttpRedirectLocationInvalid,
+            error.HttpRedirectLocationMissing,
+            error.HttpRedirectLocationOversize,
+            error.HttpContentEncodingUnsupported,
+            error.RedirectRequiresResend,
+            error.TooManyHttpRedirects,
+            error.UnsupportedUriScheme,
+            => error.MalformedResponse,
             else => error.NetworkError,
         };
     }

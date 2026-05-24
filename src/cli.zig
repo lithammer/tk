@@ -142,6 +142,20 @@ pub fn applyColorFlag(env_mode: render.Mode, flag: ?ColorFlag) render.Mode {
     };
 }
 
+/// Comptime-computed width for the `tk --help` command listing column.
+/// Walks both the implemented and planned command tables so adding a
+/// longer command name doesn't break the column alignment.
+const help_col_width: usize = blk: {
+    var max: usize = 0;
+    for (all_commands) |cmd| {
+        if (cmd.meta.name.len > max) max = cmd.meta.name.len;
+    }
+    for (unimplemented_commands) |stub| {
+        if (stub.name.len > max) max = stub.name.len;
+    }
+    break :blk max;
+};
+
 const top_flag_text =
     \\-h, --help           Display this help and exit.
     \\-v, --version        Print version and exit.
@@ -241,7 +255,13 @@ fn writeTopLevelHelp(deps: Deps) !void {
         \\
     );
     inline for (all_commands) |cmd| {
-        try deps.stdout.print("  {s:<10} {s}\n", .{ cmd.meta.name, cmd.meta.description });
+        // Padding string is comptime-known per iteration because each
+        // command's name length is comptime-known inside `inline for`.
+        // This keeps the description column aligned even when a new
+        // command (e.g. `self-update`, 11 chars) is longer than the
+        // previous longest one.
+        const padding = " " ** (help_col_width - cmd.meta.name.len);
+        try deps.stdout.print("  {s}{s} {s}\n", .{ cmd.meta.name, padding, cmd.meta.description });
     }
     try deps.stdout.writeAll(
         \\
@@ -249,7 +269,8 @@ fn writeTopLevelHelp(deps: Deps) !void {
         \\
     );
     inline for (unimplemented_commands) |stub| {
-        try deps.stdout.print("  {s:<10} {s}\n", .{ stub.name, stub.description });
+        const padding = " " ** (help_col_width - stub.name.len);
+        try deps.stdout.print("  {s}{s} {s}\n", .{ stub.name, padding, stub.description });
     }
     try deps.stdout.writeAll(
         \\
@@ -378,10 +399,18 @@ test "runArgv prints version with embedded triple" {
 
     const code = try runArgv(h.deps(), &h.iter);
     try std.testing.expectEqual(@as(u8, 0), code);
-    // The test binary's build_options defaults both fields to "dev".
-    // Release builds override per-target via `-Drelease-version` and the
-    // release-loop's hardcoded triple; cli renders `<version> (<triple>)`.
-    try std.testing.expectEqualStrings("dev (dev)\n", h.stdout());
+    // Compute the expectation from `build_options` so the assertion
+    // stays accurate when `zig build test -Drelease-version=...` or
+    // `-Drelease-triple=...` overrides the test binary's options. The
+    // format string here mirrors the one in `runArgv`; verifying both
+    // shape AND values from build_options keeps a swapped-args typo
+    // visible even when version == triple.
+    var expected_buf: [256]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expected_buf, "{s} ({s})\n", .{
+        build_options.version,
+        build_options.triple,
+    });
+    try std.testing.expectEqualStrings(expected, h.stdout());
     try std.testing.expectEqualStrings("", h.stderr());
 }
 
@@ -399,12 +428,34 @@ test "runArgv prints help" {
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "list") != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "manpage") != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "prime") != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "self-update") != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "--version") != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "--color") != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "Planned (not yet implemented):") != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "worktree") != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stdout(), "sync") != null);
     try std.testing.expectEqualStrings("", h.stderr());
+}
+
+test "runArgv help aligns command columns regardless of name length" {
+    // Defends the help_col_width invariant: every implemented and
+    // planned command name fits the comptime-computed column, so
+    // adding a longer name (e.g. an 11-char `self-update`) keeps
+    // every row visually aligned.
+    var h = Harness.init(std.testing.allocator, &.{"--help"});
+    defer h.deinit();
+    const code = try runArgv(h.deps(), &h.iter);
+    try std.testing.expectEqual(@as(u8, 0), code);
+
+    // Every command name in the output is followed by `help_col_width
+    // - name.len` padding spaces and then exactly one separator space
+    // before its description. Pick a couple of long and short names
+    // and confirm the column-after-name is at the same offset.
+    const stdout = h.stdout();
+    inline for (all_commands) |cmd| {
+        const expected_prefix = "  " ++ cmd.meta.name ++ " " ** (help_col_width - cmd.meta.name.len) ++ " " ++ cmd.meta.description;
+        try std.testing.expect(std.mem.indexOf(u8, stdout, expected_prefix) != null);
+    }
 }
 
 test "runArgv routes a planned subcommand to a not-yet-implemented stub" {

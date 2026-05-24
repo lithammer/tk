@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+const build_options = @import("build_options");
 const cli = @import("../cli.zig");
 const platform = @import("../platform.zig");
 const fake_http = @import("../http/fake.zig");
@@ -737,10 +738,17 @@ test "TK_UPDATE preserves section order" {
     try std.testing.expectEqualStrings("input/notes.md", sections_after[1].name);
     try std.testing.expectEqualStrings(sections_before[1].body, sections_after[1].body);
 
+    // Expected body is computed from `build_options` so the assertion
+    // survives `zig build test -Drelease-version=...` / `-Drelease-triple=...`.
+    var expected_buf: [256]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expected_buf, "{s} ({s})\n", .{
+        build_options.version,
+        build_options.triple,
+    });
     var found_stdout = false;
     for (sections_after) |sec| {
         if (std.mem.eql(u8, sec.name, "expected/stdout")) {
-            try std.testing.expectEqualStrings("dev (dev)\n", sec.body);
+            try std.testing.expectEqualStrings(expected, sec.body);
             found_stdout = true;
         }
     }
@@ -768,17 +776,21 @@ test "runScenario: detects stdout mismatch" {
 
 test "runScenario: detects exit-code mismatch" {
     const allocator = std.testing.allocator;
-    const fixture =
+    // Build the fixture from `build_options` so the stdout section
+    // matches whatever the test binary actually prints, isolating
+    // the assertion to the exit-code mismatch the test is verifying.
+    const fixture = try std.fmt.allocPrint(allocator,
         \\-- script --
         \\tk --version
         \\-- expected/stdout --
-        \\dev (dev)
+        \\{s} ({s})
         \\-- expected/stderr --
         \\
         \\-- expected/exit --
         \\1
         \\
-    ;
+    , .{ build_options.version, build_options.triple });
+    defer allocator.free(fixture);
 
     try std.testing.expectError(
         error.ScenarioFailed,
@@ -869,20 +881,27 @@ test "stdin source can use aggregate stdout and stderr" {
 
 test "runScenario: stdin stdout is consumed by the next tk command" {
     const allocator = std.testing.allocator;
-    const fixture =
+    // Build the fixture from `build_options` so the expected stdout
+    // section matches whatever the test binary actually prints under
+    // its build flags.
+    const fixture = try std.fmt.allocPrint(allocator,
         \\-- script --
         \\tk --version
         \\stdin stdout
         \\tk --version
         \\
         \\-- expected/stdout --
-        \\dev (dev)
-        \\dev (dev)
+        \\{s} ({s})
+        \\{s} ({s})
         \\-- expected/stderr --
         \\-- expected/exit --
         \\0
         \\
-    ;
+    , .{
+        build_options.version, build_options.triple,
+        build_options.version, build_options.triple,
+    });
+    defer allocator.free(fixture);
 
     try runScenarioWith(allocator, null, fixture, .{ .quiet = true });
 }

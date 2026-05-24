@@ -135,6 +135,10 @@ fn runWith(
             deps.stderr.writeAll(messages.self_update_query_missing_tag ++ "\n") catch {};
             return 1;
         },
+        .out_of_memory => {
+            deps.stderr.writeAll(messages.self_update_out_of_memory ++ "\n") catch {};
+            return 1;
+        },
     }
 }
 
@@ -149,18 +153,23 @@ const FetchTagOutcome = union(enum) {
     http_status: u16,
     malformed_json,
     missing_tag_field,
+    out_of_memory,
 };
 
-/// Minimal JSON shape parsed out of the API response. `ignore_unknown_fields`
-/// keeps us forward-compatible with new fields GitHub may add.
-const ReleaseJson = struct { tag_name: []const u8 };
+/// Minimal JSON shape parsed out of the API response. `tag_name` is
+/// optional so a literally absent key surfaces through the dedicated
+/// `missing_tag_field` outcome rather than getting absorbed into
+/// `malformed_json`. `ignore_unknown_fields` keeps the schema forward-
+/// compatible with new fields GitHub may add.
+const ReleaseJson = struct { tag_name: ?[]const u8 = null };
 
 fn fetchLatestTag(deps: cli.Deps) FetchTagOutcome {
     var resp = deps.http.getJson(deps.gpa, api_url) catch |err| return switch (err) {
         error.NetworkError => .network_error,
         error.TlsError => .tls_error,
         error.MalformedResponse => .malformed_json,
-        error.WriteFailed, error.OutOfMemory => .network_error,
+        error.WriteFailed => .network_error,
+        error.OutOfMemory => .out_of_memory,
     };
     defer resp.deinit(deps.gpa);
 
@@ -174,9 +183,10 @@ fn fetchLatestTag(deps: cli.Deps) FetchTagOutcome {
     ) catch return .malformed_json;
     defer parsed.deinit();
 
-    if (parsed.value.tag_name.len == 0) return .missing_tag_field;
+    const tag = parsed.value.tag_name orelse return .missing_tag_field;
+    if (tag.len == 0) return .missing_tag_field;
 
-    const owned = deps.gpa.dupe(u8, parsed.value.tag_name) catch return .network_error;
+    const owned = deps.gpa.dupe(u8, tag) catch return .out_of_memory;
     return .{ .ok = owned };
 }
 
@@ -297,6 +307,20 @@ fn performUpdate(
     };
     defer target_dir.close(deps.io);
 
+    // Build the asset URL before staging. The two `try` allocations
+    // here can fail with OutOfMemory; doing them first means a failure
+    // happens before any stage file exists, so there's nothing to
+    // clean up. Putting them after `createFile` would leak the open
+    // handle and the on-disk dirent.
+    const asset_name = try buildAssetName(deps.gpa, embedded_triple);
+    defer deps.gpa.free(asset_name);
+    const asset_url = try std.fmt.allocPrint(
+        deps.gpa,
+        releases_base_url ++ "/latest/download/{s}",
+        .{asset_name},
+    );
+    defer deps.gpa.free(asset_url);
+
     // Stage file create is the write-access test. `executable_file`
     // permissions (0o777 modulo umask on POSIX) let the smoke
     // subprocess exec the staged binary directly without a follow-up
@@ -316,17 +340,6 @@ fn performUpdate(
         },
     };
 
-    // Build the asset URL from the embedded triple. `.exe` is appended
-    // for Windows triples so Windows users download a runnable file.
-    const asset_name = try buildAssetName(deps.gpa, embedded_triple);
-    defer deps.gpa.free(asset_name);
-    const asset_url = try std.fmt.allocPrint(
-        deps.gpa,
-        releases_base_url ++ "/latest/download/{s}",
-        .{asset_name},
-    );
-    defer deps.gpa.free(asset_url);
-
     // Stream the download into the stage file, buffered through a
     // small fixed-size writer. Any failure during this step deletes
     // the stage file before returning.
@@ -336,22 +349,28 @@ fn performUpdate(
         stage_file.close(deps.io);
         target_dir.deleteFile(deps.io, stage_name) catch {};
         switch (err) {
-            error.NetworkError, error.WriteFailed, error.OutOfMemory => {
+            error.NetworkError => {
                 deps.stderr.writeAll(messages.self_update_download_network ++ "\n") catch {};
             },
             error.TlsError => {
                 deps.stderr.writeAll(messages.self_update_download_tls ++ "\n") catch {};
             },
             error.MalformedResponse => {
-                deps.stderr.writeAll(messages.self_update_download_network ++ "\n") catch {};
+                deps.stderr.writeAll(messages.self_update_download_malformed ++ "\n") catch {};
+            },
+            error.WriteFailed => {
+                deps.stderr.print(messages.self_update_stage_io_failure_prefix ++ "{s}\n", .{@errorName(err)}) catch {};
+            },
+            error.OutOfMemory => {
+                deps.stderr.writeAll(messages.self_update_out_of_memory ++ "\n") catch {};
             },
         }
         return 1;
     };
-    stage_writer.interface.flush() catch {
+    stage_writer.interface.flush() catch |err| {
         stage_file.close(deps.io);
         target_dir.deleteFile(deps.io, stage_name) catch {};
-        deps.stderr.writeAll(messages.self_update_download_network ++ "\n") catch {};
+        deps.stderr.print(messages.self_update_stage_io_failure_prefix ++ "{s}\n", .{@errorName(err)}) catch {};
         return 1;
     };
     stage_file.close(deps.io);
@@ -388,12 +407,12 @@ fn performUpdate(
         deps.stderr.print(messages.self_update_smoke_exit_prefix ++ "{d}\n", .{smoke.exit_code}) catch {};
         return 1;
     }
-    if (std.mem.indexOf(u8, smoke.stdout, latest_tag) == null) {
+    if (!smokeOutputContainsToken(smoke.stdout, latest_tag)) {
         target_dir.deleteFile(deps.io, stage_name) catch {};
         deps.stderr.print(messages.self_update_smoke_version_mismatch_prefix ++ "{s}\n", .{latest_tag}) catch {};
         return 1;
     }
-    if (std.mem.indexOf(u8, smoke.stdout, embedded_triple) == null) {
+    if (!smokeOutputContainsToken(smoke.stdout, embedded_triple)) {
         target_dir.deleteFile(deps.io, stage_name) catch {};
         deps.stderr.print(messages.self_update_smoke_triple_mismatch_prefix ++ "{s}\n", .{embedded_triple}) catch {};
         return 1;
@@ -404,12 +423,37 @@ fn performUpdate(
     // Windows uses the rename-self pattern (target → target+".old",
     // stage → target) because Windows forbids overwriting a running
     // `.exe`. The `.old` file is cleaned up at next launch by
-    // `cleanupStaleExe` in main.zig.
-    commitInstall(deps, target_dir, stage_name, target_name, platform.is_windows) catch |err| {
-        target_dir.deleteFile(deps.io, stage_name) catch {};
-        deps.stderr.print(messages.self_update_rename_failure_prefix ++ "{s}\n", .{@errorName(err)}) catch {};
-        return 1;
-    };
+    // `cleanupStaleExe` in main.zig — but only when the canonical
+    // binary exists at the exe path, so a `.rollback_failed` outcome
+    // doesn't destroy the only surviving copy.
+    switch (commitInstall(deps, target_dir, stage_name, target_name, platform.is_windows)) {
+        .ok => {},
+        .primary_failed => |err| {
+            target_dir.deleteFile(deps.io, stage_name) catch {};
+            deps.stderr.print(messages.self_update_rename_failure_prefix ++ "{s}\n", .{@errorName(err)}) catch {};
+            return 1;
+        },
+        .primary_recovered => |err| {
+            target_dir.deleteFile(deps.io, stage_name) catch {};
+            deps.stderr.print(
+                messages.self_update_rename_failure_prefix ++ "{s}; rolled back to previous binary\n",
+                .{@errorName(err)},
+            ) catch {};
+            return 1;
+        },
+        .rollback_failed => |info| {
+            // Preserve the stage file for forensics. The original is at
+            // <target>.old; the canonical path is empty. Surface a
+            // distinct stderr line with explicit recovery instructions
+            // so the user doesn't lose their working binary.
+            deps.stderr.print(
+                messages.self_update_rollback_failure_prefix ++
+                    "primary={s}, rollback={s}; original preserved at {s}.old (restore with: mv {s}.old {s})\n",
+                .{ @errorName(info.primary), @errorName(info.rollback), target_name, target_name, target_name },
+            ) catch {};
+            return 1;
+        },
+    }
 
     // Binary swap committed. Print success unconditionally before the
     // manpage step so the user sees what happened even when the
@@ -437,14 +481,32 @@ fn performUpdate(
     return 0;
 }
 
+/// Outcome of `commitInstall`. POSIX collapses to either `ok` or
+/// `primary_failed`. Windows can also reach `primary_recovered` (step 2
+/// failed but the rollback restored the original binary) and
+/// `rollback_failed` (step 2 failed AND the rollback also failed — the
+/// canonical path is empty and the original survives at `<target>.old`).
+/// Callers switch on this and clean up payload at the use site (no
+/// asymmetric `deinit`).
+const CommitOutcome = union(enum) {
+    ok,
+    primary_failed: anyerror,
+    primary_recovered: anyerror,
+    rollback_failed: struct {
+        primary: anyerror,
+        rollback: anyerror,
+    },
+};
+
 /// Commit a staged binary into place. On POSIX, one atomic rename does
 /// the job; the running process's inode stays alive across the swap. On
 /// Windows (`use_windows_pattern = true`), the running `.exe` cannot be
 /// overwritten directly, so a rename-self pattern is used: the current
 /// target is moved aside to `<target>.old` first, then the stage is
-/// renamed into place. A second-rename failure rolls back by renaming
-/// `.old` back to the target name. The `.old` file is cleaned up at
-/// next launch by `cleanupStaleExe`.
+/// renamed into place. A second-rename failure attempts to roll back
+/// by renaming `.old` back to the target name; if both fail, the
+/// outcome surfaces the catastrophic state and the original is
+/// preserved at `<target>.old` for manual recovery.
 ///
 /// The Windows branch is exercised on POSIX by setting
 /// `use_windows_pattern = true` explicitly in tests. POSIX rename
@@ -457,30 +519,40 @@ fn commitInstall(
     stage_name: []const u8,
     target_name: []const u8,
     use_windows_pattern: bool,
-) !void {
+) CommitOutcome {
     if (!use_windows_pattern) {
-        try std.Io.Dir.rename(target_dir, stage_name, target_dir, target_name, deps.io);
-        return;
+        std.Io.Dir.rename(target_dir, stage_name, target_dir, target_name, deps.io) catch |err| {
+            return .{ .primary_failed = err };
+        };
+        return .ok;
     }
 
     var old_name_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const old_name = try std.fmt.bufPrint(&old_name_buf, "{s}.old", .{target_name});
+    const old_name = std.fmt.bufPrint(&old_name_buf, "{s}.old", .{target_name}) catch {
+        return .{ .primary_failed = error.NameTooLong };
+    };
 
     // Step 1: move current target aside. A missing target file is OK —
     // first-time installs land in directories without a prior `tk.exe`,
     // and the rename simply has nothing to move.
     std.Io.Dir.rename(target_dir, target_name, target_dir, old_name, deps.io) catch |err| switch (err) {
         error.FileNotFound => {},
-        else => |e| return e,
+        else => |e| return .{ .primary_failed = e },
     };
 
     // Step 2: place new bytes at the target name. On failure, undo
     // step 1 so the user is left with a working binary at the original
-    // path rather than a missing one.
+    // path rather than a missing one. If the rollback also fails, the
+    // outcome surfaces the catastrophic state — the original is
+    // preserved at `<target>.old` and the user must restore manually.
     std.Io.Dir.rename(target_dir, stage_name, target_dir, target_name, deps.io) catch |err| {
-        std.Io.Dir.rename(target_dir, old_name, target_dir, target_name, deps.io) catch {};
-        return err;
+        std.Io.Dir.rename(target_dir, old_name, target_dir, target_name, deps.io) catch |rb_err| {
+            return .{ .rollback_failed = .{ .primary = err, .rollback = rb_err } };
+        };
+        return .{ .primary_recovered = err };
     };
+
+    return .ok;
 }
 
 /// Best-effort cleanup of a stale `<exe-dir>/tk.exe.old` left behind by a
@@ -504,6 +576,11 @@ pub fn cleanupStaleExe(io: std.Io) void {
 /// `commitInstall` will produce `<their-name>.old` and this cleanup
 /// helper will not find it. That mismatch is intentional — the literal
 /// `tk.exe.old` is the cross-launch contract.
+///
+/// Safety: only delete the `.old` sidecar when the canonical binary
+/// exists at `exe_path`. Otherwise we may be removing the user's only
+/// recoverable copy after a `commitInstall` `.rollback_failed` outcome
+/// where step 2 failed and the rollback couldn't restore the original.
 fn cleanupStaleExeAt(io: std.Io, exe_path: []const u8) void {
     const exe_dir = std.fs.path.dirname(exe_path) orelse return;
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -512,6 +589,7 @@ fn cleanupStaleExeAt(io: std.Io, exe_path: []const u8) void {
         "{s}{c}tk.exe.old",
         .{ exe_dir, std.fs.path.sep },
     ) catch return;
+    std.Io.Dir.cwd().access(io, exe_path, .{}) catch return;
     std.Io.Dir.cwd().deleteFile(io, old_path) catch {};
 }
 
@@ -524,8 +602,27 @@ fn buildAssetName(gpa: Allocator, triple: []const u8) ![]u8 {
     return std.fmt.allocPrint(gpa, "tk-{s}{s}", .{ triple, ext });
 }
 
+/// Match any Windows ABI suffix — `-windows-gnu`, `-windows-msvc`, etc. —
+/// rather than the original literal `-windows-gnu`, so future Windows
+/// triples that the release-targets table grows pick up `.exe` without
+/// silently 404ing on the download.
 fn isWindowsTriple(triple: []const u8) bool {
-    return std.mem.endsWith(u8, triple, "-windows-gnu");
+    return std.mem.indexOf(u8, triple, "-windows-") != null;
+}
+
+/// Token-anchored substring check for smoke verification: returns true
+/// only if `token` appears as a whole word in `text`, with whitespace or
+/// `()` as separators on both sides. Empty `token` returns false (the
+/// indexOf-empty-needle bypass). Defends against prefix collisions like
+/// `latest_tag = "v0.6.0"` matching `"v0.6.0-rc1"` in the staged
+/// binary's `--version` output.
+fn smokeOutputContainsToken(text: []const u8, token: []const u8) bool {
+    if (token.len == 0) return false;
+    var it = std.mem.tokenizeAny(u8, text, " \t\r\n()");
+    while (it.next()) |tok| {
+        if (std.mem.eql(u8, tok, token)) return true;
+    }
+    return false;
 }
 
 /// Build the staged binary's filename: `.tk.tmp.<8-byte-hex>`. Hex suffix
@@ -590,10 +687,14 @@ fn writeHelp(deps: cli.Deps) !void {
 
 const Harness = @import("../testing/test_cli.zig").Harness;
 
+// Dev-refusal tests call `runWith` with an explicit "dev" triple so they
+// exercise the refusal branch regardless of whatever build_options.triple
+// has been set to by `-Drelease-triple=...` at `zig build test` time.
+
 test "self-update: dev build refuses without flags" {
     var h = Harness.init(std.testing.allocator, &.{});
     defer h.deinit();
-    const code = try run(h.deps(), &h.iter);
+    const code = try runWith(h.deps(), &h.iter, "v0.0.1", dev_triple);
     try std.testing.expectEqual(@as(u8, 1), code);
     try std.testing.expect(std.mem.indexOf(u8, h.stderr(), messages.self_update_dev_build) != null);
     try std.testing.expectEqualStrings("", h.stdout());
@@ -602,7 +703,7 @@ test "self-update: dev build refuses without flags" {
 test "self-update: dev build refuses --check the same way" {
     var h = Harness.init(std.testing.allocator, &.{"--check"});
     defer h.deinit();
-    const code = try run(h.deps(), &h.iter);
+    const code = try runWith(h.deps(), &h.iter, "v0.0.1", dev_triple);
     try std.testing.expectEqual(@as(u8, 1), code);
     try std.testing.expect(std.mem.indexOf(u8, h.stderr(), messages.self_update_dev_build) != null);
     try std.testing.expectEqualStrings("", h.stdout());
@@ -851,6 +952,11 @@ test "self-update full: manpage subprocess failure warns but preserves binary sw
 
 test "self-update full: AccessDenied at stage create fast-fails before download" {
     try platform.skipOnWindows();
+    // Root bypasses DAC permission checks (CAP_DAC_OVERRIDE), so a
+    // 0o555 chmod on the staging dir won't actually block createFile.
+    // Skip rather than report a false pass: the assertion below would
+    // panic on the unmatched URL via FakeHttpClient's strict mode.
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
     const gpa = std.testing.allocator;
 
     var h = Harness.init(gpa, &.{});
@@ -1070,7 +1176,7 @@ test "self-update full: smoke triple-mismatch leaves target untouched" {
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "tk", .{}));
 }
 
-test "buildAssetName: appends .exe only for windows-gnu triples" {
+test "buildAssetName: appends .exe for any -windows- ABI" {
     const gpa = std.testing.allocator;
     const cases = [_]struct { triple: []const u8, expected: []const u8 }{
         .{ .triple = "x86_64-linux-musl", .expected = "tk-x86_64-linux-musl" },
@@ -1079,6 +1185,9 @@ test "buildAssetName: appends .exe only for windows-gnu triples" {
         .{ .triple = "aarch64-macos", .expected = "tk-aarch64-macos" },
         .{ .triple = "x86_64-windows-gnu", .expected = "tk-x86_64-windows-gnu.exe" },
         .{ .triple = "aarch64-windows-gnu", .expected = "tk-aarch64-windows-gnu.exe" },
+        // Future-proofing: any other -windows-* ABI gets `.exe` too.
+        .{ .triple = "x86_64-windows-msvc", .expected = "tk-x86_64-windows-msvc.exe" },
+        .{ .triple = "aarch64-windows-msvc", .expected = "tk-aarch64-windows-msvc.exe" },
     };
     for (cases) |c| {
         const got = try buildAssetName(gpa, c.triple);
@@ -1100,7 +1209,7 @@ test "commitInstall: POSIX pattern atomically replaces target" {
     var h = Harness.init(std.testing.allocator, &.{});
     defer h.deinit();
 
-    try commitInstall(h.deps(), tmp.dir, ".tk.tmp.aaaa", "tk", false);
+    try std.testing.expectEqual(CommitOutcome.ok, commitInstall(h.deps(), tmp.dir, ".tk.tmp.aaaa", "tk", false));
 
     const installed = try tmp.dir.readFileAlloc(std.testing.io, "tk", std.testing.allocator, .unlimited);
     defer std.testing.allocator.free(installed);
@@ -1120,7 +1229,7 @@ test "commitInstall: Windows pattern moves current to .old then places stage" {
     var h = Harness.init(std.testing.allocator, &.{});
     defer h.deinit();
 
-    try commitInstall(h.deps(), tmp.dir, ".tk.tmp.bbbb", "tk.exe", true);
+    try std.testing.expectEqual(CommitOutcome.ok, commitInstall(h.deps(), tmp.dir, ".tk.tmp.bbbb", "tk.exe", true));
 
     // New bytes at target, old bytes preserved as `.old` sidecar for
     // the next-launch cleanup hook to delete.
@@ -1145,7 +1254,7 @@ test "commitInstall: Windows pattern tolerates absent target (first install)" {
     var h = Harness.init(std.testing.allocator, &.{});
     defer h.deinit();
 
-    try commitInstall(h.deps(), tmp.dir, ".tk.tmp.cccc", "tk.exe", true);
+    try std.testing.expectEqual(CommitOutcome.ok, commitInstall(h.deps(), tmp.dir, ".tk.tmp.cccc", "tk.exe", true));
 
     const installed = try tmp.dir.readFileAlloc(std.testing.io, "tk.exe", std.testing.allocator, .unlimited);
     defer std.testing.allocator.free(installed);
@@ -1158,6 +1267,9 @@ test "cleanupStaleExeAt: deletes a stale .old file next to the exe" {
     defer tmp.cleanup();
 
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "tk.exe.old", .data = "stale" });
+    // Canonical binary must exist for cleanup to delete the sidecar
+    // — see the safety net in cleanupStaleExeAt.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "tk.exe", .data = "current" });
     const exe_dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(exe_dir_path);
     const exe_path = try std.fs.path.join(std.testing.allocator, &.{ exe_dir_path, "tk.exe" });
@@ -1166,6 +1278,28 @@ test "cleanupStaleExeAt: deletes a stale .old file next to the exe" {
     cleanupStaleExeAt(std.testing.io, exe_path);
 
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "tk.exe.old", .{}));
+}
+
+test "cleanupStaleExeAt: preserves .old when canonical binary is missing" {
+    // Defends against the catastrophic `rollback_failed` outcome in
+    // commitInstall: tk.exe is gone, original survives at tk.exe.old.
+    // Cleanup must NOT delete the only recoverable copy.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "tk.exe.old", .data = "the-only-copy" });
+    // No tk.exe at all.
+
+    const exe_dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(exe_dir_path);
+    const exe_path = try std.fs.path.join(std.testing.allocator, &.{ exe_dir_path, "tk.exe" });
+    defer std.testing.allocator.free(exe_path);
+
+    cleanupStaleExeAt(std.testing.io, exe_path);
+
+    const preserved = try tmp.dir.readFileAlloc(std.testing.io, "tk.exe.old", std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(preserved);
+    try std.testing.expectEqualStrings("the-only-copy", preserved);
 }
 
 test "cleanupStaleExeAt: no-op when .old file is absent" {
