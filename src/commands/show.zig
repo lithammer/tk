@@ -8,11 +8,14 @@ const messages = @import("../messages.zig");
 const repository = @import("../store/repository.zig");
 const ItemClass = @import("../domain/item_class.zig").ItemClass;
 const ItemStatus = @import("../domain/status.zig").ItemStatus;
-const Origin = @import("../domain/origin.zig").Origin;
+const Priority = @import("../domain/priority.zig").Priority;
 const TicketKind = @import("../domain/ticket_kind.zig").TicketKind;
 const init_command = @import("init.zig");
 const Harness = @import("../testing/test_cli.zig").Harness;
 const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+const styler_mod = @import("../render/styler.zig");
+const palette = @import("../render/palette.zig");
+const Style = @import("../render/style.zig").Style;
 
 /// Dispatcher metadata for `tk show`.
 pub const meta: cli.CommandMeta = .{
@@ -57,7 +60,7 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
     };
     defer detail.deinit(deps.gpa);
 
-    render(deps.stdout, detail) catch {};
+    render(deps.stdout, detail, deps.styler.forStdout()) catch {};
     return 0;
 }
 
@@ -79,25 +82,40 @@ fn writeHelp(deps: cli.Deps) !void {
 /// Section order: DESCRIPTION, PARENT/TICKETS, BLOCKED BY, BLOCKING,
 /// EXTERNAL BLOCKERS. Empty sections are omitted. Sections are separated by
 /// one blank line. The output ends with a single trailing newline.
-fn render(stdout: *std.Io.Writer, detail: repository.ItemDetail) !void {
+///
+/// Styling is mode-gated by `styler`: when the resolved stdout mode is
+/// `.no_color` the wrap/open/close calls emit empty bytes, so the plain
+/// txtar / snapshot baseline stays byte-identical. The styled palette
+/// follows `tk list` parity (status glyph colours, priority dot/text,
+/// kind tags, `(EPIC)` prefix) plus bold on section headers and the
+/// main header title. See palette.zig and ADR 0014.
+fn render(stdout: *std.Io.Writer, detail: repository.ItemDetail, styler: styler_mod.SubStyler) !void {
     // Header: <status-glyph> <display-id> · <title>   [<facet> · STATUS]
-    var facet_buf: [8]u8 = undefined;
-    const facet: []const u8 = switch (detail.item_class) {
-        .epic => "EPIC",
-        .ticket => try std.fmt.bufPrint(&facet_buf, "● {s}", .{(detail.priority orelse unreachable).text()}),
-    };
+    const status_st = statusStyle(detail.status);
+    try styler.wrap(status_st, detail.status.glyph()).format(stdout);
+    try stdout.writeAll(" ");
+    try styler.wrap(idStyle(detail.item_class), detail.display_id).format(stdout);
+    try stdout.writeAll(" · ");
+    try styler.wrap(palette.header, detail.title).format(stdout);
+    try stdout.writeAll("   [");
+    switch (detail.item_class) {
+        .epic => try styler.wrap(palette.kind_epic, "EPIC").format(stdout),
+        .ticket => {
+            const priority = detail.priority orelse unreachable;
+            const p_st = priorityStyle(priority);
+            try styler.wrap(p_st, "●").format(stdout);
+            try stdout.writeAll(" ");
+            try styler.wrap(p_st, priority.text()).format(stdout);
+        },
+    }
+    try stdout.writeAll(" · ");
     const status_upper: []const u8 = switch (detail.status) {
         .open => "OPEN",
         .active => "ACTIVE",
         .done => "DONE",
     };
-    try stdout.print("{s} {s} · {s}   [{s} · {s}]\n", .{
-        detail.status.glyph(),
-        detail.display_id,
-        detail.title,
-        facet,
-        status_upper,
-    });
+    try styler.wrap(status_st, status_upper).format(stdout);
+    try stdout.writeAll("]\n");
 
     // Metadata line.
     switch (detail.origin) {
@@ -114,7 +132,11 @@ fn render(stdout: *std.Io.Writer, detail: repository.ItemDetail) !void {
     }
     if (detail.item_class == .ticket) {
         const kind = detail.ticket_kind orelse unreachable;
-        try stdout.print(" · Kind: {s}", .{kind.text()});
+        try stdout.writeAll(" · Kind: ");
+        switch (kind) {
+            .bug => try styler.wrap(palette.kind_bug, kind.text()).format(stdout),
+            .task => try stdout.writeAll(kind.text()),
+        }
     }
     try stdout.writeAll("\n");
 
@@ -129,7 +151,7 @@ fn render(stdout: *std.Io.Writer, detail: repository.ItemDetail) !void {
     // DESCRIPTION section.
     if (detail.body.len > 0) {
         try stdout.writeAll("\n");
-        try stdout.writeAll(messages.show_section_description ++ "\n");
+        try writeSectionHeader(stdout, styler, messages.show_section_description);
         try stdout.writeAll(detail.body);
         if (detail.body[detail.body.len - 1] != '\n') {
             try stdout.writeAll("\n");
@@ -140,17 +162,17 @@ fn render(stdout: *std.Io.Writer, detail: repository.ItemDetail) !void {
     // PARENT section (for Tickets with a container Epic).
     if (detail.parent) |p| {
         if (has_section) try stdout.writeAll("\n");
-        try stdout.writeAll(messages.show_section_parent ++ "\n");
-        try renderSubRow(stdout, "↑", p);
+        try writeSectionHeader(stdout, styler, messages.show_section_parent);
+        try renderSubRow(stdout, "↑", p, styler);
         has_section = true;
     }
 
     // TICKETS section (for Epics with children).
     if (detail.children.len > 0) {
         if (has_section) try stdout.writeAll("\n");
-        try stdout.writeAll(messages.show_section_tickets ++ "\n");
+        try writeSectionHeader(stdout, styler, messages.show_section_tickets);
         for (detail.children) |child| {
-            try renderSubRow(stdout, "↓", child);
+            try renderSubRow(stdout, "↓", child, styler);
         }
         has_section = true;
     }
@@ -158,9 +180,9 @@ fn render(stdout: *std.Io.Writer, detail: repository.ItemDetail) !void {
     // BLOCKED BY section.
     if (detail.blocked_by.len > 0) {
         if (has_section) try stdout.writeAll("\n");
-        try stdout.writeAll(messages.show_section_blocked_by ++ "\n");
+        try writeSectionHeader(stdout, styler, messages.show_section_blocked_by);
         for (detail.blocked_by) |item| {
-            try renderSubRow(stdout, "→", item);
+            try renderSubRow(stdout, "→", item, styler);
         }
         has_section = true;
     }
@@ -168,9 +190,9 @@ fn render(stdout: *std.Io.Writer, detail: repository.ItemDetail) !void {
     // BLOCKING section.
     if (detail.blocking.len > 0) {
         if (has_section) try stdout.writeAll("\n");
-        try stdout.writeAll(messages.show_section_blocking ++ "\n");
+        try writeSectionHeader(stdout, styler, messages.show_section_blocking);
         for (detail.blocking) |item| {
-            try renderSubRow(stdout, "→", item);
+            try renderSubRow(stdout, "→", item, styler);
         }
         has_section = true;
     }
@@ -178,29 +200,81 @@ fn render(stdout: *std.Io.Writer, detail: repository.ItemDetail) !void {
     // EXTERNAL BLOCKERS section.
     if (detail.external_blockers.len > 0) {
         if (has_section) try stdout.writeAll("\n");
-        try stdout.writeAll(messages.show_section_external_blockers ++ "\n");
+        try writeSectionHeader(stdout, styler, messages.show_section_external_blockers);
         for (detail.external_blockers) |eb| {
             try stdout.print("  • {s}\n", .{eb.reason});
         }
     }
 }
 
+/// Write a section label (e.g. "DESCRIPTION") followed by a newline,
+/// wrapped in the `palette.header` style so it renders bold under
+/// `.escape_codes` and plain under `.no_color`.
+fn writeSectionHeader(stdout: *std.Io.Writer, styler: styler_mod.SubStyler, label: []const u8) !void {
+    try styler.wrap(palette.header, label).format(stdout);
+    try stdout.writeAll("\n");
+}
+
 /// Render one sub-row line with the given direction glyph.
 ///
 /// Shape: `  <glyph> <status-glyph> <display-id>: [(EPIC) ]<title>[ ● <priority>]`
-fn renderSubRow(stdout: *std.Io.Writer, glyph: []const u8, item: repository.ItemSummary) !void {
-    const epic_prefix: []const u8 = if (item.item_class == .epic) "(EPIC) " else "";
-    try stdout.print("  {s} {s} {s}: {s}{s}", .{
-        glyph,
-        item.status.glyph(),
-        item.display_id,
-        epic_prefix,
-        item.title,
-    });
+///
+/// Per-token styling mirrors `tk list`'s row palette: status glyph
+/// coloured per status, `(EPIC)` prefix in `kind_epic`, priority dot +
+/// text in the matching priority Style. Display ID passes through
+/// `id_epic` / `id_ticket` which are currently `style.none()`.
+fn renderSubRow(stdout: *std.Io.Writer, glyph: []const u8, item: repository.ItemSummary, styler: styler_mod.SubStyler) !void {
+    try stdout.writeAll("  ");
+    try stdout.writeAll(glyph);
+    try stdout.writeAll(" ");
+    try styler.wrap(statusStyle(item.status), item.status.glyph()).format(stdout);
+    try stdout.writeAll(" ");
+    try styler.wrap(idStyle(item.item_class), item.display_id).format(stdout);
+    try stdout.writeAll(": ");
+    if (item.item_class == .epic) {
+        try styler.wrap(palette.kind_epic, "(EPIC)").format(stdout);
+        try stdout.writeAll(" ");
+    }
+    try stdout.writeAll(item.title);
     if (item.priority) |p| {
-        try stdout.print(" ● {s}", .{p.text()});
+        const p_st = priorityStyle(p);
+        try stdout.writeAll(" ");
+        try styler.wrap(p_st, "●").format(stdout);
+        try stdout.writeAll(" ");
+        try styler.wrap(p_st, p.text()).format(stdout);
     }
     try stdout.writeAll("\n");
+}
+
+/// Map an `ItemStatus` to the palette `Style` used for its glyph and the
+/// matching status-text token in the main header facet bracket.
+fn statusStyle(status: ItemStatus) Style {
+    return switch (status) {
+        .open => palette.status_open,
+        .active => palette.status_active,
+        .done => palette.status_done,
+    };
+}
+
+/// Map a `Priority` to its palette `Style`. Mirrors `list.zig`.
+fn priorityStyle(priority: Priority) Style {
+    return switch (priority) {
+        .P0 => palette.priority_p0,
+        .P1 => palette.priority_p1,
+        .P2 => palette.priority_p2,
+        .P3 => palette.priority_p3,
+        .P4 => palette.priority_p4,
+    };
+}
+
+/// Map an `ItemClass` to the palette `Style` used for its Display ID.
+/// Both entries are `style.none()` today; passing them through keeps
+/// `tk show` symmetric with `tk list` for future palette changes.
+fn idStyle(item_class: ItemClass) Style {
+    return switch (item_class) {
+        .epic => palette.id_epic,
+        .ticket => palette.id_ticket,
+    };
 }
 
 const storage_msgs: repository.StorageErrorMessages = .{
@@ -688,4 +762,190 @@ test "show: --help prints usage and exits 0" {
     try std.testing.expect(std.mem.indexOf(u8, out, "<id>") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "-h, --help") != null);
     try std.testing.expectEqualStrings("", h.stderr());
+}
+
+test "show: renders styled output with correct ANSI sequences under escape_codes" {
+    const gpa = std.testing.allocator;
+    var store = try TmpStore.init(gpa, "project");
+    defer store.deinit(gpa);
+
+    var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, store.toplevel_path, .{});
+    defer cwd.close(std.testing.io);
+
+    const rev_parse = try store.gitRevParseStdout(gpa);
+    defer gpa.free(rev_parse);
+
+    {
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
+    }
+
+    const zqlite = @import("zqlite");
+    const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+
+    // Epic parent (project-1) — exercises the magenta `(EPIC)` prefix
+    // in the PARENT sub-row.
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "epic",
+        .display = "project-1",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .title = "Ship list command",
+        .created_seq = 1,
+        .created_at = "2026-04-21T00:00:00.000Z",
+        .updated_at = "2026-04-21T00:00:00.000Z",
+    });
+    // Main item (project-2) — P0 bug, ACTIVE. Exercises bold title,
+    // yellow active main-header glyph, red priority dot + text,
+    // yellow status word, and red `bug` token on the Kind line.
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "main",
+        .display = "project-2",
+        .title = "Active bug",
+        .priority = "P0",
+        .ticket_kind = "bug",
+        .status = "active",
+        .body = "Body so the DESCRIPTION section renders.",
+        .container_id = "epic",
+        .created_seq = 2,
+        .created_at = "2026-04-21T00:00:00.000Z",
+        .updated_at = "2026-04-21T00:00:00.000Z",
+    });
+    // BLOCKED BY (project-3) — ACTIVE P1 Ticket. Exercises yellow
+    // active glyph and yellow P1 priority dot + text in a sub-row.
+    // `done` status is filtered out of BLOCKED BY / BLOCKING by
+    // `repository.showItem`; the done glyph is covered separately by
+    // the Epic-main-header test below.
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "blocker",
+        .display = "project-3",
+        .title = "Active blocker",
+        .priority = "P1",
+        .status = "active",
+        .created_seq = 3,
+        .created_at = "2026-04-21T00:00:00.000Z",
+        .updated_at = "2026-04-21T00:00:00.000Z",
+    });
+    try TmpStore.insertDependency(conn, "blocker", "main");
+    // BLOCKING (project-9) — open P3 Ticket. Priority_p3 is `none()`
+    // so this row asserts negative styling on a sub-row by sitting
+    // alongside the styled ones (no SGR around the P3 dot/text).
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "downstream",
+        .display = "project-9",
+        .title = "Open downstream",
+        .priority = "P3",
+        .created_seq = 9,
+        .created_at = "2026-04-21T00:00:00.000Z",
+        .updated_at = "2026-04-21T00:00:00.000Z",
+    });
+    try TmpStore.insertDependency(conn, "main", "downstream");
+    // One unresolved external blocker so the EXTERNAL BLOCKERS header
+    // renders (its label is the only styled span in that section).
+    try conn.exec(
+        \\insert into external_blockers(id, item_id, reason, created_at, resolved_at)
+        \\values (?1, ?2, ?3, '2026-04-21T00:00:00.000Z', null)
+    , .{ "eb-open", "main", "Need legal review" });
+
+    var h = Harness.init(gpa, &.{"project-2"}, .{
+        .cwd = cwd,
+        .stdout_mode = .escape_codes,
+    });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+
+    try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
+
+    const out = h.stdout();
+
+    // Bold section headers: SGR 1 .. 22 around each label.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[1mDESCRIPTION\x1b[22m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[1mPARENT\x1b[22m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[1mBLOCKED BY\x1b[22m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[1mBLOCKING\x1b[22m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[1mEXTERNAL BLOCKERS\x1b[22m") != null);
+
+    // Bold title in the main header line.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[1mActive bug\x1b[22m") != null);
+
+    // Main header: yellow status glyph (◐ = \xe2\x97\x90) before the Display ID.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[33m\xe2\x97\x90\x1b[39m project-2") != null);
+
+    // Facet bracket: red priority dot (● = \xe2\x97\x8f) and red `P0` text.
+    try std.testing.expect(std.mem.indexOf(u8, out, "[\x1b[31m\xe2\x97\x8f\x1b[39m \x1b[31mP0\x1b[39m") != null);
+
+    // Facet bracket: yellow `ACTIVE` status word matching the glyph colour.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[33mACTIVE\x1b[39m]") != null);
+
+    // Kind line: red `bug` token; the `Kind:` label itself stays plain.
+    try std.testing.expect(std.mem.indexOf(u8, out, "Kind: \x1b[31mbug\x1b[39m") != null);
+
+    // PARENT sub-row: magenta `(EPIC)` prefix.
+    try std.testing.expect(std.mem.indexOf(u8, out, ": \x1b[35m(EPIC)\x1b[39m Ship list command") != null);
+
+    // BLOCKED BY sub-row: yellow active glyph (◐ = \xe2\x97\x90) and yellow P1.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[33m\xe2\x97\x90\x1b[39m project-3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, " \x1b[33m\xe2\x97\x8f\x1b[39m \x1b[33mP1\x1b[39m") != null);
+}
+
+test "show: Epic main header renders magenta EPIC token under escape_codes" {
+    const gpa = std.testing.allocator;
+    var store = try TmpStore.init(gpa, "project");
+    defer store.deinit(gpa);
+
+    var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, store.toplevel_path, .{});
+    defer cwd.close(std.testing.io);
+
+    const rev_parse = try store.gitRevParseStdout(gpa);
+    defer gpa.free(rev_parse);
+
+    {
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
+    }
+
+    const zqlite = @import("zqlite");
+    const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+
+    // Done Epic so the main header glyph (✓) renders in green and
+    // the status word (`DONE`) renders in green. The facet bracket
+    // shows `EPIC` instead of a priority dot, so this is the only
+    // place to assert magenta on the main-header `EPIC` token.
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "epic",
+        .display = "project-1",
+        .item_class = "epic",
+        .ticket_kind = null,
+        .priority = null,
+        .status = "done",
+        .title = "Finished epic",
+        .created_seq = 1,
+        .created_at = "2026-04-21T00:00:00.000Z",
+        .updated_at = "2026-04-21T00:00:00.000Z",
+    });
+
+    var h = Harness.init(gpa, &.{"project-1"}, .{
+        .cwd = cwd,
+        .stdout_mode = .escape_codes,
+    });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+
+    try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
+
+    const out = h.stdout();
+
+    // Green done glyph (✓ = \xe2\x9c\x93) at the start of the main header.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[32m\xe2\x9c\x93\x1b[39m project-1") != null);
+    // Bold title.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[1mFinished epic\x1b[22m") != null);
+    // Facet bracket: magenta `EPIC` token next to green `DONE` status word.
+    try std.testing.expect(std.mem.indexOf(u8, out, "[\x1b[35mEPIC\x1b[39m \xc2\xb7 \x1b[32mDONE\x1b[39m]") != null);
 }
