@@ -3180,6 +3180,18 @@ test "nextReadyTicket: scope=ticket returns no_ready_ticket when the ticket is b
     try TmpStore.insertFixtureItem(conn, .{ .id = "b", .display = "tk-B", .title = "Blocking ready Ticket", .priority = "P0", .created_seq = 2 });
     try TmpStore.insertDependency(conn, "b", "a"); // b blocks a
 
+    // Unscoped: tk-B is the higher-priority ready Ticket and would be picked
+    // ahead of tk-A. Pinning this direction proves the scope clamp — not some
+    // unrelated filter — is what excludes tk-B in the scope=tk-A case below.
+    const unscoped = try nextReadyTicket(store, gpa, .{});
+    switch (unscoped) {
+        .ticket => |ticket| {
+            defer ticket.deinit(gpa);
+            try std.testing.expectEqualStrings("tk-B", ticket.display_id);
+        },
+        else => return error.ExpectedReadyTicket,
+    }
+
     const outcome = try nextReadyTicket(store, gpa, .{ .scope = .{ .display_arg = "tk-A" } });
     try std.testing.expectEqual(NextOutcome.no_ready_ticket, outcome);
 }
