@@ -42,6 +42,7 @@ test {
     _ = @import("sync/engine.zig");
     _ = @import("commands/worktree.zig");
     _ = @import("worktree/scope.zig");
+    _ = @import("testing/deps.zig");
     _ = @import("testing/script.zig");
     _ = @import("testing/scenarios.zig");
     _ = @import("testing/smoke.zig");

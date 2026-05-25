@@ -2573,7 +2573,7 @@ test "listRows SQL has a CASE arm for every ListView tag" {
 // ──────────────────────────────────────────────────────────────────────────────
 
 const FakeClock = @import("../clock.zig").FakeClock;
-const default_fake_now_ms = @import("../testing/test_cli.zig").default_fake_now_ms;
+const default_fake_now_ms = @import("../testing/deps.zig").default_fake_now_ms;
 
 test "setItemStatus: returns not_found for unknown id" {
     const gpa = std.testing.allocator;

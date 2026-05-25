@@ -296,7 +296,7 @@ fn expectStandardParseDiagnostic(stderr: []const u8, command_prefix: []const u8,
 }
 
 test "runArgv routes prime" {
-    var h = Harness.init(std.testing.allocator, &.{"prime"});
+    var h = Harness.init(std.testing.allocator, &.{"prime"}, .{});
     defer h.deinit();
 
     const code = try runArgv(h.deps(), &h.iter);
@@ -306,7 +306,7 @@ test "runArgv routes prime" {
 }
 
 test "Deps.styler defaults to no_color on both streams under Harness" {
-    var h = Harness.init(std.testing.allocator, &.{});
+    var h = Harness.init(std.testing.allocator, &.{}, .{});
     defer h.deinit();
     const d = h.deps();
     try std.testing.expect(d.styler.stdout == .no_color);
@@ -314,7 +314,7 @@ test "Deps.styler defaults to no_color on both streams under Harness" {
 }
 
 test "runArgv accepts --color=always before subcommand" {
-    var h = Harness.init(std.testing.allocator, &.{ "--color=always", "prime" });
+    var h = Harness.init(std.testing.allocator, &.{ "--color=always", "prime" }, .{});
     defer h.deinit();
     const code = try runArgv(h.deps(), &h.iter);
     try std.testing.expectEqual(@as(u8, 0), code);
@@ -322,14 +322,14 @@ test "runArgv accepts --color=always before subcommand" {
 }
 
 test "runArgv accepts --color=never before subcommand" {
-    var h = Harness.init(std.testing.allocator, &.{ "--color=never", "prime" });
+    var h = Harness.init(std.testing.allocator, &.{ "--color=never", "prime" }, .{});
     defer h.deinit();
     const code = try runArgv(h.deps(), &h.iter);
     try std.testing.expectEqual(@as(u8, 0), code);
 }
 
 test "runArgv rejects invalid --color value with standardized parse diagnostic" {
-    var h = Harness.init(std.testing.allocator, &.{ "--color=zebra", "prime" });
+    var h = Harness.init(std.testing.allocator, &.{ "--color=zebra", "prime" }, .{});
     defer h.deinit();
     const code = try runArgv(h.deps(), &h.iter);
     try std.testing.expectEqual(@as(u8, 2), code);
@@ -352,7 +352,7 @@ test "applyColorFlag: always forces escape_codes; never forces no_color" {
 }
 
 test "Harness.Options overrides the per-stream Mode on Deps.styler" {
-    var h = Harness.initWith(std.testing.allocator, &.{}, .{
+    var h = Harness.init(std.testing.allocator, &.{}, .{
         .stdout_mode = .escape_codes,
         .stderr_mode = .escape_codes,
     });
@@ -362,7 +362,7 @@ test "Harness.Options overrides the per-stream Mode on Deps.styler" {
 }
 
 test "runArgv returns 2 on unknown subcommand" {
-    var h = Harness.init(std.testing.allocator, &.{"bogus"});
+    var h = Harness.init(std.testing.allocator, &.{"bogus"}, .{});
     defer h.deinit();
 
     const code = try runArgv(h.deps(), &h.iter);
@@ -375,7 +375,7 @@ test "runArgv returns 2 on extra positional after a subcommand" {
     // Trailing positionals after a known subcommand surface through the
     // subcommand parser; this representative case proves dispatch uses the
     // shared clap diagnostic wrapper without retesting every command.
-    var h = Harness.init(std.testing.allocator, &.{ "prime", "unexpected" });
+    var h = Harness.init(std.testing.allocator, &.{ "prime", "unexpected" }, .{});
     defer h.deinit();
 
     const code = try runArgv(h.deps(), &h.iter);
@@ -385,7 +385,7 @@ test "runArgv returns 2 on extra positional after a subcommand" {
 }
 
 test "runArgv returns 2 on missing subcommand" {
-    var h = Harness.init(std.testing.allocator, &.{});
+    var h = Harness.init(std.testing.allocator, &.{}, .{});
     defer h.deinit();
 
     const code = try runArgv(h.deps(), &h.iter);
@@ -394,7 +394,7 @@ test "runArgv returns 2 on missing subcommand" {
 }
 
 test "runArgv prints version with embedded triple" {
-    var h = Harness.init(std.testing.allocator, &.{"--version"});
+    var h = Harness.init(std.testing.allocator, &.{"--version"}, .{});
     defer h.deinit();
 
     const code = try runArgv(h.deps(), &h.iter);
@@ -415,7 +415,7 @@ test "runArgv prints version with embedded triple" {
 }
 
 test "runArgv prints help" {
-    var h = Harness.init(std.testing.allocator, &.{"--help"});
+    var h = Harness.init(std.testing.allocator, &.{"--help"}, .{});
     defer h.deinit();
 
     const code = try runArgv(h.deps(), &h.iter);
@@ -442,7 +442,7 @@ test "runArgv help aligns command columns regardless of name length" {
     // planned command name fits the comptime-computed column, so
     // adding a longer name (e.g. an 11-char `self-update`) keeps
     // every row visually aligned.
-    var h = Harness.init(std.testing.allocator, &.{"--help"});
+    var h = Harness.init(std.testing.allocator, &.{"--help"}, .{});
     defer h.deinit();
     const code = try runArgv(h.deps(), &h.iter);
     try std.testing.expectEqual(@as(u8, 0), code);
@@ -459,7 +459,7 @@ test "runArgv help aligns command columns regardless of name length" {
 }
 
 test "runArgv routes a planned subcommand to a not-yet-implemented stub" {
-    var h = Harness.init(std.testing.allocator, &.{"promote"});
+    var h = Harness.init(std.testing.allocator, &.{"promote"}, .{});
     defer h.deinit();
 
     const code = try runArgv(h.deps(), &h.iter);
@@ -483,7 +483,7 @@ test "runArgv block creates a Dependency that affects next ready Ticket" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{"init"}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{"init"}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
@@ -495,7 +495,7 @@ test "runArgv block creates a Dependency that affects next ready Ticket" {
     try TmpStore.insertFixtureItem(conn, .{ .id = "blocking", .display = "project-2", .title = "Blocking work", .created_seq = 2 });
 
     {
-        var h = Harness.initWith(gpa, &.{ "block", "project-1", "project-2" }, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{ "block", "project-1", "project-2" }, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
@@ -504,7 +504,7 @@ test "runArgv block creates a Dependency that affects next ready Ticket" {
     }
 
     {
-        var h = Harness.initWith(gpa, &.{"next"}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{"next"}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try h.fake_runner.expect(&.{ "git", "config", "--worktree", "--get", "tk.scope" }, .{ .exit_code = 1 });
@@ -527,7 +527,7 @@ test "runArgv unblock removes a Dependency so the blocked Ticket is ready again"
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{"init"}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{"init"}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
@@ -540,7 +540,7 @@ test "runArgv unblock removes a Dependency so the blocked Ticket is ready again"
     try TmpStore.insertDependency(conn, "blocking", "blocked");
 
     {
-        var h = Harness.initWith(gpa, &.{ "unblock", "project-1", "project-2" }, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{ "unblock", "project-1", "project-2" }, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
@@ -549,7 +549,7 @@ test "runArgv unblock removes a Dependency so the blocked Ticket is ready again"
     }
 
     {
-        var h = Harness.initWith(gpa, &.{"next"}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{"next"}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try h.fake_runner.expect(&.{ "git", "config", "--worktree", "--get", "tk.scope" }, .{ .exit_code = 1 });
@@ -572,7 +572,7 @@ test "runArgv block rejects a self Dependency with a role-specific diagnostic" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{"init"}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{"init"}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
@@ -582,7 +582,7 @@ test "runArgv block rejects a self Dependency with a role-specific diagnostic" {
     defer conn.close();
     try TmpStore.insertFixtureItem(conn, .{ .id = "item", .display = "project-1", .title = "One item", .created_seq = 1 });
 
-    var h = Harness.initWith(gpa, &.{ "block", "project-1", "project-1" }, .{ .cwd = cwd });
+    var h = Harness.init(gpa, &.{ "block", "project-1", "project-1" }, .{ .cwd = cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
     try std.testing.expectEqual(@as(u8, 1), try runArgv(h.deps(), &h.iter));
@@ -602,7 +602,7 @@ test "runArgv unblock rejects a self Dependency argument pair" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{"init"}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{"init"}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
@@ -612,7 +612,7 @@ test "runArgv unblock rejects a self Dependency argument pair" {
     defer conn.close();
     try TmpStore.insertFixtureItem(conn, .{ .id = "item", .display = "project-1", .title = "One item", .created_seq = 1 });
 
-    var h = Harness.initWith(gpa, &.{ "unblock", "project-1", "project-1" }, .{ .cwd = cwd });
+    var h = Harness.init(gpa, &.{ "unblock", "project-1", "project-1" }, .{ .cwd = cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
     try std.testing.expectEqual(@as(u8, 1), try runArgv(h.deps(), &h.iter));
@@ -632,7 +632,7 @@ test "runArgv block rejects a done Blocked Item" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{"init"}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{"init"}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
@@ -643,7 +643,7 @@ test "runArgv block rejects a done Blocked Item" {
     try TmpStore.insertFixtureItem(conn, .{ .id = "blocked", .display = "project-1", .title = "Finished work", .status = "done", .created_seq = 1 });
     try TmpStore.insertFixtureItem(conn, .{ .id = "blocking", .display = "project-2", .title = "Blocking work", .created_seq = 2 });
 
-    var h = Harness.initWith(gpa, &.{ "block", "project-1", "project-2" }, .{ .cwd = cwd });
+    var h = Harness.init(gpa, &.{ "block", "project-1", "project-2" }, .{ .cwd = cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
     try std.testing.expectEqual(@as(u8, 1), try runArgv(h.deps(), &h.iter));
@@ -663,7 +663,7 @@ test "runArgv block rejects a Dependency cycle with a domain diagnostic" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{"init"}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{"init"}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
@@ -675,7 +675,7 @@ test "runArgv block rejects a Dependency cycle with a domain diagnostic" {
     try TmpStore.insertFixtureItem(conn, .{ .id = "b", .display = "project-2", .title = "Second item", .created_seq = 2 });
     try TmpStore.insertDependency(conn, "b", "a");
 
-    var h = Harness.initWith(gpa, &.{ "block", "project-2", "project-1" }, .{ .cwd = cwd });
+    var h = Harness.init(gpa, &.{ "block", "project-2", "project-1" }, .{ .cwd = cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
     try std.testing.expectEqual(@as(u8, 1), try runArgv(h.deps(), &h.iter));
@@ -695,7 +695,7 @@ test "runArgv block emits add_dependency Mutation for same-backend items" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{"init"}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{"init"}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
@@ -722,7 +722,7 @@ test "runArgv block emits add_dependency Mutation for same-backend items" {
         .created_seq = 2,
     });
 
-    var h = Harness.initWith(gpa, &.{ "block", "GH#1", "GH#2" }, .{ .cwd = cwd });
+    var h = Harness.init(gpa, &.{ "block", "GH#1", "GH#2" }, .{ .cwd = cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
     try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
@@ -753,7 +753,7 @@ test "runArgv block rejects Backend Blocked Item depending on Local Blocking Ite
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{"init"}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{"init"}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
@@ -772,7 +772,7 @@ test "runArgv block rejects Backend Blocked Item depending on Local Blocking Ite
     });
     try TmpStore.insertFixtureItem(conn, .{ .id = "blocking", .display = "project-1", .title = "Local blocking", .created_seq = 2 });
 
-    var h = Harness.initWith(gpa, &.{ "block", "GH#1", "project-1" }, .{ .cwd = cwd });
+    var h = Harness.init(gpa, &.{ "block", "GH#1", "project-1" }, .{ .cwd = cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
     try std.testing.expectEqual(@as(u8, 1), try runArgv(h.deps(), &h.iter));
@@ -796,7 +796,7 @@ test "runArgv block rejects Backend Dependency across Backend kinds" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{"init"}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{"init"}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
@@ -823,7 +823,7 @@ test "runArgv block rejects Backend Dependency across Backend kinds" {
         .created_seq = 2,
     });
 
-    var h = Harness.initWith(gpa, &.{ "block", "GH#1", "JIRA-2" }, .{ .cwd = cwd });
+    var h = Harness.init(gpa, &.{ "block", "GH#1", "JIRA-2" }, .{ .cwd = cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
     try std.testing.expectEqual(@as(u8, 1), try runArgv(h.deps(), &h.iter));
@@ -847,7 +847,7 @@ test "runArgv unblock emits remove_dependency Mutation for same-backend items" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{"init"}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{"init"}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
@@ -875,7 +875,7 @@ test "runArgv unblock emits remove_dependency Mutation for same-backend items" {
     });
     try TmpStore.insertDependency(conn, "blocking", "blocked");
 
-    var h = Harness.initWith(gpa, &.{ "unblock", "GH#1", "GH#2" }, .{ .cwd = cwd });
+    var h = Harness.init(gpa, &.{ "unblock", "GH#1", "GH#2" }, .{ .cwd = cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
     try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
@@ -906,7 +906,7 @@ test "runArgv block existing Dependency is idempotent and emits no Mutation" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{"init"}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{"init"}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));
@@ -934,7 +934,7 @@ test "runArgv block existing Dependency is idempotent and emits no Mutation" {
     });
     try TmpStore.insertDependency(conn, "blocking", "blocked");
 
-    var h = Harness.initWith(gpa, &.{ "block", "GH#1", "GH#2" }, .{ .cwd = cwd });
+    var h = Harness.init(gpa, &.{ "block", "GH#1", "GH#2" }, .{ .cwd = cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
     try std.testing.expectEqual(@as(u8, 0), try runArgv(h.deps(), &h.iter));

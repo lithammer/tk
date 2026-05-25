@@ -142,7 +142,7 @@ const StoreFixture = struct {
         errdefer gpa.free(rev_parse);
 
         {
-            var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+            var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
             defer h.deinit();
             try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
             try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
@@ -164,7 +164,7 @@ fn expectRevParse(h: *Harness, fixture: StoreFixture) !void {
 
 test "start: --help prints usage and exits 0" {
     const gpa = std.testing.allocator;
-    var h = Harness.init(gpa, &.{"--help"});
+    var h = Harness.init(gpa, &.{"--help"}, .{});
     defer h.deinit();
 
     try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
@@ -175,7 +175,7 @@ test "start: --help prints usage and exits 0" {
 
 test "start: requires a positional id" {
     const gpa = std.testing.allocator;
-    var h = Harness.init(gpa, &.{});
+    var h = Harness.init(gpa, &.{}, .{});
     defer h.deinit();
 
     try std.testing.expectEqual(@as(u8, 2), try run(h.deps(), &h.iter));
@@ -192,7 +192,7 @@ test "start: reports missing store as exit 1" {
     const rev_parse = try tmp_store.gitRevParseStdout(gpa);
     defer gpa.free(rev_parse);
 
-    var h = Harness.initWith(gpa, &.{"project-1"}, .{ .cwd = cwd });
+    var h = Harness.init(gpa, &.{"project-1"}, .{ .cwd = cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
 
@@ -206,7 +206,7 @@ test "start: reports unknown id as exit 1" {
     var fixture = try StoreFixture.init(gpa);
     defer fixture.deinit(gpa);
 
-    var h = Harness.initWith(gpa, &.{"no-such-id"}, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{"no-such-id"}, .{ .cwd = fixture.cwd });
     defer h.deinit();
     try expectRevParse(&h, fixture);
 
@@ -227,7 +227,7 @@ test "start: resolves Alias and marks a local Ticket active" {
     try TmpStore.insertFixtureItem(conn, .{ .id = "t1", .display = "project-1", .title = "Local Ticket", .created_seq = 1 });
     try TmpStore.insertAlias(conn, "old-1", "t1");
 
-    var h = Harness.initWith(gpa, &.{"old-1"}, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{"old-1"}, .{ .cwd = fixture.cwd });
     defer h.deinit();
     try expectRevParse(&h, fixture);
 
@@ -256,7 +256,7 @@ test "start: marks a local Epic active" {
         .created_seq = 1,
     });
 
-    var h = Harness.initWith(gpa, &.{"project-1"}, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{"project-1"}, .{ .cwd = fixture.cwd });
     defer h.deinit();
     try expectRevParse(&h, fixture);
 
@@ -284,7 +284,7 @@ test "start: Backend Ticket success emits set_item_status Mutation" {
         .created_seq = 1,
     });
 
-    var h = Harness.initWith(gpa, &.{"GH#7"}, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{"GH#7"}, .{ .cwd = fixture.cwd });
     defer h.deinit();
     try expectRevParse(&h, fixture);
 
@@ -318,7 +318,7 @@ test "start: already-active target is a no-op" {
         .updated_at = "2026-01-01T00:00:00.000Z",
     });
 
-    var h = Harness.initWith(gpa, &.{"GH#7"}, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{"GH#7"}, .{ .cwd = fixture.cwd });
     defer h.deinit();
     try expectRevParse(&h, fixture);
 
@@ -345,7 +345,7 @@ test "start: done Ticket cannot be started (locked_done)" {
         .updated_at = "2026-01-01T00:00:00.000Z",
     });
 
-    var h = Harness.initWith(gpa, &.{"project-1"}, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{"project-1"}, .{ .cwd = fixture.cwd });
     defer h.deinit();
     try expectRevParse(&h, fixture);
 
@@ -378,7 +378,7 @@ test "start: done Epic cannot be started (locked_done)" {
         .updated_at = "2026-01-01T00:00:00.000Z",
     });
 
-    var h = Harness.initWith(gpa, &.{"project-1"}, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{"project-1"}, .{ .cwd = fixture.cwd });
     defer h.deinit();
     try expectRevParse(&h, fixture);
 
@@ -418,7 +418,7 @@ test "start: forced write failure reports diagnostic and rolls back" {
         \\end
     );
 
-    var h = Harness.initWith(gpa, &.{"GH#7"}, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{"GH#7"}, .{ .cwd = fixture.cwd });
     defer h.deinit();
     try expectRevParse(&h, fixture);
 

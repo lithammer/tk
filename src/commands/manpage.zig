@@ -187,7 +187,7 @@ fn writeHelp(deps: cli.Deps) !void {
 const Harness = @import("../testing/test_cli.zig").Harness;
 
 test "manpage writes the embedded manpage bytes to stdout" {
-    var h = Harness.init(std.testing.allocator, &.{});
+    var h = Harness.init(std.testing.allocator, &.{}, .{});
     defer h.deinit();
 
     const code = try run(h.deps(), &h.iter);
@@ -197,7 +197,7 @@ test "manpage writes the embedded manpage bytes to stdout" {
 }
 
 test "manpage rejects an unknown flag" {
-    var h = Harness.init(std.testing.allocator, &.{"--bad-flag"});
+    var h = Harness.init(std.testing.allocator, &.{"--bad-flag"}, .{});
     defer h.deinit();
 
     const code = try run(h.deps(), &h.iter);
@@ -206,7 +206,7 @@ test "manpage rejects an unknown flag" {
 }
 
 test "manpage --help prints help to stdout and exits 0" {
-    var h = Harness.init(std.testing.allocator, &.{"--help"});
+    var h = Harness.init(std.testing.allocator, &.{"--help"}, .{});
     defer h.deinit();
 
     const code = try run(h.deps(), &h.iter);
@@ -246,7 +246,7 @@ test "manpage --install renders success or a structured diagnostic" {
     // without faking the executable-path resolution.
     try platform.skipOnWindows();
 
-    var h = Harness.init(std.testing.allocator, &.{"--install"});
+    var h = Harness.init(std.testing.allocator, &.{"--install"}, .{});
     defer h.deinit();
 
     const code = try run(h.deps(), &h.iter);
@@ -272,7 +272,7 @@ test "manpage --install writes the embedded bytes to the resolved target" {
     // check on the stdout message.
     try platform.skipOnWindows();
 
-    var h = Harness.init(std.testing.allocator, &.{"--install"});
+    var h = Harness.init(std.testing.allocator, &.{"--install"}, .{});
     defer h.deinit();
 
     const code = try run(h.deps(), &h.iter);
@@ -297,7 +297,7 @@ test "manpage --install writes the embedded bytes to the resolved target" {
 test "manpage --install is a no-op on Windows" {
     try platform.skipOnPosix();
 
-    var h = Harness.init(std.testing.allocator, &.{"--install"});
+    var h = Harness.init(std.testing.allocator, &.{"--install"}, .{});
     defer h.deinit();
 
     const code = try run(h.deps(), &h.iter);

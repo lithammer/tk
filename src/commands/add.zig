@@ -220,7 +220,7 @@ test "add: creates current local Ticket state without a Mutation" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
@@ -237,7 +237,7 @@ test "add: creates current local Ticket state without a Mutation" {
     });
 
     {
-        var h = Harness.initWith(gpa, &.{ "-F", "followup.md" }, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{ "-F", "followup.md" }, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
@@ -306,14 +306,14 @@ test "add: reads message from stdin with --file -" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
     }
 
     {
-        var h = Harness.initWith(gpa, &.{ "--file", "-" }, .{
+        var h = Harness.init(gpa, &.{ "--file", "-" }, .{
             .cwd = cwd,
             .stdin =
             \\Write stdin parity test
@@ -356,14 +356,14 @@ test "add: creates a local task Ticket from message paragraphs" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
     }
 
     {
-        var h = Harness.initWith(gpa, &.{ "-m", "Write message flag", "-m", "Body paragraph." }, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{ "-m", "Write message flag", "-m", "Body paragraph." }, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
@@ -390,14 +390,14 @@ test "add: creates a local task Ticket with requested Priority" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
     }
 
     {
-        var h = Harness.initWith(gpa, &.{ "--priority", "P1", "-m", "Raise urgent follow-up" }, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{ "--priority", "P1", "-m", "Raise urgent follow-up" }, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
@@ -424,14 +424,14 @@ test "add: creates a local bug Ticket" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
     }
 
     {
-        var h = Harness.initWith(gpa, &.{ "--bug", "-m", "Investigate crash" }, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{ "--bug", "-m", "Investigate crash" }, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
@@ -458,14 +458,14 @@ test "add: creates a local Epic" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
     }
 
     {
-        var h = Harness.initWith(gpa, &.{ "--epic", "-m", "Jira backend" }, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{ "--epic", "-m", "Jira backend" }, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
@@ -479,7 +479,7 @@ test "add: creates a local Epic" {
 }
 
 test "add: rejects --bug and --epic together" {
-    var h = Harness.init(std.testing.allocator, &.{ "--bug", "--epic", "-m", "Conflicting class" });
+    var h = Harness.init(std.testing.allocator, &.{ "--bug", "--epic", "-m", "Conflicting class" }, .{});
     defer h.deinit();
 
     try std.testing.expectEqual(@as(u8, 2), try run(h.deps(), &h.iter));
@@ -488,7 +488,7 @@ test "add: rejects --bug and --epic together" {
 }
 
 test "add: rejects --priority when creating an Epic" {
-    var h = Harness.init(std.testing.allocator, &.{ "--epic", "--priority", "P1", "-m", "Epic title" });
+    var h = Harness.init(std.testing.allocator, &.{ "--epic", "--priority", "P1", "-m", "Epic title" }, .{});
     defer h.deinit();
 
     try std.testing.expectEqual(@as(u8, 2), try run(h.deps(), &h.iter));
@@ -508,21 +508,21 @@ test "add: creates a local Ticket under an Epic" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
     }
 
     {
-        var h = Harness.initWith(gpa, &.{ "--epic", "-m", "Feature Epic" }, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{ "--epic", "-m", "Feature Epic" }, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
     }
 
     {
-        var h = Harness.initWith(gpa, &.{ "--parent", "project-1", "-m", "Build child Ticket" }, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{ "--parent", "project-1", "-m", "Build child Ticket" }, .{ .cwd = cwd });
         defer h.deinit();
         h.prng = std.Random.DefaultPrng.init(1);
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
@@ -540,7 +540,7 @@ test "add: creates a local Ticket under an Epic" {
 }
 
 test "add: rejects --parent when creating an Epic" {
-    var h = Harness.init(std.testing.allocator, &.{ "--epic", "--parent", "project-1", "-m", "Nested Epic" });
+    var h = Harness.init(std.testing.allocator, &.{ "--epic", "--parent", "project-1", "-m", "Nested Epic" }, .{});
     defer h.deinit();
 
     try std.testing.expectEqual(@as(u8, 2), try run(h.deps(), &h.iter));
@@ -560,14 +560,14 @@ test "add: rejects --parent that resolves to nothing" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
     }
 
     {
-        var h = Harness.initWith(gpa, &.{ "--parent", "missing-epic", "-m", "Child" }, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{ "--parent", "missing-epic", "-m", "Child" }, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 1), try run(h.deps(), &h.iter));
@@ -591,21 +591,21 @@ test "add: rejects --parent that resolves to a Ticket" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
     }
 
     {
-        var h = Harness.initWith(gpa, &.{ "-m", "Existing Ticket" }, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{ "-m", "Existing Ticket" }, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
     }
 
     {
-        var h = Harness.initWith(gpa, &.{ "--parent", "project-1", "-m", "Child" }, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{ "--parent", "project-1", "-m", "Child" }, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 1), try run(h.deps(), &h.iter));
@@ -629,14 +629,14 @@ test "add: prints current parent Display ID when --parent uses an Alias" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
     }
 
     {
-        var h = Harness.initWith(gpa, &.{ "--epic", "-m", "Current Epic" }, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{ "--epic", "-m", "Current Epic" }, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
@@ -651,7 +651,7 @@ test "add: prints current parent Display ID when --parent uses an Alias" {
     try TmpStore.insertAlias(conn, "legacy-epic", parent_id);
 
     {
-        var h = Harness.initWith(gpa, &.{ "--parent", "legacy-epic", "-m", "Alias child" }, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{ "--parent", "legacy-epic", "-m", "Alias child" }, .{ .cwd = cwd });
         defer h.deinit();
         h.prng = std.Random.DefaultPrng.init(1);
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
@@ -675,7 +675,7 @@ test "add: prefixes git rejection diagnostics" {
         .data = "Valid title\n",
     });
 
-    var h = Harness.initWith(gpa, &.{ "-F", "followup.md" }, .{ .cwd = cwd });
+    var h = Harness.init(gpa, &.{ "-F", "followup.md" }, .{ .cwd = cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{
         .exit_code = 128,
@@ -706,7 +706,7 @@ test "add: accepts --file=<file> and reports a missing Repository Store" {
         .data = "Valid title\n",
     });
 
-    var h = Harness.initWith(gpa, &.{"--file=followup.md"}, .{ .cwd = cwd });
+    var h = Harness.init(gpa, &.{"--file=followup.md"}, .{ .cwd = cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
 
@@ -728,7 +728,7 @@ test "add: validates message input before git discovery" {
         .data = " \n\t\n",
     });
 
-    var h = Harness.initWith(gpa, &.{ "-F", "empty.md" }, .{ .cwd = cwd });
+    var h = Harness.init(gpa, &.{ "-F", "empty.md" }, .{ .cwd = cwd });
     defer h.deinit();
 
     try std.testing.expectEqual(@as(u8, 1), try run(h.deps(), &h.iter));
@@ -737,24 +737,24 @@ test "add: validates message input before git discovery" {
 }
 
 test "add: maps busy, locked, and OOM storage errors to dedicated diagnostics" {
-    var busy = Harness.init(std.testing.allocator, &.{});
+    var busy = Harness.init(std.testing.allocator, &.{}, .{});
     defer busy.deinit();
     renderStorageError(busy.deps(), error.Busy);
     try std.testing.expectEqualStrings(messages.add_store_busy_retry ++ "\n", busy.stderr());
 
-    var locked = Harness.init(std.testing.allocator, &.{});
+    var locked = Harness.init(std.testing.allocator, &.{}, .{});
     defer locked.deinit();
     renderStorageError(locked.deps(), error.LockedSharedCache);
     try std.testing.expectEqualStrings(messages.add_store_busy_retry ++ "\n", locked.stderr());
 
-    var oom = Harness.init(std.testing.allocator, &.{});
+    var oom = Harness.init(std.testing.allocator, &.{}, .{});
     defer oom.deinit();
     renderStorageError(oom.deps(), error.OutOfMemory);
     try std.testing.expectEqualStrings(messages.add_out_of_memory ++ "\n", oom.stderr());
 }
 
 test "add: rejects repeated file flags as a usage error" {
-    var h = Harness.init(std.testing.allocator, &.{ "-F", "one.md", "--file", "two.md" });
+    var h = Harness.init(std.testing.allocator, &.{ "-F", "one.md", "--file", "two.md" }, .{});
     defer h.deinit();
 
     try std.testing.expectEqual(@as(u8, 2), try run(h.deps(), &h.iter));
@@ -763,7 +763,7 @@ test "add: rejects repeated file flags as a usage error" {
 }
 
 test "add: help describes only the implemented slice" {
-    var h = Harness.init(std.testing.allocator, &.{"--help"});
+    var h = Harness.init(std.testing.allocator, &.{"--help"}, .{});
     defer h.deinit();
 
     try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));

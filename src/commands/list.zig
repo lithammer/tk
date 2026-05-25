@@ -324,7 +324,7 @@ test "list: renders an unparented local Ticket from the Repository Store" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
@@ -336,14 +336,14 @@ test "list: renders an unparented local Ticket from the Repository Store" {
     });
 
     {
-        var h = Harness.initWith(gpa, &.{ "-F", "item.md" }, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{ "-F", "item.md" }, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try add_command.run(h.deps(), &h.iter));
     }
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
 
@@ -373,7 +373,7 @@ test "list: --ready renders ready Tickets with Epic containers" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
@@ -426,7 +426,7 @@ test "list: --ready renders ready Tickets with Epic containers" {
     });
     try TmpStore.insertDependency(conn, "epic-blocker", "ticket-blocked");
 
-    var h = Harness.initWith(gpa, &.{"--ready"}, .{ .cwd = cwd });
+    var h = Harness.init(gpa, &.{"--ready"}, .{ .cwd = cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
 
@@ -457,7 +457,7 @@ test "list: --blocked --remote promotes a matching child when Origin hides its E
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
@@ -490,7 +490,7 @@ test "list: --blocked --remote promotes a matching child when Origin hides its E
     });
     try TmpStore.insertExternalBlocker(conn, "blocker-1", "remote-ticket", null);
 
-    var h = Harness.initWith(gpa, &.{ "--blocked", "--remote" }, .{ .cwd = cwd });
+    var h = Harness.init(gpa, &.{ "--blocked", "--remote" }, .{ .cwd = cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
 
@@ -519,7 +519,7 @@ test "list: marks rendered rows with unresolved blockers" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
@@ -533,7 +533,7 @@ test "list: marks rendered rows with unresolved blockers" {
     try TmpStore.insertFixtureItem(conn, .{ .id = "blocking", .display = "project-2", .title = "Blocking work", .created_seq = 2 });
     try TmpStore.insertDependency(conn, "blocking", "blocked");
 
-    var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+    var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
 
@@ -563,7 +563,7 @@ test "list: default view excludes done items" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
@@ -577,7 +577,7 @@ test "list: default view excludes done items" {
     try TmpStore.insertFixtureItem(conn, .{ .id = "active", .display = "project-2", .title = "Active work", .status = "active", .created_seq = 2 });
     try TmpStore.insertFixtureItem(conn, .{ .id = "done", .display = "project-3", .title = "Done work", .status = "done", .created_seq = 3 });
 
-    var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+    var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
 
@@ -607,7 +607,7 @@ test "list: --active retains inactive Epic containers for active child Tickets" 
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
@@ -645,7 +645,7 @@ test "list: --active retains inactive Epic containers for active child Tickets" 
         .created_seq = 3,
     });
 
-    var h = Harness.initWith(gpa, &.{"--active"}, .{ .cwd = cwd });
+    var h = Harness.init(gpa, &.{"--active"}, .{ .cwd = cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
 
@@ -675,7 +675,7 @@ test "list: reports missing store after successful Git discovery" {
     const rev_parse = try store.gitRevParseStdout(gpa);
     defer gpa.free(rev_parse);
 
-    var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+    var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
 
@@ -686,7 +686,7 @@ test "list: reports missing store after successful Git discovery" {
 
 test "list: validates mutually exclusive filters" {
     {
-        var h = Harness.init(std.testing.allocator, &.{ "--ready", "--blocked" });
+        var h = Harness.init(std.testing.allocator, &.{ "--ready", "--blocked" }, .{});
         defer h.deinit();
 
         try std.testing.expectEqual(@as(u8, 2), try run(h.deps(), &h.iter));
@@ -694,7 +694,7 @@ test "list: validates mutually exclusive filters" {
         try std.testing.expectEqualStrings(messages.list_conflicting_readiness_filters ++ "\n", h.stderr());
     }
     {
-        var h = Harness.init(std.testing.allocator, &.{ "--local", "--remote" });
+        var h = Harness.init(std.testing.allocator, &.{ "--local", "--remote" }, .{});
         defer h.deinit();
 
         try std.testing.expectEqual(@as(u8, 2), try run(h.deps(), &h.iter));
@@ -715,7 +715,7 @@ test "list: renders styled output with correct ANSI sequences under escape_codes
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
@@ -754,7 +754,7 @@ test "list: renders styled output with correct ANSI sequences under escape_codes
     try TmpStore.insertExternalBlocker(conn, "ext-blocker", "ticket-blocked", null);
 
     // Initialize harness with stdout_mode = .escape_codes
-    var h = Harness.initWith(gpa, &.{}, .{
+    var h = Harness.init(gpa, &.{}, .{
         .cwd = cwd,
         .stdout_mode = .escape_codes,
     });

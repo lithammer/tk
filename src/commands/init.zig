@@ -225,7 +225,7 @@ const Harness = @import("../testing/test_cli.zig").Harness;
 const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
 
 test "init: returns exit 1 with diagnostic when not in a git repo" {
-    var h = Harness.init(std.testing.allocator, &.{});
+    var h = Harness.init(std.testing.allocator, &.{}, .{});
     defer h.deinit();
 
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{
@@ -240,7 +240,7 @@ test "init: returns exit 1 with diagnostic when not in a git repo" {
 }
 
 test "init: empty-stderr git failure falls back to default diagnostic" {
-    var h = Harness.init(std.testing.allocator, &.{});
+    var h = Harness.init(std.testing.allocator, &.{}, .{});
     defer h.deinit();
 
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 128, .stderr = "" });
@@ -251,7 +251,7 @@ test "init: empty-stderr git failure falls back to default diagnostic" {
 }
 
 test "init: --help prints to stdout, exits 0" {
-    var h = Harness.init(std.testing.allocator, &.{"--help"});
+    var h = Harness.init(std.testing.allocator, &.{"--help"}, .{});
     defer h.deinit();
 
     const code = try run(h.deps(), &h.iter);
@@ -266,7 +266,7 @@ test "init: success creates store, applies migration, seeds prefix" {
     var store = try TmpStore.init(gpa, "my-test-repo");
     defer store.deinit(gpa);
 
-    var h = Harness.init(gpa, &.{});
+    var h = Harness.init(gpa, &.{}, .{});
     defer h.deinit();
 
     const stdout_payload = try store.gitRevParseStdout(gpa);
@@ -314,7 +314,7 @@ test "init: only tightens permissions on directories it created" {
         var store = try TmpStore.init(gpa, "my-test-repo");
         defer store.deinit(gpa);
 
-        var h = Harness.init(gpa, &.{});
+        var h = Harness.init(gpa, &.{}, .{});
         defer h.deinit();
         const stdout_payload = try store.gitRevParseStdout(gpa);
         defer gpa.free(stdout_payload);
@@ -340,7 +340,7 @@ test "init: only tightens permissions on directories it created" {
         try std.Io.Dir.cwd().createDirPath(std.testing.io, tk_dir);
         try std.Io.Dir.cwd().setFilePermissions(std.testing.io, tk_dir, @enumFromInt(0o755), .{});
 
-        var h = Harness.init(gpa, &.{});
+        var h = Harness.init(gpa, &.{}, .{});
         defer h.deinit();
         const stdout_payload = try store.gitRevParseStdout(gpa);
         defer gpa.free(stdout_payload);
@@ -364,7 +364,7 @@ test "init: idempotent on second run preserves an externally-set prefix" {
     defer gpa.free(stdout_payload);
 
     {
-        var h = Harness.init(gpa, &.{});
+        var h = Harness.init(gpa, &.{}, .{});
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = stdout_payload });
         const code = try run(h.deps(), &h.iter);
@@ -383,7 +383,7 @@ test "init: idempotent on second run preserves an externally-set prefix" {
     }
 
     {
-        var h = Harness.init(gpa, &.{});
+        var h = Harness.init(gpa, &.{}, .{});
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = stdout_payload });
         const code = try run(h.deps(), &h.iter);
@@ -465,7 +465,7 @@ test "init: surfaces the foreign-store diagnostic on stderr" {
         try foreign.execNoArgs("create table other_app(x integer)");
     }
 
-    var h = Harness.init(gpa, &.{});
+    var h = Harness.init(gpa, &.{}, .{});
     defer h.deinit();
     const stdout_payload = try store.gitRevParseStdout(gpa);
     defer gpa.free(stdout_payload);
@@ -498,7 +498,7 @@ test "init: rejects a store created by a future tk version" {
         );
     }
 
-    var h = Harness.init(gpa, &.{});
+    var h = Harness.init(gpa, &.{}, .{});
     defer h.deinit();
     const stdout_payload = try store.gitRevParseStdout(gpa);
     defer gpa.free(stdout_payload);
@@ -539,7 +539,7 @@ test "init: surfaces SQLite error when migration fails" {
         try conn.execNoArgs(pragma_sql);
     }
 
-    var h = Harness.init(gpa, &.{});
+    var h = Harness.init(gpa, &.{}, .{});
     defer h.deinit();
     const stdout_payload = try store.gitRevParseStdout(gpa);
     defer gpa.free(stdout_payload);
@@ -556,7 +556,7 @@ test "init: surfaces unparseable rev-parse output" {
     // routes to messages.init_git_unparseable. The variant itself is
     // unit-tested in src/git/discovery.zig; this test covers the wiring.
     const gpa = std.testing.allocator;
-    var h = Harness.init(gpa, &.{});
+    var h = Harness.init(gpa, &.{}, .{});
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = "" });
 

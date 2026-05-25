@@ -349,7 +349,7 @@ const StoreFixture = struct {
         errdefer gpa.free(rev_parse);
 
         {
-            var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+            var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
             defer h.deinit();
             try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
             try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
@@ -370,7 +370,7 @@ test "tk sync: no Remote configured returns 1 with diagnostic" {
     var fixture = try StoreFixture.init(gpa);
     defer fixture.deinit(gpa);
 
-    var h = Harness.initWith(gpa, &.{}, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{}, .{ .cwd = fixture.cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
 
@@ -392,7 +392,7 @@ test "tk sync: github Remote returns adapter NotImplemented in tk-17" {
         });
     }
 
-    var h = Harness.initWith(gpa, &.{}, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{}, .{ .cwd = fixture.cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
 
@@ -405,7 +405,7 @@ test "tk sync log: empty store prints default empty message" {
     var fixture = try StoreFixture.init(gpa);
     defer fixture.deinit(gpa);
 
-    var h = Harness.initWith(gpa, &.{"log"}, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{"log"}, .{ .cwd = fixture.cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
 
@@ -447,7 +447,7 @@ test "tk sync log: lists default-view rows with failed continuation line" {
         });
     }
 
-    var h = Harness.initWith(gpa, &.{"log"}, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{"log"}, .{ .cwd = fixture.cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
 
@@ -486,7 +486,7 @@ test "tk sync log <id>: shows detail for the matching sequence" {
         });
     }
 
-    var h = Harness.initWith(gpa, &.{ "log", "5" }, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{ "log", "5" }, .{ .cwd = fixture.cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
 
@@ -504,7 +504,7 @@ test "tk sync log <id>: missing sequence returns 1 with diagnostic" {
     var fixture = try StoreFixture.init(gpa);
     defer fixture.deinit(gpa);
 
-    var h = Harness.initWith(gpa, &.{ "log", "999" }, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{ "log", "999" }, .{ .cwd = fixture.cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
 
@@ -517,7 +517,7 @@ test "tk sync --skip <id>: invalid value returns 2 with diagnostic" {
     var fixture = try StoreFixture.init(gpa);
     defer fixture.deinit(gpa);
 
-    var h = Harness.initWith(gpa, &.{ "--skip", "abc" }, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{ "--skip", "abc" }, .{ .cwd = fixture.cwd });
     defer h.deinit();
 
     try std.testing.expectEqual(@as(u8, 2), try run(h.deps(), &h.iter));
@@ -531,7 +531,7 @@ test "tk sync --skip <id>: non-failed mutation renders MutationNotFailed prose" 
 
     // Configure a Remote (otherwise sync exits before reaching the engine).
     {
-        var h_setup = Harness.initWith(gpa, &.{}, .{ .cwd = fixture.cwd });
+        var h_setup = Harness.init(gpa, &.{}, .{ .cwd = fixture.cwd });
         defer h_setup.deinit();
     }
     {
@@ -560,7 +560,7 @@ test "tk sync --skip <id>: non-failed mutation renders MutationNotFailed prose" 
         });
     }
 
-    var h = Harness.initWith(gpa, &.{ "--skip", "5" }, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{ "--skip", "5" }, .{ .cwd = fixture.cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
 
@@ -602,7 +602,7 @@ test "tk sync --skip <id>: failed mutation is transitioned to skipped" {
         });
     }
 
-    var h = Harness.initWith(gpa, &.{ "--skip", "5" }, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{ "--skip", "5" }, .{ .cwd = fixture.cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
 

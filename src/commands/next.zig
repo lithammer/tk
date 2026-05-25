@@ -156,7 +156,7 @@ test "next: configured Workspace Scope selects within scope and overrides defaul
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
@@ -169,7 +169,7 @@ test "next: configured Workspace Scope selects within scope and overrides defaul
 
     // Without scope, default ordering picks `project-1` first. With
     // `tk.scope = project-2` configured, `tk next` must return `project-2`.
-    var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+    var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
     try h.fake_runner.expect(
@@ -181,6 +181,43 @@ test "next: configured Workspace Scope selects within scope and overrides defaul
     try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
     try std.testing.expectEqualStrings("project-2\n", h.stdout());
     try std.testing.expectEqualStrings("", h.stderr());
+}
+
+test "next: with a blocked non-epic ticket scope returns exit 1" {
+    const gpa = std.testing.allocator;
+    var tmp_store = try TmpStore.init(gpa, "project");
+    defer tmp_store.deinit(gpa);
+    var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, tmp_store.toplevel_path, .{});
+    defer cwd.close(std.testing.io);
+    const rev_parse = try tmp_store.gitRevParseStdout(gpa);
+    defer gpa.free(rev_parse);
+
+    {
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
+    }
+
+    const conn = try zqlite.open(tmp_store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try TmpStore.insertFixtureItem(conn, .{ .id = "a", .display = "project-1", .title = "Scoped Ticket", .priority = "P3", .created_seq = 1 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "b", .display = "project-2", .title = "Blocking ready Ticket", .priority = "P0", .created_seq = 2 });
+    try TmpStore.insertDependency(conn, "b", "a"); // b blocks a
+
+    // Configure workspace scope to project-1 (the blocked ticket).
+    var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+    try h.fake_runner.expect(
+        &.{ "git", "config", "--worktree", "--get", "tk.scope" },
+        .{ .exit_code = 0, .stdout = "project-1\n" },
+    );
+    try h.fake_runner.expect(&.{ "git", "symbolic-ref" }, .{ .exit_code = 1 });
+
+    try std.testing.expectEqual(@as(u8, 1), try run(h.deps(), &h.iter));
+    try std.testing.expectEqualStrings("", h.stdout());
+    try std.testing.expectEqualStrings(messages.next_no_ready_ticket_in_scope ++ "\n", h.stderr());
 }
 
 test "next: prints the first ready Ticket from the Repository Store" {
@@ -195,7 +232,7 @@ test "next: prints the first ready Ticket from the Repository Store" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
@@ -207,14 +244,14 @@ test "next: prints the first ready Ticket from the Repository Store" {
     });
 
     {
-        var h = Harness.initWith(gpa, &.{ "-F", "item.md" }, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{ "-F", "item.md" }, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try add_command.run(h.deps(), &h.iter));
     }
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try expectNoWorkspaceScope(&h);
@@ -237,13 +274,13 @@ test "next: returns exit 1 when no ready Ticket exists" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
     }
 
-    var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+    var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
     try expectNoWorkspaceScope(&h);
@@ -271,7 +308,7 @@ test "next: prints stderr rationale when Effective Priority comes from a Blocked
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
@@ -285,7 +322,7 @@ test "next: prints stderr rationale when Effective Priority comes from a Blocked
     try TmpStore.insertFixtureItem(conn, .{ .id = "blocked", .display = "project-2", .title = "Blocked P1", .priority = "P1", .created_seq = 2 });
     try TmpStore.insertDependency(conn, "blocker", "blocked");
 
-    var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+    var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
     try expectNoWorkspaceScope(&h);
@@ -308,7 +345,7 @@ test "next: no stderr rationale when Effective Priority equals own Priority" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
@@ -318,7 +355,7 @@ test "next: no stderr rationale when Effective Priority equals own Priority" {
     defer conn.close();
     try TmpStore.insertFixtureItem(conn, .{ .id = "solo", .display = "project-1", .title = "Standalone", .priority = "P1", .created_seq = 1 });
 
-    var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+    var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
     try expectNoWorkspaceScope(&h);
@@ -330,7 +367,7 @@ test "next: no stderr rationale when Effective Priority equals own Priority" {
 
 test "next: rejects explicit scope arguments" {
     const gpa = std.testing.allocator;
-    var h = Harness.init(gpa, &.{"tk-1"});
+    var h = Harness.init(gpa, &.{"tk-1"}, .{});
     defer h.deinit();
 
     try std.testing.expectEqual(@as(u8, 2), try run(h.deps(), &h.iter));
@@ -349,7 +386,7 @@ test "next: reports missing store after successful Git discovery" {
     const rev_parse = try store.gitRevParseStdout(gpa);
     defer gpa.free(rev_parse);
 
-    var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+    var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
 

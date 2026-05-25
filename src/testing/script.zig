@@ -9,6 +9,7 @@ const proc = @import("../proc/runner.zig");
 const clock_mod = @import("../clock.zig");
 const txtar = @import("txtar.zig");
 const SliceArgIter = @import("arg_iter.zig").SliceArgIter;
+const test_deps = @import("deps.zig");
 
 const Section = txtar.Section;
 
@@ -316,19 +317,17 @@ fn executeScript(
         defer if (stdin_bytes) |bytes| allocator.free(bytes);
         var stdin_reader: std.Io.Reader = .fixed(stdin_bytes orelse "");
 
-        const deps = cli.Deps{
+        const deps = test_deps.init(.{
             .stdout = &stdout_buf.writer,
             .stderr = &stderr_buf.writer,
             .stdin = &stdin_reader,
             .gpa = allocator,
-            .io = std.testing.io,
             .cwd = active_cwd,
             .runner = real_runner.runner(),
             .http = fake_http_client.http(),
             .clock = fake_clock.clock(),
             .random = prng.random(),
-            .styler = .{ .stdout = .no_color, .stderr = .no_color },
-        };
+        });
 
         var iter = SliceArgIter{ .items = argv[1..] };
         result.final_exit = cli.runArgv(deps, &iter) catch |err| blk: {

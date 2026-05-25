@@ -397,7 +397,7 @@ const StoreFixture = struct {
         errdefer gpa.free(rev_parse);
 
         {
-            var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+            var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
             defer h.deinit();
             try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
             try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
@@ -421,7 +421,7 @@ test "worktree: with configured scope prints two-line block" {
     defer conn.close();
     try TmpStore.insertFixtureItem(conn, .{ .id = "t1", .display = "project-1", .title = "Implement scope", .created_seq = 1 });
 
-    var h = Harness.initWith(gpa, &.{}, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{}, .{ .cwd = fixture.cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
     try h.fake_runner.expect(&.{ "git", "config", "--worktree", "--get", "tk.scope" }, .{ .exit_code = 0, .stdout = "project-1\n" });
@@ -444,7 +444,7 @@ test "worktree: with inferred branch scope prints provenance hint" {
     defer conn.close();
     try TmpStore.insertFixtureItem(conn, .{ .id = "t1", .display = "project-1", .title = "Implement scope", .created_seq = 1 });
 
-    var h = Harness.initWith(gpa, &.{}, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{}, .{ .cwd = fixture.cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
     try h.fake_runner.expect(&.{ "git", "config", "--worktree", "--get", "tk.scope" }, .{ .exit_code = 1 });
@@ -464,7 +464,7 @@ test "worktree: with unresolved configured scope exits 1 with diagnostic" {
     var fixture = try StoreFixture.init(gpa);
     defer fixture.deinit(gpa);
 
-    var h = Harness.initWith(gpa, &.{}, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{}, .{ .cwd = fixture.cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
     try h.fake_runner.expect(&.{ "git", "config", "--worktree", "--get", "tk.scope" }, .{ .exit_code = 0, .stdout = "ghost-42\n" });
@@ -498,7 +498,7 @@ test "worktree start: success block lists Ticket, status, branch, and absolute p
     const path = try std.fs.path.join(gpa, &.{ parent, path_leaf });
     defer gpa.free(path);
 
-    var h = Harness.initWith(gpa, &.{ "start", "project-1" }, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{ "start", "project-1" }, .{ .cwd = fixture.cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
     try h.fake_runner.expect(&.{ "git", "config", "extensions.worktreeConfig", "true" }, .{ .exit_code = 0 });
@@ -536,7 +536,7 @@ test "worktree start: rejects a done Ticket uniformly per ADR 0006" {
         .created_seq = 1,
     });
 
-    var h = Harness.initWith(gpa, &.{ "start", "project-1" }, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{ "start", "project-1" }, .{ .cwd = fixture.cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
 
@@ -567,7 +567,7 @@ test "worktree start: --no-status omits the Status line and leaves item open" {
     const path = try std.fs.path.join(gpa, &.{ parent, path_leaf });
     defer gpa.free(path);
 
-    var h = Harness.initWith(gpa, &.{ "start", "project-1", "--no-status" }, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{ "start", "project-1", "--no-status" }, .{ .cwd = fixture.cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
     try h.fake_runner.expect(&.{ "git", "config", "extensions.worktreeConfig", "true" }, .{ .exit_code = 0 });
@@ -587,7 +587,7 @@ test "worktree start: unknown id exits 1" {
     var fixture = try StoreFixture.init(gpa);
     defer fixture.deinit(gpa);
 
-    var h = Harness.initWith(gpa, &.{ "start", "no-such-id" }, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{ "start", "no-such-id" }, .{ .cwd = fixture.cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
 
@@ -600,7 +600,7 @@ test "worktree start: unknown id exits 1" {
 
 test "worktree start: missing positional id exits 2" {
     const gpa = std.testing.allocator;
-    var h = Harness.init(gpa, &.{"start"});
+    var h = Harness.init(gpa, &.{"start"}, .{});
     defer h.deinit();
 
     try std.testing.expectEqual(@as(u8, 2), try run(h.deps(), &h.iter));
@@ -612,7 +612,7 @@ test "worktree: with no scope prints No Workspace Scope and exits 0" {
     var fixture = try StoreFixture.init(gpa);
     defer fixture.deinit(gpa);
 
-    var h = Harness.initWith(gpa, &.{}, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{}, .{ .cwd = fixture.cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
     try h.fake_runner.expect(&.{ "git", "config", "--worktree", "--get", "tk.scope" }, .{ .exit_code = 1 });
@@ -625,7 +625,7 @@ test "worktree: with no scope prints No Workspace Scope and exits 0" {
 
 test "worktree clear: runs git config --unset and prints success" {
     const gpa = std.testing.allocator;
-    var h = Harness.init(gpa, &.{"clear"});
+    var h = Harness.init(gpa, &.{"clear"}, .{});
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "config", "--worktree", "--unset", "tk.scope" }, .{ .exit_code = 0 });
 
@@ -636,7 +636,7 @@ test "worktree clear: runs git config --unset and prints success" {
 
 test "worktree clear: exit code 5 from git config --unset is the idempotent no-op" {
     const gpa = std.testing.allocator;
-    var h = Harness.init(gpa, &.{"clear"});
+    var h = Harness.init(gpa, &.{"clear"}, .{});
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "config", "--worktree", "--unset", "tk.scope" }, .{ .exit_code = 5 });
 
@@ -647,7 +647,7 @@ test "worktree clear: exit code 5 from git config --unset is the idempotent no-o
 
 test "worktree set: missing positional id exits 2 with usage" {
     const gpa = std.testing.allocator;
-    var h = Harness.init(gpa, &.{"set"});
+    var h = Harness.init(gpa, &.{"set"}, .{});
     defer h.deinit();
 
     try std.testing.expectEqual(@as(u8, 2), try run(h.deps(), &h.iter));
@@ -660,7 +660,7 @@ test "worktree set: unknown id exits 1 with role-specific diagnostic" {
     var fixture = try StoreFixture.init(gpa);
     defer fixture.deinit(gpa);
 
-    var h = Harness.initWith(gpa, &.{ "set", "no-such-id" }, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{ "set", "no-such-id" }, .{ .cwd = fixture.cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
 
@@ -680,7 +680,7 @@ test "worktree set: git config failure surfaces as exit 1" {
     defer conn.close();
     try TmpStore.insertFixtureItem(conn, .{ .id = "t1", .display = "project-1", .title = "T", .created_seq = 1 });
 
-    var h = Harness.initWith(gpa, &.{ "set", "project-1" }, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{ "set", "project-1" }, .{ .cwd = fixture.cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
     try h.fake_runner.expect(&.{ "git", "config", "extensions.worktreeConfig", "true" }, .{ .exit_code = 128 });
@@ -699,7 +699,7 @@ test "worktree set: validates id, enables per-worktree config, writes tk.scope" 
     defer conn.close();
     try TmpStore.insertFixtureItem(conn, .{ .id = "t1", .display = "project-1", .title = "Implement", .created_seq = 1 });
 
-    var h = Harness.initWith(gpa, &.{ "set", "project-1" }, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{ "set", "project-1" }, .{ .cwd = fixture.cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
     try h.fake_runner.expect(&.{ "git", "config", "extensions.worktreeConfig", "true" }, .{ .exit_code = 0 });
@@ -712,7 +712,7 @@ test "worktree set: validates id, enables per-worktree config, writes tk.scope" 
 
 test "worktree clear: other non-zero git exit surfaces as exit 1" {
     const gpa = std.testing.allocator;
-    var h = Harness.init(gpa, &.{"clear"});
+    var h = Harness.init(gpa, &.{"clear"}, .{});
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "config", "--worktree", "--unset", "tk.scope" }, .{ .exit_code = 128 });
 

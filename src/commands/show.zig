@@ -236,7 +236,7 @@ test "show: renders a minimal Ticket with no relationships" {
 
     // Init the store.
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
@@ -257,7 +257,7 @@ test "show: renders a minimal Ticket with no relationships" {
     });
 
     {
-        var h = Harness.initWith(gpa, &.{"project-1"}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{"project-1"}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
 
@@ -284,7 +284,7 @@ test "show: renders a Ticket with parent, dependencies, and external blocker" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
@@ -349,7 +349,7 @@ test "show: renders a Ticket with parent, dependencies, and external blocker" {
     try TmpStore.insertExternalBlocker(conn, "eb-done", "ticket", "2026-04-28T00:00:00.000Z");
 
     {
-        var h = Harness.initWith(gpa, &.{"project-2"}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{"project-2"}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
 
@@ -391,7 +391,7 @@ test "show: renders an Epic with children listed" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
@@ -436,7 +436,7 @@ test "show: renders an Epic with children listed" {
     });
 
     {
-        var h = Harness.initWith(gpa, &.{"project-1"}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{"project-1"}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
 
@@ -470,7 +470,7 @@ test "show: renders Backend Ticket origin as github (#9)" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
@@ -494,7 +494,7 @@ test "show: renders Backend Ticket origin as github (#9)" {
     });
 
     {
-        var h = Harness.initWith(gpa, &.{"GH#9"}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{"GH#9"}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
 
@@ -521,7 +521,7 @@ test "show: renders Backend Epic origin as jira (PROJ-12)" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
@@ -547,7 +547,7 @@ test "show: renders Backend Epic origin as jira (PROJ-12)" {
     });
 
     {
-        var h = Harness.initWith(gpa, &.{"PROJ-12"}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{"PROJ-12"}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
 
@@ -574,7 +574,7 @@ test "show: resolves via Alias" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
@@ -599,7 +599,7 @@ test "show: resolves via Alias" {
     try TmpStore.insertAlias(conn, "project-1", "ticket-id");
 
     {
-        var h = Harness.initWith(gpa, &.{"project-1"}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{"project-1"}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
 
@@ -626,14 +626,14 @@ test "show: reports an unknown id as exit 1 with a diagnostic" {
     defer gpa.free(rev_parse);
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
     }
 
     {
-        var h = Harness.initWith(gpa, &.{"no-such-id"}, .{ .cwd = cwd });
+        var h = Harness.init(gpa, &.{"no-such-id"}, .{ .cwd = cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
 
@@ -657,7 +657,7 @@ test "show: reports missing store after successful Git discovery" {
     const rev_parse = try store.gitRevParseStdout(gpa);
     defer gpa.free(rev_parse);
 
-    var h = Harness.initWith(gpa, &.{"project-1"}, .{ .cwd = cwd });
+    var h = Harness.init(gpa, &.{"project-1"}, .{ .cwd = cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
 
@@ -668,7 +668,7 @@ test "show: reports missing store after successful Git discovery" {
 
 test "show: requires a positional id" {
     const gpa = std.testing.allocator;
-    var h = Harness.init(gpa, &.{});
+    var h = Harness.init(gpa, &.{}, .{});
     defer h.deinit();
 
     try std.testing.expectEqual(@as(u8, 2), try run(h.deps(), &h.iter));
@@ -678,7 +678,7 @@ test "show: requires a positional id" {
 
 test "show: --help prints usage and exits 0" {
     const gpa = std.testing.allocator;
-    var h = Harness.init(gpa, &.{"--help"});
+    var h = Harness.init(gpa, &.{"--help"}, .{});
     defer h.deinit();
 
     try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));

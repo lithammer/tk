@@ -692,7 +692,7 @@ const Harness = @import("../testing/test_cli.zig").Harness;
 // has been set to by `-Drelease-triple=...` at `zig build test` time.
 
 test "self-update: dev build refuses without flags" {
-    var h = Harness.init(std.testing.allocator, &.{});
+    var h = Harness.init(std.testing.allocator, &.{}, .{});
     defer h.deinit();
     const code = try runWith(h.deps(), &h.iter, "v0.0.1", dev_triple);
     try std.testing.expectEqual(@as(u8, 1), code);
@@ -701,7 +701,7 @@ test "self-update: dev build refuses without flags" {
 }
 
 test "self-update: dev build refuses --check the same way" {
-    var h = Harness.init(std.testing.allocator, &.{"--check"});
+    var h = Harness.init(std.testing.allocator, &.{"--check"}, .{});
     defer h.deinit();
     const code = try runWith(h.deps(), &h.iter, "v0.0.1", dev_triple);
     try std.testing.expectEqual(@as(u8, 1), code);
@@ -710,7 +710,7 @@ test "self-update: dev build refuses --check the same way" {
 }
 
 test "self-update --check: up-to-date exits 0 with diagnostic" {
-    var h = Harness.init(std.testing.allocator, &.{"--check"});
+    var h = Harness.init(std.testing.allocator, &.{"--check"}, .{});
     defer h.deinit();
     try h.fake_http.expect(api_url, .{
         .status = 200,
@@ -724,7 +724,7 @@ test "self-update --check: up-to-date exits 0 with diagnostic" {
 }
 
 test "self-update --check: newer available exits 1 with diagnostic" {
-    var h = Harness.init(std.testing.allocator, &.{"--check"});
+    var h = Harness.init(std.testing.allocator, &.{"--check"}, .{});
     defer h.deinit();
     try h.fake_http.expect(api_url, .{
         .status = 200,
@@ -739,7 +739,7 @@ test "self-update --check: newer available exits 1 with diagnostic" {
 }
 
 test "self-update --check: local build ahead exits 0 with diagnostic" {
-    var h = Harness.init(std.testing.allocator, &.{"--check"});
+    var h = Harness.init(std.testing.allocator, &.{"--check"}, .{});
     defer h.deinit();
     try h.fake_http.expect(api_url, .{
         .status = 200,
@@ -754,7 +754,7 @@ test "self-update --check: local build ahead exits 0 with diagnostic" {
 }
 
 test "self-update --check: ignores unknown JSON fields" {
-    var h = Harness.init(std.testing.allocator, &.{"--check"});
+    var h = Harness.init(std.testing.allocator, &.{"--check"}, .{});
     defer h.deinit();
     try h.fake_http.expect(api_url, .{
         .status = 200,
@@ -768,7 +768,7 @@ test "self-update --check: ignores unknown JSON fields" {
 }
 
 test "self-update --check: HTTP 5xx surfaces status code" {
-    var h = Harness.init(std.testing.allocator, &.{"--check"});
+    var h = Harness.init(std.testing.allocator, &.{"--check"}, .{});
     defer h.deinit();
     try h.fake_http.expect(api_url, .{ .status = 503, .body = "" });
     const code = try runWith(h.deps(), &h.iter, "v0.5.0", "x86_64-linux-musl");
@@ -779,7 +779,7 @@ test "self-update --check: HTTP 5xx surfaces status code" {
 }
 
 test "self-update --check: network error surfaces transport diagnostic" {
-    var h = Harness.init(std.testing.allocator, &.{"--check"});
+    var h = Harness.init(std.testing.allocator, &.{"--check"}, .{});
     defer h.deinit();
     try h.fake_http.expect(api_url, .{ .err = error.NetworkError });
     const code = try runWith(h.deps(), &h.iter, "v0.5.0", "x86_64-linux-musl");
@@ -789,7 +789,7 @@ test "self-update --check: network error surfaces transport diagnostic" {
 }
 
 test "self-update --check: malformed JSON" {
-    var h = Harness.init(std.testing.allocator, &.{"--check"});
+    var h = Harness.init(std.testing.allocator, &.{"--check"}, .{});
     defer h.deinit();
     try h.fake_http.expect(api_url, .{ .status = 200, .body = "{not valid json" });
     const code = try runWith(h.deps(), &h.iter, "v0.5.0", "x86_64-linux-musl");
@@ -798,7 +798,7 @@ test "self-update --check: malformed JSON" {
 }
 
 test "self-update --check: missing tag_name field" {
-    var h = Harness.init(std.testing.allocator, &.{"--check"});
+    var h = Harness.init(std.testing.allocator, &.{"--check"}, .{});
     defer h.deinit();
     try h.fake_http.expect(api_url, .{ .status = 200, .body = "{\"tag_name\":\"\"}" });
     const code = try runWith(h.deps(), &h.iter, "v0.5.0", "x86_64-linux-musl");
@@ -807,7 +807,7 @@ test "self-update --check: missing tag_name field" {
 }
 
 test "self-update --check: unparseable latest tag surfaces tag" {
-    var h = Harness.init(std.testing.allocator, &.{"--check"});
+    var h = Harness.init(std.testing.allocator, &.{"--check"}, .{});
     defer h.deinit();
     try h.fake_http.expect(api_url, .{ .status = 200, .body = "{\"tag_name\":\"not-semver\"}" });
     const code = try runWith(h.deps(), &h.iter, "v0.5.0", "x86_64-linux-musl");
@@ -817,7 +817,7 @@ test "self-update --check: unparseable latest tag surfaces tag" {
 }
 
 test "self-update --check: unparseable embedded version surfaces version" {
-    var h = Harness.init(std.testing.allocator, &.{"--check"});
+    var h = Harness.init(std.testing.allocator, &.{"--check"}, .{});
     defer h.deinit();
     try h.fake_http.expect(api_url, .{ .status = 200, .body = "{\"tag_name\":\"v0.5.0\"}" });
     const code = try runWith(h.deps(), &h.iter, "not-semver", "x86_64-linux-musl");
@@ -858,7 +858,7 @@ test "self-update full: POSIX happy path streams asset into target" {
     try platform.skipOnWindows();
     const gpa = std.testing.allocator;
 
-    var h = Harness.init(gpa, &.{});
+    var h = Harness.init(gpa, &.{}, .{});
     defer h.deinit();
 
     var tmp = std.testing.tmpDir(.{});
@@ -906,7 +906,7 @@ test "self-update full: manpage subprocess failure warns but preserves binary sw
     try platform.skipOnWindows();
     const gpa = std.testing.allocator;
 
-    var h = Harness.init(gpa, &.{});
+    var h = Harness.init(gpa, &.{}, .{});
     defer h.deinit();
 
     var tmp = std.testing.tmpDir(.{});
@@ -959,7 +959,7 @@ test "self-update full: AccessDenied at stage create fast-fails before download"
     if (std.c.geteuid() == 0) return error.SkipZigTest;
     const gpa = std.testing.allocator;
 
-    var h = Harness.init(gpa, &.{});
+    var h = Harness.init(gpa, &.{}, .{});
     defer h.deinit();
 
     var tmp = std.testing.tmpDir(.{});
@@ -1005,7 +1005,7 @@ test "self-update full: asset 404 renders unified missing-asset diagnostic" {
     try platform.skipOnWindows();
     const gpa = std.testing.allocator;
 
-    var h = Harness.init(gpa, &.{});
+    var h = Harness.init(gpa, &.{}, .{});
     defer h.deinit();
 
     var tmp = std.testing.tmpDir(.{});
@@ -1033,7 +1033,7 @@ test "self-update full: asset HTTP 5xx surfaces status code" {
     try platform.skipOnWindows();
     const gpa = std.testing.allocator;
 
-    var h = Harness.init(gpa, &.{});
+    var h = Harness.init(gpa, &.{}, .{});
     defer h.deinit();
 
     var tmp = std.testing.tmpDir(.{});
@@ -1055,7 +1055,7 @@ test "self-update full: download network error cleans up stage" {
     try platform.skipOnWindows();
     const gpa = std.testing.allocator;
 
-    var h = Harness.init(gpa, &.{});
+    var h = Harness.init(gpa, &.{}, .{});
     defer h.deinit();
 
     var tmp = std.testing.tmpDir(.{});
@@ -1080,7 +1080,7 @@ test "self-update full: smoke exit-nonzero leaves target untouched" {
     try platform.skipOnWindows();
     const gpa = std.testing.allocator;
 
-    var h = Harness.init(gpa, &.{});
+    var h = Harness.init(gpa, &.{}, .{});
     defer h.deinit();
 
     var tmp = std.testing.tmpDir(.{});
@@ -1114,7 +1114,7 @@ test "self-update full: smoke version-mismatch leaves target untouched" {
     try platform.skipOnWindows();
     const gpa = std.testing.allocator;
 
-    var h = Harness.init(gpa, &.{});
+    var h = Harness.init(gpa, &.{}, .{});
     defer h.deinit();
 
     var tmp = std.testing.tmpDir(.{});
@@ -1147,7 +1147,7 @@ test "self-update full: smoke triple-mismatch leaves target untouched" {
     try platform.skipOnWindows();
     const gpa = std.testing.allocator;
 
-    var h = Harness.init(gpa, &.{});
+    var h = Harness.init(gpa, &.{}, .{});
     defer h.deinit();
 
     var tmp = std.testing.tmpDir(.{});
@@ -1206,7 +1206,7 @@ test "commitInstall: POSIX pattern atomically replaces target" {
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".tk.tmp.aaaa", .data = "new-bytes" });
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "tk", .data = "old-bytes" });
 
-    var h = Harness.init(std.testing.allocator, &.{});
+    var h = Harness.init(std.testing.allocator, &.{}, .{});
     defer h.deinit();
 
     try std.testing.expectEqual(CommitOutcome.ok, commitInstall(h.deps(), tmp.dir, ".tk.tmp.aaaa", "tk", false));
@@ -1226,7 +1226,7 @@ test "commitInstall: Windows pattern moves current to .old then places stage" {
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".tk.tmp.bbbb", .data = "new-bytes" });
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "tk.exe", .data = "old-bytes" });
 
-    var h = Harness.init(std.testing.allocator, &.{});
+    var h = Harness.init(std.testing.allocator, &.{}, .{});
     defer h.deinit();
 
     try std.testing.expectEqual(CommitOutcome.ok, commitInstall(h.deps(), tmp.dir, ".tk.tmp.bbbb", "tk.exe", true));
@@ -1251,7 +1251,7 @@ test "commitInstall: Windows pattern tolerates absent target (first install)" {
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".tk.tmp.cccc", .data = "first-bytes" });
     // No existing tk.exe at all.
 
-    var h = Harness.init(std.testing.allocator, &.{});
+    var h = Harness.init(std.testing.allocator, &.{}, .{});
     defer h.deinit();
 
     try std.testing.expectEqual(CommitOutcome.ok, commitInstall(h.deps(), tmp.dir, ".tk.tmp.cccc", "tk.exe", true));

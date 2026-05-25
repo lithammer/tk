@@ -305,7 +305,7 @@ const StoreFixture = struct {
         errdefer gpa.free(rev_parse);
 
         {
-            var h = Harness.initWith(gpa, &.{}, .{ .cwd = cwd });
+            var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
             defer h.deinit();
             try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
             try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
@@ -326,7 +326,7 @@ test "tk remote: status with no Remote prints None" {
     var fixture = try StoreFixture.init(gpa, "project");
     defer fixture.deinit(gpa);
 
-    var h = Harness.initWith(gpa, &.{}, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{}, .{ .cwd = fixture.cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
 
@@ -340,7 +340,7 @@ test "tk remote set github: round-trips to status" {
     defer fixture.deinit(gpa);
 
     {
-        var h = Harness.initWith(gpa, &.{ "set", "github", "--repo", "owner/name" }, .{ .cwd = fixture.cwd });
+        var h = Harness.init(gpa, &.{ "set", "github", "--repo", "owner/name" }, .{ .cwd = fixture.cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
@@ -349,7 +349,7 @@ test "tk remote set github: round-trips to status" {
     }
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = fixture.cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = fixture.cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
@@ -362,7 +362,7 @@ test "tk remote set github: refuses missing --repo" {
     var fixture = try StoreFixture.init(gpa, "project");
     defer fixture.deinit(gpa);
 
-    var h = Harness.initWith(gpa, &.{ "set", "github" }, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{ "set", "github" }, .{ .cwd = fixture.cwd });
     defer h.deinit();
     try std.testing.expectEqual(@as(u8, 2), try run(h.deps(), &h.iter));
     try std.testing.expect(std.mem.indexOf(u8, h.stderr(), messages.remote_set_github_repo_required) != null);
@@ -375,7 +375,7 @@ test "tk remote set: prefix collision refuses with diagnostic" {
     var fixture = try StoreFixture.init(gpa, "gh");
     defer fixture.deinit(gpa);
 
-    var h = Harness.initWith(gpa, &.{ "set", "github", "--repo", "o/r" }, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{ "set", "github", "--repo", "o/r" }, .{ .cwd = fixture.cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
 
@@ -389,14 +389,14 @@ test "tk remote clear: removes configured Remote" {
     defer fixture.deinit(gpa);
 
     {
-        var h = Harness.initWith(gpa, &.{ "set", "github", "--repo", "o/r" }, .{ .cwd = fixture.cwd });
+        var h = Harness.init(gpa, &.{ "set", "github", "--repo", "o/r" }, .{ .cwd = fixture.cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
     }
 
     {
-        var h = Harness.initWith(gpa, &.{"clear"}, .{ .cwd = fixture.cwd });
+        var h = Harness.init(gpa, &.{"clear"}, .{ .cwd = fixture.cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
@@ -411,7 +411,7 @@ test "tk remote clear: refuses when pending or failed mutations exist" {
 
     // Configure a Remote first.
     {
-        var h = Harness.initWith(gpa, &.{ "set", "github", "--repo", "o/r" }, .{ .cwd = fixture.cwd });
+        var h = Harness.init(gpa, &.{ "set", "github", "--repo", "o/r" }, .{ .cwd = fixture.cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
@@ -439,7 +439,7 @@ test "tk remote clear: refuses when pending or failed mutations exist" {
         });
     }
 
-    var h = Harness.initWith(gpa, &.{"clear"}, .{ .cwd = fixture.cwd });
+    var h = Harness.init(gpa, &.{"clear"}, .{ .cwd = fixture.cwd });
     defer h.deinit();
     try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
     try std.testing.expectEqual(@as(u8, 1), try run(h.deps(), &h.iter));
@@ -452,7 +452,7 @@ test "tk remote set jira: round-trips to status" {
     defer fixture.deinit(gpa);
 
     {
-        var h = Harness.initWith(gpa, &.{ "set", "jira", "--site", "https://example.atlassian.net", "--project", "PROJ" }, .{ .cwd = fixture.cwd });
+        var h = Harness.init(gpa, &.{ "set", "jira", "--site", "https://example.atlassian.net", "--project", "PROJ" }, .{ .cwd = fixture.cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
@@ -461,7 +461,7 @@ test "tk remote set jira: round-trips to status" {
     }
 
     {
-        var h = Harness.initWith(gpa, &.{}, .{ .cwd = fixture.cwd });
+        var h = Harness.init(gpa, &.{}, .{ .cwd = fixture.cwd });
         defer h.deinit();
         try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
         try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
