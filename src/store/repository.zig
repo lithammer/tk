@@ -3162,6 +3162,28 @@ test "nextReadyTicket: scope=ticket collapses Effective Priority to own Priority
     }
 }
 
+test "nextReadyTicket: scope=ticket returns no_ready_ticket when the ticket is blocked" {
+    const gpa = std.testing.allocator;
+    const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
+
+    const conn = try zqlite.open(":memory:", zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try conn.execNoArgs("pragma foreign_keys = on");
+    try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
+    const store: Store = .{ .conn = conn };
+
+    // Workspace Scope = tk-A (a single Ticket). tk-A is blocked by tk-B (P0,
+    // outside scope). tk-A is not ready, and tk-B is ready. Since Workspace Scope
+    // is restricted to tk-A, the engine must not fall back to tk-B or any other
+    // ready ticket.
+    try TmpStore.insertFixtureItem(conn, .{ .id = "a", .display = "tk-A", .title = "Scoped Ticket", .priority = "P3", .created_seq = 1 });
+    try TmpStore.insertFixtureItem(conn, .{ .id = "b", .display = "tk-B", .title = "Blocking ready Ticket", .priority = "P0", .created_seq = 2 });
+    try TmpStore.insertDependency(conn, "b", "a"); // b blocks a
+
+    const outcome = try nextReadyTicket(store, gpa, .{ .scope = .{ .display_arg = "tk-A" } });
+    try std.testing.expectEqual(NextOutcome.no_ready_ticket, outcome);
+}
+
 test "nextReadyTicket: Effective Priority propagation stops at the Workspace Scope boundary" {
     const gpa = std.testing.allocator;
     const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
