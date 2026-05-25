@@ -79,17 +79,21 @@ fn writeHelp(deps: cli.Deps) !void {
 
 /// Render a full item view to `stdout`.
 ///
-/// Layout (variant B): a label line and an indented facet bar, then
-/// sections separated by one blank line. The Beads-inherited facet
-/// bracket, the `Origin:` line, and the labelled `Created:`/`Updated:`
-/// line have been folded into the facet bar to drop redundant tokens
-/// (the status word duplicates the glyph; the `●` dot duplicates the
-/// priority text; the Display ID format conveys Local-vs-Backend so a
-/// separate Origin row is just restating `GH#9` / `PROJ-12`).
+/// Layout: a label line and an indented facet bar, then sections
+/// separated by one blank line.
 ///
 ///   <status-glyph> <display-id> · <title>
 ///     <P_> · <kind> · <created> → <updated>    (Tickets)
 ///     EPIC · <created> → <updated>             (Epics)
+///
+/// The shape drops tokens that were redundant: the status word
+/// duplicates the glyph; the `●` dot duplicates the priority text;
+/// the Display ID format conveys Local-vs-Backend so a separate
+/// Origin row is just restating `GH#9` / `PROJ-12`. The Origin
+/// elision relies on tk's v1 single-Remote invariant — when one
+/// Repository Store may hold rows from more than one Remote at a
+/// time, the layout will need a Backend kind token (see ADR holding
+/// area on the Mutation-failure / multi-Remote work).
 ///
 /// Section order: DESCRIPTION, PARENT/TICKETS, BLOCKED BY, BLOCKING,
 /// EXTERNAL BLOCKERS. Empty sections are omitted. Sections are separated
@@ -232,8 +236,8 @@ fn renderSubRow(stdout: *std.Io.Writer, glyph: []const u8, item: repository.Item
     try stdout.writeAll("\n");
 }
 
-/// Map an `ItemStatus` to the palette `Style` used for its glyph and the
-/// matching status-text token in the main header facet bracket.
+/// Map an `ItemStatus` to the palette `Style` used for its glyph on
+/// the label line and in every sub-row.
 fn statusStyle(status: ItemStatus) Style {
     return switch (status) {
         .open => palette.status_open,
@@ -780,8 +784,8 @@ test "show: renders styled output with correct ANSI sequences under escape_codes
         .updated_at = "2026-04-21T00:00:00.000Z",
     });
     // Main item (project-2) — P0 bug, ACTIVE. Exercises bold title,
-    // yellow active main-header glyph, red priority dot + text,
-    // yellow status word, and red `bug` token on the Kind line.
+    // yellow active label-line glyph, red `P0` and red `bug` tokens
+    // on the facet bar, and the `created → updated` date span.
     try TmpStore.insertFixtureItem(conn, .{
         .id = "main",
         .display = "project-2",
@@ -855,12 +859,9 @@ test "show: renders styled output with correct ANSI sequences under escape_codes
     // Label line: yellow status glyph (◐ = \xe2\x97\x90) before the Display ID.
     try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[33m\xe2\x97\x90\x1b[39m project-2") != null);
 
-    // Facet bar (indented two spaces): red `P0` token at the start.
+    // Facet bar (indented two spaces): red `P0`, separator, red `bug`.
+    // The combined pattern pins position too — order swaps would fail.
     try std.testing.expect(std.mem.indexOf(u8, out, "\n  \x1b[31mP0\x1b[39m \xc2\xb7 \x1b[31mbug\x1b[39m") != null);
-
-    // Facet bar: red `bug` kind directly after the priority, separated by `·`.
-    // Asserted as part of the previous indexOf; this comment names the second
-    // styled token explicitly for grep / future readers.
 
     // PARENT sub-row: magenta `(EPIC)` prefix.
     try std.testing.expect(std.mem.indexOf(u8, out, ": \x1b[35m(EPIC)\x1b[39m Ship list command") != null);
@@ -870,7 +871,7 @@ test "show: renders styled output with correct ANSI sequences under escape_codes
     try std.testing.expect(std.mem.indexOf(u8, out, " \x1b[33m\xe2\x97\x8f\x1b[39m \x1b[33mP1\x1b[39m") != null);
 }
 
-test "show: Epic main header renders magenta EPIC token under escape_codes" {
+test "show: Epic facet bar renders magenta EPIC token under escape_codes" {
     const gpa = std.testing.allocator;
     var store = try TmpStore.init(gpa, "project");
     defer store.deinit(gpa);
