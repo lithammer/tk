@@ -77,73 +77,59 @@ fn writeHelp(deps: cli.Deps) !void {
     );
 }
 
-/// Render a full Beads-style item view to `stdout`.
+/// Render a full item view to `stdout`.
+///
+/// Layout (variant B): a label line and an indented facet bar, then
+/// sections separated by one blank line. The Beads-inherited facet
+/// bracket, the `Origin:` line, and the labelled `Created:`/`Updated:`
+/// line have been folded into the facet bar to drop redundant tokens
+/// (the status word duplicates the glyph; the `●` dot duplicates the
+/// priority text; the Display ID format conveys Local-vs-Backend so a
+/// separate Origin row is just restating `GH#9` / `PROJ-12`).
+///
+///   <status-glyph> <display-id> · <title>
+///     <P_> · <kind> · <created> → <updated>    (Tickets)
+///     EPIC · <created> → <updated>             (Epics)
 ///
 /// Section order: DESCRIPTION, PARENT/TICKETS, BLOCKED BY, BLOCKING,
-/// EXTERNAL BLOCKERS. Empty sections are omitted. Sections are separated by
-/// one blank line. The output ends with a single trailing newline.
+/// EXTERNAL BLOCKERS. Empty sections are omitted. Sections are separated
+/// by one blank line. The output ends with a single trailing newline.
 ///
 /// Styling is mode-gated by `styler`: when the resolved stdout mode is
-/// `.no_color` the wrap/open/close calls emit empty bytes, so the plain
-/// txtar / snapshot baseline stays byte-identical. The styled palette
-/// follows `tk list` parity (status glyph colours, priority dot/text,
-/// kind tags, `(EPIC)` prefix) plus bold on section headers and the
-/// main header title. See palette.zig and ADR 0014.
+/// `.no_color` the wrap/open/close calls emit empty bytes, so non-TTY
+/// output stays byte-identical to plain. The styled palette follows
+/// `tk list` parity (status glyph colours, priority text, `bug` red,
+/// `EPIC` magenta, `(EPIC)` sub-row prefix) plus bold on section
+/// headers and the main label title. See palette.zig and ADR 0014.
 fn render(stdout: *std.Io.Writer, detail: repository.ItemDetail, styler: styler_mod.SubStyler) !void {
-    // Header: <status-glyph> <display-id> · <title>   [<facet> · STATUS]
-    const status_st = statusStyle(detail.status);
-    try styler.wrap(status_st, detail.status.glyph()).format(stdout);
+    // Label line: <status-glyph> <display-id> · <title>
+    try styler.wrap(statusStyle(detail.status), detail.status.glyph()).format(stdout);
     try stdout.writeAll(" ");
     try styler.wrap(idStyle(detail.item_class), detail.display_id).format(stdout);
     try stdout.writeAll(" · ");
     try styler.wrap(palette.header, detail.title).format(stdout);
-    try stdout.writeAll("   [");
+    try stdout.writeAll("\n");
+
+    // Facet bar: indented two spaces. Ticket form carries priority and
+    // kind; Epic form carries the magenta `EPIC` token in their place.
+    // Both forms end with `<created> → <updated>`.
+    try stdout.writeAll("  ");
     switch (detail.item_class) {
         .epic => try styler.wrap(palette.kind_epic, "EPIC").format(stdout),
         .ticket => {
             const priority = detail.priority orelse unreachable;
-            const p_st = priorityStyle(priority);
-            try styler.wrap(p_st, "●").format(stdout);
-            try stdout.writeAll(" ");
-            try styler.wrap(p_st, priority.text()).format(stdout);
-        },
-    }
-    try stdout.writeAll(" · ");
-    const status_upper: []const u8 = switch (detail.status) {
-        .open => "OPEN",
-        .active => "ACTIVE",
-        .done => "DONE",
-    };
-    try styler.wrap(status_st, status_upper).format(stdout);
-    try stdout.writeAll("]\n");
-
-    // Metadata line.
-    switch (detail.origin) {
-        .local => try stdout.writeAll("Origin: local"),
-        .backend => {
-            const bk = detail.backend_kind orelse "";
-            const bkey = detail.backend_key orelse "";
-            if (std.mem.eql(u8, bk, "github")) {
-                try stdout.print("Origin: github (#{s})", .{bkey});
-            } else {
-                try stdout.print("Origin: {s} ({s})", .{ bk, bkey });
+            try styler.wrap(priorityStyle(priority), priority.text()).format(stdout);
+            try stdout.writeAll(" · ");
+            const kind = detail.ticket_kind orelse unreachable;
+            switch (kind) {
+                .bug => try styler.wrap(palette.kind_bug, kind.text()).format(stdout),
+                .task => try stdout.writeAll(kind.text()),
             }
         },
     }
-    if (detail.item_class == .ticket) {
-        const kind = detail.ticket_kind orelse unreachable;
-        try stdout.writeAll(" · Kind: ");
-        switch (kind) {
-            .bug => try styler.wrap(palette.kind_bug, kind.text()).format(stdout),
-            .task => try stdout.writeAll(kind.text()),
-        }
-    }
-    try stdout.writeAll("\n");
-
-    // Date line: Created: YYYY-MM-DD · Updated: YYYY-MM-DD
     const created_date = detail.created_at[0..@min(10, detail.created_at.len)];
     const updated_date = detail.updated_at[0..@min(10, detail.updated_at.len)];
-    try stdout.print("Created: {s} · Updated: {s}\n", .{ created_date, updated_date });
+    try stdout.print(" · {s} → {s}\n", .{ created_date, updated_date });
 
     // Track whether we have printed a section yet (for blank-line separators).
     var has_section = false;
@@ -337,9 +323,8 @@ test "show: renders a minimal Ticket with no relationships" {
 
         try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
         try std.testing.expectEqualStrings(
-            \\○ project-1 · First Ticket   [● P2 · OPEN]
-            \\Origin: local · Kind: task
-            \\Created: 2026-04-21 · Updated: 2026-04-21
+            \\○ project-1 · First Ticket
+            \\  P2 · task · 2026-04-21 → 2026-04-21
             \\
         , h.stdout());
         try std.testing.expectEqualStrings("", h.stderr());
@@ -429,9 +414,8 @@ test "show: renders a Ticket with parent, dependencies, and external blocker" {
 
         try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
         try std.testing.expectEqualStrings(
-            \\○ project-2 · Render ready list   [● P1 · OPEN]
-            \\Origin: local · Kind: task
-            \\Created: 2026-04-21 · Updated: 2026-04-28
+            \\○ project-2 · Render ready list
+            \\  P1 · task · 2026-04-21 → 2026-04-28
             \\
             \\DESCRIPTION
             \\Render the slice with ready-only filter and a folder of fixture test data.
@@ -516,9 +500,8 @@ test "show: renders an Epic with children listed" {
 
         try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
         try std.testing.expectEqualStrings(
-            \\○ project-1 · Ship list command   [EPIC · OPEN]
-            \\Origin: local
-            \\Created: 2026-04-21 · Updated: 2026-04-28
+            \\○ project-1 · Ship list command
+            \\  EPIC · 2026-04-21 → 2026-04-28
             \\
             \\DESCRIPTION
             \\The slice that ships ready-only filtering.
@@ -532,7 +515,7 @@ test "show: renders an Epic with children listed" {
     }
 }
 
-test "show: renders Backend Ticket origin as github (#9)" {
+test "show: renders Backend Ticket with the backend Display ID" {
     const gpa = std.testing.allocator;
     var store = try TmpStore.init(gpa, "project");
     defer store.deinit(gpa);
@@ -574,16 +557,15 @@ test "show: renders Backend Ticket origin as github (#9)" {
 
         try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
         try std.testing.expectEqualStrings(
-            \\○ GH#9 · Backend task   [● P1 · OPEN]
-            \\Origin: github (#9) · Kind: task
-            \\Created: 2026-04-21 · Updated: 2026-04-21
+            \\○ GH#9 · Backend task
+            \\  P1 · task · 2026-04-21 → 2026-04-21
             \\
         , h.stdout());
         try std.testing.expectEqualStrings("", h.stderr());
     }
 }
 
-test "show: renders Backend Epic origin as jira (PROJ-12)" {
+test "show: renders Backend Epic with the backend Display ID" {
     const gpa = std.testing.allocator;
     var store = try TmpStore.init(gpa, "project");
     defer store.deinit(gpa);
@@ -627,9 +609,8 @@ test "show: renders Backend Epic origin as jira (PROJ-12)" {
 
         try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
         try std.testing.expectEqualStrings(
-            \\○ PROJ-12 · Jira Epic   [EPIC · OPEN]
-            \\Origin: jira (PROJ-12)
-            \\Created: 2026-04-21 · Updated: 2026-04-21
+            \\○ PROJ-12 · Jira Epic
+            \\  EPIC · 2026-04-21 → 2026-04-21
             \\
         , h.stdout());
         try std.testing.expectEqualStrings("", h.stderr());
@@ -679,9 +660,8 @@ test "show: resolves via Alias" {
 
         try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
         try std.testing.expectEqualStrings(
-            \\○ GH#42 · A Backend Ticket   [● P2 · OPEN]
-            \\Origin: github (#42) · Kind: task
-            \\Created: 2026-04-21 · Updated: 2026-04-21
+            \\○ GH#42 · A Backend Ticket
+            \\  P2 · task · 2026-04-21 → 2026-04-21
             \\
         , h.stdout());
         try std.testing.expectEqualStrings("", h.stderr());
@@ -869,20 +849,18 @@ test "show: renders styled output with correct ANSI sequences under escape_codes
     try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[1mBLOCKING\x1b[22m") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[1mEXTERNAL BLOCKERS\x1b[22m") != null);
 
-    // Bold title in the main header line.
+    // Label line: bold title.
     try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[1mActive bug\x1b[22m") != null);
 
-    // Main header: yellow status glyph (◐ = \xe2\x97\x90) before the Display ID.
+    // Label line: yellow status glyph (◐ = \xe2\x97\x90) before the Display ID.
     try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[33m\xe2\x97\x90\x1b[39m project-2") != null);
 
-    // Facet bracket: red priority dot (● = \xe2\x97\x8f) and red `P0` text.
-    try std.testing.expect(std.mem.indexOf(u8, out, "[\x1b[31m\xe2\x97\x8f\x1b[39m \x1b[31mP0\x1b[39m") != null);
+    // Facet bar (indented two spaces): red `P0` token at the start.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\n  \x1b[31mP0\x1b[39m \xc2\xb7 \x1b[31mbug\x1b[39m") != null);
 
-    // Facet bracket: yellow `ACTIVE` status word matching the glyph colour.
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[33mACTIVE\x1b[39m]") != null);
-
-    // Kind line: red `bug` token; the `Kind:` label itself stays plain.
-    try std.testing.expect(std.mem.indexOf(u8, out, "Kind: \x1b[31mbug\x1b[39m") != null);
+    // Facet bar: red `bug` kind directly after the priority, separated by `·`.
+    // Asserted as part of the previous indexOf; this comment names the second
+    // styled token explicitly for grep / future readers.
 
     // PARENT sub-row: magenta `(EPIC)` prefix.
     try std.testing.expect(std.mem.indexOf(u8, out, ": \x1b[35m(EPIC)\x1b[39m Ship list command") != null);
@@ -914,10 +892,10 @@ test "show: Epic main header renders magenta EPIC token under escape_codes" {
     const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
     defer conn.close();
 
-    // Done Epic so the main header glyph (✓) renders in green and
-    // the status word (`DONE`) renders in green. The facet bracket
-    // shows `EPIC` instead of a priority dot, so this is the only
-    // place to assert magenta on the main-header `EPIC` token.
+    // Done Epic so the label-line glyph (✓) renders in green. The
+    // facet bar for an Epic carries `EPIC` (magenta) in place of the
+    // priority+kind tokens a Ticket would emit. This is the only test
+    // that asserts the magenta `EPIC` token on the Epic facet bar.
     try TmpStore.insertFixtureItem(conn, .{
         .id = "epic",
         .display = "project-1",
@@ -942,10 +920,10 @@ test "show: Epic main header renders magenta EPIC token under escape_codes" {
 
     const out = h.stdout();
 
-    // Green done glyph (✓ = \xe2\x9c\x93) at the start of the main header.
+    // Label line: green done glyph (✓ = \xe2\x9c\x93) before the Display ID.
     try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[32m\xe2\x9c\x93\x1b[39m project-1") != null);
-    // Bold title.
+    // Label line: bold title.
     try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[1mFinished epic\x1b[22m") != null);
-    // Facet bracket: magenta `EPIC` token next to green `DONE` status word.
-    try std.testing.expect(std.mem.indexOf(u8, out, "[\x1b[35mEPIC\x1b[39m \xc2\xb7 \x1b[32mDONE\x1b[39m]") != null);
+    // Facet bar: magenta `EPIC` token at the start of the indented row.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\n  \x1b[35mEPIC\x1b[39m \xc2\xb7 2026-04-21") != null);
 }
