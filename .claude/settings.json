@@ -4,7 +4,7 @@
             {
                 "hooks": [
                     {
-                        "command": "tk prime",
+                        "command": "./zig-out/bin/tk prime",
                         "type": "command"
                     }
                 ],
@@ -15,7 +15,7 @@
             {
                 "hooks": [
                     {
-                        "command": "tk prime",
+                        "command": "./zig-out/bin/tk prime",
                         "type": "command"
                     }
                 ],
