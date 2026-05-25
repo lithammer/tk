@@ -852,7 +852,7 @@ pub const manpage_skip_windows = "tk manpage: skipping install on Windows";
 /// runs on a development build (`build_options.triple == "dev"`). Refusal
 /// is symmetric across both invocations because a dev build has no
 /// canonical upstream tag to compare against. See ADR 0013 and tk-32.
-pub const self_update_dev_build = "tk self-update: development builds cannot self-update; install a release via the curl|bash script in README.md";
+pub const self_update_dev_build = "tk self-update: development builds cannot self-update; install a release via the curl|sh script in README.md";
 
 /// Stdout prefix for `tk self-update --check` when the embedded version
 /// equals the latest published tag. Callers append the tag followed by a

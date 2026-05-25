@@ -1,4 +1,4 @@
-# Distribute via curl|bash and tk self-update without signing in v1
+# Distribute via curl|sh and tk self-update without signing in v1
 
 Step 1 of release distribution serves bare-binary release assets from
 GitHub Releases through a POSIX install script at

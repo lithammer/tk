@@ -8,17 +8,36 @@ Supported platforms: Linux, Windows, Windows (ARM), and macOS.
 
 ## Install
 
-Linux and macOS:
+### Linux and macOS
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/lithammer/tk/main/scripts/install.sh | sh
 ```
 
-Re-running the same line upgrades to the latest release.
+### Windows
 
-Windows: download the matching `tk-x86_64-windows-gnu.exe` or
-`tk-aarch64-windows-gnu.exe` from the [latest release](https://github.com/lithammer/tk/releases/latest)
-and place it on your `PATH`.
+Download `tk-x86_64-windows-gnu.exe` or `tk-aarch64-windows-gnu.exe` from the
+[latest release](https://github.com/lithammer/tk/releases/latest), rename it to
+`tk.exe`, and place it in a directory on `PATH`. `tk self-update` works after
+that.
+
+### Upgrade
+
+Use `tk self-update`. Re-running the install script is also supported. Use the
+variables below for version pinning or ABI switching.
+
+### Environment variables
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `TK_INSTALL_DIR` | `/usr/local/bin` as root, `~/.local/bin` otherwise | Install directory. |
+| `TK_VERSION` | latest release | Release version to install. |
+| `TK_LINUX_ABI` | `musl` | Linux ABI variant: `musl`, or `gnu` on x86_64 Linux. |
+
+### Build from source <a id="build-from-source"></a>
+
+Run `mise install` to install the Zig version pinned in `.mise.toml`, then
+`zig build`; the binary is written to `zig-out/bin/tk`.
 
 ## Current Design
 
@@ -43,22 +62,6 @@ and place it on your `PATH`.
 - Sync pulls backend state before applying pending Mutations, applies Mutations in global sequence order, and stops on the first failure.
 - Failed Mutations retry on the next sync; explicit `tk sync --skip <mutation-id>` remains visible.
 - `tk sync log` inspects pending, failed, skipped, and applied Mutations.
-
-## Resolved ADRs
-
-- [0001: Keep the repository store untracked by default](./docs/adr/0001-untracked-repository-store.md)
-- [0002: Create tickets locally by default](./docs/adr/0002-local-by-default-ticket-creation.md)
-- [0003: Use a current-state store with a mutation outbox](./docs/adr/0003-use-current-state-store-with-mutation-outbox.md)
-- [0004: Use Zig 0.16 for the first implementation](./docs/adr/0004-use-zig-0-16-for-the-first-implementation.md)
-- [0005: Use SQLite for the repository store](./docs/adr/0005-use-sqlite-for-the-repository-store.md)
-- [0006: Done is terminal in v1](./docs/adr/0006-done-is-terminal-in-v1.md)
-- [0007: Default worktree path layout](./docs/adr/0007-default-worktree-path-layout.md)
-- [0008: Keep the implementation document compact](./docs/adr/0008-keep-implementation-doc-compact.md)
-- [0009: Sync failure taxonomy](./docs/adr/0009-sync-failure-taxonomy.md)
-- [0010: Pull merge skips items with pending mutations](./docs/adr/0010-pull-merge-skips-items-with-pending-mutations.md)
-- [0011: Release artifacts cross-compile from a single Linux host](./docs/adr/0011-single-host-cross-compile-release.md)
-- [0012: Linkage policy per release triple](./docs/adr/0012-linkage-policy-per-release-triple.md)
-- [0013: Distribute via curl|bash and tk self-update without signing in v1](./docs/adr/0013-distribute-via-curl-and-self-update-without-signing.md)
 
 ## Domain Language
 

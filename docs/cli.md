@@ -65,7 +65,7 @@ Prints `man/tk.1`, embedded into the binary at build time via Zig
 - Default: writes the manpage to stdout.
 - `--install`: writes the manpage to `<selfexe-dir>/../share/man/man1/tk.1`
   (FHS convention relative to the running binary). The install script
-  and `tk self-update` invoke this so a `curl | bash` install and every
+  and `tk self-update` invoke this so a `curl | sh` install and every
   later upgrade keep the manpage current next to the binary. No-op on
   Windows.
 
@@ -391,8 +391,8 @@ Replaces the running `tk` binary with the latest release.
   message naming the path so the user can re-run with `sudo`.
 - Disabled on development builds (where the embedded triple is `dev`).
 - Forward-only. Downgrade and Linux ABI variant switching are not
-  supported by self-update; re-run the install script with
-  `TK_VERSION=v0.0.1 curl ... | sh` or `TK_LINUX_ABI=gnu curl ... | sh`.
+  supported by self-update; re-run the install script with `TK_VERSION`
+  or `TK_LINUX_ABI` set.
 
 Rationale and trust-root reasoning is recorded in
 [ADR 0013](./adr/0013-distribute-via-curl-and-self-update-without-signing.md).
