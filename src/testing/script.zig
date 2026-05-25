@@ -230,7 +230,7 @@ fn executeScript(
     // `tk self-update` will register URL expectations before the call.
     var fake_http_client = fake_http.FakeHttpClient.init(allocator);
     defer fake_http_client.deinit();
-    var fake_clock = clock_mod.FakeClock.init(0);
+    var fake_clock = clock_mod.FakeClock.init(test_deps.default_fake_now_ms);
     var prng = std.Random.DefaultPrng.init(0);
     var pending_stdin: ?[]u8 = null;
     defer if (pending_stdin) |bytes| allocator.free(bytes);
