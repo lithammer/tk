@@ -11,9 +11,7 @@
 - Add doc comments for public functions, structs, methods, constants, and
   important private boundaries as code is introduced or changed.
 - Anchor comments in the project docs: [CONTEXT.md](./CONTEXT.md),
-  [ARCHITECTURE.md](./ARCHITECTURE.md),
-  [docs/design-questions.md](./docs/design-questions.md), and
-  [docs/adr/](./docs/adr/).
+  [ARCHITECTURE.md](./ARCHITECTURE.md), and [docs/adr/](./docs/adr/).
 - Use tk's domain vocabulary in comments instead of generic terms. For
   example, prefer Repository Store, Workspace Scope, Display ID, Remote,
   Backend Adapter, Mutation, and Mutation Log where those concepts apply.

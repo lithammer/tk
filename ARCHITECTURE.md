@@ -4,11 +4,12 @@ This document maps how the tk codebase is organized — which directory
 owns which role, and the durable invariants the Repository Store preserves.
 It is intentionally compact: per [ADR
 0008](./docs/adr/0008-keep-implementation-doc-compact.md), shipped slice
-checklists should not live here once code, tests, `CONTEXT.md`,
-`docs/cli.md`, and ADRs carry the durable contracts. Onboarding pointers
-live in `README.md`; agent-facing conventions (code documentation, error
-handling, testing) live in `AGENTS.md`; domain vocabulary lives in
-`CONTEXT.md`; the v1 CLI surface is `docs/cli.md`.
+checklists should not live here once code, tests, command help, `CONTEXT.md`,
+and ADRs carry the durable contracts. Onboarding pointers live in
+`README.md`; agent-facing conventions (code documentation, error handling,
+testing) live in `AGENTS.md`; domain vocabulary lives in `CONTEXT.md`; the
+command reference lives in `tk --help`, `tk <command> --help`, and
+`man/tk.1`.
 
 ## Module Map
 
@@ -85,8 +86,7 @@ style of `diff -q` or `grep -q` — for example, `tk self-update --check`
 exits `1` to mean "newer release available", not "command failed". Real
 failures from these subcommands still surface on stderr; scripts that need
 to distinguish "newer" from "broken" check whether stderr is empty. Each
-such command spells the convention out in its own help text and in
-`docs/cli.md`.
+such command spells the convention out in its own help text.
 
 ## Repository Store Contracts
 

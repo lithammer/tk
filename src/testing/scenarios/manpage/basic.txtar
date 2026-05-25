@@ -318,8 +318,8 @@ tk prime
 .fi
 .RE
 .SH SEE ALSO
-The project README, CONTEXT.md domain glossary, docs/cli.md v1 target
-surface, and ADRs under docs/adr/.
+The project README, CONTEXT.md domain glossary, ARCHITECTURE.md module map,
+and ADRs under docs/adr/.
 -- expected/stderr --
 -- expected/exit --
 0

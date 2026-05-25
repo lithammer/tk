@@ -57,8 +57,8 @@ pub const CommandMeta = struct {
     description: []const u8,
 };
 
-/// Metadata for a planned subcommand whose surface is documented in `tk prime`
-/// and `docs/cli.md` but whose implementation has not yet shipped.
+/// Metadata for a planned subcommand whose surface is referenced by `tk prime`
+/// or a tracking Ticket but whose implementation has not yet shipped.
 ///
 /// Registered in `unimplemented_commands` so an agent that follows the
 /// workflow vision from `tk prime` and reaches for a future command receives a
