@@ -129,7 +129,7 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
         defer created.deinit(deps.gpa);
 
         output.writeItemTitleLine(deps.stdout, messages.add_created_epic_prefix, created.display_id, created.title) catch {};
-        deps.stdout.print(messages.add_status_label ++ "{s}\n", .{created.status.text()}) catch {};
+        deps.stdout.print(messages.add_status_label ++ "{f}\n", .{created.status}) catch {};
         return 0;
     }
 
@@ -147,9 +147,9 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
     defer created.deinit(deps.gpa);
 
     output.writeItemTitleLine(deps.stdout, messages.add_created_ticket_prefix, created.display_id, created.title) catch {};
-    deps.stdout.print(messages.add_kind_label ++ "{s}\n", .{created.kind.text()}) catch {};
-    deps.stdout.print(messages.add_priority_label ++ "{s}\n", .{created.priority.text()}) catch {};
-    deps.stdout.print(messages.add_status_label ++ "{s}\n", .{created.status.text()}) catch {};
+    deps.stdout.print(messages.add_kind_label ++ "{f}\n", .{created.kind}) catch {};
+    deps.stdout.print(messages.add_priority_label ++ "{f}\n", .{created.priority}) catch {};
+    deps.stdout.print(messages.add_status_label ++ "{f}\n", .{created.status}) catch {};
     if (parent_ref) |ref| {
         deps.stdout.print(messages.add_parent_label ++ "{s}\n", .{ref.display_id}) catch {};
     }
