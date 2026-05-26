@@ -5,8 +5,9 @@
 //! results without spawning real processes.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
+
+const platform = @import("../platform.zig");
 
 /// How an external CLI invocation ended.
 pub const Exit = union(enum) {
@@ -55,7 +56,7 @@ pub const Result = struct {
 };
 
 test "RealRunner reports normal process exit as typed exit" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    try platform.skipOnWindows();
 
     const gpa = std.testing.allocator;
 
@@ -71,7 +72,7 @@ test "RealRunner reports normal process exit as typed exit" {
 }
 
 test "RealRunner reports signal termination as typed exit" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    try platform.skipOnWindows();
 
     const gpa = std.testing.allocator;
 
