@@ -955,7 +955,8 @@ pub const self_update_asset_missing_prefix = "tk self-update: ";
 
 /// Stderr prefix for a smoke verification that exited non-zero. Callers
 /// append the exit code and a trailing newline.
-pub const self_update_smoke_exit_prefix = "tk self-update: staged binary smoke check failed: exit ";
+pub const self_update_smoke_failure_prefix = "tk self-update: staged binary smoke check failed: ";
+pub const self_update_smoke_exit_prefix = self_update_smoke_failure_prefix ++ "exit ";
 
 /// Stderr prefix when the staged binary's `--version` output does not
 /// include the latest tag string. Defends against asset-swap and version-

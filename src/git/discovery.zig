@@ -76,7 +76,7 @@ pub fn discoverPaths(gpa: Allocator, runner: proc.Runner, cwd: std.Io.Dir) Error
     };
     defer run_result.deinit(gpa);
 
-    if (run_result.exit_code != 0) {
+    if (run_result.exit.code() != 0) {
         const trimmed = std.mem.trim(u8, run_result.stderr, " \t\r\n");
         if (trimmed.len == 0) return .{ .git_rejected = null };
         const owned = try gpa.dupe(u8, trimmed);

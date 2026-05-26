@@ -5,12 +5,43 @@
 //! results without spawning real processes.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
+
+/// How an external CLI invocation ended.
+pub const Exit = union(enum) {
+    /// The child process exited normally with this status code.
+    exited: u8,
+    /// The child process was terminated by a signal.
+    signal: u32,
+    /// The child process was stopped by a signal.
+    stopped: u32,
+    /// The platform reported an unclassified termination status.
+    unknown: u32,
+
+    /// Return the status code for a normal process exit.
+    pub fn code(self: Exit) ?u8 {
+        return switch (self) {
+            .exited => |status| status,
+            .signal, .stopped, .unknown => null,
+        };
+    }
+
+    /// Write the stable user-facing representation of the exit mode.
+    pub fn format(self: Exit, writer: *std.Io.Writer) !void {
+        switch (self) {
+            .exited => |status| try writer.print("exit {d}", .{status}),
+            .signal => |sig| try writer.print("signal {d}", .{sig}),
+            .stopped => |sig| try writer.print("stopped {d}", .{sig}),
+            .unknown => |status| try writer.print("unknown {d}", .{status}),
+        }
+    }
+};
 
 /// Captured result of an external CLI invocation.
 pub const Result = struct {
-    /// 0..255 for processes that exited normally; 255 for signal/unknown.
-    exit_code: u8,
+    /// Typed process exit outcome.
+    exit: Exit,
     /// Captured stdout. Owned by `gpa` from the call to `run`.
     stdout: []u8,
     /// Captured stderr. Owned by `gpa` from the call to `run`.
@@ -22,6 +53,36 @@ pub const Result = struct {
         gpa.free(self.stderr);
     }
 };
+
+test "RealRunner reports normal process exit as typed exit" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const gpa = std.testing.allocator;
+
+    var runner = RealRunner.init(std.testing.io);
+    var result = try runner.runner().run(gpa, .{
+        .argv = &.{ "/bin/sh", "-c", "printf stdout; printf stderr >&2; exit 7" },
+    });
+    defer result.deinit(gpa);
+
+    try std.testing.expectEqual(@as(Exit, .{ .exited = 7 }), result.exit);
+    try std.testing.expectEqualStrings("stdout", result.stdout);
+    try std.testing.expectEqualStrings("stderr", result.stderr);
+}
+
+test "RealRunner reports signal termination as typed exit" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const gpa = std.testing.allocator;
+
+    var runner = RealRunner.init(std.testing.io);
+    var result = try runner.runner().run(gpa, .{
+        .argv = &.{ "/bin/sh", "-c", "kill -TERM $$" },
+    });
+    defer result.deinit(gpa);
+
+    try std.testing.expectEqual(@as(Exit, .{ .signal = @intFromEnum(std.posix.SIG.TERM) }), result.exit);
+}
 
 /// Subprocess request issued by a command handler.
 pub const Options = struct {
@@ -64,6 +125,11 @@ pub const Runner = struct {
 };
 
 /// Real runner backed by `std.process.run`.
+///
+/// Zig 0.16's POSIX spawn path performs argv/env sentinel allocation before
+/// `fork` and reports child-side setup/exec failures through a pipe, so tk's
+/// runner keeps the Repository Store and Backend Adapter subprocess boundary
+/// fork-safe without adding a second custom process launcher.
 pub const RealRunner = struct {
     io: std.Io,
 
@@ -92,15 +158,19 @@ pub const RealRunner = struct {
             else => return error.SpawnFailed,
         };
 
-        const exit_code: u8 = switch (result.term) {
-            .exited => |c| c,
-            else => 255,
-        };
-
         return .{
-            .exit_code = exit_code,
+            .exit = exitFromTerm(result.term),
             .stdout = result.stdout,
             .stderr = result.stderr,
         };
     }
 };
+
+fn exitFromTerm(term: std.process.Child.Term) Exit {
+    return switch (term) {
+        .exited => |code| .{ .exited = code },
+        .signal => |sig| .{ .signal = @intFromEnum(sig) },
+        .stopped => |sig| .{ .stopped = @intFromEnum(sig) },
+        .unknown => |status| .{ .unknown = status },
+    };
+}

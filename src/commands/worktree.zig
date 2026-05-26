@@ -340,7 +340,7 @@ fn runGitOrFail(deps: cli.Deps, argv: []const []const u8, failure_msg: []const u
         },
     };
     defer result.deinit(deps.gpa);
-    if (result.exit_code != 0) {
+    if (result.exit.code() != 0) {
         deps.stderr.print("{s}\n", .{failure_msg}) catch {};
         return false;
     }
@@ -370,7 +370,7 @@ fn runClear(deps: cli.Deps) !u8 {
 
     // Exit 5 is git's "key already absent" code; the design contract treats
     // that as the idempotent no-op success path.
-    if (result.exit_code != 0 and result.exit_code != 5) {
+    if (result.exit.code() != 0 and result.exit.code() != 5) {
         deps.stderr.print("{s}\n", .{messages.worktree_clear_failed}) catch {};
         return 1;
     }

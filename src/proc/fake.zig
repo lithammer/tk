@@ -73,7 +73,7 @@ pub const FakeRunner = struct {
                 const stdout = gpa.dupe(u8, exp.response.stdout) catch return error.OutOfMemory;
                 errdefer gpa.free(stdout);
                 const stderr = gpa.dupe(u8, exp.response.stderr) catch return error.OutOfMemory;
-                return .{ .exit_code = exp.response.exit_code, .stdout = stdout, .stderr = stderr };
+                return .{ .exit = .{ .exited = exp.response.exit_code }, .stdout = stdout, .stderr = stderr };
             }
         }
 

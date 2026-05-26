@@ -119,7 +119,7 @@ fn readSingleLine(
     };
     defer result.deinit(gpa);
 
-    if (result.exit_code != 0) return null;
+    if (result.exit.code() != 0) return null;
     const trimmed = std.mem.trim(u8, result.stdout, " \t\r\n");
     if (trimmed.len == 0) return null;
     return try gpa.dupe(u8, trimmed);

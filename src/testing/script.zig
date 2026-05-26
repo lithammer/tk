@@ -300,7 +300,10 @@ fn executeScript(
                 return result;
             };
             defer run_result.deinit(allocator);
-            result.final_exit = run_result.exit_code;
+            result.final_exit = switch (run_result.exit) {
+                .exited => |code| code,
+                .signal, .stopped, .unknown => 255,
+            };
             try result.stdout.appendSlice(allocator, run_result.stdout);
             try result.stderr.appendSlice(allocator, run_result.stderr);
             continue;

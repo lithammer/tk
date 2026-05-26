@@ -402,9 +402,9 @@ fn performUpdate(
     };
     defer smoke.deinit(deps.gpa);
 
-    if (smoke.exit_code != 0) {
+    if (smoke.exit.code() != 0) {
         target_dir.deleteFile(deps.io, stage_name) catch {};
-        deps.stderr.print(messages.self_update_smoke_exit_prefix ++ "{d}\n", .{smoke.exit_code}) catch {};
+        deps.stderr.print(messages.self_update_smoke_failure_prefix ++ "{f}\n", .{smoke.exit}) catch {};
         return 1;
     }
     if (!smokeOutputContainsToken(smoke.stdout, latest_tag)) {
@@ -473,8 +473,8 @@ fn performUpdate(
     };
     defer manpage.deinit(deps.gpa);
 
-    if (manpage.exit_code != 0) {
-        deps.stderr.print(messages.self_update_manpage_failure_prefix ++ "exit {d}\n", .{manpage.exit_code}) catch {};
+    if (manpage.exit.code() != 0) {
+        deps.stderr.print(messages.self_update_manpage_failure_prefix ++ "{f}\n", .{manpage.exit}) catch {};
         return 1;
     }
 
