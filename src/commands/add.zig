@@ -118,10 +118,11 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
     }
 
     if (res.args.epic != 0) {
-        const created = repository.createLocalEpic(store, deps.gpa, deps.clock, deps.random, .{
+        var created: repository.CreatedEpic = undefined;
+        repository.createLocalEpic(store, deps.gpa, deps.clock, deps.random, .{
             .title = parsed_msg.title,
             .body = parsed_msg.body,
-        }) catch |err| {
+        }, &created) catch |err| {
             renderStorageError(deps, err);
             return 1;
         };
@@ -132,13 +133,14 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
         return 0;
     }
 
-    const created = repository.createLocalTicket(store, deps.gpa, deps.clock, deps.random, .{
+    var created: repository.CreatedTicket = undefined;
+    repository.createLocalTicket(store, deps.gpa, deps.clock, deps.random, .{
         .kind = ticket_kind,
         .priority = res.args.priority orelse Priority.default,
         .parent_id = if (parent_ref) |ref| ref.id else null,
         .title = parsed_msg.title,
         .body = parsed_msg.body,
-    }) catch |err| {
+    }, &created) catch |err| {
         renderStorageError(deps, err);
         return 1;
     };

@@ -68,7 +68,8 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
         },
     };
 
-    const outcome = repository.nextReadyTicket(store, deps.gpa, .{ .scope = next_scope }) catch |err| {
+    var outcome: repository.NextOutcome = undefined;
+    repository.nextReadyTicket(store, deps.gpa, .{ .scope = next_scope }, &outcome) catch |err| {
         renderStorageError(deps, err);
         return 1;
     };

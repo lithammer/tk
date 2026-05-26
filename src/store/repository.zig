@@ -301,7 +301,8 @@ pub fn openStoreCatching(
     stderr: *std.Io.Writer,
     msgs: OpenMessages,
 ) ?Store {
-    const outcome = openExisting(gpa, runner, cwd) catch |err| {
+    var outcome: OpenOutcome = undefined;
+    openExisting(gpa, runner, cwd, &outcome) catch |err| {
         renderStorageError(stderr, err, msgs.storage);
         return null;
     };
@@ -332,11 +333,24 @@ pub fn isBusyError(err: anyerror) bool {
 }
 
 /// Open the existing Repository Store for the current Git repository.
-pub fn openExisting(gpa: Allocator, runner: proc.Runner, cwd: std.Io.Dir) OpenError!OpenOutcome {
+///
+/// Writes the result into `out_outcome.*`. Each `OpenOutcome` arm owns its
+/// own payload (an open `Store` for `.ok`, a `discovery.Outcome` for
+/// `.discovery_failed`); the caller branches on the tag and either closes
+/// the store or renders the failure.
+pub fn openExisting(
+    gpa: Allocator,
+    runner: proc.Runner,
+    cwd: std.Io.Dir,
+    out_outcome: *OpenOutcome,
+) OpenError!void {
     const outcome = try discovery.discoverPaths(gpa, runner, cwd);
     var paths = switch (outcome) {
         .ok => |ok| ok,
-        else => return .{ .discovery_failed = outcome },
+        else => {
+            out_outcome.* = .{ .discovery_failed = outcome };
+            return;
+        },
     };
     defer paths.deinit(gpa);
 
@@ -344,7 +358,10 @@ pub fn openExisting(gpa: Allocator, runner: proc.Runner, cwd: std.Io.Dir) OpenEr
     defer gpa.free(db_path);
 
     const conn = zqlite.open(db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode) catch |err| switch (err) {
-        error.CantOpen => return .store_missing,
+        error.CantOpen => {
+            out_outcome.* = .store_missing;
+            return;
+        },
         else => return err,
     };
     errdefer conn.close();
@@ -355,16 +372,18 @@ pub fn openExisting(gpa: Allocator, runner: proc.Runner, cwd: std.Io.Dir) OpenEr
     const app_id = (try migrations.queryOptionalInt(conn, "pragma application_id")) orelse 0;
     if (app_id != migrations.application_id) {
         conn.close();
-        return .not_ticket_store;
+        out_outcome.* = .not_ticket_store;
+        return;
     }
 
     const version = try migrations.currentVersion(conn);
     if (version > migrations.all_migrations[migrations.all_migrations.len - 1].version) {
         conn.close();
-        return .store_from_future_version;
+        out_outcome.* = .store_from_future_version;
+        return;
     }
 
-    return .{ .ok = .{ .conn = conn } };
+    out_outcome.* = .{ .ok = .{ .conn = conn } };
 }
 
 /// Compact summary of a related item for the `tk show` sub-section rows.
@@ -397,7 +416,9 @@ pub const ExternalBlockerSummary = struct {
 
 /// Full current-state view of one Ticket or Epic for `tk show`.
 ///
-/// Allocator-owned slices; free with `deinit`.
+/// Allocator-owned slices; free with `deinit`. Built in place by `showItem`
+/// via an out-pointer to keep the ~18-field, slice-heavy payload off the
+/// return stack and pointer-stable while children/dependencies are appended.
 pub const ItemDetail = struct {
     id: []u8,
     display_id: []u8,
@@ -445,10 +466,21 @@ pub const ShowError = ResolveError;
 /// Read one item's full current state from the Repository Store.
 ///
 /// Resolves `display_arg` via the `item_ids` table (Display ID or Alias).
-/// Returns `null` when the Display ID or Alias does not resolve. The caller
-/// is responsible for freeing the returned `ItemDetail` via `deinit`.
-pub fn showItem(store: Store, gpa: Allocator, display_arg: []const u8) ShowError!?ItemDetail {
-    const ref = (try resolveItemRef(store, gpa, display_arg)) orelse return null;
+/// On a hit, `out_item.*` is initialized in place and `true` is returned;
+/// the caller is then responsible for freeing it via `ItemDetail.deinit`.
+/// Returns `false` when the Display ID or Alias does not resolve, in which
+/// case `out_item.*` is left untouched and must not be deinit-ed.
+///
+/// In-place initialization is used per AGENTS.md "Design & Safety Patterns"
+/// because `ItemDetail` owns many slices and nested summaries: keeping it
+/// pointer-stable during construction avoids a wide stack copy on return.
+pub fn showItem(
+    store: Store,
+    gpa: Allocator,
+    display_arg: []const u8,
+    out_item: *ItemDetail,
+) ShowError!bool {
+    const ref = (try resolveItemRef(store, gpa, display_arg)) orelse return false;
     defer ref.deinit(gpa);
 
     // Read the main item row.
@@ -458,7 +490,7 @@ pub fn showItem(store: Store, gpa: Allocator, display_arg: []const u8) ShowError
         \\       container_id
         \\  from items
         \\ where id = ?1
-    , .{ref.id})) orelse return null;
+    , .{ref.id})) orelse return false;
     defer item_row.deinit();
 
     const id = try gpa.dupe(u8, item_row.text(0));
@@ -620,7 +652,7 @@ pub fn showItem(store: Store, gpa: Allocator, display_arg: []const u8) ShowError
         if (rows.err) |err| return err;
     }
 
-    return .{
+    out_item.* = .{
         .id = id,
         .display_id = display_id,
         .item_class = item_class,
@@ -640,6 +672,7 @@ pub fn showItem(store: Store, gpa: Allocator, display_arg: []const u8) ShowError
         .blocking = try blocking.toOwnedSlice(gpa),
         .external_blockers = try external_blockers.toOwnedSlice(gpa),
     };
+    return true;
 }
 
 pub const CreateError = migrations.QueryError || zqlite.Error || error{OutOfMemory};
@@ -892,7 +925,15 @@ pub fn listRows(store: Store, gpa: Allocator, options: ListOptions) ListError![]
 }
 
 /// Select the next ready Ticket from current Repository Store state.
-pub fn nextReadyTicket(store: Store, gpa: Allocator, options: NextOptions) NextError!NextOutcome {
+///
+/// Writes the result into `out_outcome.*`. The `.ticket` arm owns its
+/// copied row fields; callers free that payload in the matching switch arm.
+pub fn nextReadyTicket(
+    store: Store,
+    gpa: Allocator,
+    options: NextOptions,
+    out_outcome: *NextOutcome,
+) NextError!void {
     var scope_mode: []const u8 = "all";
     var scope_id: []const u8 = "";
 
@@ -902,7 +943,10 @@ pub fn nextReadyTicket(store: Store, gpa: Allocator, options: NextOptions) NextE
     switch (options.scope) {
         .none => {},
         .display_arg => |display_arg| {
-            const resolved = (try resolveItemRef(store, gpa, display_arg)) orelse return .scope_not_found;
+            const resolved = (try resolveItemRef(store, gpa, display_arg)) orelse {
+                out_outcome.* = .scope_not_found;
+                return;
+            };
             resolved_scope = resolved;
             scope_id = resolved.id;
             scope_mode = resolved.item_class.text();
@@ -911,19 +955,25 @@ pub fn nextReadyTicket(store: Store, gpa: Allocator, options: NextOptions) NextE
 
     if (try store.conn.row(next_ready_ticket_sql, .{ scope_mode, scope_id })) |r| {
         defer r.deinit();
-        return .{ .ticket = try nextTicketFromSql(gpa, r) };
+        out_outcome.* = .{ .ticket = try nextTicketFromSql(gpa, r) };
+        return;
     }
-    return .no_ready_ticket;
+    out_outcome.* = .no_ready_ticket;
 }
 
 /// Create a Local Ticket and its current Display ID resolver row.
+///
+/// Writes the result into `out_created.*`. On success the caller owns the
+/// freshly-allocated `id`/`display_id` slices and frees them via
+/// `CreatedTicket.deinit`; on error `out_created.*` is left untouched.
 pub fn createLocalTicket(
     store: Store,
     gpa: Allocator,
     clock: clock_mod.Clock,
     random: std.Random,
     input: CreateLocalTicketInput,
-) CreateError!CreatedTicket {
+    out_created: *CreatedTicket,
+) CreateError!void {
     const identity = try beginLocalItemCreate(store, gpa, clock, random);
     errdefer identity.deinit(gpa);
     errdefer store.conn.rollback();
@@ -954,7 +1004,7 @@ pub fn createLocalTicket(
 
     try store.conn.commit();
 
-    return .{
+    out_created.* = .{
         .id = identity.id,
         .display_id = identity.display_id,
         .kind = input.kind,
@@ -967,13 +1017,18 @@ pub fn createLocalTicket(
 }
 
 /// Create a Local Epic and its current Display ID resolver row.
+///
+/// Writes the result into `out_created.*`. On success the caller owns the
+/// freshly-allocated `id`/`display_id` slices and frees them via
+/// `CreatedEpic.deinit`; on error `out_created.*` is left untouched.
 pub fn createLocalEpic(
     store: Store,
     gpa: Allocator,
     clock: clock_mod.Clock,
     random: std.Random,
     input: CreateLocalEpicInput,
-) CreateError!CreatedEpic {
+    out_created: *CreatedEpic,
+) CreateError!void {
     const identity = try beginLocalItemCreate(store, gpa, clock, random);
     errdefer identity.deinit(gpa);
     errdefer store.conn.rollback();
@@ -996,7 +1051,7 @@ pub fn createLocalEpic(
 
     try store.conn.commit();
 
-    return .{
+    out_created.* = .{
         .id = identity.id,
         .display_id = identity.display_id,
         .status = ItemStatus.default,
@@ -1901,7 +1956,8 @@ test "nextReadyTicket: selects ready Tickets by Priority then creation order" {
         .created_seq = 7,
     });
 
-    const outcome = try nextReadyTicket(store, gpa, .{});
+    var outcome: NextOutcome = undefined;
+    try nextReadyTicket(store, gpa, .{}, &outcome);
     switch (outcome) {
         .ticket => |ticket| {
             defer ticket.deinit(gpa);
@@ -1949,7 +2005,8 @@ test "nextReadyTicket: selects backend Tickets regardless of Mutation state" {
         \\)
     , .{});
 
-    const outcome = try nextReadyTicket(store, gpa, .{});
+    var outcome: NextOutcome = undefined;
+    try nextReadyTicket(store, gpa, .{}, &outcome);
     switch (outcome) {
         .ticket => |ticket| {
             defer ticket.deinit(gpa);
@@ -1987,7 +2044,8 @@ test "nextReadyTicket: breaks Priority ties by created_seq across Origins" {
         .created_seq = 2,
     });
 
-    const outcome = try nextReadyTicket(store, gpa, .{});
+    var outcome: NextOutcome = undefined;
+    try nextReadyTicket(store, gpa, .{}, &outcome);
     switch (outcome) {
         .ticket => |ticket| {
             defer ticket.deinit(gpa);
@@ -2024,7 +2082,8 @@ test "nextReadyTicket: ignores Ticket Kind for ordering" {
         .created_seq = 2,
     });
 
-    const outcome = try nextReadyTicket(store, gpa, .{});
+    var outcome: NextOutcome = undefined;
+    try nextReadyTicket(store, gpa, .{}, &outcome);
     switch (outcome) {
         .ticket => |ticket| {
             defer ticket.deinit(gpa);
@@ -2070,7 +2129,8 @@ test "nextReadyTicket: selects a ready child Ticket under a done Epic" {
         .created_seq = 3,
     });
 
-    const outcome = try nextReadyTicket(store, gpa, .{});
+    var outcome: NextOutcome = undefined;
+    try nextReadyTicket(store, gpa, .{}, &outcome);
     switch (outcome) {
         .ticket => |ticket| {
             defer ticket.deinit(gpa);
@@ -2117,7 +2177,8 @@ test "nextReadyTicket: scoped Epic blockers do not block ready children" {
     try TmpStore.insertDependency(conn, "blocker", "epic");
     try TmpStore.insertExternalBlocker(conn, "external-blocker", "epic", null);
 
-    const outcome = try nextReadyTicket(store, gpa, .{ .scope = .{ .display_arg = "tk-1" } });
+    var outcome: NextOutcome = undefined;
+    try nextReadyTicket(store, gpa, .{ .scope = .{ .display_arg = "tk-1" } }, &outcome);
     switch (outcome) {
         .ticket => |ticket| {
             defer ticket.deinit(gpa);
@@ -2173,7 +2234,8 @@ test "nextReadyTicket: applies scoped Display ID and Alias selection" {
     });
     try TmpStore.insertAlias(conn, "tk-42", "promoted");
 
-    const scoped_epic = try nextReadyTicket(store, gpa, .{ .scope = .{ .display_arg = "tk-1" } });
+    var scoped_epic: NextOutcome = undefined;
+    try nextReadyTicket(store, gpa, .{ .scope = .{ .display_arg = "tk-1" } }, &scoped_epic);
     switch (scoped_epic) {
         .ticket => |ticket| {
             defer ticket.deinit(gpa);
@@ -2182,7 +2244,8 @@ test "nextReadyTicket: applies scoped Display ID and Alias selection" {
         else => return error.UnexpectedOutcome,
     }
 
-    const scoped_alias = try nextReadyTicket(store, gpa, .{ .scope = .{ .display_arg = "tk-42" } });
+    var scoped_alias: NextOutcome = undefined;
+    try nextReadyTicket(store, gpa, .{ .scope = .{ .display_arg = "tk-42" } }, &scoped_alias);
     switch (scoped_alias) {
         .ticket => |ticket| {
             defer ticket.deinit(gpa);
@@ -2191,7 +2254,8 @@ test "nextReadyTicket: applies scoped Display ID and Alias selection" {
         else => return error.UnexpectedOutcome,
     }
 
-    const missing_scope = try nextReadyTicket(store, gpa, .{ .scope = .{ .display_arg = "missing-9" } });
+    var missing_scope: NextOutcome = undefined;
+    try nextReadyTicket(store, gpa, .{ .scope = .{ .display_arg = "missing-9" } }, &missing_scope);
     switch (missing_scope) {
         .scope_not_found => {},
         else => return error.UnexpectedOutcome,
@@ -2360,8 +2424,8 @@ test "showItem: returns null for an unknown Display ID" {
     try migrations.applyAll(conn, "2026-05-09T00:00:00.000Z", null);
     const store: Store = .{ .conn = conn };
 
-    const result = try showItem(store, gpa, "missing");
-    try std.testing.expectEqual(null, result);
+    var detail: ItemDetail = undefined;
+    try std.testing.expect(!try showItem(store, gpa, "missing", &detail));
 }
 
 test "showItem: returns full Ticket detail with parent, dependencies, and external blockers" {
@@ -2420,7 +2484,8 @@ test "showItem: returns full Ticket detail with parent, dependencies, and extern
     // A resolved External Blocker (must be excluded).
     try TmpStore.insertExternalBlocker(conn, "eb-done", "ticket", "2026-05-10T00:00:00.000Z");
 
-    const detail = (try showItem(store, gpa, "tk-2")) orelse return error.ExpectedDetail;
+    var detail: ItemDetail = undefined;
+    if (!try showItem(store, gpa, "tk-2", &detail)) return error.ExpectedDetail;
     defer detail.deinit(gpa);
 
     try std.testing.expectEqualStrings("ticket", detail.id);
@@ -2487,7 +2552,8 @@ test "showItem: includes children for Epics ordered by created_seq" {
         .created_seq = 3,
     });
 
-    const detail = (try showItem(store, gpa, "tk-1")) orelse return error.ExpectedDetail;
+    var detail: ItemDetail = undefined;
+    if (!try showItem(store, gpa, "tk-1", &detail)) return error.ExpectedDetail;
     defer detail.deinit(gpa);
 
     try std.testing.expectEqual(ItemClass.epic, detail.item_class);
@@ -2523,7 +2589,8 @@ test "showItem: filters out resolved (done) dependencies" {
     });
     try TmpStore.insertDependency(conn, "done-blocker", "ticket");
 
-    const detail = (try showItem(store, gpa, "tk-2")) orelse return error.ExpectedDetail;
+    var detail: ItemDetail = undefined;
+    if (!try showItem(store, gpa, "tk-2", &detail)) return error.ExpectedDetail;
     defer detail.deinit(gpa);
 
     // Done blocker must not appear.
@@ -2551,7 +2618,8 @@ test "showItem: resolves via Alias" {
     });
     try TmpStore.insertAlias(conn, "tk-1", "ticket-id");
 
-    const detail = (try showItem(store, gpa, "tk-1")) orelse return error.ExpectedDetail;
+    var detail: ItemDetail = undefined;
+    if (!try showItem(store, gpa, "tk-1", &detail)) return error.ExpectedDetail;
     defer detail.deinit(gpa);
 
     try std.testing.expectEqualStrings("ticket-id", detail.id);
@@ -2969,7 +3037,11 @@ test "setItemStatus: completing a blocker makes the blocked Ticket ready" {
     });
     try TmpStore.insertDependency(conn, "blocker", "blocked");
 
-    try std.testing.expectEqual(NextOutcome.no_ready_ticket, try nextReadyTicket(store, gpa, .{}));
+    {
+        var outcome: NextOutcome = undefined;
+        try nextReadyTicket(store, gpa, .{}, &outcome);
+        try std.testing.expectEqual(NextOutcome.no_ready_ticket, outcome);
+    }
     {
         const blocked_rows = try listRows(store, gpa, .{ .view = .blocked });
         defer freeListRows(gpa, blocked_rows);
@@ -2983,7 +3055,8 @@ test "setItemStatus: completing a blocker makes the blocked Ticket ready" {
         .locked_done => return error.UnexpectedLockedDone,
     }
 
-    const next = try nextReadyTicket(store, gpa, .{});
+    var next: NextOutcome = undefined;
+    try nextReadyTicket(store, gpa, .{}, &next);
     switch (next) {
         .ticket => |ticket| {
             defer ticket.deinit(gpa);
@@ -3017,7 +3090,8 @@ test "nextReadyTicket: returns a rationale when Effective Priority comes from a 
     try TmpStore.insertFixtureItem(conn, .{ .id = "blocked", .display = "tk-B", .title = "Blocked P1", .priority = "P1", .created_seq = 2 });
     try TmpStore.insertDependency(conn, "blocker", "blocked");
 
-    const outcome = try nextReadyTicket(store, gpa, .{});
+    var outcome: NextOutcome = undefined;
+    try nextReadyTicket(store, gpa, .{}, &outcome);
     switch (outcome) {
         .ticket => |ticket| {
             defer ticket.deinit(gpa);
@@ -3065,7 +3139,8 @@ test "nextReadyTicket: rationale names the Epic-mediated contributor" {
     });
     try TmpStore.insertDependency(conn, "a", "epic");
 
-    const outcome = try nextReadyTicket(store, gpa, .{});
+    var outcome: NextOutcome = undefined;
+    try nextReadyTicket(store, gpa, .{}, &outcome);
     switch (outcome) {
         .ticket => |ticket| {
             defer ticket.deinit(gpa);
@@ -3090,7 +3165,8 @@ test "nextReadyTicket: rationale is null when Effective Priority equals own Prio
 
     try TmpStore.insertFixtureItem(conn, .{ .id = "solo", .display = "tk-A", .title = "Standalone P1", .priority = "P1", .created_seq = 1 });
 
-    const outcome = try nextReadyTicket(store, gpa, .{});
+    var outcome: NextOutcome = undefined;
+    try nextReadyTicket(store, gpa, .{}, &outcome);
     switch (outcome) {
         .ticket => |ticket| {
             defer ticket.deinit(gpa);
@@ -3120,7 +3196,8 @@ test "nextReadyTicket: External Blocker on an intermediate item does not interru
     try TmpStore.insertDependency(conn, "a", "b");
     try TmpStore.insertExternalBlocker(conn, "eb-1", "b", null);
 
-    const outcome = try nextReadyTicket(store, gpa, .{});
+    var outcome: NextOutcome = undefined;
+    try nextReadyTicket(store, gpa, .{}, &outcome);
     switch (outcome) {
         .ticket => |ticket| {
             defer ticket.deinit(gpa);
@@ -3151,7 +3228,8 @@ test "nextReadyTicket: scope=ticket collapses Effective Priority to own Priority
     try TmpStore.insertFixtureItem(conn, .{ .id = "b", .display = "tk-B", .title = "Out-of-scope P0", .priority = "P0", .created_seq = 2 });
     try TmpStore.insertDependency(conn, "a", "b");
 
-    const outcome = try nextReadyTicket(store, gpa, .{ .scope = .{ .display_arg = "tk-A" } });
+    var outcome: NextOutcome = undefined;
+    try nextReadyTicket(store, gpa, .{ .scope = .{ .display_arg = "tk-A" } }, &outcome);
     switch (outcome) {
         .ticket => |ticket| {
             defer ticket.deinit(gpa);
@@ -3183,7 +3261,8 @@ test "nextReadyTicket: scope=ticket returns no_ready_ticket when the ticket is b
     // Unscoped: tk-B is the higher-priority ready Ticket and would be picked
     // ahead of tk-A. Pinning this direction proves the scope clamp — not some
     // unrelated filter — is what excludes tk-B in the scope=tk-A case below.
-    const unscoped = try nextReadyTicket(store, gpa, .{});
+    var unscoped: NextOutcome = undefined;
+    try nextReadyTicket(store, gpa, .{}, &unscoped);
     switch (unscoped) {
         .ticket => |ticket| {
             defer ticket.deinit(gpa);
@@ -3192,7 +3271,8 @@ test "nextReadyTicket: scope=ticket returns no_ready_ticket when the ticket is b
         else => return error.ExpectedReadyTicket,
     }
 
-    const outcome = try nextReadyTicket(store, gpa, .{ .scope = .{ .display_arg = "tk-A" } });
+    var outcome: NextOutcome = undefined;
+    try nextReadyTicket(store, gpa, .{ .scope = .{ .display_arg = "tk-A" } }, &outcome);
     try std.testing.expectEqual(NextOutcome.no_ready_ticket, outcome);
 }
 
@@ -3225,7 +3305,8 @@ test "nextReadyTicket: Effective Priority propagation stops at the Workspace Sco
     try TmpStore.insertFixtureItem(conn, .{ .id = "x", .display = "tk-X", .title = "Out-of-scope P0", .priority = "P0", .created_seq = 4 });
     try TmpStore.insertDependency(conn, "a", "x");
 
-    const outcome = try nextReadyTicket(store, gpa, .{ .scope = .{ .display_arg = "tk-E" } });
+    var outcome: NextOutcome = undefined;
+    try nextReadyTicket(store, gpa, .{ .scope = .{ .display_arg = "tk-E" } }, &outcome);
     switch (outcome) {
         .ticket => |ticket| {
             defer ticket.deinit(gpa);
@@ -3254,7 +3335,8 @@ test "nextReadyTicket: active Blocked Items contribute to Effective Priority" {
     try TmpStore.insertFixtureItem(conn, .{ .id = "d", .display = "tk-D", .title = "Unrelated P1", .priority = "P1", .created_seq = 3 });
     try TmpStore.insertDependency(conn, "a", "b");
 
-    const outcome = try nextReadyTicket(store, gpa, .{});
+    var outcome: NextOutcome = undefined;
+    try nextReadyTicket(store, gpa, .{}, &outcome);
     switch (outcome) {
         .ticket => |ticket| {
             defer ticket.deinit(gpa);
@@ -3282,7 +3364,8 @@ test "nextReadyTicket: done Blocked Items do not contribute to Effective Priorit
     try TmpStore.insertFixtureItem(conn, .{ .id = "d", .display = "tk-D", .title = "Unrelated P1", .priority = "P1", .created_seq = 3 });
     try TmpStore.insertDependency(conn, "a", "b");
 
-    const outcome = try nextReadyTicket(store, gpa, .{});
+    var outcome: NextOutcome = undefined;
+    try nextReadyTicket(store, gpa, .{}, &outcome);
     switch (outcome) {
         .ticket => |ticket| {
             defer ticket.deinit(gpa);
@@ -3340,7 +3423,8 @@ test "nextReadyTicket: an Epic in the chain contributes the lowest of its unfini
     try TmpStore.insertFixtureItem(conn, .{ .id = "d", .display = "tk-D", .title = "Unrelated P2", .priority = "P2", .created_seq = 5 });
     try TmpStore.insertDependency(conn, "a", "epic");
 
-    const outcome = try nextReadyTicket(store, gpa, .{});
+    var outcome: NextOutcome = undefined;
+    try nextReadyTicket(store, gpa, .{}, &outcome);
     switch (outcome) {
         .ticket => |ticket| {
             defer ticket.deinit(gpa);
@@ -3389,7 +3473,8 @@ test "nextReadyTicket: an Epic in the chain contributes its open children's Prio
     try TmpStore.insertFixtureItem(conn, .{ .id = "unrelated", .display = "tk-D", .title = "Unrelated P1", .priority = "P1", .created_seq = 4 });
     try TmpStore.insertDependency(conn, "a", "epic");
 
-    const outcome = try nextReadyTicket(store, gpa, .{});
+    var outcome: NextOutcome = undefined;
+    try nextReadyTicket(store, gpa, .{}, &outcome);
     switch (outcome) {
         .ticket => |ticket| {
             defer ticket.deinit(gpa);
@@ -3419,7 +3504,8 @@ test "nextReadyTicket: propagates Effective Priority through a transitive blocke
     try TmpStore.insertDependency(conn, "a", "b");
     try TmpStore.insertDependency(conn, "b", "c");
 
-    const outcome = try nextReadyTicket(store, gpa, .{});
+    var outcome: NextOutcome = undefined;
+    try nextReadyTicket(store, gpa, .{}, &outcome);
     switch (outcome) {
         .ticket => |ticket| {
             defer ticket.deinit(gpa);
@@ -3447,7 +3533,8 @@ test "nextReadyTicket: direct P1 beats a P2 blocker with the same Effective Prio
     try TmpStore.insertFixtureItem(conn, .{ .id = "blocked-by-indirect", .display = "tk-Z", .title = "Blocked P1", .priority = "P1", .created_seq = 3 });
     try TmpStore.insertDependency(conn, "indirect", "blocked-by-indirect");
 
-    const outcome = try nextReadyTicket(store, gpa, .{});
+    var outcome: NextOutcome = undefined;
+    try nextReadyTicket(store, gpa, .{}, &outcome);
     switch (outcome) {
         .ticket => |ticket| {
             defer ticket.deinit(gpa);
@@ -3498,7 +3585,8 @@ test "nextReadyTicket: tolerates dep + Epic-membership cross-cycles" {
     // selection. The point of this test is that nextReadyTicket returns
     // *some* answer in a fixed bounded time rather than blowing out
     // SQLite's recursion working set.
-    const outcome = try nextReadyTicket(store, gpa, .{});
+    var outcome: NextOutcome = undefined;
+    try nextReadyTicket(store, gpa, .{}, &outcome);
     switch (outcome) {
         .ticket => |ticket| ticket.deinit(gpa),
         else => return error.UnexpectedOutcome,
@@ -3526,7 +3614,8 @@ test "nextReadyTicket: a blocked Ticket with the best own Priority is excluded f
     try TmpStore.insertFixtureItem(conn, .{ .id = "z", .display = "tk-Z", .title = "Blocked P0", .priority = "P0", .created_seq = 3 });
     try TmpStore.insertDependency(conn, "y", "z");
 
-    const outcome = try nextReadyTicket(store, gpa, .{});
+    var outcome: NextOutcome = undefined;
+    try nextReadyTicket(store, gpa, .{}, &outcome);
     switch (outcome) {
         .ticket => |ticket| {
             defer ticket.deinit(gpa);
@@ -3554,7 +3643,8 @@ test "nextReadyTicket: surfaces a P3 blocker when it blocks a P1" {
     try TmpStore.insertFixtureItem(conn, .{ .id = "chore", .display = "tk-C", .title = "Unrelated P2", .priority = "P2", .created_seq = 3 });
     try TmpStore.insertDependency(conn, "blocker", "blocked");
 
-    const outcome = try nextReadyTicket(store, gpa, .{});
+    var outcome: NextOutcome = undefined;
+    try nextReadyTicket(store, gpa, .{}, &outcome);
     switch (outcome) {
         .ticket => |ticket| {
             defer ticket.deinit(gpa);

@@ -52,13 +52,15 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
     const store = repository.openStoreCatching(deps.gpa, deps.runner, deps.cwd, deps.stderr, open_msgs) orelse return 1;
     defer store.close();
 
-    const detail = (repository.showItem(store, deps.gpa, id) catch |err| {
+    var detail: repository.ItemDetail = undefined;
+    const found = repository.showItem(store, deps.gpa, id, &detail) catch |err| {
         renderStorageError(deps, err);
         return 1;
-    }) orelse {
+    };
+    if (!found) {
         deps.stderr.print(messages.show_id_not_found_prefix ++ "{s}" ++ messages.show_id_not_found_suffix ++ "\n", .{id}) catch {};
         return 1;
-    };
+    }
     defer detail.deinit(deps.gpa);
 
     render(deps.stdout, detail, deps.styler.forStdout()) catch {};
