@@ -208,6 +208,10 @@ _Avoid_: Ack
 The latest structured failure recorded for a **Mutation** that could not be applied.
 _Avoid_: Error Log
 
+**Adapter Failure**:
+A **Mutation Failure** as produced and classified by a **Backend Adapter**, carrying a failure classification (rate-limited, validation, sync conflict, auth, transient, or unknown) used to render **Sync Log** summaries and, later, to drive retry and recovery policy.
+_Avoid_: Adapter Error
+
 **Skipped Mutation**:
 A **Mutation** explicitly bypassed during sync without being applied to a **Backend**.
 _Avoid_: Ignored Mutation
@@ -360,6 +364,9 @@ _Avoid_: ticket, tickets
 - A **Sync Cursor** belongs to one **Backend**.
 - A **Mutation Receipt** belongs to one **Mutation**.
 - A **Mutation Failure** belongs to one **Mutation**.
+- An **Adapter Failure** is a **Mutation Failure** produced by a **Backend Adapter**, which assigns its failure classification.
+- The failure classification is one of rate-limited, validation, sync conflict, auth, transient, or unknown; **Backend Adapters** populate it from real failure modes, defaulting to unknown.
+- The **Backend Adapter** assigns the classification; the sync engine and recovery workflows own retry and recoverability policy.
 - The **Repository Store** keeps current **Ticket** and **Epic** state.
 - The **Mutation Log** records replayable backend intent and is not the primary
   read model or a general local edit history.
