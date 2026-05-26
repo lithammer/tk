@@ -70,6 +70,64 @@ reintroduced without a concrete forcing constraint:
   caller and requires a comment at every call site. Have each switch
   arm free its own payload directly.
 
+## Design & Safety Patterns
+
+Prefer these patterns when introducing or changing code. They are guidance, not
+blanket mandates; use the narrowest shape that preserves tk's Repository Store
+contracts, command testability, and cross-platform behavior.
+
+- **Avoid copy-heavy returns for large owned views.** For large
+  allocator-owning or copy-heavy structs such as `ItemDetail`, `ListRow`
+  batches, or future Repository Store view structs, consider in-place
+  initialization with an out-pointer instead of returning the full value by
+  value. This is most useful when the struct owns many slices, has nested
+  payloads, or is built in hot/query paths.
+
+  ```zig
+  pub fn buildItemDetail(target: *ItemDetail, gpa: Allocator, ...) !void {
+      target.* = .{
+          .display_id = try gpa.dupe(u8, display_id),
+          // ...
+      };
+  }
+  ```
+
+  Small pure domain values should still be returned by value when that is the
+  clearest API.
+
+- **Keep subprocess runners fork-safe.** If a `proc.Runner` implementation
+  forks directly or adds pre-exec child hooks, do not allocate on the child
+  path between `fork` and `exec`. Prepare argv/env/path state before entering
+  the child path. If `exec` fails in the child, report only with stack-owned
+  buffers or raw OS writes; do not use heap-backed formatting there.
+
+  This child-only fallback is separate from normal command-facing error
+  handling. Parent-side runner APIs should still return bare error tags or
+  typed `Outcome` values so commands own user-facing stderr rendering.
+
+- **Centralize platform discovery behind an explicit boundary.** Do not scatter
+  raw `builtin.os.tag` checks, XDG parsing, macOS Application Support logic, or
+  Windows profile-directory lookup through command or domain modules. Put
+  platform filesystem discovery behind a small boundary module and document the
+  boundary in `ARCHITECTURE.md` when it is introduced or changed.
+
+- **Prefer writer formatting over temporary strings for domain rendering.**
+  When a core domain or rendering type is printed in multiple places, give it a
+  `format` method using the project's Zig 0.16 writer convention:
+
+  ```zig
+  pub fn format(self: T, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+      try writer.print("{s}", .{self.text()});
+  }
+  ```
+
+  Use this for stable representations of types such as `Priority`,
+  `ItemStatus`, `TicketKind`, diagnostic rendering wrappers, and styling
+  wrappers. Formatting methods are presentation helpers only; do not use them
+  to carry transient failure details. Use the Error Handling shapes above for
+  error state. Avoid allocating temporary strings solely to print simple domain
+  values.
+
 ## Testing
 
 Use layered tests:
