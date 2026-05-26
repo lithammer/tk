@@ -14,13 +14,14 @@ Run `tk prime` after compaction, clear, or a new agent session.
 
 - Use tk for repository-local work tracking.
 - New Tickets and Epics are local by default.
-- Use `tk add -F -` for self-contained local Tickets with enough context for
-  a fresh agent session.
+- Use `tk add` for self-contained local Tickets with enough context for a fresh
+  agent session.
 - Promotion and sync are explicit, human-visible operations.
 - Use `tk next` to choose agent work.
 - Use `tk worktree` to inspect the current Workspace Scope.
 - Workspace Scope is not an implicit item target; pass explicit Display IDs to item commands.
 - Use `tk sync log` to inspect pending, failed, skipped, and applied Mutations.
+- Do not run `git push` unless the user explicitly asks for it.
 
 ## Session Start
 
@@ -30,19 +31,23 @@ tk worktree
 tk next
 ```
 
-## Session Close
+## Definition of Done
 
 Before saying work is complete:
 
 ```sh
-tk done <id>
-tk add -F -
+git status --short
+git diff --check
 tk sync log
 ```
 
-Use `tk done <id>` for completed work. Use `tk add -F -` for follow-ups,
-deferred decisions, or context that should survive a fresh session. Use `tk
-sync log` to check whether local sync state needs human attention.
+- Inspect repo state and keep unrelated user changes separate.
+- Run the narrow verification for the change; if skipped, say why.
+- Use `tk done <id>` for completed scoped work.
+- Use `tk add` for follow-ups, deferred decisions, or context that should
+  survive a fresh session.
+- Surface pending, failed, or skipped Mutations from `tk sync log`.
+- State whether code is uncommitted, committed, or waiting for an explicit push.
 
 ## Essential Commands
 
