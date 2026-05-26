@@ -9,6 +9,7 @@ const message = @import("message.zig");
 const repository = @import("../store/repository.zig");
 const Priority = @import("../domain/priority.zig").Priority;
 const TicketKind = @import("../domain/ticket_kind.zig").TicketKind;
+const output = @import("output.zig");
 
 /// Dispatcher metadata for `tk add`.
 pub const meta: cli.CommandMeta = .{
@@ -126,7 +127,7 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
         };
         defer created.deinit(deps.gpa);
 
-        deps.stdout.print(messages.add_created_epic_prefix ++ "{s} - {s}\n", .{ created.display_id, created.title }) catch {};
+        output.writeItemTitleLine(deps.stdout, messages.add_created_epic_prefix, created.display_id, created.title) catch {};
         deps.stdout.print(messages.add_status_label ++ "{s}\n", .{created.status.text()}) catch {};
         return 0;
     }
@@ -143,7 +144,7 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
     };
     defer created.deinit(deps.gpa);
 
-    deps.stdout.print(messages.add_created_ticket_prefix ++ "{s} - {s}\n", .{ created.display_id, created.title }) catch {};
+    output.writeItemTitleLine(deps.stdout, messages.add_created_ticket_prefix, created.display_id, created.title) catch {};
     deps.stdout.print(messages.add_kind_label ++ "{s}\n", .{created.kind.text()}) catch {};
     deps.stdout.print(messages.add_priority_label ++ "{s}\n", .{created.priority.text()}) catch {};
     deps.stdout.print(messages.add_status_label ++ "{s}\n", .{created.status.text()}) catch {};

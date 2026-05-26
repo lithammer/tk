@@ -14,6 +14,7 @@ const init_command = @import("init.zig");
 const Harness = @import("../testing/test_cli.zig").Harness;
 const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
 const styler_mod = @import("../render/styler.zig");
+const sanitize = @import("../render/sanitize.zig");
 const palette = @import("../render/palette.zig");
 const Style = @import("../render/style.zig").Style;
 
@@ -111,7 +112,9 @@ fn render(stdout: *std.Io.Writer, detail: repository.ItemDetail, styler: styler_
     try stdout.writeAll(" ");
     try styler.wrap(idStyle(detail.item_class), detail.display_id).format(stdout);
     try stdout.writeAll(" · ");
-    try styler.wrap(palette.header, detail.title).format(stdout);
+    try stdout.writeAll(styler.open(palette.header));
+    try sanitize.writeSanitizedLine(stdout, detail.title);
+    try stdout.writeAll(styler.close(palette.header));
     try stdout.writeAll("\n");
 
     // Facet bar: indented two spaces. Ticket form carries priority and
@@ -142,7 +145,7 @@ fn render(stdout: *std.Io.Writer, detail: repository.ItemDetail, styler: styler_
     if (detail.body.len > 0) {
         try stdout.writeAll("\n");
         try writeSectionHeader(stdout, styler, messages.show_section_description);
-        try stdout.writeAll(detail.body);
+        try sanitize.writeSanitizedBody(stdout, detail.body);
         if (detail.body[detail.body.len - 1] != '\n') {
             try stdout.writeAll("\n");
         }
@@ -192,7 +195,9 @@ fn render(stdout: *std.Io.Writer, detail: repository.ItemDetail, styler: styler_
         if (has_section) try stdout.writeAll("\n");
         try writeSectionHeader(stdout, styler, messages.show_section_external_blockers);
         for (detail.external_blockers) |eb| {
-            try stdout.print("  • {s}\n", .{eb.reason});
+            try stdout.writeAll("  • ");
+            try sanitize.writeSanitizedLine(stdout, eb.reason);
+            try stdout.writeAll("\n");
         }
     }
 }
@@ -225,7 +230,7 @@ fn renderSubRow(stdout: *std.Io.Writer, glyph: []const u8, item: repository.Item
         try styler.wrap(palette.kind_epic, "(EPIC)").format(stdout);
         try stdout.writeAll(" ");
     }
-    try stdout.writeAll(item.title);
+    try sanitize.writeSanitizedLine(stdout, item.title);
     if (item.priority) |p| {
         const p_st = priorityStyle(p);
         try stdout.writeAll(" ");
@@ -927,4 +932,61 @@ test "show: Epic facet bar renders magenta EPIC token under escape_codes" {
     try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[1mFinished epic\x1b[22m") != null);
     // Facet bar: magenta `EPIC` token at the start of the indented row.
     try std.testing.expect(std.mem.indexOf(u8, out, "\n  \x1b[35mEPIC\x1b[39m \xc2\xb7 2026-04-21") != null);
+}
+
+test "show: renders sanitized/escaped title, body, and blocker reason" {
+    const gpa = std.testing.allocator;
+    var store = try TmpStore.init(gpa, "project");
+    defer store.deinit(gpa);
+
+    var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, store.toplevel_path, .{});
+    defer cwd.close(std.testing.io);
+
+    const rev_parse = try store.gitRevParseStdout(gpa);
+    defer gpa.free(rev_parse);
+
+    {
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
+    }
+
+    const zqlite = @import("zqlite");
+    const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "malicious",
+        .display = "project-1",
+        .item_class = "ticket",
+        .ticket_kind = "task",
+        .priority = "P2",
+        .title = "Malicious \x1b[31mTitle\rWith\nEscapes",
+        .body = "Line 1\r\nLine 2\x1b[1ABypassed",
+        .created_seq = 1,
+        .created_at = "2026-04-21T00:00:00.000Z",
+        .updated_at = "2026-04-21T00:00:00.000Z",
+    });
+
+    try TmpStore.insertExternalBlocker(conn, "eb1", "malicious", null);
+    try conn.exec(
+        "update external_blockers set reason = ?1 where id = ?2",
+        .{ "External \x1b[0m Reason", "eb1" },
+    );
+
+    var h = Harness.init(gpa, &.{"project-1"}, .{
+        .cwd = cwd,
+        .stdout_mode = .no_color,
+    });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+
+    try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
+
+    const out = h.stdout();
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "Malicious \\x1b[31mTitle With Escapes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Line 1\nLine 2\\x1b[1ABypassed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "External \\x1b[0m Reason") != null);
 }

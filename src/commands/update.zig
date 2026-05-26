@@ -9,6 +9,7 @@ const message = @import("message.zig");
 const repository = @import("../store/repository.zig");
 const Priority = @import("../domain/priority.zig").Priority;
 const ItemClass = @import("../domain/item_class.zig").ItemClass;
+const output = @import("output.zig");
 
 /// Dispatcher metadata for `tk update`.
 pub const meta: cli.CommandMeta = .{
@@ -163,7 +164,7 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
                 .ticket => messages.update_success_ticket_prefix,
                 .epic => messages.update_success_epic_prefix,
             };
-            deps.stdout.print("{s}{s} - {s}\n", .{ prefix, updated.display_id, updated.title }) catch {};
+            output.writeItemTitleLine(deps.stdout, prefix, updated.display_id, updated.title) catch {};
         },
         // Race window: the resolved row may have been deleted between
         // `resolveItemRef` and the BEGIN IMMEDIATE inside `updateItem`.

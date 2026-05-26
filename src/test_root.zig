@@ -9,6 +9,7 @@ test {
     _ = @import("commands/manpage.zig");
     _ = @import("commands/message.zig");
     _ = @import("commands/next.zig");
+    _ = @import("commands/output.zig");
     _ = @import("commands/prime.zig");
     _ = @import("http/client.zig");
     _ = @import("http/fake.zig");
@@ -34,6 +35,7 @@ test {
     _ = @import("render/palette.zig");
     _ = @import("render/style.zig");
     _ = @import("render/styler.zig");
+    _ = @import("render/sanitize.zig");
     _ = @import("domain/diagnostic.zig");
     _ = @import("embed.zig");
     _ = @import("store/migrations.zig");

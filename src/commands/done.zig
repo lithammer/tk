@@ -9,6 +9,7 @@ const parse_diagnostic = @import("parse_diagnostic.zig");
 const messages = @import("../messages.zig");
 const repository = @import("../store/repository.zig");
 const ItemStatus = @import("../domain/status.zig").ItemStatus;
+const output = @import("output.zig");
 
 /// Dispatcher metadata for `tk done`.
 pub const meta: cli.CommandMeta = .{
@@ -67,7 +68,7 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
                 .ticket => messages.done_success_ticket_prefix,
                 .epic => messages.done_success_epic_prefix,
             };
-            deps.stdout.print("{s}{s} - {s}\n", .{ prefix, item.display_id, item.title }) catch {};
+            output.writeItemTitleLine(deps.stdout, prefix, item.display_id, item.title) catch {};
         },
         // Race window: the resolved row may have been deleted between
         // `resolveItemRef` and the BEGIN IMMEDIATE inside `setItemStatus`.

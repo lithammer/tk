@@ -13,6 +13,7 @@ const add_command = @import("add.zig");
 const Harness = @import("../testing/test_cli.zig").Harness;
 const TmpStore = @import("../testing/tmp_store.zig").TmpStore;
 const styler_mod = @import("../render/styler.zig");
+const sanitize = @import("../render/sanitize.zig");
 const palette = @import("../render/palette.zig");
 const Priority = @import("../domain/priority.zig").Priority;
 const Style = @import("../render/style.zig").Style;
@@ -250,13 +251,13 @@ fn renderRow(stdout: *std.Io.Writer, row: *const repository.ListRow, tree_prefix
                 try styler.wrap(palette.kind_bug, "[bug]").format(stdout);
             }
             try stdout.writeAll(" ");
-            try stdout.writeAll(row.title);
+            try sanitize.writeSanitizedLine(stdout, row.title);
         },
         .epic => {
             try stdout.writeAll(" ");
             try styler.wrap(palette.kind_epic, "[epic]").format(stdout);
             try stdout.writeAll(" ");
-            try stdout.writeAll(row.title);
+            try sanitize.writeSanitizedLine(stdout, row.title);
         },
     }
 
@@ -791,4 +792,52 @@ test "list: renders styled output with correct ANSI sequences under escape_codes
     // Blocker legend glyph:
     // "⊘" (blocked) is styled with blocked (style.none()), so it remains unstyled.
     try std.testing.expect(std.mem.indexOf(u8, out, "Blocked: \xe2\x8a\x98 blocked") != null);
+}
+
+test "list: renders sanitized/escaped title" {
+    const gpa = std.testing.allocator;
+    var store = try TmpStore.init(gpa, "project");
+    defer store.deinit(gpa);
+
+    var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, store.toplevel_path, .{});
+    defer cwd.close(std.testing.io);
+
+    const rev_parse = try store.gitRevParseStdout(gpa);
+    defer gpa.free(rev_parse);
+
+    {
+        var h = Harness.init(gpa, &.{}, .{ .cwd = cwd });
+        defer h.deinit();
+        try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+        try std.testing.expectEqual(@as(u8, 0), try init_command.run(h.deps(), &h.iter));
+    }
+
+    const zqlite = @import("zqlite");
+    const conn = try zqlite.open(store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "malicious",
+        .display = "project-1",
+        .item_class = "ticket",
+        .ticket_kind = "task",
+        .priority = "P2",
+        .title = "Malicious \x1b[31mTitle\rWith\nEscapes",
+        .created_seq = 1,
+        .created_at = "2026-04-21T00:00:00.000Z",
+        .updated_at = "2026-04-21T00:00:00.000Z",
+    });
+
+    var h = Harness.init(gpa, &.{}, .{
+        .cwd = cwd,
+        .stdout_mode = .no_color,
+    });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = rev_parse });
+
+    try std.testing.expectEqual(@as(u8, 0), try run(h.deps(), &h.iter));
+
+    const out = h.stdout();
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "Malicious \\x1b[31mTitle With Escapes") != null);
 }
