@@ -7,6 +7,7 @@ const parse_diagnostic = @import("parse_diagnostic.zig");
 const messages = @import("../messages.zig");
 const message = @import("message.zig");
 const repository = @import("../store/repository.zig");
+const resolver = @import("resolver.zig");
 const Priority = @import("../domain/priority.zig").Priority;
 const TicketKind = @import("../domain/ticket_kind.zig").TicketKind;
 const output = @import("output.zig");
@@ -87,34 +88,18 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
     defer parsed_msg.deinit(deps.gpa);
 
     const ticket_kind: TicketKind = if (res.args.bug != 0) .bug else TicketKind.default;
-    const store = repository.openStoreCatching(deps.gpa, deps.runner, deps.cwd, deps.stderr, open_msgs) orelse return 1;
-    defer store.close();
+    const r = resolver.open(deps.gpa, deps.runner, deps.cwd, deps.stderr, open_msgs) orelse return 1;
+    defer r.close();
+    const store = r.store;
 
     var parent_ref: ?repository.ResolvedItemRefWithDisplay = null;
     defer if (parent_ref) |ref| ref.deinit(deps.gpa);
     if (res.args.parent) |parent_display| {
-        const parent_outcome = repository.resolveAsEpicWithDisplay(store, deps.gpa, parent_display) catch |err| {
-            renderStorageError(deps, err);
-            return 1;
-        };
-        switch (parent_outcome) {
-            .epic => |ref| parent_ref = ref,
-            .not_found => {
-                deps.stderr.print(
-                    messages.add_parent_prefix ++ "{s}" ++ messages.add_parent_not_found_suffix ++ "\n",
-                    .{parent_display},
-                ) catch {};
-                return 1;
-            },
-            .not_an_epic => |ref| {
-                defer ref.deinit(deps.gpa);
-                deps.stderr.print(
-                    messages.add_parent_prefix ++ "{s}" ++ messages.add_parent_not_epic_suffix ++ "\n",
-                    .{parent_display},
-                ) catch {};
-                return 1;
-            },
-        }
+        parent_ref = r.resolveEpicWithDisplay(parent_display, .{
+            .prefix = messages.add_parent_prefix,
+            .not_found_suffix = messages.add_parent_not_found_suffix,
+            .not_epic_suffix = messages.add_parent_not_epic_suffix,
+        }) orelse return 1;
     }
 
     if (res.args.epic != 0) {
@@ -182,7 +167,7 @@ fn writeHelp(deps: cli.Deps) !void {
     );
 }
 
-const storage_msgs: repository.StorageErrorMessages = .{
+const storage_msgs: resolver.StorageErrorMessages = .{
     .busy_retry = messages.add_store_busy_retry,
     .out_of_memory = messages.add_out_of_memory,
     .fallback = messages.add_create_failed,
@@ -195,14 +180,14 @@ const input_msgs: message.InputMessages = .{
     .stdin_read_prefix = messages.add_stdin_read_prefix,
 };
 
-const open_msgs: repository.OpenMessages = .{
+const open_msgs: resolver.OpenMessages = .{
     .command_name = "add",
     .missing_store = messages.add_missing_store,
     .storage = storage_msgs,
 };
 
 fn renderStorageError(deps: cli.Deps, err: anyerror) void {
-    repository.renderStorageError(deps.stderr, err, storage_msgs);
+    resolver.renderStorageError(deps.stderr, err, storage_msgs);
 }
 
 const zqlite = @import("zqlite");

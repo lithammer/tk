@@ -8,6 +8,7 @@ const cli = @import("../cli.zig");
 const parse_diagnostic = @import("parse_diagnostic.zig");
 const messages = @import("../messages.zig");
 const repository = @import("../store/repository.zig");
+const resolver = @import("resolver.zig");
 const ItemStatus = @import("../domain/status.zig").ItemStatus;
 const output = @import("output.zig");
 
@@ -42,16 +43,14 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
         return 2;
     };
 
-    const store = repository.openStoreCatching(deps.gpa, deps.runner, deps.cwd, deps.stderr, open_msgs) orelse return 1;
-    defer store.close();
+    const r = resolver.open(deps.gpa, deps.runner, deps.cwd, deps.stderr, open_msgs) orelse return 1;
+    defer r.close();
+    const store = r.store;
 
-    const resolved = (repository.resolveItemRef(store, deps.gpa, id) catch |err| {
-        renderStorageError(deps, err);
-        return 1;
-    }) orelse {
-        deps.stderr.print(messages.start_id_not_found_prefix ++ "{s}" ++ messages.start_id_not_found_suffix ++ "\n", .{id}) catch {};
-        return 1;
-    };
+    const resolved = r.resolve(id, .{
+        .prefix = messages.start_id_not_found_prefix,
+        .suffix = messages.start_id_not_found_suffix,
+    }) orelse return 1;
     defer resolved.deinit(deps.gpa);
 
     const outcome = repository.setItemStatus(store, deps.gpa, deps.clock, .{
@@ -104,20 +103,20 @@ fn writeHelp(deps: cli.Deps) !void {
     );
 }
 
-const storage_msgs: repository.StorageErrorMessages = .{
+const storage_msgs: resolver.StorageErrorMessages = .{
     .busy_retry = messages.start_store_busy_retry,
     .out_of_memory = messages.start_out_of_memory,
     .fallback = messages.start_write_failed,
 };
 
-const open_msgs: repository.OpenMessages = .{
+const open_msgs: resolver.OpenMessages = .{
     .command_name = "start",
     .missing_store = messages.start_missing_store,
     .storage = storage_msgs,
 };
 
 fn renderStorageError(deps: cli.Deps, err: anyerror) void {
-    repository.renderStorageError(deps.stderr, err, storage_msgs);
+    resolver.renderStorageError(deps.stderr, err, storage_msgs);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

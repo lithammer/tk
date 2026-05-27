@@ -6,6 +6,7 @@ const cli = @import("../cli.zig");
 const parse_diagnostic = @import("parse_diagnostic.zig");
 const messages = @import("../messages.zig");
 const repository = @import("../store/repository.zig");
+const resolver = @import("resolver.zig");
 const worktree_scope = @import("../worktree/scope.zig");
 const init_command = @import("init.zig");
 const add_command = @import("add.zig");
@@ -38,7 +39,7 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
         return 0;
     }
 
-    const store = repository.openStoreCatching(deps.gpa, deps.runner, deps.cwd, deps.stderr, open_msgs) orelse return 1;
+    const store = (resolver.open(deps.gpa, deps.runner, deps.cwd, deps.stderr, open_msgs) orelse return 1).store;
     defer store.close();
 
     const raw = worktree_scope.readGitSide(deps.gpa, deps.runner, deps.cwd) catch |err| {
@@ -131,20 +132,20 @@ fn writeHelp(deps: cli.Deps) !void {
     );
 }
 
-const storage_msgs: repository.StorageErrorMessages = .{
+const storage_msgs: resolver.StorageErrorMessages = .{
     .busy_retry = messages.next_store_busy_retry,
     .out_of_memory = messages.next_out_of_memory,
     .fallback = messages.next_read_failed,
 };
 
-const open_msgs: repository.OpenMessages = .{
+const open_msgs: resolver.OpenMessages = .{
     .command_name = "next",
     .missing_store = messages.next_missing_store,
     .storage = storage_msgs,
 };
 
 fn renderStorageError(deps: cli.Deps, err: anyerror) void {
-    repository.renderStorageError(deps.stderr, err, storage_msgs);
+    resolver.renderStorageError(deps.stderr, err, storage_msgs);
 }
 
 test "next: configured Workspace Scope selects within scope and overrides default ordering" {

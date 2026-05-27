@@ -6,6 +6,7 @@ const cli = @import("../cli.zig");
 const parse_diagnostic = @import("parse_diagnostic.zig");
 const messages = @import("../messages.zig");
 const repository = @import("../store/repository.zig");
+const resolver = @import("resolver.zig");
 const ItemStatus = @import("../domain/status.zig").ItemStatus;
 const TicketKind = @import("../domain/ticket_kind.zig").TicketKind;
 const init_command = @import("init.zig");
@@ -49,7 +50,7 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
     }
     const options = parseOptions(deps, res.args) orelse return 2;
 
-    const store = repository.openStoreCatching(deps.gpa, deps.runner, deps.cwd, deps.stderr, open_msgs) orelse return 1;
+    const store = (resolver.open(deps.gpa, deps.runner, deps.cwd, deps.stderr, open_msgs) orelse return 1).store;
     defer store.close();
 
     const rows = repository.listRows(store, deps.gpa, options) catch |err| {
@@ -297,20 +298,20 @@ const StatusCounts = struct {
     }
 };
 
-const storage_msgs: repository.StorageErrorMessages = .{
+const storage_msgs: resolver.StorageErrorMessages = .{
     .busy_retry = messages.list_store_busy_retry,
     .out_of_memory = messages.list_out_of_memory,
     .fallback = messages.list_read_failed,
 };
 
-const open_msgs: repository.OpenMessages = .{
+const open_msgs: resolver.OpenMessages = .{
     .command_name = "list",
     .missing_store = messages.list_missing_store,
     .storage = storage_msgs,
 };
 
 fn renderStorageError(deps: cli.Deps, err: anyerror) void {
-    repository.renderStorageError(deps.stderr, err, storage_msgs);
+    resolver.renderStorageError(deps.stderr, err, storage_msgs);
 }
 
 test "list: renders an unparented local Ticket from the Repository Store" {

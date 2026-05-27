@@ -13,6 +13,7 @@ const Allocator = std.mem.Allocator;
 const cli = @import("../cli.zig");
 const messages = @import("../messages.zig");
 const repository = @import("../store/repository.zig");
+const resolver = @import("resolver.zig");
 const store_sync = @import("../store/sync.zig");
 const Diagnostic = @import("../domain/diagnostic.zig").Diagnostic;
 
@@ -56,48 +57,48 @@ fn writeHelp(deps: cli.Deps) !void {
     );
 }
 
-const status_storage_msgs: repository.StorageErrorMessages = .{
+const status_storage_msgs: resolver.StorageErrorMessages = .{
     .busy_retry = messages.remote_status_store_busy_retry,
     .out_of_memory = messages.remote_status_out_of_memory,
     .fallback = messages.remote_status_read_failed,
 };
 
-const status_open_msgs: repository.OpenMessages = .{
+const status_open_msgs: resolver.OpenMessages = .{
     .command_name = "remote",
     .missing_store = messages.remote_status_missing_store,
     .storage = status_storage_msgs,
 };
 
-const set_storage_msgs: repository.StorageErrorMessages = .{
+const set_storage_msgs: resolver.StorageErrorMessages = .{
     .busy_retry = messages.remote_set_store_busy_retry,
     .out_of_memory = messages.remote_set_out_of_memory,
     .fallback = messages.remote_set_write_failed,
 };
 
-const set_open_msgs: repository.OpenMessages = .{
+const set_open_msgs: resolver.OpenMessages = .{
     .command_name = "remote set",
     .missing_store = messages.remote_set_missing_store,
     .storage = set_storage_msgs,
 };
 
-const clear_storage_msgs: repository.StorageErrorMessages = .{
+const clear_storage_msgs: resolver.StorageErrorMessages = .{
     .busy_retry = messages.remote_clear_store_busy_retry,
     .out_of_memory = messages.remote_clear_out_of_memory,
     .fallback = messages.remote_clear_write_failed,
 };
 
-const clear_open_msgs: repository.OpenMessages = .{
+const clear_open_msgs: resolver.OpenMessages = .{
     .command_name = "remote clear",
     .missing_store = messages.remote_clear_missing_store,
     .storage = clear_storage_msgs,
 };
 
 fn runStatus(deps: cli.Deps) !u8 {
-    const store = repository.openStoreCatching(deps.gpa, deps.runner, deps.cwd, deps.stderr, status_open_msgs) orelse return 1;
+    const store = (resolver.open(deps.gpa, deps.runner, deps.cwd, deps.stderr, status_open_msgs) orelse return 1).store;
     defer store.close();
 
     const row_opt = store_sync.getRemote(store.conn, deps.gpa) catch |err| {
-        repository.renderStorageError(deps.stderr, err, status_storage_msgs);
+        resolver.renderStorageError(deps.stderr, err, status_storage_msgs);
         return 1;
     };
     if (row_opt) |row| {
@@ -146,7 +147,7 @@ fn runSetGithub(deps: cli.Deps, args_iter: anytype) !u8 {
         return 2;
     }
 
-    const store = repository.openStoreCatching(deps.gpa, deps.runner, deps.cwd, deps.stderr, set_open_msgs) orelse return 1;
+    const store = (resolver.open(deps.gpa, deps.runner, deps.cwd, deps.stderr, set_open_msgs) orelse return 1).store;
     defer store.close();
 
     // Validate prefix collision before writing.
@@ -187,7 +188,7 @@ fn runSetJira(deps: cli.Deps, args_iter: anytype) !u8 {
         return 2;
     };
 
-    const store = repository.openStoreCatching(deps.gpa, deps.runner, deps.cwd, deps.stderr, set_open_msgs) orelse return 1;
+    const store = (resolver.open(deps.gpa, deps.runner, deps.cwd, deps.stderr, set_open_msgs) orelse return 1).store;
     defer store.close();
 
     // Validate prefix collision: jira's adapter namespace is the project key.
@@ -244,11 +245,11 @@ fn checkPrefixCollision(
 }
 
 fn runClear(deps: cli.Deps) !u8 {
-    const store = repository.openStoreCatching(deps.gpa, deps.runner, deps.cwd, deps.stderr, clear_open_msgs) orelse return 1;
+    const store = (resolver.open(deps.gpa, deps.runner, deps.cwd, deps.stderr, clear_open_msgs) orelse return 1).store;
     defer store.close();
 
     const count = store_sync.pendingOrFailedMutationCount(store.conn) catch |err| {
-        repository.renderStorageError(deps.stderr, err, clear_storage_msgs);
+        resolver.renderStorageError(deps.stderr, err, clear_storage_msgs);
         return 1;
     };
     if (count > 0) {
@@ -275,10 +276,10 @@ fn runClear(deps: cli.Deps) !u8 {
 fn renderStorageDiag(
     stderr: *std.Io.Writer,
     err: anyerror,
-    msgs: repository.StorageErrorMessages,
+    msgs: resolver.StorageErrorMessages,
     diag: *const Diagnostic,
 ) void {
-    repository.renderStorageError(stderr, err, msgs);
+    resolver.renderStorageError(stderr, err, msgs);
     if (diag.message().len > 0) stderr.print("{s}\n", .{diag.message()}) catch {};
 }
 

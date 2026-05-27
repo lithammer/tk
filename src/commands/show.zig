@@ -6,6 +6,7 @@ const cli = @import("../cli.zig");
 const parse_diagnostic = @import("parse_diagnostic.zig");
 const messages = @import("../messages.zig");
 const repository = @import("../store/repository.zig");
+const resolver = @import("resolver.zig");
 const ItemClass = @import("../domain/item_class.zig").ItemClass;
 const ItemStatus = @import("../domain/status.zig").ItemStatus;
 const Priority = @import("../domain/priority.zig").Priority;
@@ -49,7 +50,7 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
         return 2;
     };
 
-    const store = repository.openStoreCatching(deps.gpa, deps.runner, deps.cwd, deps.stderr, open_msgs) orelse return 1;
+    const store = (resolver.open(deps.gpa, deps.runner, deps.cwd, deps.stderr, open_msgs) orelse return 1).store;
     defer store.close();
 
     var detail: repository.ItemDetail = undefined;
@@ -274,20 +275,20 @@ fn idStyle(item_class: ItemClass) Style {
     };
 }
 
-const storage_msgs: repository.StorageErrorMessages = .{
+const storage_msgs: resolver.StorageErrorMessages = .{
     .busy_retry = messages.show_store_busy_retry,
     .out_of_memory = messages.show_out_of_memory,
     .fallback = messages.show_read_failed,
 };
 
-const open_msgs: repository.OpenMessages = .{
+const open_msgs: resolver.OpenMessages = .{
     .command_name = "show",
     .missing_store = messages.show_missing_store,
     .storage = storage_msgs,
 };
 
 fn renderStorageError(deps: cli.Deps, err: anyerror) void {
-    repository.renderStorageError(deps.stderr, err, storage_msgs);
+    resolver.renderStorageError(deps.stderr, err, storage_msgs);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

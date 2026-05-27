@@ -7,6 +7,7 @@ const parse_diagnostic = @import("parse_diagnostic.zig");
 const messages = @import("../messages.zig");
 const message = @import("message.zig");
 const repository = @import("../store/repository.zig");
+const resolver = @import("resolver.zig");
 const Priority = @import("../domain/priority.zig").Priority;
 const ItemClass = @import("../domain/item_class.zig").ItemClass;
 const output = @import("output.zig");
@@ -84,17 +85,15 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
         };
     }
 
-    const store = repository.openStoreCatching(deps.gpa, deps.runner, deps.cwd, deps.stderr, open_msgs) orelse return 1;
-    defer store.close();
+    const r = resolver.open(deps.gpa, deps.runner, deps.cwd, deps.stderr, open_msgs) orelse return 1;
+    defer r.close();
+    const store = r.store;
 
     // Resolve the item id.
-    const resolved = (repository.resolveItemRef(store, deps.gpa, id) catch |err| {
-        renderStorageError(deps, err);
-        return 1;
-    }) orelse {
-        deps.stderr.print(messages.update_id_not_found_prefix ++ "{s}" ++ messages.update_id_not_found_suffix ++ "\n", .{id}) catch {};
-        return 1;
-    };
+    const resolved = r.resolve(id, .{
+        .prefix = messages.update_id_not_found_prefix,
+        .suffix = messages.update_id_not_found_suffix,
+    }) orelse return 1;
     defer resolved.deinit(deps.gpa);
 
     // Class-level validation (requires resolved class).
@@ -115,31 +114,13 @@ pub fn run(deps: cli.Deps, args_iter: anytype) !u8 {
     defer if (parent_ref) |ref| ref.deinit(deps.gpa);
 
     if (res.args.parent) |parent_display| {
-        const parent_outcome = repository.resolveAsEpic(store, deps.gpa, parent_display) catch |err| {
-            renderStorageError(deps, err);
-            return 1;
-        };
-        switch (parent_outcome) {
-            .epic => |ref| {
-                parent_op = .{ .set = ref.id };
-                parent_ref = ref;
-            },
-            .not_found => {
-                deps.stderr.print(
-                    messages.update_parent_prefix ++ "{s}" ++ messages.update_parent_not_found_suffix ++ "\n",
-                    .{parent_display},
-                ) catch {};
-                return 1;
-            },
-            .not_an_epic => |ref| {
-                defer ref.deinit(deps.gpa);
-                deps.stderr.print(
-                    messages.update_parent_prefix ++ "{s}" ++ messages.update_parent_not_epic_suffix ++ "\n",
-                    .{parent_display},
-                ) catch {};
-                return 1;
-            },
-        }
+        const epic = r.resolveEpic(parent_display, .{
+            .prefix = messages.update_parent_prefix,
+            .not_found_suffix = messages.update_parent_not_found_suffix,
+            .not_epic_suffix = messages.update_parent_not_epic_suffix,
+        }) orelse return 1;
+        parent_op = .{ .set = epic.id };
+        parent_ref = epic;
     } else if (res.args.@"no-parent" != 0) {
         parent_op = .clear;
     }
@@ -194,7 +175,7 @@ fn writeHelp(deps: cli.Deps) !void {
     );
 }
 
-const storage_msgs: repository.StorageErrorMessages = .{
+const storage_msgs: resolver.StorageErrorMessages = .{
     .busy_retry = messages.update_store_busy_retry,
     .out_of_memory = messages.update_out_of_memory,
     .fallback = messages.update_write_failed,
@@ -207,14 +188,14 @@ const input_msgs: message.InputMessages = .{
     .stdin_read_prefix = messages.update_stdin_read_prefix,
 };
 
-const open_msgs: repository.OpenMessages = .{
+const open_msgs: resolver.OpenMessages = .{
     .command_name = "update",
     .missing_store = messages.update_missing_store,
     .storage = storage_msgs,
 };
 
 fn renderStorageError(deps: cli.Deps, err: anyerror) void {
-    repository.renderStorageError(deps.stderr, err, storage_msgs);
+    resolver.renderStorageError(deps.stderr, err, storage_msgs);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

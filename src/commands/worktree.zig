@@ -6,6 +6,7 @@ const Allocator = std.mem.Allocator;
 const cli = @import("../cli.zig");
 const messages = @import("../messages.zig");
 const repository = @import("../store/repository.zig");
+const resolver = @import("resolver.zig");
 const worktree_scope = @import("../worktree/scope.zig");
 const git_discovery = @import("../git/discovery.zig");
 const ItemClass = @import("../domain/item_class.zig").ItemClass;
@@ -54,54 +55,54 @@ fn writeHelp(deps: cli.Deps) !void {
     );
 }
 
-const status_storage_msgs: repository.StorageErrorMessages = .{
+const status_storage_msgs: resolver.StorageErrorMessages = .{
     .busy_retry = messages.worktree_status_store_busy_retry,
     .out_of_memory = messages.worktree_status_out_of_memory,
     .fallback = messages.worktree_status_read_failed,
 };
 
-const set_storage_msgs: repository.StorageErrorMessages = .{
+const set_storage_msgs: resolver.StorageErrorMessages = .{
     .busy_retry = messages.worktree_set_store_busy_retry,
     .out_of_memory = messages.worktree_set_out_of_memory,
     .fallback = messages.worktree_set_read_failed,
 };
 
-const start_storage_msgs: repository.StorageErrorMessages = .{
+const start_storage_msgs: resolver.StorageErrorMessages = .{
     .busy_retry = messages.worktree_start_store_busy_retry,
     .out_of_memory = messages.worktree_start_out_of_memory,
     .fallback = messages.worktree_start_write_failed,
 };
 
-const status_open_msgs: repository.OpenMessages = .{
+const status_open_msgs: resolver.OpenMessages = .{
     .command_name = "worktree",
     .missing_store = messages.worktree_status_missing_store,
     .storage = status_storage_msgs,
 };
 
-const set_open_msgs: repository.OpenMessages = .{
+const set_open_msgs: resolver.OpenMessages = .{
     .command_name = "worktree set",
     .missing_store = messages.worktree_set_missing_store,
     .storage = set_storage_msgs,
 };
 
-const start_open_msgs: repository.OpenMessages = .{
+const start_open_msgs: resolver.OpenMessages = .{
     .command_name = "worktree start",
     .missing_store = messages.worktree_start_missing_store,
     .storage = start_storage_msgs,
 };
 
 fn runStatus(deps: cli.Deps) !u8 {
-    const store = repository.openStoreCatching(deps.gpa, deps.runner, deps.cwd, deps.stderr, status_open_msgs) orelse return 1;
+    const store = (resolver.open(deps.gpa, deps.runner, deps.cwd, deps.stderr, status_open_msgs) orelse return 1).store;
     defer store.close();
 
     const raw = worktree_scope.readGitSide(deps.gpa, deps.runner, deps.cwd) catch |err| {
-        repository.renderStorageError(deps.stderr, err, status_storage_msgs);
+        resolver.renderStorageError(deps.stderr, err, status_storage_msgs);
         return 1;
     };
     defer worktree_scope.freeRaw(deps.gpa, raw);
 
     const scope_outcome = worktree_scope.resolveAgainstStore(store, deps.gpa, raw) catch |err| {
-        repository.renderStorageError(deps.stderr, err, status_storage_msgs);
+        resolver.renderStorageError(deps.stderr, err, status_storage_msgs);
         return 1;
     };
     switch (scope_outcome) {
@@ -194,11 +195,11 @@ fn runStart(deps: cli.Deps, args_iter: anytype) !u8 {
         return 2;
     };
 
-    const store = repository.openStoreCatching(deps.gpa, deps.runner, deps.cwd, deps.stderr, start_open_msgs) orelse return 1;
+    const store = (resolver.open(deps.gpa, deps.runner, deps.cwd, deps.stderr, start_open_msgs) orelse return 1).store;
     defer store.close();
 
     const target = (lookupStartTarget(store, deps.gpa, id) catch |err| {
-        repository.renderStorageError(deps.stderr, err, start_storage_msgs);
+        resolver.renderStorageError(deps.stderr, err, start_storage_msgs);
         return 1;
     }) orelse {
         deps.stderr.print(
@@ -240,7 +241,7 @@ fn runStart(deps: cli.Deps, args_iter: anytype) !u8 {
             .id = target.id,
             .status = .active,
         }) catch |err| {
-            repository.renderStorageError(deps.stderr, err, start_storage_msgs);
+            resolver.renderStorageError(deps.stderr, err, start_storage_msgs);
             return 1;
         };
         switch (set_outcome) {
@@ -307,19 +308,13 @@ fn runSet(deps: cli.Deps, args_iter: anytype) !u8 {
         return 2;
     };
 
-    const store = repository.openStoreCatching(deps.gpa, deps.runner, deps.cwd, deps.stderr, set_open_msgs) orelse return 1;
-    defer store.close();
+    const r = resolver.open(deps.gpa, deps.runner, deps.cwd, deps.stderr, set_open_msgs) orelse return 1;
+    defer r.close();
 
-    const resolved = (repository.resolveItemRef(store, deps.gpa, id) catch |err| {
-        repository.renderStorageError(deps.stderr, err, set_storage_msgs);
-        return 1;
-    }) orelse {
-        deps.stderr.print(
-            "{s}{s}{s}\n",
-            .{ messages.worktree_set_id_not_found_prefix, id, messages.worktree_set_id_not_found_suffix },
-        ) catch {};
-        return 1;
-    };
+    const resolved = r.resolve(id, .{
+        .prefix = messages.worktree_set_id_not_found_prefix,
+        .suffix = messages.worktree_set_id_not_found_suffix,
+    }) orelse return 1;
     resolved.deinit(deps.gpa);
 
     if (!(try runGitOrFail(deps, &.{ "git", "config", "extensions.worktreeConfig", "true" }, messages.worktree_set_failed))) return 1;
@@ -348,7 +343,7 @@ fn runGitOrFail(deps: cli.Deps, argv: []const []const u8, failure_msg: []const u
 }
 
 fn renderSetStorageError(deps: cli.Deps, err: anyerror) void {
-    repository.renderStorageError(deps.stderr, err, .{
+    resolver.renderStorageError(deps.stderr, err, .{
         .busy_retry = messages.worktree_set_store_busy_retry,
         .out_of_memory = messages.worktree_set_out_of_memory,
         .fallback = messages.worktree_set_read_failed,

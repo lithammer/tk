@@ -6,7 +6,6 @@ const Allocator = std.mem.Allocator;
 const zqlite = @import("zqlite");
 const clock_mod = @import("../clock.zig");
 const discovery = @import("../git/discovery.zig");
-const messages = @import("../messages.zig");
 const proc = @import("../proc/runner.zig");
 const migrations = @import("migrations.zig");
 const mutations_mod = @import("mutations.zig");
@@ -220,117 +219,6 @@ pub const OpenOutcome = union(enum) {
 };
 
 pub const OpenError = discovery.Error || migrations.QueryError || zqlite.Error || error{OutOfMemory};
-
-/// Render a non-`.ok` `OpenOutcome` as a command-prefixed stderr diagnostic.
-///
-/// The four failure arms share identical phrasing across commands; only the
-/// command-prefixed missing-store sentence varies. Callers pass the
-/// already-prefixed missing-store message (e.g. `messages.list_missing_store`)
-/// so `messages.zig` remains the single source of stable strings.
-pub fn renderOpenFailure(
-    stderr: *std.Io.Writer,
-    gpa: Allocator,
-    command_name: []const u8,
-    missing_store: []const u8,
-    outcome: OpenOutcome,
-) void {
-    switch (outcome) {
-        .ok => unreachable,
-        .discovery_failed => |inner| discovery.renderFailure(stderr, gpa, command_name, inner),
-        .store_missing => stderr.print("{s}\n", .{missing_store}) catch {},
-        .not_ticket_store => stderr.print("tk {s}: Repository Store is {s}\n", .{ command_name, messages.init_refuse_foreign }) catch {},
-        .store_from_future_version => stderr.print("tk {s}: Repository Store was created by a {s}\n", .{ command_name, messages.init_refuse_future_version }) catch {},
-    }
-}
-
-/// Command-prefixed message constants used by `renderStorageError`.
-///
-/// `fallback` is the generic non-transient diagnostic; the caller appends
-/// `"\n{s}\n"` for `@errorName(err)`. The three messages stay command-specific
-/// so `messages.zig` remains the single source of truth for stable strings.
-pub const StorageErrorMessages = struct {
-    busy_retry: []const u8,
-    out_of_memory: []const u8,
-    fallback: []const u8,
-};
-
-/// Render a Repository Store read or write failure as a stderr diagnostic.
-///
-/// Busy/locked errors and `error.OutOfMemory` get dedicated phrasing so we
-/// only suggest a retry when one is plausible; everything else falls through
-/// to `fallback ++ "\n{s}\n"` carrying the underlying `@errorName`.
-pub fn renderStorageError(stderr: *std.Io.Writer, err: anyerror, msgs: StorageErrorMessages) void {
-    if (isBusyError(err)) {
-        stderr.print("{s}\n", .{msgs.busy_retry}) catch {};
-        return;
-    }
-    if (err == error.OutOfMemory) {
-        stderr.print("{s}\n", .{msgs.out_of_memory}) catch {};
-        return;
-    }
-    stderr.print("{s}\n{s}\n", .{ msgs.fallback, @errorName(err) }) catch {};
-}
-
-/// Per-command message bundle for `openStoreCatching`. Each command declares
-/// one constant at module level so the open-failure rendering pipeline is
-/// driven entirely by the command's stable phrasing.
-pub const OpenMessages = struct {
-    /// Subcommand name as it appears in diagnostics, e.g. `"next"` or
-    /// `"worktree set"`. Used by `renderOpenFailure` to format `tk <name>: …`.
-    command_name: []const u8,
-    /// Pre-formatted "Repository Store not initialized" line for this command.
-    missing_store: []const u8,
-    /// Storage-error triple used when `openExisting` raises an error.
-    storage: StorageErrorMessages,
-};
-
-/// Open the Repository Store for a command, rendering the standard
-/// open-failure or storage-error diagnostic on any failure. Returns the open
-/// `Store` on success or `null` after the diagnostic is written; callers do
-/// `openStoreCatching(...) orelse return 1;`.
-///
-/// `error.OutOfMemory` is rendered through `msgs.storage.out_of_memory` rather
-/// than propagated. This matches every existing command's storage-error
-/// handling: anticipated OOM exits 1 with a stable message; only unanticipated
-/// failures (e.g. zig-clap OOM that bypasses command rendering) reach the
-/// exit-3 catch-all in `main.zig`.
-pub fn openStoreCatching(
-    gpa: Allocator,
-    runner: proc.Runner,
-    cwd: std.Io.Dir,
-    stderr: *std.Io.Writer,
-    msgs: OpenMessages,
-) ?Store {
-    var outcome: OpenOutcome = undefined;
-    openExisting(gpa, runner, cwd, &outcome) catch |err| {
-        renderStorageError(stderr, err, msgs.storage);
-        return null;
-    };
-    switch (outcome) {
-        .ok => |store| return store,
-        else => {
-            renderOpenFailure(stderr, gpa, msgs.command_name, msgs.missing_store, outcome);
-            return null;
-        },
-    }
-}
-
-/// Classify a Repository Store error as a transient SQLite busy/locked state
-/// that a retry can clear. Shared by commands so the retry contract stays
-/// uniform across writes and reads.
-pub fn isBusyError(err: anyerror) bool {
-    return switch (err) {
-        error.Busy,
-        error.BusyRecovery,
-        error.BusySnapshot,
-        error.BusyTimeout,
-        error.Locked,
-        error.LockedSharedCache,
-        error.LockedVTab,
-        => true,
-        else => false,
-    };
-}
 
 /// Open the existing Repository Store for the current Git repository.
 ///

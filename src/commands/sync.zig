@@ -16,6 +16,7 @@ const Allocator = std.mem.Allocator;
 const cli = @import("../cli.zig");
 const messages = @import("../messages.zig");
 const repository = @import("../store/repository.zig");
+const resolver = @import("resolver.zig");
 const Diagnostic = @import("../domain/diagnostic.zig").Diagnostic;
 const factory = @import("../remote/factory.zig");
 const store_sync = @import("../store/sync.zig");
@@ -140,25 +141,25 @@ fn writeHelp(deps: cli.Deps) !void {
     );
 }
 
-const sync_storage_msgs: repository.StorageErrorMessages = .{
+const sync_storage_msgs: resolver.StorageErrorMessages = .{
     .busy_retry = messages.sync_store_busy_retry,
     .out_of_memory = messages.sync_out_of_memory,
     .fallback = messages.sync_storage_failed,
 };
 
-const sync_open_msgs: repository.OpenMessages = .{
+const sync_open_msgs: resolver.OpenMessages = .{
     .command_name = "sync",
     .missing_store = messages.sync_missing_store,
     .storage = sync_storage_msgs,
 };
 
-const log_storage_msgs: repository.StorageErrorMessages = .{
+const log_storage_msgs: resolver.StorageErrorMessages = .{
     .busy_retry = messages.sync_log_store_busy_retry,
     .out_of_memory = messages.sync_log_out_of_memory,
     .fallback = messages.sync_log_storage_failed,
 };
 
-const log_open_msgs: repository.OpenMessages = .{
+const log_open_msgs: resolver.OpenMessages = .{
     .command_name = "sync log",
     .missing_store = messages.sync_log_missing_store,
     .storage = log_storage_msgs,
@@ -186,7 +187,7 @@ fn runSync(deps: cli.Deps, args_iter: anytype) !u8 {
         }
     }
 
-    const store = repository.openStoreCatching(deps.gpa, deps.runner, deps.cwd, deps.stderr, sync_open_msgs) orelse return 1;
+    const store = (resolver.open(deps.gpa, deps.runner, deps.cwd, deps.stderr, sync_open_msgs) orelse return 1).store;
     defer store.close();
 
     var now_buf: [24]u8 = undefined;
@@ -211,7 +212,7 @@ fn runSync(deps: cli.Deps, args_iter: anytype) !u8 {
             return 1;
         },
         else => {
-            repository.renderStorageError(deps.stderr, err, sync_storage_msgs);
+            resolver.renderStorageError(deps.stderr, err, sync_storage_msgs);
             return 1;
         },
     };
@@ -258,7 +259,7 @@ fn runLog(deps: cli.Deps, args_iter: anytype) !u8 {
         }
     }
 
-    const store = repository.openStoreCatching(deps.gpa, deps.runner, deps.cwd, deps.stderr, log_open_msgs) orelse return 1;
+    const store = (resolver.open(deps.gpa, deps.runner, deps.cwd, deps.stderr, log_open_msgs) orelse return 1).store;
     defer store.close();
 
     if (id_arg) |id_str| {
@@ -275,7 +276,7 @@ fn runLog(deps: cli.Deps, args_iter: anytype) !u8 {
                 return 1;
             },
             else => {
-                repository.renderStorageError(deps.stderr, err, log_storage_msgs);
+                resolver.renderStorageError(deps.stderr, err, log_storage_msgs);
                 return 1;
             },
         };
@@ -295,7 +296,7 @@ fn runLog(deps: cli.Deps, args_iter: anytype) !u8 {
     }
 
     const rows = store_sync.listMutationLog(store.conn, deps.gpa, filter) catch |err| {
-        repository.renderStorageError(deps.stderr, err, log_storage_msgs);
+        resolver.renderStorageError(deps.stderr, err, log_storage_msgs);
         return 1;
     };
     defer {
