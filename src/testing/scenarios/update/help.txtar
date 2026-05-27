@@ -7,12 +7,12 @@ Usage:
   tk update <id> [options]
 
 Options:
-  -h, --help              Display this help and exit.
-  -m, --message <str>     Message paragraph (repeatable).
-  -F, --file <file | ->   Read the message from a file, or '-' for stdin.
-  --priority <P0..P4>     Set Priority. Tickets only.
-  --parent <id>           Set the containing Epic. Tickets only.
-  --no-parent             Remove the Ticket from its Epic. Tickets only.
+  -h, --help                  Display this help and exit.
+  -m, --message <str>         Message paragraph (repeatable).
+  -F, --file <file | ->       Read the message from a file, or '-' for stdin.
+  -p, --priority <P0..P4>     Set Priority. Tickets only.
+  -P, --parent <id>           Set the containing Epic. Tickets only.
+  --no-parent                 Remove the Ticket from its Epic. Tickets only.
 -- expected/stderr --
 -- expected/exit --
 0

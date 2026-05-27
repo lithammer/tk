@@ -24,13 +24,13 @@ const parsers = .{
 };
 
 const params = clap.parseParamsComptime(
-    \\-h, --help              Display this help and exit.
-    \\-m, --message <str>...  Message paragraph (repeatable; -m title -m body ...).
-    \\-F, --file <str>...     Read the message from a file, or '-' for stdin.
-    \\--bug                   Create a bug Ticket.
-    \\--epic                  Create an Epic.
-    \\--parent <str>          Place the new Ticket under an Epic by Display ID or Alias.
-    \\--priority <PRIORITY>   Set Priority (P0..P4). Tickets only.
+    \\-h, --help                  Display this help and exit.
+    \\-m, --message <str>...      Message paragraph (repeatable; -m title -m body ...).
+    \\-F, --file <str>...         Read the message from a file, or '-' for stdin.
+    \\--bug                       Create a bug Ticket.
+    \\--epic                      Create an Epic.
+    \\-P, --parent <str>          Place the new Ticket under an Epic by Display ID or Alias.
+    \\-p, --priority <PRIORITY>   Set Priority (P0..P4). Tickets only.
     \\
 );
 
@@ -156,13 +156,13 @@ fn writeHelp(deps: cli.Deps) !void {
         \\
     );
     try deps.stdout.writeAll(
-        \\  -h, --help              Display this help and exit.
-        \\  -m, --message <text>    Message paragraph (repeatable).
-        \\  -F, --file <file | ->   Read the message from a file, or '-' for stdin.
-        \\  --bug                   Create a bug Ticket.
-        \\  --epic                  Create an Epic.
-        \\  --parent <id>           Place the new Ticket under an Epic.
-        \\  --priority <P0..P4>     Set Priority. Tickets only.
+        \\  -h, --help                  Display this help and exit.
+        \\  -m, --message <text>        Message paragraph (repeatable).
+        \\  -F, --file <file | ->       Read the message from a file, or '-' for stdin.
+        \\  --bug                       Create a bug Ticket.
+        \\  --epic                      Create an Epic.
+        \\  -P, --parent <id>           Place the new Ticket under an Epic.
+        \\  -p, --priority <P0..P4>     Set Priority. Tickets only.
         \\
     );
 }

@@ -24,12 +24,12 @@ const parsers = .{
 };
 
 const params = clap.parseParamsComptime(
-    \\-h, --help              Display this help and exit.
-    \\-m, --message <str>...  Message paragraph (repeatable; -m title -m body ...).
-    \\-F, --file <str>        Read the message from a file, or '-' for stdin.
-    \\--priority <PRIORITY>   Set Priority (P0..P4). Tickets only.
-    \\--parent <str>          Set the containing Epic by Display ID or Alias. Tickets only.
-    \\--no-parent             Remove the Ticket from its current Epic. Tickets only.
+    \\-h, --help                  Display this help and exit.
+    \\-m, --message <str>...      Message paragraph (repeatable; -m title -m body ...).
+    \\-F, --file <str>            Read the message from a file, or '-' for stdin.
+    \\-p, --priority <PRIORITY>   Set Priority (P0..P4). Tickets only.
+    \\-P, --parent <str>          Set the containing Epic by Display ID or Alias. Tickets only.
+    \\--no-parent                 Remove the Ticket from its current Epic. Tickets only.
     \\<str>
     \\
 );
@@ -165,12 +165,12 @@ fn writeHelp(deps: cli.Deps) !void {
         \\  tk update <id> [options]
         \\
         \\Options:
-        \\  -h, --help              Display this help and exit.
-        \\  -m, --message <str>     Message paragraph (repeatable).
-        \\  -F, --file <file | ->   Read the message from a file, or '-' for stdin.
-        \\  --priority <P0..P4>     Set Priority. Tickets only.
-        \\  --parent <id>           Set the containing Epic. Tickets only.
-        \\  --no-parent             Remove the Ticket from its Epic. Tickets only.
+        \\  -h, --help                  Display this help and exit.
+        \\  -m, --message <str>         Message paragraph (repeatable).
+        \\  -F, --file <file | ->       Read the message from a file, or '-' for stdin.
+        \\  -p, --priority <P0..P4>     Set Priority. Tickets only.
+        \\  -P, --parent <id>           Set the containing Epic. Tickets only.
+        \\  --no-parent                 Remove the Ticket from its Epic. Tickets only.
         \\
     );
 }
