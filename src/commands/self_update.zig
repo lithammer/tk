@@ -405,6 +405,10 @@ fn performUpdate(
     if (smoke.exit.code() != 0) {
         target_dir.deleteFile(deps.io, stage_name) catch {};
         deps.stderr.print(messages.self_update_smoke_failure_prefix ++ "{f}\n", .{smoke.exit}) catch {};
+        // Forward the staged binary's own stderr beneath the frame so a
+        // failed `--version` self-reports why (mirrors worktree runGitOrFail).
+        const smoke_stderr = std.mem.trim(u8, smoke.stderr, " \t\r\n");
+        if (smoke_stderr.len > 0) deps.stderr.print("{s}\n", .{smoke_stderr}) catch {};
         return 1;
     }
     if (!smokeOutputContainsToken(smoke.stdout, latest_tag)) {
@@ -475,6 +479,10 @@ fn performUpdate(
 
     if (manpage.exit.code() != 0) {
         deps.stderr.print(messages.self_update_manpage_failure_prefix ++ "{f}\n", .{manpage.exit}) catch {};
+        // Forward the installed binary's own stderr beneath the frame so the
+        // manpage-install reason survives (mirrors worktree runGitOrFail).
+        const manpage_stderr = std.mem.trim(u8, manpage.stderr, " \t\r\n");
+        if (manpage_stderr.len > 0) deps.stderr.print("{s}\n", .{manpage_stderr}) catch {};
         return 1;
     }
 
@@ -945,9 +953,11 @@ test "self-update full: manpage subprocess failure warns but preserves binary sw
     defer gpa.free(installed);
     try std.testing.expectEqualStrings(new_binary_bytes, installed);
 
-    // Manpage-failure warning surfaced on stderr with the retry hint.
+    // Manpage-failure warning surfaced on stderr with the retry hint, and
+    // the installed binary's own stderr is forwarded beneath the frame.
     try std.testing.expect(std.mem.indexOf(u8, h.stderr(), messages.self_update_manpage_failure_prefix) != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "exit 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "tk manpage: install failed at /some/path") != null);
 }
 
 test "self-update full: AccessDenied at stage create fast-fails before download" {
@@ -1098,13 +1108,15 @@ test "self-update full: smoke exit-nonzero leaves target untouched" {
     try h.fake_http.expect(asset_url, .{ .status = 200, .body = "junk-bytes" });
     try h.fake_runner.expect(
         &.{ expected_stage_path, "--version" },
-        .{ .exit_code = 7, .stdout = "" },
+        .{ .exit_code = 7, .stdout = "", .stderr = "tk: corrupt embedded payload\n" },
     );
 
     const code = try performUpdate(h.deps(), target_dir_path, "tk", "x86_64-linux-musl", "v0.6.0");
     try std.testing.expectEqual(@as(u8, 1), code);
     try std.testing.expect(std.mem.indexOf(u8, h.stderr(), messages.self_update_smoke_exit_prefix) != null);
     try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "7") != null);
+    // The staged binary's own stderr is forwarded beneath the frame.
+    try std.testing.expect(std.mem.indexOf(u8, h.stderr(), "tk: corrupt embedded payload") != null);
 
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, expected_stage_name, .{}));
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "tk", .{}));
