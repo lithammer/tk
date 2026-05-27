@@ -326,6 +326,14 @@ fn runSet(deps: cli.Deps, args_iter: anytype) !u8 {
 
 /// Run a git subprocess. Returns `true` on exit 0, `false` on spawn failure
 /// or non-zero exit (with the diagnostic already written to stderr).
+///
+/// On a non-zero exit, `failure_msg` is the framing line naming which tk
+/// operation failed; git's own captured stderr is then forwarded on a second
+/// line so the caller sees git's precise reason (e.g. a worktree path or
+/// branch collision) rather than only the generic frame. Empty git stderr is
+/// omitted. tk treats git as the authority on these collisions and does not
+/// preflight-reimplement git's existence checks — see ARCHITECTURE.md and
+/// tk-15. Stderr trimming mirrors `git.discovery`.
 fn runGitOrFail(deps: cli.Deps, argv: []const []const u8, failure_msg: []const u8) error{OutOfMemory}!bool {
     var result = deps.runner.run(deps.gpa, .{ .argv = argv, .cwd = deps.cwd }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -337,6 +345,8 @@ fn runGitOrFail(deps: cli.Deps, argv: []const []const u8, failure_msg: []const u
     defer result.deinit(deps.gpa);
     if (result.exit.code() != 0) {
         deps.stderr.print("{s}\n", .{failure_msg}) catch {};
+        const git_stderr = std.mem.trim(u8, result.stderr, " \t\r\n");
+        if (git_stderr.len > 0) deps.stderr.print("{s}\n", .{git_stderr}) catch {};
         return false;
     }
     return true;
@@ -367,6 +377,11 @@ fn runClear(deps: cli.Deps) !u8 {
     // that as the idempotent no-op success path.
     if (result.exit.code() != 0 and result.exit.code() != 5) {
         deps.stderr.print("{s}\n", .{messages.worktree_clear_failed}) catch {};
+        // Same forwarding contract as `runGitOrFail`: surface git's own
+        // captured stderr beneath the frame. This call site is inline rather
+        // than routed through the helper because exit 5 is a success path.
+        const git_stderr = std.mem.trim(u8, result.stderr, " \t\r\n");
+        if (git_stderr.len > 0) deps.stderr.print("{s}\n", .{git_stderr}) catch {};
         return 1;
     }
     try deps.stdout.print("{s}\n", .{messages.worktree_cleared});
@@ -515,6 +530,53 @@ test "worktree start: success block lists Ticket, status, branch, and absolute p
     const row = (try conn.row("select status from items where id = 't1'", .{})) orelse return error.ExpectedRow;
     defer row.deinit();
     try std.testing.expectEqualStrings("active", row.text(0));
+}
+
+test "worktree start: forwards git's own message when worktree add collides" {
+    const gpa = std.testing.allocator;
+    var fixture = try StoreFixture.init(gpa);
+    defer fixture.deinit(gpa);
+    const conn = try zqlite.open(fixture.tmp_store.db_path.ptr, zqlite.OpenFlags.ReadWrite | zqlite.OpenFlags.EXResCode);
+    defer conn.close();
+    try TmpStore.insertFixtureItem(conn, .{
+        .id = "t1",
+        .display = "project-1",
+        .title = "Implement worktree start",
+        .created_seq = 1,
+    });
+
+    const branch = "tk/project-1-implement-worktree-start";
+    const path_leaf = "project.project-1-implement-worktree-start";
+    const parent = std.fs.path.dirname(fixture.tmp_store.toplevel_path).?;
+    const path = try std.fs.path.join(gpa, &.{ parent, path_leaf });
+    defer gpa.free(path);
+
+    const git_msg = "fatal: a branch named '" ++ branch ++ "' already exists";
+
+    var h = Harness.init(gpa, &.{ "start", "project-1" }, .{ .cwd = fixture.cwd });
+    defer h.deinit();
+    try h.fake_runner.expect(&.{ "git", "rev-parse" }, .{ .exit_code = 0, .stdout = fixture.rev_parse });
+    try h.fake_runner.expect(&.{ "git", "config", "extensions.worktreeConfig", "true" }, .{ .exit_code = 0 });
+    // Re-running start collides on the would-be branch. tk forwards git's own
+    // message (trailing newline trimmed) instead of preflighting the
+    // collision itself; the generic frame names the operation, git names why.
+    try h.fake_runner.expect(&.{ "git", "worktree", "add", "-b", branch, path }, .{
+        .exit_code = 128,
+        .stderr = git_msg ++ "\n",
+    });
+
+    try std.testing.expectEqual(@as(u8, 1), try run(h.deps(), &h.iter));
+    try std.testing.expectEqualStrings("", h.stdout());
+    try std.testing.expectEqualStrings(
+        messages.worktree_start_git_failed ++ "\n" ++ git_msg ++ "\n",
+        h.stderr(),
+    );
+
+    // The failed git step short-circuits before the status write, so the
+    // Ticket stays at its pre-start status rather than flipping to active.
+    const row = (try conn.row("select status from items where id = 't1'", .{})) orelse return error.ExpectedRow;
+    defer row.deinit();
+    try std.testing.expectEqualStrings("open", row.text(0));
 }
 
 test "worktree start: rejects a done Ticket uniformly per ADR 0006" {
@@ -714,4 +776,22 @@ test "worktree clear: other non-zero git exit surfaces as exit 1" {
     try std.testing.expectEqual(@as(u8, 1), try run(h.deps(), &h.iter));
     try std.testing.expectEqualStrings("", h.stdout());
     try std.testing.expectEqualStrings(messages.worktree_clear_failed ++ "\n", h.stderr());
+}
+
+test "worktree clear: forwards git's own message on non-zero exit" {
+    const gpa = std.testing.allocator;
+    var h = Harness.init(gpa, &.{"clear"}, .{});
+    defer h.deinit();
+    const git_msg = "error: could not lock config file .git/config: Permission denied";
+    try h.fake_runner.expect(
+        &.{ "git", "config", "--worktree", "--unset", "tk.scope" },
+        .{ .exit_code = 128, .stderr = git_msg ++ "\n" },
+    );
+
+    try std.testing.expectEqual(@as(u8, 1), try run(h.deps(), &h.iter));
+    try std.testing.expectEqualStrings("", h.stdout());
+    try std.testing.expectEqualStrings(
+        messages.worktree_clear_failed ++ "\n" ++ git_msg ++ "\n",
+        h.stderr(),
+    );
 }

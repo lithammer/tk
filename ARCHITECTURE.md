@@ -152,9 +152,12 @@ worktree creation and after Promotion through Aliases.
 
 `tk worktree start` creates a scoped git worktree and marks the item `active` by
 default unless `--no-status` is used. The default path layout is recorded in
-[ADR 0007](./docs/adr/0007-default-worktree-path-layout.md). Missing preflight
-checks are tracked by `tk-15`; configurable path layout is tracked by
-`tk-16`.
+[ADR 0007](./docs/adr/0007-default-worktree-path-layout.md). On a path or
+branch collision `tk worktree start` does not preflight: it runs the git
+operation and forwards git's own stderr beneath a framing line (see
+`runGitOrFail`), treating git as the authority rather than reimplementing
+git's existence checks with the TOCTOU gap that implies (`tk-15`).
+Configurable path layout is tracked by `tk-16`.
 
 Workspace Scope is a selection context, not an implicit item target. Commands
 that inspect, update, or promote a specific item require explicit Display IDs;
