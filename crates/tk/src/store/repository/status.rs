@@ -300,10 +300,7 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert!(matches!(
-            err,
-            SetStatusError::LockedDone(ItemClass::Ticket)
-        ));
+        assert!(matches!(err, SetStatusError::LockedDone(ItemClass::Ticket)));
 
         let stored: String = store
             .conn

@@ -209,7 +209,11 @@ mod tests {
         let mut conn = open_seeded();
         seed_remote(&conn);
         let mut fake = FakeAdapter::new(
-            vec![PullResponse::Snapshots(vec![snapshot("42", "gh-42", "Discovered")])],
+            vec![PullResponse::Snapshots(vec![snapshot(
+                "42",
+                "gh-42",
+                "Discovered",
+            )])],
             vec![],
         );
 
@@ -233,14 +237,18 @@ mod tests {
         seed_remote(&conn);
         update_ticket_mutation(&conn, 5, "t1", "New");
 
-        let mut fake =
-            FakeAdapter::new(vec![PullResponse::Snapshots(vec![])], vec![ApplyResponse::Success]);
+        let mut fake = FakeAdapter::new(
+            vec![PullResponse::Snapshots(vec![])],
+            vec![ApplyResponse::Success],
+        );
         let report = run(&mut conn, &mut fake).unwrap();
         assert_eq!(report.applied_count, 1);
         assert_eq!(report.stopped_at_sequence, None);
 
         let state: String = conn
-            .query_row("select state from mutations where sequence = 5", [], |r| r.get(0))
+            .query_row("select state from mutations where sequence = 5", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(state, "applied");
 
@@ -256,7 +264,11 @@ mod tests {
         // Fake saw the decoded payload.
         assert_eq!(fake.captured_applies.len(), 1);
         assert_eq!(fake.captured_applies[0].sequence, 5);
-        assert!(fake.captured_applies[0].payload_text.contains(r#""title":"New""#));
+        assert!(
+            fake.captured_applies[0]
+                .payload_text
+                .contains(r#""title":"New""#)
+        );
     }
 
     #[test]
@@ -270,7 +282,9 @@ mod tests {
 
         let mut fake = FakeAdapter::new(
             vec![PullResponse::Snapshots(vec![])],
-            vec![ApplyResponse::RecordedFailure("HTTP 422: title required".into())],
+            vec![ApplyResponse::RecordedFailure(
+                "HTTP 422: title required".into(),
+            )],
         );
         let report = run(&mut conn, &mut fake).unwrap();
         assert_eq!(report.applied_count, 0);
@@ -287,7 +301,9 @@ mod tests {
         assert!(failure1.contains("title required"));
 
         let state2: String = conn
-            .query_row("select state from mutations where sequence = 2", [], |r| r.get(0))
+            .query_row("select state from mutations where sequence = 2", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(state2, "pending", "loop stopped before sequence 2");
 
@@ -307,10 +323,15 @@ mod tests {
             vec![ApplyResponse::EnvFailure(ProcError::ExecutableNotFound)],
         );
         let err = run(&mut conn, &mut fake).unwrap_err();
-        assert!(matches!(err, RunSyncError::Apply(ProcError::ExecutableNotFound)));
+        assert!(matches!(
+            err,
+            RunSyncError::Apply(ProcError::ExecutableNotFound)
+        ));
 
         let state: String = conn
-            .query_row("select state from mutations where sequence = 1", [], |r| r.get(0))
+            .query_row("select state from mutations where sequence = 1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(state, "pending", "engine wrote no outcome");
     }
@@ -322,8 +343,10 @@ mod tests {
         seed_remote(&conn);
         update_ticket_mutation(&conn, 1, "t1", "A");
 
-        let mut fake =
-            FakeAdapter::new(vec![PullResponse::RecordedFailure("gh: HTTP 502".into())], vec![]);
+        let mut fake = FakeAdapter::new(
+            vec![PullResponse::RecordedFailure("gh: HTTP 502".into())],
+            vec![],
+        );
         let err = run(&mut conn, &mut fake).unwrap_err();
         match err {
             RunSyncError::Pull(PullError::Failed(detail)) => assert!(detail.contains("HTTP 502")),
@@ -333,7 +356,9 @@ mod tests {
         // Apply never invoked; row still pending.
         assert!(fake.captured_applies.is_empty());
         let state: String = conn
-            .query_row("select state from mutations where sequence = 1", [], |r| r.get(0))
+            .query_row("select state from mutations where sequence = 1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(state, "pending");
     }
@@ -357,8 +382,10 @@ mod tests {
         )
         .unwrap();
 
-        let mut fake =
-            FakeAdapter::new(vec![PullResponse::Snapshots(vec![])], vec![ApplyResponse::Success]);
+        let mut fake = FakeAdapter::new(
+            vec![PullResponse::Snapshots(vec![])],
+            vec![ApplyResponse::Success],
+        );
         let report = run(&mut conn, &mut fake).unwrap();
         assert_eq!(report.applied_count, 1);
 
@@ -384,7 +411,11 @@ mod tests {
 
         // Pull returns a stale backend view; apply the in-flight mutation.
         let mut fake = FakeAdapter::new(
-            vec![PullResponse::Snapshots(vec![snapshot("1", "gh-1", "Stale Backend View")])],
+            vec![PullResponse::Snapshots(vec![snapshot(
+                "1",
+                "gh-1",
+                "Stale Backend View",
+            )])],
             vec![ApplyResponse::Success],
         );
         run(&mut conn, &mut fake).unwrap();
@@ -414,9 +445,11 @@ mod tests {
         assert_eq!(report.stopped_at_sequence, None);
 
         let applied: i64 = conn
-            .query_row("select count(*) from mutations where state = 'applied'", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "select count(*) from mutations where state = 'applied'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(applied, 2);
 

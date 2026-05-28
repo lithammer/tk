@@ -88,7 +88,11 @@ impl Adapter for FakeAdapter {
         }
     }
 
-    fn apply_mutation(&mut self, view: &MutationView, _now: &str) -> Result<ApplyOutcome, ApplyError> {
+    fn apply_mutation(
+        &mut self,
+        view: &MutationView,
+        _now: &str,
+    ) -> Result<ApplyOutcome, ApplyError> {
         // Record before consulting the script so the rejection and env-failure
         // paths still leave evidence in `captured_applies`.
         self.captured_applies.push(ApplyCall {
@@ -117,7 +121,9 @@ mod tests {
     use super::*;
     use crate::domain::apply_outcome::ApplyOutcome;
     use crate::domain::item_class::ItemClass;
-    use crate::domain::mutation_payload::{DependencyRef, EpicRef, MutationPayload, StatusChange, TitleBody};
+    use crate::domain::mutation_payload::{
+        DependencyRef, EpicRef, MutationPayload, StatusChange, TitleBody,
+    };
     use crate::domain::status::ItemStatus;
     use crate::domain::ticket_kind::TicketKind;
 
@@ -176,8 +182,10 @@ mod tests {
 
     #[test]
     fn pull_recorded_failure_returns_failed_with_detail() {
-        let mut fake =
-            FakeAdapter::new(vec![PullResponse::RecordedFailure("gh: HTTP 502".into())], vec![]);
+        let mut fake = FakeAdapter::new(
+            vec![PullResponse::RecordedFailure("gh: HTTP 502".into())],
+            vec![],
+        );
         let err = fake.pull_backend_items().unwrap_err();
         match err {
             PullError::Failed(detail) => assert!(detail.contains("HTTP 502")),
@@ -258,7 +266,9 @@ mod tests {
     fn apply_recorded_failure_returns_failure_outcome() {
         let mut fake = FakeAdapter::new(
             vec![],
-            vec![ApplyResponse::RecordedFailure("validation: title required".into())],
+            vec![ApplyResponse::RecordedFailure(
+                "validation: title required".into(),
+            )],
         );
         let outcome = fake
             .apply_mutation(
@@ -283,8 +293,10 @@ mod tests {
 
     #[test]
     fn apply_env_failure_returns_bare_error_and_records_call() {
-        let mut fake =
-            FakeAdapter::new(vec![], vec![ApplyResponse::EnvFailure(ProcError::SpawnFailed)]);
+        let mut fake = FakeAdapter::new(
+            vec![],
+            vec![ApplyResponse::EnvFailure(ProcError::SpawnFailed)],
+        );
         let err = fake.apply_mutation(
             &view(
                 1,
@@ -316,9 +328,11 @@ mod tests {
             "2026-05-19T00:00:00.000Z",
         )
         .unwrap();
-        assert!(fake.captured_applies[0]
-            .payload_text
-            .contains(r#""epic_id":"e-internal""#));
+        assert!(
+            fake.captured_applies[0]
+                .payload_text
+                .contains(r#""epic_id":"e-internal""#)
+        );
     }
 
     #[test]
@@ -335,9 +349,11 @@ mod tests {
             "2026-05-19T00:00:00.000Z",
         )
         .unwrap();
-        assert!(fake.captured_applies[0]
-            .payload_text
-            .contains(r#""blocking_id":"b-internal""#));
+        assert!(
+            fake.captured_applies[0]
+                .payload_text
+                .contains(r#""blocking_id":"b-internal""#)
+        );
     }
 
     #[test]

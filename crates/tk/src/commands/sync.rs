@@ -23,8 +23,8 @@ use crate::commands::resolver;
 use crate::remote::adapter::PullError;
 use crate::remote::factory::{self, OpenError as FactoryOpenError};
 use crate::store::sync::{
-    self as store_sync, ApplyMutationOutcomeError, LogDetailRow, LogError, LogListFilter,
-    LogListRow, LoadApplicableError, MarkSkippedError, MergeError,
+    self as store_sync, ApplyMutationOutcomeError, LoadApplicableError, LogDetailRow, LogError,
+    LogListFilter, LogListRow, MarkSkippedError, MergeError,
 };
 use crate::sync::{self, RunSyncError, SyncReport};
 
@@ -418,9 +418,19 @@ mod tests {
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
 
-        let code = run(h.deps(), Args { subcommand: None, skip: None });
+        let code = run(
+            h.deps(),
+            Args {
+                subcommand: None,
+                skip: None,
+            },
+        );
         assert_eq!(code, 1);
-        assert!(String::from_utf8(h.stderr).unwrap().contains("no Remote configured"));
+        assert!(
+            String::from_utf8(h.stderr)
+                .unwrap()
+                .contains("no Remote configured")
+        );
     }
 
     #[test]
@@ -441,11 +451,19 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(h.deps(), Args { subcommand: None, skip: None });
+        let code = run(
+            h.deps(),
+            Args {
+                subcommand: None,
+                skip: None,
+            },
+        );
         assert_eq!(code, 1);
-        assert!(String::from_utf8(h.stderr)
-            .unwrap()
-            .contains("adapter is not implemented in this build"));
+        assert!(
+            String::from_utf8(h.stderr)
+                .unwrap()
+                .contains("adapter is not implemented in this build")
+        );
     }
 
     #[test]
@@ -473,12 +491,20 @@ mod tests {
         expect_git(&h, &store);
         // No Remote configured: sync still exits 1 on no-remote, but the skip
         // committed first.
-        let code = run(h.deps(), Args { subcommand: None, skip: Some(1) });
+        let code = run(
+            h.deps(),
+            Args {
+                subcommand: None,
+                skip: Some(1),
+            },
+        );
         assert_eq!(code, 1);
 
         let conn = Connection::open(store.db_path()).unwrap();
         let state: String = conn
-            .query_row("select state from mutations where sequence = 1", [], |r| r.get(0))
+            .query_row("select state from mutations where sequence = 1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(state, "skipped", "skip committed before the no-remote exit");
     }
@@ -505,11 +531,19 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(h.deps(), Args { subcommand: None, skip: Some(1) });
+        let code = run(
+            h.deps(),
+            Args {
+                subcommand: None,
+                skip: Some(1),
+            },
+        );
         assert_eq!(code, 1);
-        assert!(String::from_utf8(h.stderr)
-            .unwrap()
-            .contains("is not in the failed state"));
+        assert!(
+            String::from_utf8(h.stderr)
+                .unwrap()
+                .contains("is not in the failed state")
+        );
     }
 
     // ---- tk sync log ----------------------------------------------------
@@ -535,7 +569,11 @@ mod tests {
             },
         );
         assert_eq!(code, 0);
-        assert!(String::from_utf8(h.stdout).unwrap().contains("No Mutations recorded."));
+        assert!(
+            String::from_utf8(h.stdout)
+                .unwrap()
+                .contains("No Mutations recorded.")
+        );
     }
 
     #[test]
@@ -657,7 +695,11 @@ mod tests {
             },
         );
         assert_eq!(code, 1);
-        assert!(String::from_utf8(h.stderr).unwrap().contains("Mutation 99 not found"));
+        assert!(
+            String::from_utf8(h.stderr)
+                .unwrap()
+                .contains("Mutation 99 not found")
+        );
     }
 
     // ---- report / error rendering (engine unreachable via factory) ------
@@ -705,7 +747,10 @@ mod tests {
             &mut err_out,
             &RunSyncError::Pull(PullError::Failed("gh: HTTP 502".into())),
         );
-        assert_eq!(String::from_utf8(err_out).unwrap(), "tk sync: gh: HTTP 502\n");
+        assert_eq!(
+            String::from_utf8(err_out).unwrap(),
+            "tk sync: gh: HTTP 502\n"
+        );
     }
 
     #[test]
@@ -728,8 +773,10 @@ mod tests {
             &mut err_out,
             &RunSyncError::Load(LoadApplicableError::UnknownMutationType("weird".into())),
         );
-        assert!(String::from_utf8(err_out)
-            .unwrap()
-            .contains("unrecognised mutation kind"));
+        assert!(
+            String::from_utf8(err_out)
+                .unwrap()
+                .contains("unrecognised mutation kind")
+        );
     }
 }

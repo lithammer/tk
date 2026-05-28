@@ -61,5 +61,9 @@ pub trait Adapter {
     /// `Failure` carrying the rejection detail). Environment failures arrive
     /// through the [`ApplyError`] error arm. `now` is the engine's injected
     /// timestamp for adapters that stamp their backend writes.
-    fn apply_mutation(&mut self, view: &MutationView, now: &str) -> Result<ApplyOutcome, ApplyError>;
+    fn apply_mutation(
+        &mut self,
+        view: &MutationView,
+        now: &str,
+    ) -> Result<ApplyOutcome, ApplyError>;
 }

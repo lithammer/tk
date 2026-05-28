@@ -26,9 +26,7 @@ use crate::domain::status::ItemStatus;
 use crate::git::discovery;
 use crate::proc::{ProcError, ProcRunner};
 use crate::store::repository::Store;
-use crate::store::repository::status::{
-    self as set_status, SetStatusError, SetStatusRequest,
-};
+use crate::store::repository::status::{self as set_status, SetStatusError, SetStatusRequest};
 use crate::worktree::scope::{self as worktree_scope, ScopeError, ScopeSource};
 
 /// Flags for `tk worktree`.

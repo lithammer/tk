@@ -102,13 +102,7 @@ pub fn merge_backend_snapshots(
                 "update items \
                     set title = ?2, body = ?3, status = ?4, updated_at = ?5 \
                   where id = ?1",
-                params![
-                    item_id,
-                    snap.title,
-                    snap.body,
-                    snap.status.text(),
-                    now
-                ],
+                params![item_id, snap.title, snap.body, snap.status.text(), now],
             )?;
             continue;
         }
@@ -116,7 +110,9 @@ pub fn merge_backend_snapshots(
         // Scenario A: INSERT a new backend-origin Item.
         let id = generate_internal_id(rng);
         let created_seq = sequences::next(&tx, "item_created_seq")?;
-        let ticket_kind_text = snap.ticket_kind.map(super::super::domain::ticket_kind::TicketKind::text);
+        let ticket_kind_text = snap
+            .ticket_kind
+            .map(super::super::domain::ticket_kind::TicketKind::text);
         let priority_text = if snap.item_class == ItemClass::Ticket {
             Some("P2")
         } else {
@@ -543,7 +539,9 @@ pub fn list_mutation_log(
     let mut out = Vec::new();
     while let Some(row) = rows.next()? {
         let raw_failure: Option<String> = row.get(5)?;
-        let failure_detail = raw_failure.map(|raw| decode_failure_detail(&raw)).transpose()?;
+        let failure_detail = raw_failure
+            .map(|raw| decode_failure_detail(&raw))
+            .transpose()?;
         out.push(LogListRow {
             sequence: row.get(0)?,
             state: row.get(1)?,
@@ -670,7 +668,13 @@ mod tests {
         merge_backend_snapshots(
             &mut conn,
             &mut rng,
-            &[snapshot("1", "gh-1", ItemClass::Ticket, "First", ItemStatus::Open)],
+            &[snapshot(
+                "1",
+                "gh-1",
+                ItemClass::Ticket,
+                "First",
+                ItemStatus::Open,
+            )],
             "2026-05-19T00:00:00Z",
         )
         .unwrap();
@@ -714,7 +718,13 @@ mod tests {
         merge_backend_snapshots(
             &mut conn,
             &mut rng,
-            &[snapshot("1", "gh-1", ItemClass::Ticket, "Stale Backend View", ItemStatus::Open)],
+            &[snapshot(
+                "1",
+                "gh-1",
+                ItemClass::Ticket,
+                "Stale Backend View",
+                ItemStatus::Open,
+            )],
             "2026-05-19T00:00:00Z",
         )
         .unwrap();
@@ -722,7 +732,10 @@ mod tests {
         let title: String = conn
             .query_row("select title from items where id = 't1'", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(title, "Local Edit", "pending mutation must shield the local edit");
+        assert_eq!(
+            title, "Local Edit",
+            "pending mutation must shield the local edit"
+        );
     }
 
     #[test]
@@ -734,7 +747,13 @@ mod tests {
         merge_backend_snapshots(
             &mut conn,
             &mut rng,
-            &[snapshot("1", "gh-1", ItemClass::Ticket, "Backend Wins", ItemStatus::Active)],
+            &[snapshot(
+                "1",
+                "gh-1",
+                ItemClass::Ticket,
+                "Backend Wins",
+                ItemStatus::Active,
+            )],
             "2026-05-20T00:00:00Z",
         )
         .unwrap();
@@ -771,7 +790,13 @@ mod tests {
         let err = merge_backend_snapshots(
             &mut conn,
             &mut rng,
-            &[snapshot("99", "gh-1", ItemClass::Ticket, "Backend", ItemStatus::Open)],
+            &[snapshot(
+                "99",
+                "gh-1",
+                ItemClass::Ticket,
+                "Backend",
+                ItemStatus::Open,
+            )],
             "2026-05-19T00:00:00Z",
         )
         .unwrap_err();
@@ -781,9 +806,11 @@ mod tests {
         }
         // Rollback: no orphaned backend item landed.
         let count: i64 = conn
-            .query_row("select count(*) from items where backend_key = '99'", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "select count(*) from items where backend_key = '99'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(count, 0);
     }
@@ -794,7 +821,12 @@ mod tests {
     fn load_applicable_returns_pending_and_failed_in_sequence_order() {
         let conn = open_seeded();
         backend_ticket(&conn, "t1", "gh-1", "1", 1);
-        for (seq, state) in [(3, "pending"), (1, "failed"), (2, "applied"), (4, "skipped")] {
+        for (seq, state) in [
+            (3, "pending"),
+            (1, "failed"),
+            (2, "applied"),
+            (4, "skipped"),
+        ] {
             insert_fixture_mutation(
                 &conn,
                 FixtureMutation {
@@ -897,7 +929,13 @@ mod tests {
         seed_remote(&conn);
         seed_pending(&conn, 5);
 
-        apply_mutation_outcome(&mut conn, 5, &ApplyOutcome::accepted(), "2026-05-19T00:00:00Z").unwrap();
+        apply_mutation_outcome(
+            &mut conn,
+            5,
+            &ApplyOutcome::accepted(),
+            "2026-05-19T00:00:00Z",
+        )
+        .unwrap();
 
         let (state, failure): (String, Option<String>) = conn
             .query_row(
@@ -963,7 +1001,13 @@ mod tests {
         )
         .unwrap();
 
-        apply_mutation_outcome(&mut conn, 3, &ApplyOutcome::accepted(), "2026-05-19T00:00:00Z").unwrap();
+        apply_mutation_outcome(
+            &mut conn,
+            3,
+            &ApplyOutcome::accepted(),
+            "2026-05-19T00:00:00Z",
+        )
+        .unwrap();
 
         let (state, failure): (String, Option<String>) = conn
             .query_row(
@@ -995,8 +1039,13 @@ mod tests {
         )
         .unwrap();
 
-        apply_mutation_outcome(&mut conn, 2, &ApplyOutcome::rejected("new reason"), "2026-05-19T00:00:00Z")
-            .unwrap();
+        apply_mutation_outcome(
+            &mut conn,
+            2,
+            &ApplyOutcome::rejected("new reason"),
+            "2026-05-19T00:00:00Z",
+        )
+        .unwrap();
 
         let (state, failure): (String, String) = conn
             .query_row(
@@ -1014,8 +1063,13 @@ mod tests {
     fn apply_outcome_missing_row_returns_not_found() {
         let mut conn = open_seeded();
         seed_remote(&conn);
-        match apply_mutation_outcome(&mut conn, 999, &ApplyOutcome::accepted(), "2026-05-19T00:00:00Z")
-            .unwrap_err()
+        match apply_mutation_outcome(
+            &mut conn,
+            999,
+            &ApplyOutcome::accepted(),
+            "2026-05-19T00:00:00Z",
+        )
+        .unwrap_err()
         {
             ApplyMutationOutcomeError::MutationNotFound(999) => {}
             other => panic!("expected MutationNotFound, got {other:?}"),
@@ -1040,8 +1094,13 @@ mod tests {
         )
         .unwrap();
 
-        match apply_mutation_outcome(&mut conn, 7, &ApplyOutcome::accepted(), "2026-05-19T00:00:00Z")
-            .unwrap_err()
+        match apply_mutation_outcome(
+            &mut conn,
+            7,
+            &ApplyOutcome::accepted(),
+            "2026-05-19T00:00:00Z",
+        )
+        .unwrap_err()
         {
             ApplyMutationOutcomeError::MutationNotApplicable(7) => {}
             other => panic!("expected MutationNotApplicable, got {other:?}"),
@@ -1132,7 +1191,12 @@ mod tests {
     fn pending_or_failed_count_counts_only_in_flight() {
         let conn = open_seeded();
         backend_ticket(&conn, "t1", "gh-1", "1", 1);
-        for (seq, state) in [(1, "pending"), (2, "failed"), (3, "applied"), (4, "skipped")] {
+        for (seq, state) in [
+            (1, "pending"),
+            (2, "failed"),
+            (3, "applied"),
+            (4, "skipped"),
+        ] {
             insert_fixture_mutation(
                 &conn,
                 FixtureMutation {
@@ -1208,7 +1272,10 @@ mod tests {
         let seqs: Vec<i64> = rows.iter().map(|r| r.sequence).collect();
         assert_eq!(seqs, vec![1, 2, 3]);
         assert_eq!(rows[0].failure_detail, None);
-        assert_eq!(rows[1].failure_detail.as_deref(), Some("HTTP 422: rejected"));
+        assert_eq!(
+            rows[1].failure_detail.as_deref(),
+            Some("HTTP 422: rejected")
+        );
         assert_eq!(rows[1].target_display_id, "gh-2");
     }
 
@@ -1217,9 +1284,24 @@ mod tests {
         let conn = open_seeded();
         seed_log_fixture(&conn);
 
-        assert_eq!(list_mutation_log(&conn, LogListFilter::Pending).unwrap().len(), 1);
-        assert_eq!(list_mutation_log(&conn, LogListFilter::Failed).unwrap().len(), 1);
-        assert_eq!(list_mutation_log(&conn, LogListFilter::Skipped).unwrap().len(), 1);
+        assert_eq!(
+            list_mutation_log(&conn, LogListFilter::Pending)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            list_mutation_log(&conn, LogListFilter::Failed)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            list_mutation_log(&conn, LogListFilter::Skipped)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

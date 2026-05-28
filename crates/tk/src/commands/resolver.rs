@@ -13,9 +13,7 @@ use std::path::Path;
 use thiserror::Error;
 
 use crate::proc::ProcRunner;
-use crate::store::repository::{
-    self, ResolvedItemRef, ResolvedItemRefWithDisplay, Store,
-};
+use crate::store::repository::{self, ResolvedItemRef, ResolvedItemRefWithDisplay, Store};
 
 /// Errors re-exported from the store layer, where the operations that produce
 /// them live. [`OpenError`] is rendered by [`render_open_error`]; the resolve

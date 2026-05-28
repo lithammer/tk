@@ -114,7 +114,11 @@ fn read_single_line<R: ProcRunner + ?Sized>(
 pub fn resolve_against_store(store: &Store, raw: &Raw) -> Result<Option<Scope>, ScopeError> {
     if let Some(stored) = raw.configured_value.as_deref() {
         return match crate::store::repository::resolve_item_ref(store.conn(), stored)? {
-            Some(resolved) => Ok(Some(load_scope(store, &resolved.id, ScopeSource::Configured)?)),
+            Some(resolved) => Ok(Some(load_scope(
+                store,
+                &resolved.id,
+                ScopeSource::Configured,
+            )?)),
             None => Err(ScopeError::ConfiguredUnresolved(stored.to_owned())),
         };
     }

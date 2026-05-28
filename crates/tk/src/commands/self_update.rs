@@ -94,12 +94,7 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
 /// any networking happens. A dev build has no canonical upstream tag to
 /// compare against, so even the read-only `--check` query has nothing
 /// meaningful to report.
-fn run_with(
-    mut deps: Deps<'_>,
-    args: Args,
-    embedded_version: &str,
-    embedded_triple: &str,
-) -> u8 {
+fn run_with(mut deps: Deps<'_>, args: Args, embedded_version: &str, embedded_triple: &str) -> u8 {
     if embedded_triple == DEV_TRIPLE {
         let _ = writeln!(
             deps.stderr,
@@ -161,7 +156,9 @@ fn fetch_latest_tag<R: crate::proc::ProcRunner + ?Sized>(
     let user_agent = format!("{USER_AGENT_PREFIX}{embedded_version}");
     let argv = curl_get_argv(&user_agent, API_URL, None);
     let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-    let output = runner.run(&argv_refs, cwd).map_err(|_| QueryError::Network)?;
+    let output = runner
+        .run(&argv_refs, cwd)
+        .map_err(|_| QueryError::Network)?;
     let (body, status) = split_body_and_status(&output.stdout)?;
     classify_curl_outcome(output.exit_code, status)?;
     parse_release_tag(body)
@@ -191,7 +188,10 @@ fn split_body_and_status(stdout: &[u8]) -> Result<(&[u8], u16), QueryError> {
         .ok_or(QueryError::Malformed)?;
     let (body, rest) = bytes.split_at(last_nl);
     let status_str = std::str::from_utf8(&rest[1..]).map_err(|_| QueryError::Malformed)?;
-    let status: u16 = status_str.trim().parse().map_err(|_| QueryError::Malformed)?;
+    let status: u16 = status_str
+        .trim()
+        .parse()
+        .map_err(|_| QueryError::Malformed)?;
     Ok((body, status))
 }
 
@@ -257,7 +257,8 @@ enum VersionParseError {
 }
 
 fn compare_versions(embedded: &str, latest: &str) -> Result<Comparison, VersionParseError> {
-    let lhs = parse_semver(embedded).map_err(|()| VersionParseError::Embedded(embedded.to_string()))?;
+    let lhs =
+        parse_semver(embedded).map_err(|()| VersionParseError::Embedded(embedded.to_string()))?;
     let rhs = parse_semver(latest).map_err(|()| VersionParseError::Latest(latest.to_string()))?;
     Ok(match lhs.cmp(&rhs) {
         std::cmp::Ordering::Equal => Comparison::UpToDate,
@@ -454,7 +455,10 @@ fn perform_update(
                 );
             }
             QueryError::HttpStatus(code) => {
-                let _ = writeln!(stderr, "tk self-update: asset download returned HTTP {code}");
+                let _ = writeln!(
+                    stderr,
+                    "tk self-update: asset download returned HTTP {code}"
+                );
             }
             QueryError::Malformed | QueryError::MissingTag => unreachable!(),
         }
@@ -529,7 +533,10 @@ fn perform_update(
         Ok(()) => {}
         Err(CommitError::PrimaryFailed(err)) => {
             let _ = fs::remove_file(&stage_path);
-            let _ = writeln!(stderr, "tk self-update: failed to install new binary: {err}");
+            let _ = writeln!(
+                stderr,
+                "tk self-update: failed to install new binary: {err}"
+            );
             return 1;
         }
         Err(CommitError::PrimaryRecovered(err)) => {
@@ -715,7 +722,11 @@ fn cleanup_stale_exe_at(exe_path: &Path) {
 /// GitHub serves and the Windows CreateProcessW path finds the staged
 /// file by extension.
 fn build_asset_name(triple: &str) -> String {
-    let ext = if is_windows_triple(triple) { ".exe" } else { "" };
+    let ext = if is_windows_triple(triple) {
+        ".exe"
+    } else {
+        ""
+    };
     format!("tk-{triple}{ext}")
 }
 
@@ -1537,7 +1548,10 @@ mod tests {
         let outcome = commit_install(target_dir, ".tk.tmp.bbbb", "tk.exe", true);
         outcome.expect("commit succeeds");
         assert_eq!(fs::read(target_dir.join("tk.exe")).unwrap(), b"new-bytes");
-        assert_eq!(fs::read(target_dir.join("tk.exe.old")).unwrap(), b"old-bytes");
+        assert_eq!(
+            fs::read(target_dir.join("tk.exe.old")).unwrap(),
+            b"old-bytes"
+        );
         assert!(!target_dir.join(".tk.tmp.bbbb").exists());
     }
 
