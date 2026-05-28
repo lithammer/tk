@@ -132,7 +132,10 @@ pub fn render_open_error<W: Write + ?Sized>(stderr: &mut W, command: &str, err: 
             );
         }
         OpenError::NotTicketStore => {
-            let _ = writeln!(stderr, "tk {command}: Repository Store is not a tk Repository Store");
+            let _ = writeln!(
+                stderr,
+                "tk {command}: Repository Store is not a tk Repository Store"
+            );
         }
         OpenError::FromFutureVersion => {
             let _ = writeln!(

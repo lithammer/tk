@@ -105,10 +105,7 @@ fn read_single_line<R: ProcRunner + ?Sized>(
 }
 
 /// Resolve raw discovery output against the Repository Store.
-pub fn resolve_against_store(
-    store: &Store,
-    raw: &Raw,
-) -> Result<ResolveOutcome, rusqlite::Error> {
+pub fn resolve_against_store(store: &Store, raw: &Raw) -> Result<ResolveOutcome, rusqlite::Error> {
     if let Some(stored) = raw.configured_value.as_deref() {
         return match crate::store::repository::resolve_item_ref(store.conn(), stored)? {
             Some(resolved) => Ok(ResolveOutcome::Scope(load_scope(
@@ -133,11 +130,7 @@ pub fn resolve_against_store(
     Ok(ResolveOutcome::None)
 }
 
-fn load_scope(
-    store: &Store,
-    item_id: &str,
-    source: ScopeSource,
-) -> Result<Scope, rusqlite::Error> {
+fn load_scope(store: &Store, item_id: &str, source: ScopeSource) -> Result<Scope, rusqlite::Error> {
     let (display_id, title): (String, String) = store.conn().query_row(
         "select display_value, title from items where id = ?1",
         params![item_id],
@@ -153,10 +146,7 @@ fn load_scope(
 /// Longest stored Display ID or Alias that is a `-`-bounded prefix of the
 /// branch tail. The `-` boundary keeps `proj` from silently shadowing
 /// `tk/project-1`; `collate nocase` matches the `item_ids` PK collation.
-fn longest_prefix_match(
-    store: &Store,
-    tail: &str,
-) -> Result<Option<String>, rusqlite::Error> {
+fn longest_prefix_match(store: &Store, tail: &str) -> Result<Option<String>, rusqlite::Error> {
     if tail.is_empty() {
         return Ok(None);
     }

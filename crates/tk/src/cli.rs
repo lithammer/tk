@@ -64,6 +64,10 @@ struct Cli {
 enum Command {
     /// Initialize the Repository Store in the current Git repository.
     Init(commands::init::Args),
+    /// Render the Repository Store List Tree.
+    List(commands::list::Args),
+    /// Select the next ready Ticket.
+    Next(commands::next::Args),
     /// Render one Ticket or Epic with current state.
     Show(commands::show::Args),
 }
@@ -82,6 +86,8 @@ pub fn run_argv(deps: Deps<'_>, argv: &[String]) -> std::io::Result<u8> {
     };
     match cli.command {
         Command::Init(args) => Ok(commands::init::run(deps, args)),
+        Command::List(args) => Ok(commands::list::run(deps, args)),
+        Command::Next(args) => Ok(commands::next::run(deps, args)),
         Command::Show(args) => Ok(commands::show::run(deps, args)),
     }
 }
