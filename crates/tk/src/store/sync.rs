@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use thiserror::Error;
 
+use crate::domain::apply_outcome::ApplyOutcome;
 use crate::domain::backend_item_snapshot::BackendItemSnapshot;
 use crate::domain::item_class::ItemClass;
 use crate::domain::mutation_payload::{
@@ -23,7 +24,6 @@ use crate::domain::mutation_payload::{
 };
 use crate::domain::mutation_type::MutationType;
 use crate::domain::mutation_view::MutationView;
-use crate::domain::outcome::Outcome;
 use crate::store::repository::create::generate_internal_id;
 use crate::store::repository::item_class_from_text;
 use crate::store::sequences::{self, SequenceError};
@@ -296,7 +296,7 @@ pub enum ApplyMutationOutcomeError {
     MutationNotApplicable(i64),
 }
 
-/// Persist the effect of an adapter [`Outcome`] against the Mutation Log row at
+/// Persist the effect of an adapter [`ApplyOutcome`] against the Mutation Log row at
 /// `sequence`, inside its own transaction:
 ///   - `pending`/`failed` + `Success` → `applied`, clear `failure_json`,
 ///     advance the Sync Cursor.
@@ -308,7 +308,7 @@ pub enum ApplyMutationOutcomeError {
 pub fn apply_mutation_outcome(
     conn: &mut Connection,
     sequence: i64,
-    outcome: &Outcome,
+    outcome: &ApplyOutcome,
     now: &str,
 ) -> Result<(), ApplyMutationOutcomeError> {
     let tx = conn.transaction()?;
@@ -328,7 +328,7 @@ pub fn apply_mutation_outcome(
     }
 
     match outcome {
-        Outcome::Success(_) => {
+        ApplyOutcome::Accepted(_) => {
             tx.execute(
                 "update mutations \
                     set state = 'applied', failure_json = null, state_changed_at = ?2 \
@@ -337,7 +337,7 @@ pub fn apply_mutation_outcome(
             )?;
             advance_sync_cursor(&tx, sequence, now)?;
         }
-        Outcome::Failure(failure) => {
+        ApplyOutcome::Rejected(failure) => {
             let failure_json = serde_json::to_string(&FailureJsonWrapper {
                 detail: failure.detail.clone(),
             })
@@ -899,7 +899,7 @@ mod tests {
         seed_remote(&conn);
         seed_pending(&conn, 5);
 
-        apply_mutation_outcome(&mut conn, 5, &Outcome::success(), "2026-05-19T00:00:00Z").unwrap();
+        apply_mutation_outcome(&mut conn, 5, &ApplyOutcome::accepted(), "2026-05-19T00:00:00Z").unwrap();
 
         let (state, failure): (String, Option<String>) = conn
             .query_row(
@@ -930,7 +930,7 @@ mod tests {
         apply_mutation_outcome(
             &mut conn,
             1,
-            &Outcome::failure("HTTP 422: title required"),
+            &ApplyOutcome::rejected("HTTP 422: title required"),
             "2026-05-19T00:00:00Z",
         )
         .unwrap();
@@ -965,7 +965,7 @@ mod tests {
         )
         .unwrap();
 
-        apply_mutation_outcome(&mut conn, 3, &Outcome::success(), "2026-05-19T00:00:00Z").unwrap();
+        apply_mutation_outcome(&mut conn, 3, &ApplyOutcome::accepted(), "2026-05-19T00:00:00Z").unwrap();
 
         let (state, failure): (String, Option<String>) = conn
             .query_row(
@@ -997,7 +997,7 @@ mod tests {
         )
         .unwrap();
 
-        apply_mutation_outcome(&mut conn, 2, &Outcome::failure("new reason"), "2026-05-19T00:00:00Z")
+        apply_mutation_outcome(&mut conn, 2, &ApplyOutcome::rejected("new reason"), "2026-05-19T00:00:00Z")
             .unwrap();
 
         let (state, failure): (String, String) = conn
@@ -1016,7 +1016,7 @@ mod tests {
     fn apply_outcome_missing_row_returns_not_found() {
         let mut conn = open_seeded();
         seed_remote(&conn);
-        match apply_mutation_outcome(&mut conn, 999, &Outcome::success(), "2026-05-19T00:00:00Z")
+        match apply_mutation_outcome(&mut conn, 999, &ApplyOutcome::accepted(), "2026-05-19T00:00:00Z")
             .unwrap_err()
         {
             ApplyMutationOutcomeError::MutationNotFound(999) => {}
@@ -1042,7 +1042,7 @@ mod tests {
         )
         .unwrap();
 
-        match apply_mutation_outcome(&mut conn, 7, &Outcome::success(), "2026-05-19T00:00:00Z")
+        match apply_mutation_outcome(&mut conn, 7, &ApplyOutcome::accepted(), "2026-05-19T00:00:00Z")
             .unwrap_err()
         {
             ApplyMutationOutcomeError::MutationNotApplicable(7) => {}

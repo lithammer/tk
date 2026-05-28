@@ -12,25 +12,28 @@
 //!   — surfaces through the adapter method's `Result<_, ApplyError>` error
 //!   arm, bubbles out of the engine, leaves the Mutation row `pending`;
 //! - per-Mutation rejection (the backend ran but refused the write) —
-//!   surfaces as [`Outcome::Failure`], recorded to `failure_json`, stops the
-//!   apply loop;
-//! - acceptance — surfaces as [`Outcome::Success`], transitions the row to
-//!   `applied` and advances the Sync Cursor.
+//!   surfaces as [`ApplyOutcome::Rejected`], recorded to `failure_json`, stops
+//!   the apply loop;
+//! - acceptance — surfaces as [`ApplyOutcome::Accepted`], transitions the row
+//!   to `applied` and advances the Sync Cursor.
 //!
-//! The success/rejection split (this type) vs. environment failure (the error
-//! arm) is the ADR-0009 sync failure taxonomy.
+//! The acceptance/rejection split (this type) vs. environment failure (the
+//! error arm) is the ADR-0009 sync failure taxonomy. This is NOT a
+//! `Result`-in-disguise: a rejection is durable evidence the engine records,
+//! not an error it bubbles — hence the named `Accepted`/`Rejected` variants
+//! rather than `Ok`/`Err`.
 
-/// Result of handing one Mutation Log entry to a Backend Adapter.
+/// The backend's verdict on applying one Mutation Log entry.
 ///
 /// Environment failures are NOT modelled here — they arrive through the
 /// adapter method's `Result` error arm (`ApplyError`). This enum only
 /// distinguishes backend acceptance from backend rejection.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Outcome {
+pub enum ApplyOutcome {
     /// Mutation accepted by the backend.
-    Success(Receipt),
+    Accepted(Receipt),
     /// Mutation rejected by the backend (non-zero exit, validation refusal).
-    Failure(Failure),
+    Rejected(Failure),
 }
 
 /// Adapter-supplied evidence that a Mutation succeeded.
@@ -51,17 +54,17 @@ pub struct Failure {
     pub detail: String,
 }
 
-impl Outcome {
-    /// Convenience constructor for the empty-receipt success case.
+impl ApplyOutcome {
+    /// Convenience constructor for the empty-receipt acceptance case.
     #[must_use]
-    pub fn success() -> Self {
-        Self::Success(Receipt::default())
+    pub fn accepted() -> Self {
+        Self::Accepted(Receipt::default())
     }
 
     /// Convenience constructor for a rejection carrying `detail`.
     #[must_use]
-    pub fn failure(detail: impl Into<String>) -> Self {
-        Self::Failure(Failure {
+    pub fn rejected(detail: impl Into<String>) -> Self {
+        Self::Rejected(Failure {
             detail: detail.into(),
         })
     }

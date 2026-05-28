@@ -3,7 +3,7 @@
 //! Commands and the sync engine consume this trait so tests can substitute a
 //! [`crate::remote::fake::FakeAdapter`] without spawning real backend CLIs.
 //! The contract data types it exchanges — [`BackendItemSnapshot`],
-//! [`MutationView`], [`Outcome`] — are pure domain data under
+//! [`MutationView`], [`ApplyOutcome`] — are pure domain data under
 //! [`crate::domain`].
 //!
 //! The trait takes `&mut self` because the only stateful implementation today
@@ -11,9 +11,9 @@
 //! through an injected [`crate::proc::ProcRunner`] and hold no per-call mutable
 //! state, so `&mut self` costs them nothing.
 
+use crate::domain::apply_outcome::ApplyOutcome;
 use crate::domain::backend_item_snapshot::BackendItemSnapshot;
 use crate::domain::mutation_view::MutationView;
-use crate::domain::outcome::Outcome;
 use crate::proc::ProcError;
 use thiserror::Error;
 
@@ -23,7 +23,7 @@ use thiserror::Error;
 /// `gh`, Jira via `acli`) reaches the backend through the injectable runner,
 /// so the environment-failure vocabulary is the runner's. Mutation-level
 /// rejection — non-zero exit, refused write, validation failure — does NOT
-/// flow here; it rides the [`Outcome::Failure`] arm so the engine can persist
+/// flow here; it rides the [`ApplyOutcome::Rejected`] arm so the engine can persist
 /// the failure detail to `mutations.failure_json` without conflating it with
 /// adapter unavailability (the ADR-0009 sync failure taxonomy).
 pub type ApplyError = ProcError;
@@ -57,9 +57,9 @@ pub trait Adapter {
 
     /// Apply one pending Mutation Log entry to the backend.
     ///
-    /// Returns [`Outcome::Success`] (a `Receipt`) or [`Outcome::Failure`] (a
+    /// Returns [`ApplyOutcome::Accepted`] (a `Receipt`) or [`ApplyOutcome::Rejected`] (a
     /// `Failure` carrying the rejection detail). Environment failures arrive
     /// through the [`ApplyError`] error arm. `now` is the engine's injected
     /// timestamp for adapters that stamp their backend writes.
-    fn apply_mutation(&mut self, view: &MutationView, now: &str) -> Result<Outcome, ApplyError>;
+    fn apply_mutation(&mut self, view: &MutationView, now: &str) -> Result<ApplyOutcome, ApplyError>;
 }

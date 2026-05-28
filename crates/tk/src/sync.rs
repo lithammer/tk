@@ -11,7 +11,7 @@
 //! 2. Apply loop. [`load_applicable_mutations`] returns pending+failed
 //!    [`MutationView`]s in sequence order. Each is handed to
 //!    [`Adapter::apply_mutation`], then persisted via [`apply_mutation_outcome`].
-//!    The loop stops at the first [`Outcome::Failure`].
+//!    The loop stops at the first [`ApplyOutcome::Rejected`].
 //!
 //! `tk sync --skip <id>` does NOT pass through the engine — the command calls
 //! [`crate::store::sync::mark_mutation_skipped`] directly, before opening the
@@ -22,7 +22,7 @@
 use rusqlite::Connection;
 use thiserror::Error;
 
-use crate::domain::outcome::Outcome;
+use crate::domain::apply_outcome::ApplyOutcome;
 use crate::remote::adapter::{Adapter, ApplyError, PullError};
 use crate::store::sync::{
     ApplyMutationOutcomeError, LoadApplicableError, MergeError, apply_mutation_outcome,
@@ -37,7 +37,7 @@ pub struct SyncReport {
     /// Number of Mutations that transitioned to `applied` during this run.
     pub applied_count: usize,
     /// When `Some`, the sync stopped because this Mutation's Apply returned
-    /// [`Outcome::Failure`]; the `mutations.failure_json` row records the
+    /// [`ApplyOutcome::Rejected`]; the `mutations.failure_json` row records the
     /// detail and the caller renders the sequence.
     pub stopped_at_sequence: Option<i64>,
 }
@@ -100,8 +100,8 @@ pub fn run_sync(
         let outcome = adapter.apply_mutation(view, now)?;
         apply_mutation_outcome(conn, view.sequence, &outcome, now)?;
         match outcome {
-            Outcome::Success(_) => report.applied_count += 1,
-            Outcome::Failure(_) => {
+            ApplyOutcome::Accepted(_) => report.applied_count += 1,
+            ApplyOutcome::Rejected(_) => {
                 report.stopped_at_sequence = Some(view.sequence);
                 return Ok(report);
             }

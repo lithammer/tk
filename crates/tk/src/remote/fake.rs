@@ -6,10 +6,10 @@
 //! manual dupe/free step — responses own their data and `apply_mutation`
 //! records calls by cloning into [`FakeAdapter::captured_applies`].
 
+use crate::domain::apply_outcome::ApplyOutcome;
 use crate::domain::backend_item_snapshot::BackendItemSnapshot;
 use crate::domain::mutation_type::MutationType;
 use crate::domain::mutation_view::MutationView;
-use crate::domain::outcome::Outcome;
 use crate::proc::ProcError;
 
 use super::adapter::{Adapter, ApplyError, PullError};
@@ -29,9 +29,9 @@ pub enum PullResponse {
 /// Scripted response for one [`Adapter::apply_mutation`] call.
 #[derive(Debug, Clone)]
 pub enum ApplyResponse {
-    /// Mutation accepted — returns [`Outcome::Success`] with an empty Receipt.
+    /// Mutation accepted — returns [`ApplyOutcome::Accepted`] with an empty Receipt.
     Success,
-    /// Mutation rejected — returns [`Outcome::Failure`] carrying this detail.
+    /// Mutation rejected — returns [`ApplyOutcome::Rejected`] carrying this detail.
     RecordedFailure(String),
     /// Environment failure — returns this bare error tag.
     EnvFailure(ProcError),
@@ -89,7 +89,7 @@ impl Adapter for FakeAdapter {
         }
     }
 
-    fn apply_mutation(&mut self, view: &MutationView, _now: &str) -> Result<Outcome, ApplyError> {
+    fn apply_mutation(&mut self, view: &MutationView, _now: &str) -> Result<ApplyOutcome, ApplyError> {
         // Record before consulting the script so the rejection and env-failure
         // paths still leave evidence in `captured_applies`.
         self.captured_applies.push(ApplyCall {
@@ -106,8 +106,8 @@ impl Adapter for FakeAdapter {
             .clone();
         self.apply_index += 1;
         match response {
-            ApplyResponse::Success => Ok(Outcome::success()),
-            ApplyResponse::RecordedFailure(detail) => Ok(Outcome::failure(detail)),
+            ApplyResponse::Success => Ok(ApplyOutcome::accepted()),
+            ApplyResponse::RecordedFailure(detail) => Ok(ApplyOutcome::rejected(detail)),
             ApplyResponse::EnvFailure(err) => Err(err),
         }
     }
@@ -116,9 +116,9 @@ impl Adapter for FakeAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::apply_outcome::ApplyOutcome;
     use crate::domain::item_class::ItemClass;
     use crate::domain::mutation_payload::{DependencyRef, EpicRef, MutationPayload, StatusChange, TitleBody};
-    use crate::domain::outcome::Outcome;
     use crate::domain::status::ItemStatus;
     use crate::domain::ticket_kind::TicketKind;
 
@@ -228,7 +228,7 @@ mod tests {
                 "2026-05-19T00:00:00.000Z",
             )
             .unwrap();
-        assert!(matches!(outcome, Outcome::Success(_)));
+        assert!(matches!(outcome, ApplyOutcome::Accepted(_)));
     }
 
     #[test]
@@ -274,8 +274,8 @@ mod tests {
             )
             .unwrap();
         match outcome {
-            Outcome::Failure(f) => assert_eq!(f.detail, "validation: title required"),
-            Outcome::Success(_) => panic!("expected Failure"),
+            ApplyOutcome::Rejected(f) => assert_eq!(f.detail, "validation: title required"),
+            ApplyOutcome::Accepted(_) => panic!("expected Failure"),
         }
         // Rejection still records evidence.
         assert_eq!(fake.captured_applies.len(), 1);
@@ -363,7 +363,7 @@ mod tests {
                 "2026-05-19T00:00:00.000Z",
             )
             .unwrap();
-        assert!(matches!(first, Outcome::Success(_)));
+        assert!(matches!(first, ApplyOutcome::Accepted(_)));
         let second = fake
             .apply_mutation(
                 &view(
@@ -378,8 +378,8 @@ mod tests {
             )
             .unwrap();
         match second {
-            Outcome::Failure(f) => assert_eq!(f.detail, "second call failed"),
-            Outcome::Success(_) => panic!("expected Failure"),
+            ApplyOutcome::Rejected(f) => assert_eq!(f.detail, "second call failed"),
+            ApplyOutcome::Accepted(_) => panic!("expected Failure"),
         }
         assert_eq!(fake.apply_index, 2);
         assert_eq!(fake.captured_applies.len(), 2);

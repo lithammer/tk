@@ -19,20 +19,20 @@
 //!   ([`crate::store::sync`]); a richer classified type only earns its place
 //!   when a concrete Backend Adapter produces the evidence to classify.
 //!
-//! [`outcome`] ports the typed Apply-result shape (ADR-0009 taxonomy): the
-//! sync engine is the "real adapter pressure" ADR-0018 deferred it for.
+//! [`apply_outcome`] ports the typed Apply-result shape (ADR-0009 taxonomy):
+//! the sync engine is the "real adapter pressure" ADR-0018 deferred it for.
 //!
 //! `display_prefix` already lives under [`crate::store`] alongside its only
 //! current consumer (`tk init`); revisit the placement when the store layer
 //! port lands and real cross-module consumers exist.
 
+pub mod apply_outcome;
 pub mod backend_item_snapshot;
 pub mod item_class;
 pub mod mutation_payload;
 pub mod mutation_type;
 pub mod mutation_view;
 pub mod origin;
-pub mod outcome;
 pub mod priority;
 pub mod status;
 pub mod ticket_kind;
