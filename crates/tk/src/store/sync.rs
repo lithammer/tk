@@ -25,7 +25,6 @@ use crate::domain::mutation_payload::{
 use crate::domain::mutation_type::MutationType;
 use crate::domain::mutation_view::MutationView;
 use crate::store::repository::create::generate_internal_id;
-use crate::store::repository::item_class_from_text;
 use crate::store::sequences::{self, SequenceError};
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -89,7 +88,7 @@ pub fn merge_backend_snapshots(
                     "select 1 from mutations \
                      where item_id = ?1 and item_class = ?2 \
                        and state in ('pending','failed') limit 1",
-                    params![item_id, snap.item_class.text()],
+                    params![item_id, snap.item_class],
                     |r| r.get(0),
                 )
                 .optional()?;
@@ -216,14 +215,13 @@ pub fn load_applicable_mutations(
         let sequence: i64 = row.get(0)?;
         let type_text: String = row.get(1)?;
         let item_id: String = row.get(2)?;
-        let item_class_text: String = row.get(3)?;
+        let item_class: ItemClass = row.get(3)?;
         let payload_text: String = row.get(4)?;
         let backend_kind: Option<String> = row.get(5)?;
         let backend_key: Option<String> = row.get(6)?;
 
         let mutation_type = MutationType::from_str(&type_text)
             .map_err(|_| LoadApplicableError::UnknownMutationType(type_text))?;
-        let item_class = item_class_from_text(&item_class_text);
         let payload = decode_mutation_payload(mutation_type, &payload_text)?;
 
         out.push(MutationView {

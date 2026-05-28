@@ -19,10 +19,6 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use thiserror::Error;
 
 use crate::domain::item_class::ItemClass;
-use crate::domain::origin::Origin;
-use crate::domain::priority::Priority;
-use crate::domain::status::ItemStatus;
-use crate::domain::ticket_kind::TicketKind;
 use crate::git::discovery;
 use crate::proc::ProcRunner;
 use crate::store::migrations;
@@ -176,11 +172,9 @@ pub fn resolve_item_ref(
           where ids.value = ?1",
         params![display_arg],
         |row| {
-            let id: String = row.get(0)?;
-            let class_text: String = row.get(1)?;
             Ok(ResolvedItemRef {
-                id,
-                item_class: item_class_from_text(&class_text),
+                id: row.get(0)?,
+                item_class: row.get(1)?,
             })
         },
     )
@@ -199,13 +193,10 @@ pub fn resolve_item_ref_with_display(
           where ids.value = ?1",
         params![display_arg],
         |row| {
-            let id: String = row.get(0)?;
-            let display_id: String = row.get(1)?;
-            let class_text: String = row.get(2)?;
             Ok(ResolvedItemRefWithDisplay {
-                id,
-                display_id,
-                item_class: item_class_from_text(&class_text),
+                id: row.get(0)?,
+                display_id: row.get(1)?,
+                item_class: row.get(2)?,
             })
         },
     )
@@ -245,68 +236,6 @@ pub fn resolve_as_epic_with_display(
         Ok(resolved)
     } else {
         Err(ResolveEpicError::NotAnEpic)
-    }
-}
-
-// ---- Text-column decoders ----------------------------------------------
-//
-// The `items.*` columns carry CHECK constraints that pin the set of legal
-// spellings, so reading an unknown value is Repository Store corruption.
-// The decoders panic rather than thread `Result` through every read site —
-// surfacing a debug-mode panic in tests is more useful than silently
-// returning a default value that would lie to downstream callers.
-//
-// `dead_code` is permitted at the umbrella scope because not every decoder
-// is exercised until the matching leaf operation lands — keeping them all
-// here matches the schema column set and lets the leaves grow without
-// adding helpers piecemeal.
-
-#[allow(dead_code)]
-pub(crate) fn item_class_from_text(text: &str) -> ItemClass {
-    match text {
-        "ticket" => ItemClass::Ticket,
-        "epic" => ItemClass::Epic,
-        other => panic!("repository store corruption: unknown item_class `{other}`"),
-    }
-}
-
-#[allow(dead_code)]
-pub(crate) fn ticket_kind_from_text(text: &str) -> TicketKind {
-    match text {
-        "task" => TicketKind::Task,
-        "bug" => TicketKind::Bug,
-        other => panic!("repository store corruption: unknown ticket_kind `{other}`"),
-    }
-}
-
-#[allow(dead_code)]
-pub(crate) fn priority_from_text(text: &str) -> Priority {
-    match text {
-        "P0" => Priority::P0,
-        "P1" => Priority::P1,
-        "P2" => Priority::P2,
-        "P3" => Priority::P3,
-        "P4" => Priority::P4,
-        other => panic!("repository store corruption: unknown priority `{other}`"),
-    }
-}
-
-#[allow(dead_code)]
-pub(crate) fn status_from_text(text: &str) -> ItemStatus {
-    match text {
-        "open" => ItemStatus::Open,
-        "active" => ItemStatus::Active,
-        "done" => ItemStatus::Done,
-        other => panic!("repository store corruption: unknown status `{other}`"),
-    }
-}
-
-#[allow(dead_code)]
-pub(crate) fn origin_from_text(text: &str) -> Origin {
-    match text {
-        "local" => Origin::Local,
-        "backend" => Origin::Backend,
-        other => panic!("repository store corruption: unknown origin `{other}`"),
     }
 }
 

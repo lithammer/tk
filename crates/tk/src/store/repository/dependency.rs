@@ -16,7 +16,7 @@ use crate::domain::origin::Origin;
 use crate::domain::status::ItemStatus;
 use crate::store::mutations;
 
-use super::{Store, item_class_from_text, origin_from_text, status_from_text};
+use super::Store;
 
 /// Input for [`add_dependency`] and [`remove_dependency`].
 #[derive(Debug, Clone, Copy)]
@@ -217,21 +217,14 @@ fn read_endpoint_info(
           where blocked.id = ?1",
         params![edge.blocked_id, edge.blocking_id],
         |row| {
-            let blocked_status: String = row.get(0)?;
-            let blocked_origin: String = row.get(1)?;
-            let blocked_class: String = row.get(2)?;
-            let blocked_backend_kind: Option<String> = row.get(3)?;
-            let blocking_status: String = row.get(4)?;
-            let blocking_origin: String = row.get(5)?;
-            let blocking_backend_kind: Option<String> = row.get(6)?;
             Ok(EndpointInfo {
-                blocked_status: status_from_text(&blocked_status),
-                blocked_origin: origin_from_text(&blocked_origin),
-                blocked_class: item_class_from_text(&blocked_class),
-                blocked_backend_kind,
-                blocking_status: status_from_text(&blocking_status),
-                blocking_origin: origin_from_text(&blocking_origin),
-                blocking_backend_kind,
+                blocked_status: row.get(0)?,
+                blocked_origin: row.get(1)?,
+                blocked_class: row.get(2)?,
+                blocked_backend_kind: row.get(3)?,
+                blocking_status: row.get(4)?,
+                blocking_origin: row.get(5)?,
+                blocking_backend_kind: row.get(6)?,
             })
         },
     )

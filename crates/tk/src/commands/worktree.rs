@@ -364,21 +364,22 @@ fn lookup_start_target(
           where ids.value = ?1",
         rusqlite::params![display_arg],
         |row| {
-            let id: String = row.get(0)?;
-            let display_id: String = row.get(1)?;
-            let class_text: String = row.get(2)?;
-            let title: String = row.get(3)?;
-            let status_text: String = row.get(4)?;
-            Ok((id, display_id, class_text, title, status_text))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, ItemClass>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, ItemStatus>(4)?,
+            ))
         },
     );
     match result {
-        Ok((id, display_id, class_text, title, status_text)) => Ok(Some(StartTarget {
+        Ok((id, display_id, item_class, title, status)) => Ok(Some(StartTarget {
             id,
             display_id,
             title,
-            item_class: crate::store::repository::item_class_from_text(&class_text),
-            status: crate::store::repository::status_from_text(&status_text),
+            item_class,
+            status,
         })),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(err) => Err(err),

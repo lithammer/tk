@@ -14,10 +14,7 @@ use crate::domain::priority::Priority;
 use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
 
-use super::{
-    Store, item_class_from_text, origin_from_text, priority_from_text, status_from_text,
-    ticket_kind_from_text,
-};
+use super::Store;
 
 /// One current-state row for a List Tree entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,28 +165,18 @@ pub fn list_rows(store: &Store, options: ListOptions) -> Result<Vec<ListRow>, ru
 }
 
 fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<ListRow> {
-    let id: String = row.get(0)?;
-    let display_id: String = row.get(1)?;
-    let class_text: String = row.get(2)?;
-    let kind_text: Option<String> = row.get(3)?;
-    let priority_text: Option<String> = row.get(4)?;
-    let title: String = row.get(5)?;
-    let status_text: String = row.get(6)?;
-    let origin_text: String = row.get(7)?;
-    let container_id: Option<String> = row.get(8)?;
-    let created_seq: i64 = row.get(9)?;
     let has_unresolved_blocker: i64 = row.get(10)?;
     Ok(ListRow {
-        id,
-        display_id,
-        item_class: item_class_from_text(&class_text),
-        ticket_kind: kind_text.as_deref().map(ticket_kind_from_text),
-        priority: priority_text.as_deref().map(priority_from_text),
-        title,
-        status: status_from_text(&status_text),
-        origin: origin_from_text(&origin_text),
-        container_id,
-        created_seq,
+        id: row.get(0)?,
+        display_id: row.get(1)?,
+        item_class: row.get(2)?,
+        ticket_kind: row.get(3)?,
+        priority: row.get(4)?,
+        title: row.get(5)?,
+        status: row.get(6)?,
+        origin: row.get(7)?,
+        container_id: row.get(8)?,
+        created_seq: row.get(9)?,
         has_unresolved_blocker: has_unresolved_blocker != 0,
     })
 }

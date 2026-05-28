@@ -21,7 +21,7 @@ use crate::domain::origin::Origin;
 use crate::domain::status::ItemStatus;
 use crate::store::mutations;
 
-use super::{Store, item_class_from_text, origin_from_text, status_from_text};
+use super::Store;
 
 /// Input for [`set_item_status`].
 #[derive(Debug, Clone)]
@@ -77,23 +77,20 @@ pub fn set_item_status<C: Clock + ?Sized>(
                from items where id = ?1",
             params![req.id],
             |row| {
-                let origin: String = row.get(0)?;
-                let status: String = row.get(1)?;
-                let class: String = row.get(2)?;
-                let display: String = row.get(3)?;
-                let title: String = row.get(4)?;
-                Ok((origin, status, class, display, title))
+                Ok((
+                    row.get::<_, Origin>(0)?,
+                    row.get::<_, ItemStatus>(1)?,
+                    row.get::<_, ItemClass>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
             },
         )
         .optional()?;
-    let Some((origin_text, status_text, class_text, display_id, title)) = current else {
+    let Some((origin, current_status, item_class, display_id, title)) = current else {
         // No write happened — drop the transaction implicitly.
         return Err(SetStatusError::NotFound);
     };
-
-    let origin = origin_from_text(&origin_text);
-    let current_status = status_from_text(&status_text);
-    let item_class = item_class_from_text(&class_text);
 
     if current_status == ItemStatus::Done && req.status != ItemStatus::Done {
         tx.commit()?;
@@ -112,7 +109,7 @@ pub fn set_item_status<C: Clock + ?Sized>(
 
     tx.execute(
         "update items set status = ?2, updated_at = ?3 where id = ?1",
-        params![req.id, req.status.text(), now_iso],
+        params![req.id, req.status, now_iso],
     )?;
 
     if origin == Origin::Backend {

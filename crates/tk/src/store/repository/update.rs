@@ -21,7 +21,7 @@ use crate::domain::origin::Origin;
 use crate::domain::priority::Priority;
 use crate::store::mutations;
 
-use super::{Store, origin_from_text};
+use super::Store;
 
 /// Parent-Epic operation requested by the caller.
 #[derive(Debug, Clone, Copy, Default)]
@@ -112,17 +112,12 @@ pub fn update_item<C: Clock + ?Sized>(
                from items where id = ?1",
             params![req.id],
             |r| {
-                let origin: String = r.get(0)?;
-                let title: String = r.get(1)?;
-                let body: String = r.get(2)?;
-                let priority: Option<String> = r.get(3)?;
-                let container_id: Option<String> = r.get(4)?;
                 Ok(Current {
-                    origin: origin_from_text(&origin),
-                    title,
-                    body,
-                    priority,
-                    container_id,
+                    origin: r.get(0)?,
+                    title: r.get(1)?,
+                    body: r.get(2)?,
+                    priority: r.get(3)?,
+                    container_id: r.get(4)?,
                 })
             },
         )
@@ -285,7 +280,7 @@ fn write_columns(
                     id,
                     title,
                     body,
-                    p.text(),
+                    p,
                     new_epic_id,
                     new_container_class,
                     now_iso
@@ -303,7 +298,7 @@ fn write_columns(
         conn.execute(
             "update items set title = ?2, body = ?3, priority = ?4, updated_at = ?5 \
               where id = ?1",
-            params![id, title, body, p.text(), now_iso],
+            params![id, title, body, p, now_iso],
         )?;
     } else {
         conn.execute(

@@ -16,10 +16,7 @@ use crate::domain::priority::Priority;
 use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
 
-use super::{
-    Store, item_class_from_text, origin_from_text, priority_from_text, resolve_item_ref,
-    status_from_text, ticket_kind_from_text,
-};
+use super::{Store, resolve_item_ref};
 
 /// Compact summary of a related item shown in the `tk show` sub-sections.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,13 +74,13 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, Option<String>>(3)?,
-                r.get::<_, Option<String>>(4)?,
+                r.get::<_, ItemClass>(2)?,
+                r.get::<_, Option<TicketKind>>(3)?,
+                r.get::<_, Option<Priority>>(4)?,
                 r.get::<_, String>(5)?,
                 r.get::<_, String>(6)?,
-                r.get::<_, String>(7)?,
-                r.get::<_, String>(8)?,
+                r.get::<_, ItemStatus>(7)?,
+                r.get::<_, Origin>(8)?,
                 r.get::<_, Option<String>>(9)?,
                 r.get::<_, Option<String>>(10)?,
                 r.get::<_, String>(11)?,
@@ -95,13 +92,13 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
     let Ok((
         id,
         display_id,
-        class_text,
-        kind_text,
-        priority_text,
+        item_class,
+        ticket_kind,
+        priority,
         title,
         body,
-        status_text,
-        origin_text,
+        status,
+        origin,
         backend_kind,
         backend_key,
         created_at,
@@ -116,7 +113,6 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
         };
     };
 
-    let item_class = item_class_from_text(&class_text);
     let parent = container_id
         .as_deref()
         .map(|cid| read_item_summary_by_id(&store.conn, cid))
@@ -136,12 +132,12 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
         id,
         display_id,
         item_class,
-        ticket_kind: kind_text.as_deref().map(ticket_kind_from_text),
-        priority: priority_text.as_deref().map(priority_from_text),
+        ticket_kind,
+        priority,
         title,
         body,
-        status: status_from_text(&status_text),
-        origin: origin_from_text(&origin_text),
+        status,
+        origin,
         backend_kind,
         backend_key,
         created_at,
@@ -237,17 +233,12 @@ fn read_external_blockers(
 }
 
 fn item_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemSummary> {
-    let display_id: String = row.get(0)?;
-    let title: String = row.get(1)?;
-    let class_text: String = row.get(2)?;
-    let status_text: String = row.get(3)?;
-    let priority_text: Option<String> = row.get(4)?;
     Ok(ItemSummary {
-        display_id,
-        title,
-        item_class: item_class_from_text(&class_text),
-        status: status_from_text(&status_text),
-        priority: priority_text.as_deref().map(priority_from_text),
+        display_id: row.get(0)?,
+        title: row.get(1)?,
+        item_class: row.get(2)?,
+        status: row.get(3)?,
+        priority: row.get(4)?,
     })
 }
 
