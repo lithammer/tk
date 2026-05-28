@@ -89,6 +89,10 @@ enum Command {
     Unblock(commands::unblock::Args),
     /// Inspect or configure the current Workspace Scope.
     Worktree(commands::worktree::Args),
+    /// Print the agent workflow briefing.
+    Prime(commands::prime::Args),
+    /// Print or install the tk manpage.
+    Manpage(commands::manpage::Args),
 }
 
 /// Entrypoint that the binary's `main.rs` and the scenario harness share.
@@ -116,6 +120,8 @@ pub fn run_argv(deps: Deps<'_>, argv: &[String]) -> std::io::Result<u8> {
         Command::Block(args) => Ok(commands::block::run(deps, args)),
         Command::Unblock(args) => Ok(commands::unblock::run(deps, args)),
         Command::Worktree(args) => Ok(commands::worktree::run(deps, args)),
+        Command::Prime(args) => Ok(commands::prime::run(deps, args)),
+        Command::Manpage(args) => Ok(commands::manpage::run(deps, args)),
     }
 }
 

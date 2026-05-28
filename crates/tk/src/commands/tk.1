@@ -1,0 +1,319 @@
+.\" Man page for the tk CLI.
+.\" View with: man -l man/tk.1
+.TH TK 1 "May 2026" "" "tk Manual"
+.SH NAME
+tk \- agent-first work tracking command
+.SH SYNOPSIS
+.B tk
+[\fB\-\-help\fR]
+[\fB\-\-version\fR]
+.br
+.B tk
+\fIcommand\fR
+[\fIarguments\fR]
+.SH DESCRIPTION
+.B tk
+is an agent-first tool for managing backend-agnostic work items through a
+local-first Repository Store and explicit backend Promotion.
+.PP
+This manual documents the command surface available in the current binary.
+Future v1 commands are intentionally omitted until they are implemented.
+.PP
+New
+.B Tickets
+are local by default. A configured Remote does not make new Tickets
+backend-backed; Promotion is the explicit boundary where local state becomes
+backend intent.
+.SH GLOBAL OPTIONS
+.TP
+.B \-\-help
+Print top-level help.
+.TP
+.B \-\-version
+Print the current version.
+.SH COMMANDS
+.SS Repository setup
+.TP
+.B tk init
+Initialize the Repository Store for the current git repository.
+.PP
+The Repository Store is a SQLite database at
+\fI<git-common-dir>/tk/tk.db\fR. It is shared by all git worktrees for the
+same repository and is untracked local state.
+.PP
+.B tk init
+is idempotent. If the store already exists and is current, it reports the
+existing path instead of recreating it.
+.SS Creating Tickets and Epics
+.TP
+\fBtk add\fR [\fB\-\-bug\fR | \fB\-\-epic\fR] [\fB\-\-parent\fR \fIepic-id\fR] [\fB\-\-priority\fR \fIP0..P4\fR] (\fB\-m\fR \fIparagraph\fR... | \fB\-F\fR \fIfile\fR)
+.TQ
+\fBtk add\fR [\fB\-\-bug\fR | \fB\-\-epic\fR] [\fB\-\-parent\fR \fIepic-id\fR] [\fB\-\-priority\fR \fIP0..P4\fR] \fB\-F\fR \fB\-\fR
+Create a local task Ticket by default.
+.PP
+.B \-\-bug
+creates a bug Ticket.
+.B \-\-epic
+creates an Epic.
+.B \-\-bug
+and
+.B \-\-epic
+are mutually exclusive.
+.B \-\-parent
+places a new Ticket under an Epic; it is invalid with
+.BR \-\-epic .
+.B \-\-priority
+sets local-only Priority for Tickets. The default is
+.BR P2 .
+.PP
+.B \-m
+and
+.B \-\-message
+are repeatable message paragraphs.
+.B \-F
+and
+.B \-\-file
+read the message from a file. Use
+.B \-
+to read the message from standard input. Editor mode for bare
+.B tk add
+is deferred from v1.
+.PP
+The first paragraph becomes the title. Later paragraphs become the body. An
+empty message aborts creation.
+.PP
+On successful Ticket creation,
+.B tk add
+prints:
+.PP
+.RS 4
+.nf
+Created Ticket: <display-id> - <title>
+Kind: task|bug
+Priority: P0|P1|P2|P3|P4
+Status: open
+Parent: <epic-display-id>
+.fi
+.RE
+.PP
+The
+.B Parent:
+line is printed only when
+.B \-\-parent
+is supplied, and it uses the parent Epic's current Display ID even when the
+argument was an Alias.
+.PP
+On successful Epic creation,
+.B tk add
+prints:
+.PP
+.RS 4
+.nf
+Created Epic: <display-id> - <title>
+Status: open
+.fi
+.RE
+.SS Reading the List Tree
+.TP
+\fBtk list\fR [\fB\-\-ready\fR | \fB\-\-blocked\fR | \fB\-\-active\fR] [\fB\-\-local\fR | \fB\-\-remote\fR]
+Render the Repository Store List Tree.
+.PP
+The default view shows open and active Tickets and Epics. Epics render as
+top-level rows, child Tickets render under their Epic with tree glyphs, and
+unparented Tickets render as top-level rows.
+.PP
+.B \-\-ready
+shows open Tickets with no unresolved Dependencies or External Blockers.
+.B \-\-blocked
+shows open or active Tickets with unresolved Dependencies or External Blockers.
+.B \-\-active
+shows active Tickets and Epics, retaining inactive Epics as containers for
+active child Tickets.
+.PP
+.B \-\-local
+shows only local items.
+.B \-\-remote
+shows only Backend-backed items. The current binary can read backend-origin
+rows seeded by tests or future sync paths, but it does not promote or pull
+backend items yet.
+.PP
+On success with one local Ticket,
+.B tk list
+prints:
+.PP
+.RS 4
+.nf
+○ project-1 ● P2 Investigate flaky login retry
+--------------------------------------------------------------------------------
+Total: 1 item (1 open)
+
+Status: ○ open  ◐ active  ✓ done
+.fi
+.RE
+.SS Selecting Ready Work
+.TP
+.B tk next
+Select the next ready Ticket.
+.PP
+.B tk next
+selects open Tickets with no unresolved Dependencies or External Blockers. It
+orders ready Tickets by Effective Priority, then own Priority, then Repository
+Store created_seq, and never selects Epics. Effective Priority is the lowest
+of a candidate's own Priority and the Priorities of every unfinished item it
+transitively blocks through Dependencies and Epic-membership, so a ready
+Ticket that gates a higher-Priority Blocked Item outranks lower-priority
+direct work. Effective Priority does not cross the Workspace Scope boundary.
+Backend Tickets use local import order for the created_seq tie break, not
+backend-native creation time. Selection is deterministic and does not
+randomize among candidates. Ticket Kind and Assignees do not affect ordering.
+.PP
+.B tk next
+does not explain skipped candidates. When the selected Ticket's Effective
+Priority is lower than its own Priority,
+.B tk next
+writes one rationale line to standard error in the form
+.RS 4
+.nf
+<display-id>: Effective Priority <P> (via <contributor-id>)
+.fi
+.RE
+so the non-obvious pick is explainable without a follow-up
+.BR "tk show" .
+Standard output stays a single Display ID line, so
+.B id=$(tk next)
+captures only the selection; redirect standard error with
+.B 2>/dev/null
+to suppress the rationale.
+.PP
+Parent Epic status, Dependencies, and External Blockers do not hide otherwise
+ready child Tickets.
+.PP
+Mutation Log, Mutation Failure, and Sync Cursor state do not filter
+.B tk next
+selection, and
+.B tk next
+does not emit sync-health warnings.
+.PP
+.B tk next
+is read-only and does not change Item Status. Starting work belongs to
+.BR "tk worktree start" .
+.PP
+.B tk next
+takes no scope argument; scoped selection comes only from Workspace Scope.
+.PP
+When Workspace Scope support lands,
+.B tk next
+will default to the active Workspace Scope. In the current binary, Workspace
+Scope discovery has not landed yet, so
+.B tk next
+searches all ready Tickets. Global ready-work inspection uses
+.BR "tk list --ready" .
+.PP
+On success,
+.B tk next
+prints one Display ID:
+.PP
+.RS 4
+.nf
+<display-id>
+.fi
+.RE
+.PP
+.B tk next
+has no JSON or structured-output mode in v1; the Display ID line is the
+machine interface.
+.PP
+If no ready Ticket matches,
+.B tk next
+returns exit status 1 and writes
+.B tk next: no ready Tickets
+to standard error. If Workspace Scope was applied, it instead writes
+.B tk next: no ready Tickets in Workspace Scope
+to standard error.
+.SS Agent briefing
+.TP
+.B tk prime
+Print static agent workflow guidance to standard output.
+.PP
+.B tk prime
+does not require an initialized Repository Store and writes nothing to
+standard error on success.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Logical failure, such as missing Repository Store or invalid message input.
+.TP
+.B 2
+Usage error.
+.TP
+.B 3
+Unexpected internal error.
+.SH EXAMPLES
+Initialize a repository-local store:
+.PP
+.RS 4
+.nf
+tk init
+.fi
+.RE
+.PP
+Create a local Ticket from a file:
+.PP
+.RS 4
+.nf
+tk add -F followup.md
+.fi
+.RE
+.PP
+Create a local Ticket from standard input:
+.PP
+.RS 4
+.nf
+tk add -F - <<'EOF'
+Investigate flaky login retry
+
+Repro is intermittent on the staging cluster.
+First seen 2026-04-30.
+EOF
+.fi
+.RE
+.PP
+Create an Epic and a child Ticket:
+.PP
+.RS 4
+.nf
+tk add --epic -m "Jira backend"
+tk add --parent project-1 -m "Map Jira issue fields"
+.fi
+.RE
+.PP
+List visible work:
+.PP
+.RS 4
+.nf
+tk list
+tk list --ready
+.fi
+.RE
+.PP
+Select the next ready Ticket:
+.PP
+.RS 4
+.nf
+tk next
+.fi
+.RE
+.PP
+Print agent guidance:
+.PP
+.RS 4
+.nf
+tk prime
+.fi
+.RE
+.SH SEE ALSO
+The project README, CONTEXT.md domain glossary, ARCHITECTURE.md module map,
+and ADRs under docs/adr/.
