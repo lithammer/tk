@@ -64,6 +64,8 @@ struct Cli {
 enum Command {
     /// Initialize the Repository Store in the current Git repository.
     Init(commands::init::Args),
+    /// Render one Ticket or Epic with current state.
+    Show(commands::show::Args),
 }
 
 /// Entrypoint that the binary's `main.rs` and the scenario harness share.
@@ -80,6 +82,7 @@ pub fn run_argv(deps: Deps<'_>, argv: &[String]) -> std::io::Result<u8> {
     };
     match cli.command {
         Command::Init(args) => Ok(commands::init::run(deps, args)),
+        Command::Show(args) => Ok(commands::show::run(deps, args)),
     }
 }
 

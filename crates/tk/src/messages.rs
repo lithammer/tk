@@ -53,3 +53,33 @@ pub const GIT_SPAWN_FAILED: &str = "failed to invoke git";
 /// Stderr line when `git rev-parse` exits zero but stdout cannot be parsed
 /// into the expected `(common-dir, toplevel)` line pair.
 pub const GIT_UNPARSEABLE: &str = "git produced unexpected rev-parse output";
+
+// `tk show` — single-item read.
+
+/// Stderr line when no Repository Store exists for the current repository.
+pub const SHOW_MISSING_STORE: &str = "tk show: Repository Store not initialized; run 'tk init'";
+
+/// Stderr prefix for unknown Display ID or Alias. Callers append the supplied
+/// id and [`SHOW_ID_NOT_FOUND_SUFFIX`] plus a newline.
+pub const SHOW_ID_NOT_FOUND_PREFIX: &str = "tk show: '";
+
+/// Stderr suffix for unknown Display ID or Alias.
+pub const SHOW_ID_NOT_FOUND_SUFFIX: &str = "' is not a known Display ID or Alias";
+
+/// Stderr line when no positional id was supplied.
+pub const SHOW_ID_REQUIRED: &str = "tk show: an item ID argument is required";
+
+/// Stderr line for non-transient Repository Store read failures.
+pub const SHOW_READ_FAILED: &str = "tk show: failed to read Repository Store";
+
+/// Stderr line for busy/locked Repository Store reads.
+pub const SHOW_STORE_BUSY_RETRY: &str = "tk show: Repository Store is busy; retry the command";
+
+// Section headers for `tk show` output.
+
+pub const SHOW_SECTION_DESCRIPTION: &str = "DESCRIPTION";
+pub const SHOW_SECTION_PARENT: &str = "PARENT";
+pub const SHOW_SECTION_TICKETS: &str = "TICKETS";
+pub const SHOW_SECTION_BLOCKED_BY: &str = "BLOCKED BY";
+pub const SHOW_SECTION_BLOCKING: &str = "BLOCKING";
+pub const SHOW_SECTION_EXTERNAL_BLOCKERS: &str = "EXTERNAL BLOCKERS";
