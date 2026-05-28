@@ -43,11 +43,21 @@ not the `.zig` files (one reference implementation of them):
 
 ## Differential oracle and order
 
-- **Oracle:** keep the `src/testing/script.zig` txtar harness *unmoved* and swap
-  the binary it spawns from `tk` (Zig) to `tk` (Rust) — byte-exact differential
-  check, zero test-translation cost. Migrate scenarios to `trycmd` **last**,
-  after every command passes, because `trycmd` is not 1:1 with the runner and
-  translating early weakens the oracle when it matters most.
+- **Oracle:** the txtar scenarios in `src/testing/scenarios/` are the
+  byte-exact CLI contract. The Zig `src/testing/script.zig` runner dispatches
+  `tk` lines **in-process** via `cli.runArgv` (`script.zig:336`) with injected
+  fakes for clock / HTTP / RNG (`:323-333`), so "swap the spawned binary" is
+  not possible as the first draft of this ADR assumed. Resolution: a small
+  Rust subprocess driver replays the same scenario data files against the Rust
+  binary, and the Rust binary exposes **process-level determinism seams**
+  matching what the Zig in-process fakes provide — a clock override (e.g.
+  `TK_NOW` / `SOURCE_DATE_EPOCH`), an RNG seed (`TK_RAND_SEED`), and, because
+  all networking in the Rust port is subprocess (git / gh / acli / curl, per
+  tk-80), network faking folds into faking the subprocess runner (PATH-shim or
+  a `TK_FAKE_RUNNER` mode). One faking mechanism, not two. The scenario data
+  files port verbatim; only the runner changes. This resolves the open `tk-6`
+  fakeability TODO at `script.zig:224`. Migrating to `trycmd` stays **last** —
+  the Rust subprocess driver is the intermediate oracle.
 - **Freeze the Zig tree during the port.** A living oracle requires a still
   oracle. Justified by single-author / ~3-week-old / no externally visible
   users; feature work resumes on the Rust tree.
@@ -91,6 +101,14 @@ it:
   not on the user-facing path.
 - **Testing:** `insta` (snapshots; `INSTA_UPDATE` ≈ `TK_UPDATE=1`), `assert_cmd`
   + `predicates`, `tempfile`; `trycmd` last.
+- **Lints:** `clippy::pedantic` enabled as **warnings** via
+  `[workspace.lints.clippy]` in `Cargo.toml` from day one — cheap on greenfield,
+  expensive to retrofit. The allow-list is a slice-0 deliverable (near-certain
+  entries: `module_name_repetitions` for tk's domain-qualified type names;
+  `must_use_candidate` if noisy). CI flips to `-D warnings` after slice-0
+  ratifies the allow-list. `clippy::nursery` and `clippy::restriction` excluded
+  as groups (WIP / mutually contradictory); individual lints from them only
+  when specifically motivated.
 - **Manpage:** `include_str!` the hand-authored `man/tk.1` (mirrors today's
   `@embedFile`); keep the no-CR guard via `.gitattributes` + a test.
   `clap_mangen` / `clap_complete` (generate manpage + completions from the clap
