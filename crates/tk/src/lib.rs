@@ -11,6 +11,7 @@
 //! - [`git`]: git subprocess discovery façade.
 //! - [`store`]: Repository Store + migrations.
 //! - [`domain`]: pure domain helpers.
+//! - [`remote`]: Backend Adapter trait + test fake (real adapters in tk-40).
 //!
 //! RNG lives in the `rand` crate; `Deps::rng` is a borrowed
 //! `&mut dyn rand::Rng` (the dyn-compatible low-level trait; `RngCore` is
@@ -26,6 +27,7 @@ pub mod git;
 pub mod messages;
 pub mod platform;
 pub mod proc;
+pub mod remote;
 pub mod render;
 pub mod store;
 pub mod worktree;
