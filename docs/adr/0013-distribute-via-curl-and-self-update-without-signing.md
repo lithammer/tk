@@ -8,10 +8,10 @@ latest tag. The trust root is TLS + GitHub; an unsigned `SHA256SUMS`
 shipped alongside the binaries shares its trust root with them and
 would only catch corruption, not tampering, so v1 publishes neither
 checksums nor signatures. The `man/tk.1` manpage is embedded into the
-binary via `@embedFile` and placed by `tk manpage --install` so the
+binary at compile time and placed by `tk manpage --install` so the
 release asset stays a bare binary; Homebrew/Scoop manifests, minisign
 signing, and a PowerShell install script for Windows are deferred to
-follow-up tickets against tk-39.
+follow-up tickets.
 
 ## Considered Options
 
@@ -26,8 +26,8 @@ not the primary doc surface for an agent-first CLI.
 
 `tk` gains network capability (direct HTTPS to `github.com` and
 `api.github.com`), changing the testing surface to require an
-injectable HTTP client alongside the existing subprocess runner. The
-binary embeds its compile-time triple via `build_options.triple` so a
-musl install upgrades to musl and a glibc install upgrades to glibc;
-variant switching goes through re-running the install script with
-`TK_LINUX_ABI=gnu` or equivalent.
+injectable HTTP client (or a subprocess `curl` runner) alongside the
+existing subprocess runner. The binary embeds its compile-time triple
+so a musl install upgrades to musl and a glibc install upgrades to
+glibc; variant switching goes through re-running the install script
+with `TK_LINUX_ABI=gnu` or equivalent.

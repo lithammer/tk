@@ -51,10 +51,10 @@ agents the reason.
 
 ## Consequences
 
-- The selection SQL in `src/store/repository.zig` (`next_ready_ticket_sql`)
-  is replaced by a recursive CTE that computes **Effective Priority**
-  for each candidate using the existing `dependencies` and `items`
-  tables; no schema additions are needed.
+- The selection SQL (`next_ready_ticket_sql` in the store layer) is
+  replaced by a recursive CTE that computes **Effective Priority** for
+  each candidate using the existing `dependencies` and `items` tables;
+  no schema additions are needed.
 - `tk list --ready` ordering is untouched (it already sorts by
   `created_seq`, not **Priority**). The two views serve different
   jobs and need not agree on ordering.

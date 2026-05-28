@@ -6,6 +6,58 @@
 - Read [CONTEXT.md](./CONTEXT.md) before changing domain language.
 - Read [docs/adr/](./docs/adr/) before revisiting recorded design decisions.
 
+## Porting from Zig
+
+The Zig tree on `main` is the frozen oracle; active development is the Rust
+port on `rust-main`. Preserve observable contracts (CLI bytes, exit codes,
+SQL schema, ADR-0017 verbatim messages) but collapse Zig shapes into
+idiomatic Rust. ADR-0018 settles the method; this section is the checklist.
+
+**Always collapse these Zig shapes:**
+
+- **Typed `Outcome` tagged union** (`union(enum) { success, failure }`) →
+  `Result<T, E>`. The Zig union exists because Zig error tags can't carry
+  payloads; Rust's `Result` does.
+- **`?*Diagnostic` out-param** → `Result<T, E>` with the diagnostic captured
+  in the error variant (typically a `thiserror` enum carrying a `String`).
+  The single-producer scratch buffer was the same workaround.
+- **`*anyopaque` vtable seams** → traits.
+- **Manual `deinit` / allocator threading** → ownership + `Drop`.
+- **Out-param init helpers** (`buildItemDetail(target: *T, ...)`) → return
+  the value, or use a builder.
+- **Comptime-evaluated `pub const`** that prebakes byte sequences → `const`
+  with the composition done in a `const fn` or inline; the *contract*
+  (prebaked at definition time, no runtime cost) survives.
+
+**Lean into the type system. Prefer enums over raw strings.**
+
+If a SQL column has a CHECK constraint (`status in ('open','active','done')`),
+the domain type is a Rust enum with `text()` returning the SQL spelling —
+not a `&str` passed through the store. The Zig store layer sometimes passed
+raw string literals (`origin = "backend"`); the Rust port replaces those
+with `Origin::Backend` so the type system catches typos at compile time.
+Same goes for `MutationType`, `TicketKind`, `ItemClass`, `Priority`, and
+`ItemStatus`. The `text()` method on each is the storage contract; the
+typed value is what flows through the code.
+
+**Before porting any new type from `src/domain/`, ask:**
+
+1. Does ADR-0018 list this shape as one to collapse? If yes, collapse it.
+2. Is the type's existence in Zig only because Zig lacks `Result` / `Drop` /
+   traits? If yes, the scaffolding doesn't transfer.
+3. Is the type's shape *schema-determined* (the SQL schema or an existing
+   ADR pins it) or *evidence-determined* (it depends on what a future
+   Backend Adapter observes)?
+   - Schema-determined → port now as a typed enum / struct.
+   - Evidence-determined → defer per ADR-0016's precedent until the
+     consumer ticket lands; let real consumer pressure settle the shape.
+
+**When an ADR mentions a Zig mechanism** (`?*Diagnostic`, `Outcome.failure`,
+`@embedFile`, `std.Io.Writer`, comptime builder), the *mechanism* is usually
+collapsed per ADR-0018, but the *contract* the ADR records usually still
+applies. Check whether ADR-0018 names the mechanism before porting it
+mechanically.
+
 ## Code Documentation
 
 - Add doc comments for public functions, structs, methods, constants, and
@@ -17,134 +69,3 @@
   Backend Adapter, Mutation, and Mutation Log where those concepts apply.
 - Comments should explain contracts, ownership, lifetimes, invariants, and why
   a boundary exists. Avoid comments that only restate the next line of code.
-
-## Error Handling
-
-Zig errors are bare enum tags with no payload. The codebase uses three
-shapes; pick the one that matches the call site:
-
-- **Bare `error.Foo`** for distinguishing-only failures where the caller
-  switches on the tag and renders a stable templated message. Example:
-  `proc.Runner.Error` (`ExecutableNotFound`, `SpawnFailed`, `OutOfMemory`).
-  The tag is the contract; no payload type.
-- **`?*Diagnostic` out-param** when a failure carries a transient string
-  the caller wants to surface (e.g. SQLite's `errmsg` captured before
-  `rollback` clears it). Stack-allocate `var diag: Diagnostic = .{};`,
-  pass `&diag` into the fallible operation, read `diag.message()` after
-  observing the error union. Canonical use: `migrations.applyAll` and
-  `src/store/diagnostic.zig`. The pattern mirrors
-  `std.json.Scanner.Diagnostics` and `std.zon.parse.Diagnostics`.
-- **Typed `Outcome` tagged union** when callers dispatch on failure kind
-  across multiple stable rendering branches. Each switch arm frees its
-  own payload — do **not** add an `Outcome.deinit` that handles some
-  arms but not others. Canonical use: `git.discovery.Outcome` in
-  `src/git/discovery.zig`. Validated against the Zig compiler itself:
-  `Compilation.CreateDiagnostic` in `src/Compilation.zig` is the same
-  shape — typed tagged union out-param paired with a single error tag
-  (`error.CreateFail`), called as `var diag: CreateDiagnostic =
-  undefined; create(..., &diag, ...)`.
-
-A fourth shape — a **Mutation Failure** record (per CONTEXT.md) —
-arrives with slice 9 Backend Adapters. It is persisted JSON with a
-stable schema, distinct from the ephemeral `Diagnostic`. Don't conflate
-the two; see `tk show tk-11` for the design holding area.
-
-Anti-patterns that have been ruled out by review and should not be
-reintroduced without a concrete forcing constraint:
-
-- **Module-level `var last_error_buf` or sidecar `lastError()` on a
-  long-lived handle.** A research pass over Ghostty, TigerBeetle, Bun,
-  ZLS, and the Zig stdlib found no mature codebase using this shape.
-  Use `?*Diagnostic` instead.
-- **`null`-or-empty-as-sentinel return** where the sentinel encodes
-  "I already wrote stderr." Mixes a control-flow signal into a returned
-  value; surface the failure as a typed `Outcome` so the caller owns
-  stderr. The Zig compiler's Sema reinforces this rule: its
-  `error.AnalysisFail` is documented (`src/Zcu.zig`) as *"When this is
-  returned, the compile error for the failure has already been
-  recorded"* — the bare error tag is the "already recorded" signal and
-  the structured payload lives out-of-band in `zcu.failed_analysis`.
-  Nothing about stderr is implied by the tag itself.
-- **Asymmetric `Outcome.deinit`** that no-ops on some arms but frees on
-  others. Per-variant cleanup pushes ownership tracking onto every
-  caller and requires a comment at every call site. Have each switch
-  arm free its own payload directly.
-
-## Design & Safety Patterns
-
-Prefer these patterns when introducing or changing code. They are guidance, not
-blanket mandates; use the narrowest shape that preserves tk's Repository Store
-contracts, command testability, and cross-platform behavior.
-
-- **Avoid copy-heavy returns for large owned views.** For large
-  allocator-owning or copy-heavy structs such as `ItemDetail`, `ListRow`
-  batches, or future Repository Store view structs, consider in-place
-  initialization with an out-pointer instead of returning the full value by
-  value. This is most useful when the struct owns many slices, has nested
-  payloads, or is built in hot/query paths.
-
-  ```zig
-  pub fn buildItemDetail(target: *ItemDetail, gpa: Allocator, ...) !void {
-      target.* = .{
-          .display_id = try gpa.dupe(u8, display_id),
-          // ...
-      };
-  }
-  ```
-
-  Small pure domain values should still be returned by value when that is the
-  clearest API.
-
-- **Keep subprocess runners fork-safe.** If a `proc.Runner` implementation
-  forks directly or adds pre-exec child hooks, do not allocate on the child
-  path between `fork` and `exec`. Prepare argv/env/path state before entering
-  the child path. If `exec` fails in the child, report only with stack-owned
-  buffers or raw OS writes; do not use heap-backed formatting there.
-
-  This child-only fallback is separate from normal command-facing error
-  handling. Parent-side runner APIs should still return bare error tags or
-  typed `Outcome` values so commands own user-facing stderr rendering.
-
-- **Centralize platform discovery behind an explicit boundary.** Do not scatter
-  raw `builtin.os.tag` checks, XDG parsing, macOS Application Support logic, or
-  Windows profile-directory lookup through command or domain modules. Put
-  platform filesystem discovery behind a small boundary module and document the
-  boundary in `ARCHITECTURE.md` when it is introduced or changed.
-
-- **Prefer writer formatting over temporary strings for domain rendering.**
-  When a core domain or rendering type is printed in multiple places, give it a
-  `format` method using the project's Zig 0.16 writer convention:
-
-  ```zig
-  pub fn format(self: T, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-      try writer.print("{s}", .{self.text()});
-  }
-  ```
-
-  Use this for stable representations of types such as `Priority`,
-  `ItemStatus`, `TicketKind`, diagnostic rendering wrappers, and styling
-  wrappers. Formatting methods are presentation helpers only; do not use them
-  to carry transient failure details. Use the Error Handling shapes above for
-  error state. Avoid allocating temporary strings solely to print simple domain
-  values.
-
-## Testing
-
-Use layered tests:
-
-- Zig unit tests for pure domain behavior and store helpers.
-- Command-handler tests with fake stores, fake subprocess runners, fake clocks,
-  and allocating writers.
-- SQLite migration/store tests against temp databases.
-- Inline snapshots for small rendered outputs.
-- txtar-based CLI scenarios for multi-step command behavior.
-- Subprocess smoke tests for linked-binary wiring, embedded payloads, Git
-  subprocess discovery, filesystem writes, and SQLite linkage.
-
-Avoid testing everything through subprocess scenarios. Prefer the narrowest
-layer that can observe the behavior.
-
-The txtar script runner follows the `testscript`-style tokenizer documented in
-`src/testing/script.zig`: whitespace splitting, single-quote literals, comments
-with `#`, `$NAME` / `${NAME}` env expansion, byte-exact output comparison, and
-`TK_UPDATE=1` snapshot rewriting.
