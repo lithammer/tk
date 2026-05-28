@@ -17,3 +17,4 @@ pub mod start;
 pub mod stop;
 pub mod unblock;
 pub mod update;
+pub mod worktree;

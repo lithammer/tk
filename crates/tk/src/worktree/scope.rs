@@ -165,6 +165,57 @@ fn longest_prefix_match(store: &Store, tail: &str) -> Result<Option<String>, rus
         .optional()
 }
 
+/// Sanitize a Ticket / Epic title into a slug for a git ref or filesystem
+/// path component.
+///
+/// Replaces every maximal run of characters outside `[a-z0-9]` with a
+/// single `-`, trims leading and trailing `-`, lowercases ASCII letters,
+/// and truncates the result to `max_len` characters at the last `-`
+/// boundary that fits. Returns the empty string when the input carries
+/// no `[a-z0-9]` characters after lowercasing — callers fall back to a
+/// no-slug branch / path shape.
+#[must_use]
+pub fn sanitize(title: &str, max_len: usize) -> String {
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for byte in title.bytes() {
+        let lower = byte.to_ascii_lowercase();
+        if is_slug_byte(lower) {
+            out.push(char::from(lower));
+            prev_dash = false;
+        } else if !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    if out.ends_with('-') {
+        out.pop();
+    }
+
+    if out.len() > max_len {
+        // Truncate at the last `-` boundary at or before max_len; if none,
+        // hard truncate. Strip a trailing `-` so the result never ends in
+        // a dash.
+        let bytes = out.as_bytes();
+        let mut cut = max_len;
+        while cut > 0 && bytes[cut] != b'-' {
+            cut -= 1;
+        }
+        if cut == 0 {
+            cut = max_len;
+        }
+        out.truncate(cut);
+        if out.ends_with('-') {
+            out.pop();
+        }
+    }
+    out
+}
+
+const fn is_slug_byte(b: u8) -> bool {
+    b.is_ascii_lowercase() || b.is_ascii_digit()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,5 +356,29 @@ mod tests {
             ResolveOutcome::Scope(s) => assert_eq!(s.display_id, "tk-1"),
             other => panic!("expected Scope, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn sanitize_lowercases_and_dashes_non_slug_runs() {
+        assert_eq!(sanitize("Fix Login Page", 100), "fix-login-page");
+        assert_eq!(sanitize("hello, world!", 100), "hello-world");
+    }
+
+    #[test]
+    fn sanitize_trims_leading_and_trailing_dashes() {
+        assert_eq!(sanitize("  Whitespace  ", 100), "whitespace");
+        assert_eq!(sanitize("!!!nope!!!", 100), "nope");
+    }
+
+    #[test]
+    fn sanitize_truncates_at_dash_boundary() {
+        // "fix-login-page-and-cleanup" has dashes at 3, 9, 14, 18.
+        // max_len 12 should cut at 9 ("fix-login").
+        assert_eq!(sanitize("Fix login page and cleanup", 12), "fix-login");
+    }
+
+    #[test]
+    fn sanitize_empty_when_no_slug_bytes_present() {
+        assert_eq!(sanitize("!@#$", 100), "");
     }
 }

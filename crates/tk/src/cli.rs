@@ -87,6 +87,8 @@ enum Command {
     Block(commands::block::Args),
     /// Remove a blocking relationship.
     Unblock(commands::unblock::Args),
+    /// Inspect or configure the current Workspace Scope.
+    Worktree(commands::worktree::Args),
 }
 
 /// Entrypoint that the binary's `main.rs` and the scenario harness share.
@@ -113,6 +115,7 @@ pub fn run_argv(deps: Deps<'_>, argv: &[String]) -> std::io::Result<u8> {
         Command::Done(args) => Ok(commands::done::run(deps, args)),
         Command::Block(args) => Ok(commands::block::run(deps, args)),
         Command::Unblock(args) => Ok(commands::unblock::run(deps, args)),
+        Command::Worktree(args) => Ok(commands::worktree::run(deps, args)),
     }
 }
 
