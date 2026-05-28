@@ -61,13 +61,17 @@ impl Default for NextOptions<'_> {
     }
 }
 
-/// Result of [`next_ready_ticket`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NextOutcome {
-    Ticket(NextTicket),
-    NoReadyTicket,
-    /// The supplied Workspace Scope Display ID did not resolve.
+/// Why [`next_ready_ticket`] returned no Ticket. A successful query returns
+/// `Ok(Some(NextTicket))` when something is ready and `Ok(None)` when nothing
+/// is — `tk next` maps the empty case to exit 1, but it is a normal result,
+/// not a failure, so it rides the `Ok(None)` channel.
+#[derive(Debug, thiserror::Error)]
+pub enum NextError {
+    /// A Workspace Scope Display ID was supplied but did not resolve to a row.
+    #[error("workspace scope does not resolve to a Ticket or Epic")]
     ScopeNotFound,
+    #[error(transparent)]
+    Storage(#[from] rusqlite::Error),
 }
 
 /// SQL ordering already guarantees `eff.ep <= ann.priority`, so a byte
@@ -174,12 +178,12 @@ select ann.display_value, ann.priority, eff.ep, \
 pub fn next_ready_ticket(
     store: &Store,
     options: NextOptions<'_>,
-) -> Result<NextOutcome, rusqlite::Error> {
+) -> Result<Option<NextTicket>, NextError> {
     let (scope_mode, scope_id_owned) = match options.scope {
         NextScope::None => ("all", String::new()),
         NextScope::DisplayArg(arg) => {
             let Some(resolved) = resolve_item_ref(&store.conn, arg)? else {
-                return Ok(NextOutcome::ScopeNotFound);
+                return Err(NextError::ScopeNotFound);
             };
             let mode = match resolved.item_class {
                 ItemClass::Ticket => "ticket",
@@ -203,13 +207,13 @@ pub fn next_ready_ticket(
     match row {
         Ok((display_id, own_priority, effective_priority, contributor)) => {
             let rationale = build_rationale(&own_priority, effective_priority, contributor);
-            Ok(NextOutcome::Ticket(NextTicket {
+            Ok(Some(NextTicket {
                 display_id,
                 rationale,
             }))
         }
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(NextOutcome::NoReadyTicket),
-        Err(err) => Err(err),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(err) => Err(NextError::Storage(err)),
     }
 }
 
@@ -265,7 +269,7 @@ mod tests {
         let store = open_seeded();
         assert_eq!(
             next_ready_ticket(&store, NextOptions::default()).unwrap(),
-            NextOutcome::NoReadyTicket
+            None
         );
     }
 
@@ -274,10 +278,10 @@ mod tests {
         let store = open_seeded();
         seed(&store, "low", "tk-1", "P3", 1);
         seed(&store, "high", "tk-2", "P0", 2);
-        match next_ready_ticket(&store, NextOptions::default()).unwrap() {
-            NextOutcome::Ticket(t) => assert_eq!(t.display_id, "tk-2"),
-            other => panic!("expected Ticket, got {other:?}"),
-        }
+        let ticket = next_ready_ticket(&store, NextOptions::default())
+            .unwrap()
+            .expect("a ready ticket");
+        assert_eq!(ticket.display_id, "tk-2");
     }
 
     #[test]
@@ -285,10 +289,10 @@ mod tests {
         let store = open_seeded();
         seed(&store, "second", "tk-1", "P1", 2);
         seed(&store, "first", "tk-2", "P1", 1);
-        match next_ready_ticket(&store, NextOptions::default()).unwrap() {
-            NextOutcome::Ticket(t) => assert_eq!(t.display_id, "tk-2"),
-            other => panic!("expected Ticket, got {other:?}"),
-        }
+        let ticket = next_ready_ticket(&store, NextOptions::default())
+            .unwrap()
+            .expect("a ready ticket");
+        assert_eq!(ticket.display_id, "tk-2");
     }
 
     #[test]
@@ -303,10 +307,10 @@ mod tests {
         seed(&store, "blocker", "tk-3", "P4", 3);
         insert_dependency(&store.conn, "blocker", "blocked").unwrap();
 
-        match next_ready_ticket(&store, NextOptions::default()).unwrap() {
-            NextOutcome::Ticket(t) => assert_eq!(t.display_id, "tk-2"),
-            other => panic!("expected Ticket, got {other:?}"),
-        }
+        let ticket = next_ready_ticket(&store, NextOptions::default())
+            .unwrap()
+            .expect("a ready ticket");
+        assert_eq!(ticket.display_id, "tk-2");
     }
 
     #[test]
@@ -319,11 +323,9 @@ mod tests {
         insert_dependency(&store.conn, "blocker", "blocked-high").unwrap();
         seed(&store, "ready", "tk-3", "P1", 3);
 
-        let outcome = next_ready_ticket(&store, NextOptions::default()).unwrap();
-        let ticket = match outcome {
-            NextOutcome::Ticket(t) => t,
-            other => panic!("expected Ticket, got {other:?}"),
-        };
+        let ticket = next_ready_ticket(&store, NextOptions::default())
+            .unwrap()
+            .expect("a ready ticket");
         // Effective Priority of `blocker` is P0 (inherited via `blocked-high`),
         // so it sorts ahead of `ready` (P1, own = effective).
         assert_eq!(ticket.display_id, "tk-1");
@@ -336,14 +338,14 @@ mod tests {
     fn scope_unknown_display_arg_returns_scope_not_found() {
         let store = open_seeded();
         seed(&store, "t1", "tk-1", "P1", 1);
-        let outcome = next_ready_ticket(
+        let err = next_ready_ticket(
             &store,
             NextOptions {
                 scope: NextScope::DisplayArg("missing"),
             },
         )
-        .unwrap();
-        assert_eq!(outcome, NextOutcome::ScopeNotFound);
+        .unwrap_err();
+        assert!(matches!(err, NextError::ScopeNotFound));
     }
 
     #[test]
@@ -352,17 +354,15 @@ mod tests {
         seed(&store, "scope-target", "tk-1", "P3", 1);
         seed(&store, "other", "tk-2", "P0", 2);
 
-        let outcome = next_ready_ticket(
+        let ticket = next_ready_ticket(
             &store,
             NextOptions {
                 scope: NextScope::DisplayArg("tk-1"),
             },
         )
-        .unwrap();
-        match outcome {
-            NextOutcome::Ticket(t) => assert_eq!(t.display_id, "tk-1"),
-            other => panic!("expected Ticket, got {other:?}"),
-        }
+        .unwrap()
+        .expect("a ready ticket");
+        assert_eq!(ticket.display_id, "tk-1");
     }
 
     #[test]
@@ -378,18 +378,16 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(outcome, NextOutcome::NoReadyTicket);
+        assert_eq!(outcome, None);
     }
 
     #[test]
     fn rationale_is_absent_when_own_priority_equals_effective_priority() {
         let store = open_seeded();
         seed(&store, "ready", "tk-1", "P1", 1);
-        let outcome = next_ready_ticket(&store, NextOptions::default()).unwrap();
-        let ticket = match outcome {
-            NextOutcome::Ticket(t) => t,
-            other => panic!("expected Ticket, got {other:?}"),
-        };
+        let ticket = next_ready_ticket(&store, NextOptions::default())
+            .unwrap()
+            .expect("a ready ticket");
         assert_eq!(ticket.display_id, "tk-1");
         assert!(ticket.rationale.is_none());
     }
@@ -405,11 +403,9 @@ mod tests {
         insert_dependency(&store.conn, "ready", "mid").unwrap();
         insert_dependency(&store.conn, "mid", "tail").unwrap();
 
-        let outcome = next_ready_ticket(&store, NextOptions::default()).unwrap();
-        let ticket = match outcome {
-            NextOutcome::Ticket(t) => t,
-            other => panic!("expected Ticket, got {other:?}"),
-        };
+        let ticket = next_ready_ticket(&store, NextOptions::default())
+            .unwrap()
+            .expect("a ready ticket");
         assert_eq!(ticket.display_id, "tk-1");
         let rationale = ticket.rationale.expect("multi-hop rationale required");
         assert_eq!(rationale.effective_priority, "P0");

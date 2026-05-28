@@ -13,7 +13,7 @@ use clap::Args as ClapArgs;
 
 use crate::cli::Deps;
 use crate::commands::resolver;
-use crate::store::repository::next::{self, NextOptions, NextOutcome, NextScope, Rationale};
+use crate::store::repository::next::{self, NextError, NextOptions, NextScope, Rationale};
 use crate::worktree::scope as worktree_scope;
 
 const COMMAND: &str = "next";
@@ -64,23 +64,15 @@ pub fn run(deps: Deps<'_>, _args: Args) -> u8 {
         }
     };
 
-    let outcome = match next::next_ready_ticket(&store, NextOptions { scope: next_scope }) {
-        Ok(outcome) => outcome,
-        Err(err) => {
-            resolver::render_storage_error(stderr, COMMAND, &err);
-            return 1;
-        }
-    };
-
-    match outcome {
-        NextOutcome::Ticket(ticket) => {
+    match next::next_ready_ticket(&store, NextOptions { scope: next_scope }) {
+        Ok(Some(ticket)) => {
             let _ = writeln!(stdout, "{}", ticket.display_id);
             if let Some(rationale) = ticket.rationale.as_ref() {
                 render_rationale(stderr, &ticket.display_id, rationale);
             }
             0
         }
-        NextOutcome::NoReadyTicket => {
+        Ok(None) => {
             let line = if has_scope {
                 "tk next: no ready Tickets in Workspace Scope"
             } else {
@@ -89,11 +81,15 @@ pub fn run(deps: Deps<'_>, _args: Args) -> u8 {
             let _ = writeln!(stderr, "{line}");
             1
         }
-        NextOutcome::ScopeNotFound => {
+        Err(NextError::ScopeNotFound) => {
             let _ = writeln!(
                 stderr,
                 "tk next: Workspace Scope does not resolve to a Ticket or Epic"
             );
+            1
+        }
+        Err(NextError::Storage(err)) => {
+            resolver::render_storage_error(stderr, COMMAND, &err);
             1
         }
     }
