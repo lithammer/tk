@@ -146,24 +146,19 @@ pub struct ResolvedItemRefWithDisplay {
     pub item_class: ItemClass,
 }
 
-/// Outcome of resolving a Display ID or Alias that must refer to an Epic.
-///
-/// `NotAnEpic` carries the resolved reference so callers can render
-/// "tk-1 is a Ticket, not an Epic" with the actual class if v1 ever
-/// adds a third Item Class.
-#[derive(Debug, Clone)]
-pub enum ResolveEpicOutcome {
-    Epic(ResolvedItemRef),
+/// Why resolving a Display ID or Alias that must be an Epic failed. Shared by
+/// [`resolve_as_epic`] and [`resolve_as_epic_with_display`] and re-exported as
+/// `resolver::ResolveEpicError`; the command picks the exit-1 phrasing per
+/// variant. With only Ticket and Epic in v1, "not an Epic" means "is a
+/// Ticket", so `NotAnEpic` carries no payload.
+#[derive(Debug, Error)]
+pub enum ResolveEpicError {
+    #[error("Display ID or Alias not found")]
     NotFound,
-    NotAnEpic(ResolvedItemRef),
-}
-
-/// Like [`ResolveEpicOutcome`] but with the current Display ID attached.
-#[derive(Debug, Clone)]
-pub enum ResolveEpicWithDisplayOutcome {
-    Epic(ResolvedItemRefWithDisplay),
-    NotFound,
-    NotAnEpic(ResolvedItemRefWithDisplay),
+    #[error("resolved Item is not an Epic")]
+    NotAnEpic,
+    #[error(transparent)]
+    Storage(#[from] rusqlite::Error),
 }
 
 /// Resolve a Display ID or Alias to its stable internal `items.id`.
@@ -226,14 +221,15 @@ pub fn resolve_item_ref_with_display(
 pub fn resolve_as_epic(
     conn: &Connection,
     display_arg: &str,
-) -> Result<ResolveEpicOutcome, rusqlite::Error> {
+) -> Result<ResolvedItemRef, ResolveEpicError> {
+    // `?` converts a SQLite fault into ResolveEpicError::Storage via #[from].
     let Some(resolved) = resolve_item_ref(conn, display_arg)? else {
-        return Ok(ResolveEpicOutcome::NotFound);
+        return Err(ResolveEpicError::NotFound);
     };
     if resolved.item_class == ItemClass::Epic {
-        Ok(ResolveEpicOutcome::Epic(resolved))
+        Ok(resolved)
     } else {
-        Ok(ResolveEpicOutcome::NotAnEpic(resolved))
+        Err(ResolveEpicError::NotAnEpic)
     }
 }
 
@@ -241,14 +237,14 @@ pub fn resolve_as_epic(
 pub fn resolve_as_epic_with_display(
     conn: &Connection,
     display_arg: &str,
-) -> Result<ResolveEpicWithDisplayOutcome, rusqlite::Error> {
+) -> Result<ResolvedItemRefWithDisplay, ResolveEpicError> {
     let Some(resolved) = resolve_item_ref_with_display(conn, display_arg)? else {
-        return Ok(ResolveEpicWithDisplayOutcome::NotFound);
+        return Err(ResolveEpicError::NotFound);
     };
     if resolved.item_class == ItemClass::Epic {
-        Ok(ResolveEpicWithDisplayOutcome::Epic(resolved))
+        Ok(resolved)
     } else {
-        Ok(ResolveEpicWithDisplayOutcome::NotAnEpic(resolved))
+        Err(ResolveEpicError::NotAnEpic)
     }
 }
 
@@ -427,10 +423,7 @@ mod tests {
             },
         )
         .unwrap();
-        match resolve_as_epic(&conn, "tk-1").unwrap() {
-            ResolveEpicOutcome::Epic(r) => assert_eq!(r.id, "e1"),
-            other => panic!("expected Epic, got {other:?}"),
-        }
+        assert_eq!(resolve_as_epic(&conn, "tk-1").unwrap().id, "e1");
     }
 
     #[test]
@@ -447,19 +440,19 @@ mod tests {
             },
         )
         .unwrap();
-        match resolve_as_epic(&conn, "tk-1").unwrap() {
-            ResolveEpicOutcome::NotAnEpic(r) => assert_eq!(r.id, "t1"),
-            other => panic!("expected NotAnEpic, got {other:?}"),
-        }
+        assert!(matches!(
+            resolve_as_epic(&conn, "tk-1"),
+            Err(ResolveEpicError::NotAnEpic)
+        ));
     }
 
     #[test]
     fn resolve_as_epic_returns_not_found_for_unknown_value() {
         let conn = open_seeded();
-        match resolve_as_epic(&conn, "missing").unwrap() {
-            ResolveEpicOutcome::NotFound => {}
-            other => panic!("expected NotFound, got {other:?}"),
-        }
+        assert!(matches!(
+            resolve_as_epic(&conn, "missing"),
+            Err(ResolveEpicError::NotFound)
+        ));
     }
 
     // ---- open_existing ---------------------------------------------------

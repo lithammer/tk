@@ -14,31 +14,19 @@ use thiserror::Error;
 
 use crate::proc::ProcRunner;
 use crate::store::repository::{
-    self, ResolveEpicOutcome, ResolveEpicWithDisplayOutcome, ResolvedItemRef,
-    ResolvedItemRefWithDisplay, Store,
+    self, ResolvedItemRef, ResolvedItemRefWithDisplay, Store,
 };
 
-/// Failure of [`open_for_command`], re-exported from the store layer where
-/// [`repository::open_existing`] produces it. [`render_open_error`] renders it
-/// behind the `tk <command>:` prefix.
-pub use crate::store::repository::OpenError;
+/// Errors re-exported from the store layer, where the operations that produce
+/// them live. [`OpenError`] is rendered by [`render_open_error`]; the resolve
+/// errors are matched and rendered by each command.
+pub use crate::store::repository::{OpenError, ResolveEpicError};
 
 /// Failure of [`resolve`] / [`resolve_with_display`].
 #[derive(Debug, Error)]
 pub enum ResolveError {
     #[error("Display ID or Alias not found")]
     NotFound,
-    #[error(transparent)]
-    Storage(rusqlite::Error),
-}
-
-/// Failure of [`resolve_epic`] / [`resolve_epic_with_display`].
-#[derive(Debug, Error)]
-pub enum ResolveEpicError {
-    #[error("Display ID or Alias not found")]
-    NotFound,
-    #[error("resolved Item is not an Epic")]
-    NotAnEpic,
     #[error(transparent)]
     Storage(rusqlite::Error),
 }
@@ -78,12 +66,7 @@ pub fn resolve_with_display(
 
 /// Resolve a Display ID or Alias that must refer to an Epic.
 pub fn resolve_epic(store: &Store, arg: &str) -> Result<ResolvedItemRef, ResolveEpicError> {
-    match repository::resolve_as_epic(store.conn(), arg) {
-        Ok(ResolveEpicOutcome::Epic(r)) => Ok(r),
-        Ok(ResolveEpicOutcome::NotFound) => Err(ResolveEpicError::NotFound),
-        Ok(ResolveEpicOutcome::NotAnEpic(_)) => Err(ResolveEpicError::NotAnEpic),
-        Err(err) => Err(ResolveEpicError::Storage(err)),
-    }
+    repository::resolve_as_epic(store.conn(), arg)
 }
 
 /// Like [`resolve_epic`] but with the current Display ID attached.
@@ -91,12 +74,7 @@ pub fn resolve_epic_with_display(
     store: &Store,
     arg: &str,
 ) -> Result<ResolvedItemRefWithDisplay, ResolveEpicError> {
-    match repository::resolve_as_epic_with_display(store.conn(), arg) {
-        Ok(ResolveEpicWithDisplayOutcome::Epic(r)) => Ok(r),
-        Ok(ResolveEpicWithDisplayOutcome::NotFound) => Err(ResolveEpicError::NotFound),
-        Ok(ResolveEpicWithDisplayOutcome::NotAnEpic(_)) => Err(ResolveEpicError::NotAnEpic),
-        Err(err) => Err(ResolveEpicError::Storage(err)),
-    }
+    repository::resolve_as_epic_with_display(store.conn(), arg)
 }
 
 /// Render an [`OpenError`] to stderr with the supplied `tk <command>:`
