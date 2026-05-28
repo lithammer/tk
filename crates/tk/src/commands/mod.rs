@@ -4,6 +4,7 @@
 //! used by every item command (ADR-0017).
 
 pub mod add;
+pub mod block;
 pub mod done;
 pub mod init;
 pub mod lifecycle;
@@ -14,4 +15,5 @@ pub mod resolver;
 pub mod show;
 pub mod start;
 pub mod stop;
+pub mod unblock;
 pub mod update;

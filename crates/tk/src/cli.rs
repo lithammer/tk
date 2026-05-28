@@ -83,6 +83,10 @@ enum Command {
     Stop(commands::stop::Args),
     /// Close a Ticket or Epic.
     Done(commands::done::Args),
+    /// Record that one item blocks another.
+    Block(commands::block::Args),
+    /// Remove a blocking relationship.
+    Unblock(commands::unblock::Args),
 }
 
 /// Entrypoint that the binary's `main.rs` and the scenario harness share.
@@ -107,6 +111,8 @@ pub fn run_argv(deps: Deps<'_>, argv: &[String]) -> std::io::Result<u8> {
         Command::Start(args) => Ok(commands::start::run(deps, args)),
         Command::Stop(args) => Ok(commands::stop::run(deps, args)),
         Command::Done(args) => Ok(commands::done::run(deps, args)),
+        Command::Block(args) => Ok(commands::block::run(deps, args)),
+        Command::Unblock(args) => Ok(commands::unblock::run(deps, args)),
     }
 }
 

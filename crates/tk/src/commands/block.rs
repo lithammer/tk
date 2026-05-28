@@ -1,48 +1,27 @@
-//! Shared lifecycle-transition implementation for `tk start` / `tk stop` /
-//! `tk done`.
-//!
-//! All three commands open the store, resolve a Display ID or Alias,
-//! attempt a [`set_item_status`] write to a fixed target, and render the
-//! same shape of success / not-found / locked-done diagnostics. The
-//! `command` and `target` parameters carry the only per-command
-//! variation.
+//! `tk block` — record that one item blocks another.
+
+use clap::Args as ClapArgs;
 
 use crate::cli::Deps;
 use crate::commands::resolver;
-use crate::domain::item_class::ItemClass;
-use crate::domain::status::ItemStatus;
-use crate::store::repository::status::{self, SetStatusError, SetStatusOutcome, SetStatusRequest};
+use crate::store::repository::dependency::{
+    self, AddDependencyOutcome, DependencyEdge, DependencyError,
+};
 
-/// Per-command success prefix tokens. `tk start` says "Started Ticket: …";
-/// `tk stop` says "Stopped Ticket: …"; `tk done` says "Done Ticket: …".
-/// The active-verb suffix is shared across both classes; only the verb
-/// differs across commands.
-#[derive(Debug, Clone, Copy)]
-pub struct SuccessLabel {
-    pub ticket: &'static str,
-    pub epic: &'static str,
+const COMMAND: &str = "block";
+
+#[derive(Debug, ClapArgs)]
+pub struct Args {
+    /// Item being blocked.
+    #[arg(value_name = "BLOCKED")]
+    pub blocked: String,
+    /// Item that must finish first.
+    #[arg(value_name = "BLOCKING")]
+    pub blocking: String,
 }
 
-impl SuccessLabel {
-    fn select(self, class: ItemClass) -> &'static str {
-        match class {
-            ItemClass::Ticket => self.ticket,
-            ItemClass::Epic => self.epic,
-        }
-    }
-}
-
-/// Run a lifecycle transition against the supplied Deps and report the
-/// outcome with per-command phrasing. `command` is the subcommand name
-/// (`"start"` / `"stop"` / `"done"`) used in stderr diagnostics.
 #[must_use]
-pub fn transition(
-    deps: Deps<'_>,
-    command: &'static str,
-    id: &str,
-    target: ItemStatus,
-    success: SuccessLabel,
-) -> u8 {
+pub fn run(deps: Deps<'_>, args: Args) -> u8 {
     let Deps {
         stdout,
         stderr,
@@ -55,64 +34,104 @@ pub fn transition(
     let mut store = match resolver::open_for_command(runner, cwd) {
         Ok(s) => s,
         Err(err) => {
-            resolver::render_open_error(stderr, command, &err);
+            resolver::render_open_error(stderr, COMMAND, &err);
             return 1;
         }
     };
 
-    let resolved = match resolver::resolve(&store, id) {
+    let blocked = match resolver::resolve(&store, &args.blocked) {
         Ok(r) => r,
         Err(resolver::ResolveError::NotFound) => {
             let _ = writeln!(
                 stderr,
-                "tk {command}: '{id}' is not a known Display ID or Alias"
+                "tk block: blocked '{}' is not a known Display ID or Alias",
+                args.blocked
             );
             return 1;
         }
         Err(resolver::ResolveError::Storage(err)) => {
-            resolver::render_storage_error(stderr, command, &err);
+            resolver::render_storage_error(stderr, COMMAND, &err);
+            return 1;
+        }
+    };
+    let blocking = match resolver::resolve(&store, &args.blocking) {
+        Ok(r) => r,
+        Err(resolver::ResolveError::NotFound) => {
+            let _ = writeln!(
+                stderr,
+                "tk block: blocking '{}' is not a known Display ID or Alias",
+                args.blocking
+            );
+            return 1;
+        }
+        Err(resolver::ResolveError::Storage(err)) => {
+            resolver::render_storage_error(stderr, COMMAND, &err);
             return 1;
         }
     };
 
-    let outcome = match status::set_item_status(
+    if blocked.id == blocking.id {
+        let _ = writeln!(stderr, "tk block: an item cannot block itself");
+        return 1;
+    }
+
+    let outcome = match dependency::add_dependency(
         &mut store,
         clock,
-        SetStatusRequest {
-            id: &resolved.id,
-            status: target,
+        DependencyEdge {
+            blocked_id: &blocked.id,
+            blocking_id: &blocking.id,
         },
     ) {
         Ok(o) => o,
-        Err(SetStatusError::Sqlite(err)) => {
-            resolver::render_storage_error(stderr, command, &err);
+        Err(DependencyError::Sqlite(err)) => {
+            resolver::render_storage_error(stderr, COMMAND, &err);
             return 1;
         }
-        Err(SetStatusError::Mutation(err)) => {
-            let _ = writeln!(stderr, "tk {command}: failed to append Mutation: {err}");
+        Err(DependencyError::Mutation(err)) => {
+            let _ = writeln!(stderr, "tk block: failed to append Mutation: {err}");
             return 1;
         }
     };
 
     match outcome {
-        SetStatusOutcome::Ok(item) => {
-            let prefix = success.select(item.item_class);
-            let _ = writeln!(stdout, "{prefix}{} - {}", item.display_id, item.title);
+        AddDependencyOutcome::Ok => {
+            let _ = writeln!(
+                stdout,
+                "Blocked: {} blocked by {}",
+                args.blocked, args.blocking
+            );
             0
         }
-        SetStatusOutcome::NotFound => {
-            // Race: row vanished between resolve and the BEGIN IMMEDIATE.
+        AddDependencyOutcome::EndpointMissing => {
+            let _ = writeln!(stderr, "tk block: endpoint missing in items table");
+            1
+        }
+        AddDependencyOutcome::BlockedDone => {
+            let _ = writeln!(stderr, "tk block: blocked '{}' is done", args.blocked);
+            1
+        }
+        AddDependencyOutcome::BlockingDone => {
+            let _ = writeln!(stderr, "tk block: blocking '{}' is done", args.blocking);
+            1
+        }
+        AddDependencyOutcome::Cycle => {
+            let _ = writeln!(stderr, "tk block: dependency cycle");
+            1
+        }
+        AddDependencyOutcome::BackendBlockedLocalBlocking => {
             let _ = writeln!(
                 stderr,
-                "tk {command}: '{id}' is not a known Display ID or Alias"
+                "tk block: Backend blocked '{}' cannot depend on Local blocking item '{}'",
+                args.blocked, args.blocking
             );
             1
         }
-        SetStatusOutcome::LockedDone(class) => {
+        AddDependencyOutcome::BackendKindMismatch => {
             let _ = writeln!(
                 stderr,
-                "tk {command}: {label} '{id}' is done and cannot be reopened",
-                label = class.label()
+                "tk block: Backend blocked '{}' cannot depend on blocking item '{}' from another Backend kind",
+                args.blocked, args.blocking
             );
             1
         }
@@ -196,22 +215,28 @@ mod tests {
         );
     }
 
-    const STARTED: SuccessLabel = SuccessLabel {
-        ticket: "Started Ticket: ",
-        epic: "Started Epic: ",
-    };
-
     #[test]
-    fn start_transitions_open_ticket_to_active() {
+    fn block_inserts_dependency_and_renders_confirmation() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_item(
             &conn,
             FixtureItem {
-                id: "t1",
+                id: "blocker",
                 display: "tk-1",
-                title: "Subject",
+                title: "B",
                 created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "blocked",
+                display: "tk-2",
+                title: "C",
+                created_seq: 2,
                 ..FixtureItem::default()
             },
         )
@@ -221,14 +246,20 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = transition(h.deps(), "start", "tk-1", ItemStatus::Active, STARTED);
+        let code = run(
+            h.deps(),
+            Args {
+                blocked: "tk-2".into(),
+                blocking: "tk-1".into(),
+            },
+        );
         assert_eq!(code, 0);
         let stdout = String::from_utf8(h.stdout).unwrap();
-        assert!(stdout.contains("Started Ticket: tk-1 - Subject"));
+        assert!(stdout.contains("Blocked: tk-2 blocked by tk-1"));
     }
 
     #[test]
-    fn done_lock_refuses_to_reopen_a_done_ticket() {
+    fn block_self_dependency_is_refused() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_item(
@@ -236,8 +267,7 @@ mod tests {
             FixtureItem {
                 id: "t1",
                 display: "tk-1",
-                title: "Done",
-                status: "done",
+                title: "T",
                 created_seq: 1,
                 ..FixtureItem::default()
             },
@@ -248,22 +278,15 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = transition(h.deps(), "start", "tk-1", ItemStatus::Active, STARTED);
+        let code = run(
+            h.deps(),
+            Args {
+                blocked: "tk-1".into(),
+                blocking: "tk-1".into(),
+            },
+        );
         assert_eq!(code, 1);
         let stderr = String::from_utf8(h.stderr).unwrap();
-        assert!(stderr.contains("tk start: Ticket 'tk-1' is done and cannot be reopened"));
-    }
-
-    #[test]
-    fn unknown_id_renders_not_found_per_command() {
-        let store = TmpStore::new("repo");
-        seed_store(&store);
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
-        let code = transition(h.deps(), "stop", "tk-9999", ItemStatus::Open, STARTED);
-        assert_eq!(code, 1);
-        let stderr = String::from_utf8(h.stderr).unwrap();
-        assert!(stderr.contains("tk stop: 'tk-9999' is not a known Display ID or Alias"));
+        assert!(stderr.contains("tk block: an item cannot block itself"));
     }
 }
