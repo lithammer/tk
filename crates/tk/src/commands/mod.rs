@@ -10,3 +10,4 @@ pub mod message;
 pub mod next;
 pub mod resolver;
 pub mod show;
+pub mod update;
