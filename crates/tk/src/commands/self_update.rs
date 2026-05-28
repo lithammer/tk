@@ -526,13 +526,13 @@ fn perform_update(
     }
 
     match commit_install(target_dir, &stage_name, target_name, platform::IS_WINDOWS) {
-        CommitOutcome::Ok => {}
-        CommitOutcome::PrimaryFailed(err) => {
+        Ok(()) => {}
+        Err(CommitError::PrimaryFailed(err)) => {
             let _ = fs::remove_file(&stage_path);
             let _ = writeln!(stderr, "tk self-update: failed to install new binary: {err}");
             return 1;
         }
-        CommitOutcome::PrimaryRecovered(err) => {
+        Err(CommitError::PrimaryRecovered(err)) => {
             let _ = fs::remove_file(&stage_path);
             let _ = writeln!(
                 stderr,
@@ -540,7 +540,7 @@ fn perform_update(
             );
             return 1;
         }
-        CommitOutcome::RollbackFailed { primary, rollback } => {
+        Err(CommitError::RollbackFailed { primary, rollback }) => {
             let _ = writeln!(
                 stderr,
                 "tk self-update: cannot recover from rename failure: primary={primary}, rollback={rollback}; original preserved at {target_name}.old (restore with: mv {target_name}.old {target_name})"
@@ -616,14 +616,13 @@ fn trim_whitespace(bytes: &[u8]) -> &[u8] {
     &bytes[start..end]
 }
 
-/// Outcome of [`commit_install`]. POSIX collapses to `Ok` or
-/// `PrimaryFailed`. Windows can also reach `PrimaryRecovered` (step 2
-/// failed but the rollback restored the original binary) and
-/// `RollbackFailed` (step 2 failed AND the rollback also failed — the
+/// Why [`commit_install`] failed to put the staged binary in place. Success
+/// is `Ok(())`. POSIX only reaches `PrimaryFailed`. Windows can also reach
+/// `PrimaryRecovered` (step 2 failed but the rollback restored the original)
+/// and `RollbackFailed` (step 2 failed AND the rollback also failed — the
 /// canonical path is empty and the original survives at `<target>.old`).
 #[derive(Debug)]
-enum CommitOutcome {
-    Ok,
+enum CommitError {
     PrimaryFailed(std::io::Error),
     PrimaryRecovered(std::io::Error),
     RollbackFailed {
@@ -653,15 +652,12 @@ fn commit_install(
     stage_name: &str,
     target_name: &str,
     use_windows_pattern: bool,
-) -> CommitOutcome {
+) -> Result<(), CommitError> {
     let stage_path = target_dir.join(stage_name);
     let target_path = target_dir.join(target_name);
 
     if !use_windows_pattern {
-        return match fs::rename(&stage_path, &target_path) {
-            Ok(()) => CommitOutcome::Ok,
-            Err(err) => CommitOutcome::PrimaryFailed(err),
-        };
+        return fs::rename(&stage_path, &target_path).map_err(CommitError::PrimaryFailed);
     }
 
     let old_path = target_dir.join(format!("{target_name}.old"));
@@ -670,7 +666,7 @@ fn commit_install(
     // first-time installs land in directories without a prior binary.
     if let Err(err) = fs::rename(&target_path, &old_path) {
         if err.kind() != std::io::ErrorKind::NotFound {
-            return CommitOutcome::PrimaryFailed(err);
+            return Err(CommitError::PrimaryFailed(err));
         }
     }
 
@@ -680,12 +676,12 @@ fn commit_install(
     // catastrophic state — the original survives at `<target>.old`.
     if let Err(primary) = fs::rename(&stage_path, &target_path) {
         if let Err(rollback) = fs::rename(&old_path, &target_path) {
-            return CommitOutcome::RollbackFailed { primary, rollback };
+            return Err(CommitError::RollbackFailed { primary, rollback });
         }
-        return CommitOutcome::PrimaryRecovered(primary);
+        return Err(CommitError::PrimaryRecovered(primary));
     }
 
-    CommitOutcome::Ok
+    Ok(())
 }
 
 /// Best-effort cleanup of a stale `<exe-dir>/tk.exe.old` left behind by a
@@ -696,7 +692,7 @@ fn commit_install(
 ///
 /// Safety: only delete the `.old` sidecar when the canonical binary
 /// exists at the exe path. Otherwise we may be removing the user's only
-/// recoverable copy after a [`CommitOutcome::RollbackFailed`] outcome.
+/// recoverable copy after a [`CommitError::RollbackFailed`] outcome.
 pub fn cleanup_stale_exe() {
     let Ok(exe_path) = std::env::current_exe() else {
         return;
@@ -1525,7 +1521,7 @@ mod tests {
         fs::write(target_dir.join("tk"), "old-bytes").unwrap();
 
         let outcome = commit_install(target_dir, ".tk.tmp.aaaa", "tk", false);
-        assert!(matches!(outcome, CommitOutcome::Ok));
+        outcome.expect("commit succeeds");
         assert_eq!(fs::read(target_dir.join("tk")).unwrap(), b"new-bytes");
         assert!(!target_dir.join(".tk.tmp.aaaa").exists());
         assert!(!target_dir.join("tk.old").exists());
@@ -1539,7 +1535,7 @@ mod tests {
         fs::write(target_dir.join("tk.exe"), "old-bytes").unwrap();
 
         let outcome = commit_install(target_dir, ".tk.tmp.bbbb", "tk.exe", true);
-        assert!(matches!(outcome, CommitOutcome::Ok));
+        outcome.expect("commit succeeds");
         assert_eq!(fs::read(target_dir.join("tk.exe")).unwrap(), b"new-bytes");
         assert_eq!(fs::read(target_dir.join("tk.exe.old")).unwrap(), b"old-bytes");
         assert!(!target_dir.join(".tk.tmp.bbbb").exists());
@@ -1552,7 +1548,7 @@ mod tests {
         fs::write(target_dir.join(".tk.tmp.cccc"), "first-bytes").unwrap();
 
         let outcome = commit_install(target_dir, ".tk.tmp.cccc", "tk.exe", true);
-        assert!(matches!(outcome, CommitOutcome::Ok));
+        outcome.expect("commit succeeds");
         assert_eq!(fs::read(target_dir.join("tk.exe")).unwrap(), b"first-bytes");
         assert!(!target_dir.join("tk.exe.old").exists());
     }
