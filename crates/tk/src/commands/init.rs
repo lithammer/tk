@@ -282,6 +282,7 @@ mod tests {
     use super::*;
     use crate::clock::FakeClock;
     use crate::proc::{FakeRunner, RunOutput};
+    use crate::render::Styler;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
     use rusqlite::Connection;
@@ -354,6 +355,10 @@ mod tests {
                 clock: &self.clock,
                 rng: &mut self.rng,
                 cwd: self.cwd,
+                // Scenario-test default per ADR-0014: both streams stay
+                // no-colour so byte-exact output assertions hold without
+                // TTY mocking.
+                styler: Styler::plain(),
             }
         }
     }

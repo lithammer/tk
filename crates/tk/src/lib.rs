@@ -26,4 +26,5 @@ pub mod git;
 pub mod messages;
 pub mod platform;
 pub mod proc;
+pub mod render;
 pub mod store;

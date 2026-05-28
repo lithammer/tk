@@ -229,6 +229,15 @@ fn execute_script(work: &Path, sections: &[Section]) -> ScriptResult {
                 // land in `schema_migrations.applied_at`.
                 cmd.env("TK_NOW", "2026-05-09T00:00:00.000Z");
                 cmd.env("TK_RAND_SEED", "0");
+                // Scrub the parent shell's colour-policy env so a
+                // developer running scenarios under `CLICOLOR_FORCE=1`
+                // (or with `NO_COLOR` set to a non-empty value) gets
+                // the same byte-exact stdout/stderr CI does. Scenarios
+                // assert against plain output by default; once styled
+                // output lands, future fixtures can opt in by setting
+                // these explicitly.
+                cmd.env_remove("NO_COLOR");
+                cmd.env_remove("CLICOLOR_FORCE");
                 let out = if let Some(input) = pending_stdin.take() {
                     use std::io::Write;
                     use std::process::Stdio;

@@ -4,11 +4,10 @@
 //! injectable I/O, clock, runner, RNG, and cwd so command-handler tests can
 //! substitute fakes without touching the global environment.
 //!
-//! Dispatch + help/version/usage rendering are owned by `clap`'s derive API,
-//! which retires the hand-rolled `writeHelp` per Zig command. Adding a new
-//! command is a matter of appending a variant to [`Command`] and a handler in
-//! [`commands`]; clap takes care of `--help`, `-h`, `--version`, `-V`, and
-//! suggestion-style errors on typos.
+//! Dispatch + help/version/usage rendering are owned by `clap`'s derive API.
+//! Adding a new command is a matter of appending a variant to [`Command`] and
+//! a handler in [`commands`]; clap takes care of `--help`, `-h`, `--version`,
+//! `-V`, and suggestion-style errors on typos.
 
 use std::io::Write;
 use std::path::Path;
@@ -19,6 +18,7 @@ use rand::Rng;
 use crate::clock::Clock;
 use crate::commands;
 use crate::proc::ProcRunner;
+use crate::render::Styler;
 
 /// Dependencies shared by every command. Holds borrowed I/O streams and trait
 /// objects for the determinism seams (`runner`, `clock`, `rng`).
@@ -36,6 +36,13 @@ pub struct Deps<'a> {
     pub clock: &'a dyn Clock,
     pub rng: &'a mut dyn Rng,
     pub cwd: &'a Path,
+    /// Resolved per-stream colour choice (ADR-0014). Commands emitting
+    /// styled output reach for `deps.styler.for_stdout()` /
+    /// `for_stderr()` and let the returned `SubStyler` gate emission.
+    /// The choice is resolved once at process startup from `NO_COLOR`,
+    /// `CLICOLOR_FORCE`, and per-stream `IsTerminal`; command handlers
+    /// never re-resolve it.
+    pub styler: Styler,
 }
 
 /// Top-level argument parser.

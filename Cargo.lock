@@ -648,6 +648,9 @@ dependencies = [
 name = "tk"
 version = "0.0.0"
 dependencies = [
+ "anstream",
+ "anstyle",
+ "anstyle-query",
  "assert_cmd",
  "clap",
  "jiff",

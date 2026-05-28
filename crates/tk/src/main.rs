@@ -11,6 +11,7 @@ use rand::SeedableRng;
 use rand::rngs::{StdRng, SysRng};
 
 use tk::cli;
+use tk::render::{ColorChoice, resolve_styler_from_env};
 
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -28,8 +29,17 @@ fn main() -> ExitCode {
             return ExitCode::from(3);
         }
     };
-    let mut stdout = io::stdout().lock();
-    let mut stderr = io::stderr().lock();
+    let styler = resolve_styler_from_env();
+
+    // Wrap the real streams in `anstream::AutoStream` so SGR escape
+    // codes the styler emits reach the terminal unmodified under
+    // `Always` and are stripped under `Never`. Clap renders its own
+    // help and errors via `StyledStr`'s `Display` impl, which is
+    // colour-unaware (see `cli::render_clap_error`); the wrap covers
+    // only output written through `deps.stdout` / `deps.stderr` by tk
+    // itself.
+    let mut stdout = anstream::AutoStream::new(io::stdout().lock(), to_anstream(styler.stdout));
+    let mut stderr = anstream::AutoStream::new(io::stderr().lock(), to_anstream(styler.stderr));
 
     let runner = tk::proc::RealRunner::new();
     let clock = tk::clock::RealClock::new();
@@ -44,6 +54,10 @@ fn main() -> ExitCode {
     {
         Some(seed) => StdRng::seed_from_u64(seed),
         None => StdRng::try_from_rng(&mut SysRng).unwrap_or_else(|err| {
+            // Fatal-startup path: the AutoStream stderr hasn't been
+            // built yet (the styler is constructed but `stderr` above
+            // captures the lock by move). Write straight to the raw
+            // stderr lock so the diagnostic is unaffected by policy.
             let _ = io::Write::write_all(
                 &mut io::stderr().lock(),
                 format!("tk: failed to seed RNG from OS entropy: {err}\n").as_bytes(),
@@ -59,6 +73,7 @@ fn main() -> ExitCode {
         clock: &clock,
         rng: &mut rng,
         cwd: cwd.as_path(),
+        styler,
     };
 
     let code = match cli::run_argv(deps, &argv) {
@@ -77,4 +92,19 @@ fn main() -> ExitCode {
         }
     };
     ExitCode::from(code)
+}
+
+/// Translate tk's resolved [`ColorChoice`] into the `anstream`
+/// equivalent. ADR-0014 keeps tk to SGR escape codes, so [`Always`]
+/// maps to [`anstream::ColorChoice::AlwaysAnsi`] (which guarantees raw
+/// SGR passthrough on every platform) rather than
+/// [`anstream::ColorChoice::Always`] (which on Windows enables the
+/// legacy console-API translation path tk does not target).
+///
+/// [`Always`]: ColorChoice::Always
+fn to_anstream(choice: ColorChoice) -> anstream::ColorChoice {
+    match choice {
+        ColorChoice::Always => anstream::ColorChoice::AlwaysAnsi,
+        ColorChoice::Never => anstream::ColorChoice::Never,
+    }
 }

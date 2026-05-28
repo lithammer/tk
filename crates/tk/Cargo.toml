@@ -15,9 +15,26 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-# clap derive replaces the Zig-side hand-rolled dispatch + per-command
-# `writeHelp`. ADR-0018 pins this as the slice-0 idiom.
+# clap (derive API) owns top-level dispatch and per-command help.
+# ADR-0018 pins this as the slice-0 idiom.
 clap = { version = "4", features = ["derive"] }
+
+# Styled output: anstyle defines the palette of named `Style` constants
+# (ADR-0014); anstream::AutoStream wraps the real stdout/stderr so the
+# resolved policy gates SGR codes the styler emits. anstyle's universal
+# `Reset` is intentionally NOT used for our own spans — see the
+# family-specific close logic in `render::styler` for the ADR-0014
+# disjoint-family invariant.
+#
+# The `wincon` default feature is dropped: tk emits SGR only and would
+# never use the wincon SGR → Win32-console-API translation path.
+# Instead, `anstyle-query` is pulled directly so `resolve_styler_from_env`
+# can call `enable_ansi_colors()` on Windows and downgrade legacy
+# (pre-VT) consoles to plain output, matching ADR-0014's "legacy
+# console → no-color" arm.
+anstyle = "1"
+anstream = { version = "1", default-features = false, features = ["auto"] }
+anstyle-query = "1"
 
 # rusqlite with `bundled` keeps the single-static-binary contract (ADR-0011).
 # We compile SQLite from source via `cargo-zigbuild` later; the bundled feature
