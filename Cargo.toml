@@ -9,18 +9,26 @@ license = "MIT"
 repository = "https://github.com/lithammer/tk"
 
 # Slice 0 ratifies the lint posture for every downstream slice. `pedantic` is
-# enabled as warnings from day one (cheap on greenfield, expensive to retrofit)
-# per ADR-0018. The allow-list below is the working draft discovered while
-# porting `tk init`; CI flips to `-D warnings` only once it has settled.
+# enabled from day one (cheap on greenfield, expensive to retrofit) per
+# ADR-0018. The allow-list below is the slice-0 working draft discovered while
+# porting `tk init`; tk-83 promotes the levels to `deny` so `cargo clippy` (and
+# `cargo build` for `[lints.rust]`) hard-fails locally and in CI without needing
+# a `-D warnings` flag on the command line.
 #
 # `nursery` and `restriction` are excluded as groups: `nursery` ships WIP lints,
 # `restriction` contains mutually-contradictory rules. Pull individual lints
 # from either only when specifically motivated.
 [workspace.lints.rust]
 unsafe_code = "forbid"
+# Catches the default-warn rustc lints (unused imports, dead code, …) that
+# `-D warnings` used to convert into errors.
+warnings = { level = "deny", priority = -1 }
 
 [workspace.lints.clippy]
-pedantic = { level = "warn", priority = -1 }
+# `all` is the umbrella for default-warn clippy lints (correctness, suspicious,
+# style, complexity, perf); `pedantic` is opt-in on top.
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
 
 # tk's domain-qualified names (Repository Store, Workspace Scope, Display ID)
 # produce types like `store::Store`, `mutation::Mutation`. Renaming for the
