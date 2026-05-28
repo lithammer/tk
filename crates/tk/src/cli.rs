@@ -77,6 +77,12 @@ enum Command {
     Show(commands::show::Args),
     /// Update the title, body, priority, or parent of a Ticket or Epic.
     Update(commands::update::Args),
+    /// Mark a Ticket or Epic active.
+    Start(commands::start::Args),
+    /// Return a Ticket or Epic to open.
+    Stop(commands::stop::Args),
+    /// Close a Ticket or Epic.
+    Done(commands::done::Args),
 }
 
 /// Entrypoint that the binary's `main.rs` and the scenario harness share.
@@ -98,6 +104,9 @@ pub fn run_argv(deps: Deps<'_>, argv: &[String]) -> std::io::Result<u8> {
         Command::Next(args) => Ok(commands::next::run(deps, args)),
         Command::Show(args) => Ok(commands::show::run(deps, args)),
         Command::Update(args) => Ok(commands::update::run(deps, args)),
+        Command::Start(args) => Ok(commands::start::run(deps, args)),
+        Command::Stop(args) => Ok(commands::stop::run(deps, args)),
+        Command::Done(args) => Ok(commands::done::run(deps, args)),
     }
 }
 
