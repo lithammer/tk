@@ -23,17 +23,25 @@ use std::process::Command;
 
 use assert_cmd::cargo::CommandCargoExt;
 
-#[test]
-fn init_fresh_scenario_passes_byte_exact() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    // crates/tk -> repo root is two levels up.
-    let repo_root = manifest_dir
+/// Resolve a scenario fixture path relative to the corpus root.
+/// `crates/tk` → repo root is two levels up.
+fn fixture(rel: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
         .expect("repo root")
-        .to_path_buf();
-    let fixture = repo_root.join("src/testing/scenarios/init/init_fresh.txtar");
-    run_scenario(&fixture);
+        .join("src/testing/scenarios")
+        .join(rel)
+}
+
+#[test]
+fn init_fresh_scenario_passes_byte_exact() {
+    run_scenario(&fixture("init/init_fresh.txtar"));
+}
+
+#[test]
+fn init_idempotent_scenario_passes_byte_exact() {
+    run_scenario(&fixture("init/init_idempotent.txtar"));
 }
 
 // ---- Driver -------------------------------------------------------------

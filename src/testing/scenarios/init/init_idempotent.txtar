@@ -1,0 +1,10 @@
+-- script --
+git init -q
+tk init
+tk init
+-- expected/stdout --
+Initialized Repository Store at $WORK/.git/tk/tk.db
+Repository Store already initialized at $WORK/.git/tk/tk.db
+-- expected/stderr --
+-- expected/exit --
+0
