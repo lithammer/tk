@@ -175,7 +175,8 @@ pub fn classify(conn: &Connection) -> Result<StoreKind, rusqlite::Error> {
     if app_id == i64::from(migrations::APPLICATION_ID) {
         return Ok(StoreKind::Ours);
     }
-    let table_count: i64 = conn.query_row("select count(*) from sqlite_master", [], |r| r.get(0))?;
+    let table_count: i64 =
+        conn.query_row("select count(*) from sqlite_master", [], |r| r.get(0))?;
     if app_id == 0 && table_count == 0 {
         Ok(StoreKind::Fresh)
     } else {

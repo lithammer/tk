@@ -97,4 +97,3 @@ fn render_clap_error(deps: Deps<'_>, err: &clap::Error) -> u8 {
         }
     }
 }
-

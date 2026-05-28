@@ -126,11 +126,7 @@ pub fn render_failure<W: Write + ?Sized>(stderr: &mut W, command: &str, outcome:
             let _ = writeln!(stderr, "tk {command}: {msg}");
         }
         Outcome::GitRejected(None) => {
-            let _ = writeln!(
-                stderr,
-                "tk {command}: {}",
-                messages::GIT_OUTSIDE_DEFAULT
-            );
+            let _ = writeln!(stderr, "tk {command}: {}", messages::GIT_OUTSIDE_DEFAULT);
         }
         Outcome::GitOutputUnparseable => {
             let _ = writeln!(stderr, "tk {command}: {}", messages::GIT_UNPARSEABLE);

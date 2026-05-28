@@ -64,7 +64,8 @@ impl Default for RealClock {
 
 impl Clock for RealClock {
     fn now_ms(&self) -> i64 {
-        self.pinned_ms.unwrap_or_else(|| Timestamp::now().as_millisecond())
+        self.pinned_ms
+            .unwrap_or_else(|| Timestamp::now().as_millisecond())
     }
 }
 
@@ -94,7 +95,10 @@ fn parse_tk_now(raw: &str) -> Option<i64> {
     if let Ok(ms) = trimmed.parse::<i64>() {
         return Some(ms);
     }
-    trimmed.parse::<Timestamp>().ok().map(Timestamp::as_millisecond)
+    trimmed
+        .parse::<Timestamp>()
+        .ok()
+        .map(Timestamp::as_millisecond)
 }
 
 /// Render `unix_ms` as `YYYY-MM-DDTHH:MM:SS.fffZ`.

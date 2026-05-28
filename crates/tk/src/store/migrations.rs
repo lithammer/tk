@@ -31,8 +31,10 @@ pub struct Migration {
 // "verbatim" promise of ADR-0017 / ADR-0018 mechanical instead of typographic.
 // CRLF safety is enforced by `.gitattributes` (`*.sql text eol=lf`) so a
 // Windows clone with `core.autocrlf=true` still checks the files out as LF.
-const MIGRATION_1_SQL: &str = include_str!("../../../../src/store/migrations/001_repository_store.sql");
-const MIGRATION_2_SQL: &str = include_str!("../../../../src/store/migrations/002_items_no_escape_from_done.sql");
+const MIGRATION_1_SQL: &str =
+    include_str!("../../../../src/store/migrations/001_repository_store.sql");
+const MIGRATION_2_SQL: &str =
+    include_str!("../../../../src/store/migrations/002_items_no_escape_from_done.sql");
 
 /// V1 Repository Store schema skeleton.
 pub const MIGRATION_1: Migration = Migration {
@@ -80,7 +82,10 @@ pub enum ApplyError {
 pub fn apply_all(conn: &mut Connection, now_iso: &str) -> Result<(), ApplyError> {
     debug_assert_eq!(
         MAX_KNOWN_VERSION,
-        ALL_MIGRATIONS.last().expect("non-empty migration list").version,
+        ALL_MIGRATIONS
+            .last()
+            .expect("non-empty migration list")
+            .version,
         "MAX_KNOWN_VERSION must equal the last migration's version"
     );
     let recorded = current_version(conn)?;
@@ -226,7 +231,8 @@ mod tests {
         // `create table items` fails. The error message should mention the
         // conflicting table so command-side stderr can render it verbatim.
         let mut conn = open_memory();
-        conn.execute_batch("create table items (x integer)").unwrap();
+        conn.execute_batch("create table items (x integer)")
+            .unwrap();
 
         let err = apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap_err();
         let msg = format!("{err}");

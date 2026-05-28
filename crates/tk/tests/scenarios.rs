@@ -55,11 +55,12 @@ fn run_scenario(fixture_path: &Path) {
     let expected_stderr = section(&sections, "expected/stderr")
         .unwrap_or(&[])
         .to_vec();
-    let expected_exit: i32 = std::str::from_utf8(section(&sections, "expected/exit").unwrap_or(b"0\n"))
-        .expect("expected/exit must be UTF-8")
-        .trim()
-        .parse()
-        .expect("expected/exit is an integer");
+    let expected_exit: i32 =
+        std::str::from_utf8(section(&sections, "expected/exit").unwrap_or(b"0\n"))
+            .expect("expected/exit must be UTF-8")
+            .trim()
+            .parse()
+            .expect("expected/exit is an integer");
 
     let actual_stdout = normalize_work(&result.stdout, &work);
     let actual_stderr = normalize_work(&result.stderr, &work);
@@ -138,10 +139,7 @@ fn execute_script(work: &Path, sections: &[Section]) -> ScriptResult {
                     return result;
                 }
                 if !is_valid_input_path(&argv[1]) {
-                    script_error(
-                        &mut result,
-                        &format!("invalid mkdir path: {}", argv[1]),
-                    );
+                    script_error(&mut result, &format!("invalid mkdir path: {}", argv[1]));
                     return result;
                 }
                 if let Err(e) = fs::create_dir_all(active_cwd.join(&argv[1])) {
