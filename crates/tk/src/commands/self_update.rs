@@ -583,7 +583,7 @@ fn perform_update(
 }
 
 /// Exclusive create that surfaces `PermissionDenied` distinctly from
-/// other I/O failures, mirroring the Zig oracle's AccessDenied probe.
+/// other I/O failures.
 fn create_exclusive(path: &Path) -> std::io::Result<fs::File> {
     fs::OpenOptions::new()
         .write(true)

@@ -1,8 +1,7 @@
 //! `tk init` — create the Repository Store at `<git-common-dir>/tk/tk.db`.
 //!
-//! Port of `src/commands/init.zig`. Preserves the discovery → classify →
-//! pragmas → migrations → display_prefix sequence and the stable stderr
-//! messages from `messages.zig` (ADR-0017).
+//! The pipeline runs discovery → classify → pragmas → migrations →
+//! display_prefix, emitting the stable stderr messages fixed by ADR-0017.
 //!
 //! Slice 0 ships a flagless command: argument parsing and `--help` /
 //! `--version` rendering happen upstream in [`crate::cli`] via clap-derive,
@@ -242,7 +241,7 @@ fn ensure_tk_dir(path: &Path) -> std::io::Result<bool> {
         Ok(()) => Ok(true),
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
         Err(err) => {
-            // Mirror Zig's createDirPath: try to create parents too.
+            // The leaf create failed; create any missing parents and retry.
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent).map_err(|_| err)?;
                 match fs::create_dir(path) {

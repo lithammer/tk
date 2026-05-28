@@ -2,9 +2,9 @@
 //!
 //! `tk init` (and future commands that open the store) need Git's common
 //! directory and toplevel to place or find `<git-common-dir>/tk/tk.db`.
-//! This module owns the `git rev-parse` invocation and returns a typed
-//! [`Outcome`] so callers can render diagnostics without this module reaching
-//! for stderr itself.
+//! This module owns the `git rev-parse` invocation and returns the discovered
+//! paths as a typed result so callers can render diagnostics without this
+//! module reaching for stderr itself.
 //!
 //! Discovery failures are a typed [`DiscoveryError`]: each variant carries its
 //! own user-visible phrasing via `#[error]` (ADR-0017 stable strings), so the

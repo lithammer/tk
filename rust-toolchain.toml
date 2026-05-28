@@ -1,7 +1,7 @@
 [toolchain]
-# Pin the Rust toolchain to match the explicit `Zig 0.16` pin philosophy:
-# the language is stable, but we still want reproducible builds across
-# contributor machines and CI. Bump deliberately, never opportunistically.
+# Pin the Rust toolchain: the language is stable, but we still want
+# reproducible builds across contributor machines and CI. Bump deliberately,
+# never opportunistically.
 channel = "1.95.0"
 components = ["rustfmt", "clippy"]
 profile = "minimal"

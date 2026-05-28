@@ -1,6 +1,6 @@
 //! Item Status for Tickets and Epics.
 //!
-//! Ported from `src/domain/status.zig`. The three lifecycle states are mirrored
+//! The three lifecycle states are mirrored
 //! in the V1 `items.status` CHECK constraint; the `text()` spelling is the
 //! storage contract, not just a rendering convenience.
 

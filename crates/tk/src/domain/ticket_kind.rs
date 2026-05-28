@@ -1,6 +1,6 @@
 //! Ticket Kind classifies Tickets as tasks or bugs.
 //!
-//! Ported from `src/domain/ticket_kind.zig`. The two-variant set is mirrored in
+//! The two-variant set is mirrored in
 //! the V1 `items.ticket_kind` CHECK constraint; the `text()` spelling is the
 //! storage contract.
 

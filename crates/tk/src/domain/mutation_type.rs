@@ -1,11 +1,10 @@
 //! Typed V1 Mutation kind enum shared by the Mutation Log and Backend Adapters.
 //!
-//! Ported from `src/domain/mutation_type.zig`. The `text()` spelling matches
-//! the `mutations.mutation_type` SQL CHECK constraint verbatim so the type can
-//! round-trip a SQL text column through [`MutationType::text`] /
-//! [`MutationType::from_str`] without an intermediate map. Zig used
-//! `@tagName` for that round-trip; the Rust port writes the mapping out so
-//! renaming a variant cannot silently break the SQL contract.
+//! The `text()` spelling matches the `mutations.mutation_type` SQL CHECK
+//! constraint verbatim so the type round-trips a SQL text column through
+//! [`MutationType::text`] / [`MutationType::from_str`] without an intermediate
+//! map. The mapping is written out explicitly rather than derived from the
+//! variant names so renaming a variant cannot silently break the SQL contract.
 
 use std::fmt;
 use std::str::FromStr;

@@ -1,8 +1,8 @@
 //! Repository Store schema migrations.
 //!
-//! The migration SQL is the durable artefact (ADR-0005); the Rust port reuses
-//! it *verbatim* via `include_str!` from `src/store/migrations/` so there is
-//! one source of truth while the Zig oracle still serves `main`.
+//! The migration SQL is the durable artefact (ADR-0005); it is reused
+//! *verbatim* via `include_str!` from the repository's `src/store/migrations/`
+//! so there is a single source of truth.
 //!
 //! Each migration runs inside its own transaction. The caller is responsible
 //! for connection-level setup (`foreign_keys`, `busy_timeout`, `journal_mode`)
@@ -26,9 +26,9 @@ pub struct Migration {
 }
 
 // `include_str!` resolves paths relative to this source file. From
-// `crates/tk/src/store/migrations.rs` the Zig oracle's SQL lives four levels
-// up under `src/store/migrations/`. Pulling the SQL by reference keeps the
-// "verbatim" promise of ADR-0017 / ADR-0018 mechanical instead of typographic.
+// `crates/tk/src/store/migrations.rs` the SQL files live four levels up under
+// the repository's `src/store/migrations/`. Pulling the SQL by reference keeps
+// the "verbatim" promise of ADR-0017 / ADR-0018 mechanical instead of typographic.
 // CRLF safety is enforced by `.gitattributes` (`*.sql text eol=lf`) so a
 // Windows clone with `core.autocrlf=true` still checks the files out as LF.
 const MIGRATION_1_SQL: &str =

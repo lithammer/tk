@@ -1,6 +1,6 @@
 //! Priority is a local-only Ticket ranking.
 //!
-//! Ported from `src/domain/priority.zig`. The five-variant set is mirrored
+//! The five-variant set is mirrored
 //! verbatim in the V1 `items.priority` CHECK constraint, so the SQL spelling
 //! returned by [`Priority::text`] is the contract — not just a rendering
 //! convenience.

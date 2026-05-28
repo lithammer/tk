@@ -32,8 +32,8 @@ pub type ApplyError = ProcError;
 ///
 /// Extends the runner's environment failures with [`PullError::Failed`] for
 /// adapter-level rejection (the CLI ran but exited non-zero). `Failed` carries
-/// the CLI stderr the adapter captured — this is where the Zig `?*Diagnostic`
-/// out-param collapses into the typed error (ADR-0018). The engine renders the
+/// the CLI stderr the adapter captured — ADR-0018 carries this diagnostic on
+/// the typed error itself. The engine renders the
 /// detail and stops the sync: Pull is all-or-nothing in v1 because the
 /// snapshot model assumes a consistent backend view.
 #[derive(Debug, Error)]

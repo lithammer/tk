@@ -2,9 +2,8 @@
 //!
 //! Each script entry is consumed in order; an exhausted script panics so a
 //! test that forgot to declare an interaction fails loudly instead of getting
-//! a silent default. Unlike the Zig original, Rust ownership removes every
-//! manual dupe/free step — responses own their data and `apply_mutation`
-//! records calls by cloning into [`FakeAdapter::captured_applies`].
+//! a silent default. Responses own their data, so `apply_mutation` records
+//! calls by cloning into [`FakeAdapter::captured_applies`].
 
 use crate::domain::apply_outcome::ApplyOutcome;
 use crate::domain::backend_item_snapshot::BackendItemSnapshot;

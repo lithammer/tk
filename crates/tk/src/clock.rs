@@ -20,7 +20,7 @@ pub trait Clock {
     fn now_ms(&self) -> i64;
 
     /// ISO-8601 UTC millisecond-precision rendering: `YYYY-MM-DDTHH:MM:SS.fffZ`.
-    /// The 24-byte fixed width matches the Zig oracle's `nowIso`.
+    /// The 24-byte fixed width is the contract every stored timestamp honours.
     fn now_iso(&self) -> String {
         format_iso(self.now_ms())
     }
@@ -150,7 +150,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn format_iso_matches_zig_oracle_shape() {
+    fn format_iso_renders_iso8601_milliseconds() {
         // 2026-05-09T00:00:00.000Z corresponds to 1_778_284_800_000 ms.
         assert_eq!(format_iso(1_778_284_800_000), "2026-05-09T00:00:00.000Z");
     }

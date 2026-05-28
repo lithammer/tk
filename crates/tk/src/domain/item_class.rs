@@ -1,6 +1,6 @@
 //! Item Class distinguishes Tickets from Epics in the Repository Store.
 //!
-//! Ported from `src/domain/item_class.zig`. The two-variant set is mirrored in
+//! The two-variant set is mirrored in
 //! the V1 `items.item_class` CHECK constraint; the `text()` spelling is the
 //! storage contract.
 

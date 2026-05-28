@@ -1,10 +1,8 @@
 //! Snapshot of one backend-owned Item observed during a Backend Pull.
 //!
-//! Ported from `src/domain/backend_item_snapshot.zig`. The Zig version held
-//! borrowed slices and forced each caller to `deinit` them with the matching
-//! allocator; the Rust port owns its strings directly so `Drop` handles
-//! cleanup. Consumed by `store::merge_backend_snapshots` (future) and produced
-//! by `Adapter::pull_backend_items`.
+//! A self-owned value (no borrows) so it can cross the Backend Adapter
+//! boundary freely: produced by `Adapter::pull_backend_items` and consumed by
+//! `store::merge_backend_snapshots` (future).
 
 use super::item_class::ItemClass;
 use super::status::ItemStatus;

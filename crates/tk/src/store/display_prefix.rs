@@ -13,8 +13,6 @@
 //! - If the result is empty or starts with a digit, prefix with `tk-`.
 //!
 //! Vowels are not stripped. Output is always lowercase ASCII.
-//!
-//! Ported from `src/domain/display_prefix.zig`.
 
 /// Maximum length of the stored local Display ID prefix.
 pub const MAX_PREFIX_LEN: usize = 12;

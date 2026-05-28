@@ -1,6 +1,6 @@
 //! Origin describes whether an Item is local or backend-backed.
 //!
-//! Ported from `src/domain/origin.zig`. The two-variant set is mirrored in the
+//! The two-variant set is mirrored in the
 //! V1 `items.origin` CHECK constraint; the `text()` spelling is the storage
 //! contract.
 

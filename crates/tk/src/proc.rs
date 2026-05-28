@@ -1,6 +1,6 @@
 //! Subprocess runner abstraction shared by every command that shells out.
 //!
-//! ADR-0018 collapses the Zig `*anyopaque` vtable into a Rust trait. Every
+//! ADR-0018 models the subprocess seam as a Rust trait. Every
 //! subprocess in tk (git / gh / acli / curl) flows through this seam so tests
 //! can fake them with `FakeRunner` and the determinism harness can swap a
 //! `TK_FAKE_RUNNER` mode in without per-call-site changes.

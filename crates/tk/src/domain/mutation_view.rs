@@ -1,9 +1,7 @@
 //! Engine-built decoded view of one Mutation Log row handed to an adapter.
 //!
-//! Ported from `src/domain/mutation_view.zig`. The Zig version held borrowed
-//! slices and pushed ownership cleanup back to `store.deinitMutationView`;
-//! the Rust port owns its strings directly so `Drop` handles cleanup and the
-//! store layer does not have to track aliasing.
+//! A self-owned value (no borrows) so the store layer hands it to an adapter
+//! without tracking aliasing and `Drop` handles cleanup.
 
 use super::item_class::ItemClass;
 use super::mutation_payload::MutationPayload;
