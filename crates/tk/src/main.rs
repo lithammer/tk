@@ -1,11 +1,14 @@
 //! `tk` binary entrypoint.
 //!
-//! Mirrors the role `src/main.zig` plays in the Zig oracle: a thin process
-//! shim that constructs real `Deps`, dispatches to `cli::run_argv`, and maps
-//! an internal error to exit code 3. Command logic lives in `commands/`.
+//! Thin process shim: builds the real `Deps`, dispatches to `cli::run_argv`,
+//! and maps an unexpected `Err` to exit code 3. Command logic lives under
+//! [`tk::commands`].
 
 use std::io;
 use std::process::ExitCode;
+
+use rand::SeedableRng;
+use rand::rngs::{StdRng, SysRng};
 
 use tk::cli;
 
@@ -30,14 +33,31 @@ fn main() -> ExitCode {
 
     let runner = tk::proc::RealRunner::new();
     let clock = tk::clock::RealClock::new();
-    let rng = tk::rng::RealRng::new();
+    // `TK_RAND_SEED` is the determinism seam (ADR-0018). When unset, seed
+    // ChaCha from the OS entropy source via rand's SysRng; otherwise use the
+    // explicit u64. `try_from_rng` only fails when the OS RNG is unavailable
+    // (e.g. exhausted /dev/random on Linux); treat that as fatal at startup
+    // rather than surfacing a confusing partial-entropy state to commands.
+    let mut rng: StdRng = match std::env::var("TK_RAND_SEED")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+    {
+        Some(seed) => StdRng::seed_from_u64(seed),
+        None => StdRng::try_from_rng(&mut SysRng).unwrap_or_else(|err| {
+            let _ = io::Write::write_all(
+                &mut io::stderr().lock(),
+                format!("tk: failed to seed RNG from OS entropy: {err}\n").as_bytes(),
+            );
+            std::process::exit(3);
+        }),
+    };
 
     let deps = cli::Deps {
         stdout: &mut stdout,
         stderr: &mut stderr,
         runner: &runner,
         clock: &clock,
-        rng: &rng,
+        rng: &mut rng,
         cwd: cwd.as_path(),
     };
 

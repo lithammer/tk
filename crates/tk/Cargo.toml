@@ -28,6 +28,22 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # are declined per ADR-0018 — tk owns its curated stderr contract.
 thiserror = "1"
 
+# jiff is the date/time library; Andrew Gallant's Temporal-inspired API. tk
+# uses `Timestamp::parse`, `from_millisecond`, and `strftime` only — no
+# timezone resolution, no zoneinfo lookups. Trim the default `tz-*` /
+# `tzdb-*` features so we don't bundle hundreds of KB of IANA tzdb into the
+# static binary (ADR-0011 wants slim release artifacts).
+jiff = { version = "0.2", default-features = false, features = ["std"] }
+
+# RNG. tk init doesn't draw randomness; first consumers are `tk add` (internal
+# IDs), `tk self-update` / `tk manpage` (stage_name suffix), and `tk sync`.
+# Wired in slice 0 so the trait shape every downstream slice inherits is
+# `&mut dyn Rng` (the dyn-compatible low-level trait), with `StdRng::seed_from_u64`
+# as the deterministic seam keyed by `TK_RAND_SEED`. The `thread_rng` default
+# feature is dropped — tk dispatch is single-threaded and consumes `StdRng`
+# directly from `Deps`.
+rand = { version = "0.10", default-features = false, features = ["std", "std_rng", "sys_rng"] }
+
 [dev-dependencies]
 tempfile = "3"
 # Minimal CLI assertion helper for the scenario driver.

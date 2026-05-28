@@ -29,30 +29,10 @@ pub struct Migration {
 // `crates/tk/src/store/migrations.rs` the Zig oracle's SQL lives four levels
 // up under `src/store/migrations/`. Pulling the SQL by reference keeps the
 // "verbatim" promise of ADR-0017 / ADR-0018 mechanical instead of typographic.
-const MIGRATION_1_SQL: &str = assert_no_cr(include_str!(
-    "../../../../src/store/migrations/001_repository_store.sql"
-));
-const MIGRATION_2_SQL: &str = assert_no_cr(include_str!(
-    "../../../../src/store/migrations/002_items_no_escape_from_done.sql"
-));
-
-/// Compile-time refusal of CR bytes in embedded SQL. Mirrors the Zig oracle's
-/// `embed.assertNoCR`: a Windows clone with `core.autocrlf=true` would
-/// otherwise smuggle CR bytes into constraint-failure errmsgs (and any other
-/// reflected schema text) and break byte-exact comparison against
-/// POSIX-developed fixtures.
-const fn assert_no_cr(sql: &'static str) -> &'static str {
-    let bytes = sql.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        assert!(
-            bytes[i] != b'\r',
-            "embedded migration SQL contains a CR byte; check core.autocrlf"
-        );
-        i += 1;
-    }
-    sql
-}
+// CRLF safety is enforced by `.gitattributes` (`*.sql text eol=lf`) so a
+// Windows clone with `core.autocrlf=true` still checks the files out as LF.
+const MIGRATION_1_SQL: &str = include_str!("../../../../src/store/migrations/001_repository_store.sql");
+const MIGRATION_2_SQL: &str = include_str!("../../../../src/store/migrations/002_items_no_escape_from_done.sql");
 
 /// V1 Repository Store schema skeleton.
 pub const MIGRATION_1: Migration = Migration {

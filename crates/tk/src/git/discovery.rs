@@ -117,10 +117,10 @@ pub fn render_failure<W: Write + ?Sized>(stderr: &mut W, command: &str, outcome:
     match outcome {
         Outcome::Ok(_) => unreachable!("render_failure called on Outcome::Ok"),
         Outcome::GitMissing => {
-            let _ = writeln!(stderr, "tk {command}: {}", messages::INIT_GIT_MISSING);
+            let _ = writeln!(stderr, "tk {command}: {}", messages::GIT_MISSING);
         }
         Outcome::SpawnFailed => {
-            let _ = writeln!(stderr, "tk {command}: {}", messages::INIT_GIT_SPAWN_FAILED);
+            let _ = writeln!(stderr, "tk {command}: {}", messages::GIT_SPAWN_FAILED);
         }
         Outcome::GitRejected(Some(msg)) => {
             let _ = writeln!(stderr, "tk {command}: {msg}");
@@ -129,11 +129,11 @@ pub fn render_failure<W: Write + ?Sized>(stderr: &mut W, command: &str, outcome:
             let _ = writeln!(
                 stderr,
                 "tk {command}: {}",
-                messages::INIT_OUTSIDE_GIT_DEFAULT
+                messages::GIT_OUTSIDE_DEFAULT
             );
         }
         Outcome::GitOutputUnparseable => {
-            let _ = writeln!(stderr, "tk {command}: {}", messages::INIT_GIT_UNPARSEABLE);
+            let _ = writeln!(stderr, "tk {command}: {}", messages::GIT_UNPARSEABLE);
         }
     }
 }
@@ -276,28 +276,28 @@ mod tests {
         render_failure(&mut buf, "init", &Outcome::GitMissing);
         assert_eq!(
             std::str::from_utf8(&buf).unwrap(),
-            format!("tk init: {}\n", messages::INIT_GIT_MISSING)
+            format!("tk init: {}\n", messages::GIT_MISSING)
         );
 
         let mut buf = Vec::new();
         render_failure(&mut buf, "add", &Outcome::SpawnFailed);
         assert_eq!(
             std::str::from_utf8(&buf).unwrap(),
-            format!("tk add: {}\n", messages::INIT_GIT_SPAWN_FAILED)
+            format!("tk add: {}\n", messages::GIT_SPAWN_FAILED)
         );
 
         let mut buf = Vec::new();
         render_failure(&mut buf, "init", &Outcome::GitOutputUnparseable);
         assert_eq!(
             std::str::from_utf8(&buf).unwrap(),
-            format!("tk init: {}\n", messages::INIT_GIT_UNPARSEABLE)
+            format!("tk init: {}\n", messages::GIT_UNPARSEABLE)
         );
 
         let mut buf = Vec::new();
         render_failure(&mut buf, "init", &Outcome::GitRejected(None));
         assert_eq!(
             std::str::from_utf8(&buf).unwrap(),
-            format!("tk init: {}\n", messages::INIT_OUTSIDE_GIT_DEFAULT)
+            format!("tk init: {}\n", messages::GIT_OUTSIDE_DEFAULT)
         );
 
         let mut buf = Vec::new();

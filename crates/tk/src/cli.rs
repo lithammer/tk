@@ -4,92 +4,97 @@
 //! injectable I/O, clock, runner, RNG, and cwd so command-handler tests can
 //! substitute fakes without touching the global environment.
 //!
-//! Slice 0 keeps dispatch hand-rolled while only `tk init` is ported; once a
-//! second command lands (`tk show` is the natural next slice), this module
-//! grows to a `clap_derive`-style command tuple. The Zig oracle keeps its
-//! own dispatch in `src/cli.zig` until then.
+//! Dispatch + help/version/usage rendering are owned by `clap`'s derive API,
+//! which retires the hand-rolled `writeHelp` per Zig command. Adding a new
+//! command is a matter of appending a variant to [`Command`] and a handler in
+//! [`commands`]; clap takes care of `--help`, `-h`, `--version`, `-V`, and
+//! suggestion-style errors on typos.
 
 use std::io::Write;
 use std::path::Path;
 
+use clap::{Parser, Subcommand};
+use rand::Rng;
+
 use crate::clock::Clock;
 use crate::commands;
 use crate::proc::ProcRunner;
-use crate::rng::Rng;
 
 /// Dependencies shared by every command. Holds borrowed I/O streams and trait
 /// objects for the determinism seams (`runner`, `clock`, `rng`).
+///
+/// `rng` is `&mut dyn rand::Rng` — the low-level dyn-compatible trait in
+/// `rand_core` 0.10 (its `RngCore` alias still exists as a marker `trait
+/// RngCore: Rng {}`, but `Rng` is the primary surface). The convenience
+/// `RngExt` trait is not object-safe and is auto-derived for any `Rng`
+/// implementor, so commands can call `gen_range` etc. on `*deps.rng` once a
+/// downstream slice imports the extension trait.
 pub struct Deps<'a> {
     pub stdout: &'a mut dyn Write,
     pub stderr: &'a mut dyn Write,
     pub runner: &'a dyn ProcRunner,
     pub clock: &'a dyn Clock,
-    pub rng: &'a dyn Rng,
+    pub rng: &'a mut dyn Rng,
     pub cwd: &'a Path,
+}
+
+/// Top-level argument parser.
+#[derive(Debug, Parser)]
+#[command(
+    name = "tk",
+    version,
+    about = "Repository-local work tracker",
+    disable_help_subcommand = true
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+/// Subcommand registry. Add a variant here and a module under [`commands`]
+/// to land a new command.
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Initialize the Repository Store in the current Git repository.
+    Init(commands::init::Args),
 }
 
 /// Entrypoint that the binary's `main.rs` and the scenario harness share.
 ///
-/// `argv` is the post-`tk` argument vector — the first element is the
-/// subcommand name (or `--help` / `--version`). Returns the process exit code.
-///
-/// # Errors
-///
-/// This signature carries an `io::Error` slot for symmetry with the Zig
-/// oracle's `cli.runArgv`, where unexpected errors propagate to the process
-/// shim. Slice 0 commands map their own failures internally and return the
-/// exit code; the error variant is reserved for future commands that bubble
-/// an unexpected `io::Error` through (`main.rs` already renders these as
-/// exit 3).
+/// `argv` is the post-`tk` argument vector. Returns the process exit code.
 pub fn run_argv(deps: Deps<'_>, argv: &[String]) -> std::io::Result<u8> {
-    if argv.is_empty() {
-        return Ok(write_top_help(deps));
+    // `try_parse_from` expects argv[0] to be the binary name; prepend it.
+    let full_argv: Vec<&str> = std::iter::once("tk")
+        .chain(argv.iter().map(String::as_str))
+        .collect();
+    let cli = match Cli::try_parse_from(full_argv) {
+        Ok(cli) => cli,
+        Err(err) => return Ok(render_clap_error(deps, &err)),
+    };
+    match cli.command {
+        Command::Init(args) => Ok(commands::init::run(deps, args)),
     }
+}
 
-    let (cmd, rest) = argv.split_first().expect("argv non-empty checked above");
-    match cmd.as_str() {
-        "init" => Ok(commands::init::run(deps, rest)),
-        "--help" | "-h" => Ok(write_top_help(deps)),
-        // `-V` is clap's out-of-the-box version short flag; the hand-rolled
-        // dispatch matches it so a future clap-derive migration is a no-op
-        // on this surface. (The Zig oracle uses `-v` — that drift goes when
-        // the Zig tree thaws.)
-        "--version" | "-V" => Ok(write_version(deps)),
-        unknown => {
-            let _ = writeln!(
-                deps.stderr,
-                "tk: unknown command '{unknown}'. Run 'tk --help' for usage."
-            );
-            Ok(2)
+/// Route `clap::Error` through `Deps` writers so command-handler tests can
+/// capture --help / --version output, then map clap's exit code into our
+/// process exit:
+/// - `DisplayHelp` / `DisplayVersion`: success (exit 0), rendered to stdout.
+/// - any other error (unknown flag, missing subcommand, …): exit 2,
+///   rendered to stderr.
+fn render_clap_error(deps: Deps<'_>, err: &clap::Error) -> u8 {
+    use clap::error::ErrorKind;
+    let rendered = err.render();
+    let bytes = rendered.to_string();
+    match err.kind() {
+        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => {
+            let _ = deps.stdout.write_all(bytes.as_bytes());
+            0
+        }
+        _ => {
+            let _ = deps.stderr.write_all(bytes.as_bytes());
+            2
         }
     }
 }
 
-fn write_top_help(deps: Deps<'_>) -> u8 {
-    let help = "\
-tk — repository-local work tracker
-
-Usage:
-  tk <command> [options]
-
-Commands:
-  init   Initialize the Repository Store in the current Git repository.
-
-Options:
-  -h, --help     Show this help.
-  -V, --version  Show version.
-";
-    let _ = deps.stdout.write_all(help.as_bytes());
-    0
-}
-
-fn write_version(deps: Deps<'_>) -> u8 {
-    // Mirror the Zig oracle's `tk --version` shape: `<version> (<triple>)`.
-    // Slice 0 hard-codes "0.0.0" for the version and uses Cargo's target
-    // triple env var (set by `build.rs` or `cargo zigbuild`); fall back to
-    // a deterministic placeholder when unset so scenarios stay byte-stable.
-    let version = env!("CARGO_PKG_VERSION");
-    let triple = option_env!("TARGET").unwrap_or("unknown-triple");
-    let _ = writeln!(deps.stdout, "{version} ({triple})");
-    0
-}

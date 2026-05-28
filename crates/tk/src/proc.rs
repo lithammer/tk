@@ -30,14 +30,14 @@ impl RunOutput {
     }
 }
 
-/// Failure modes a [`ProcRunner`] may surface to its caller.
+/// Failure modes returned by [`ProcRunner`].
 ///
-/// Mirrors `proc.Runner.Error` in the Zig oracle: bare distinguishing-only
-/// tags. Callers map these to typed `Outcome` variants (see
-/// [`crate::git::discovery::Outcome`]). The variants are payload-free because
-/// every current consumer ([`crate::git::discovery::discover_paths`]) renders
-/// a fixed stderr line from the tag alone — adding payloads would invite
-/// drift from the curated `messages` constants.
+/// Bare distinguishing-only tags: callers map them to typed `Outcome`
+/// variants (see [`crate::git::discovery::Outcome`]). The variants are
+/// payload-free because every current consumer
+/// ([`crate::git::discovery::discover_paths`]) renders a fixed stderr line
+/// from the tag alone — adding payloads would invite drift from the curated
+/// `messages` constants.
 #[derive(Debug, Clone, Copy, Error)]
 pub enum ProcError {
     /// The binary was not found on PATH (POSIX `ENOENT`).

@@ -4,12 +4,15 @@
 //! pragmas → migrations → display_prefix sequence and the stable stderr
 //! messages from `messages.zig` (ADR-0017).
 //!
-//! Slice 0 keeps the command flagless except for `--help`.
+//! Slice 0 ships a flagless command: argument parsing and `--help` /
+//! `--version` rendering happen upstream in [`crate::cli`] via clap-derive,
+//! so [`run`] takes the parsed [`Args`] (currently empty) and proceeds
+//! directly to the pipeline.
 
 use std::fs;
-use std::io::Write;
 use std::path::Path;
 
+use clap::Args as ClapArgs;
 use rusqlite::{Connection, OpenFlags};
 
 use crate::cli::Deps;
@@ -17,6 +20,11 @@ use crate::git::discovery::{self, DiscoveredPaths, Outcome};
 use crate::messages;
 use crate::platform;
 use crate::store::{display_prefix, migrations};
+
+/// Flags for `tk init`. Slice 0 is flagless except for clap's auto-generated
+/// `--help` / `-h`; future slices add knobs here.
+#[derive(Debug, ClapArgs)]
+pub struct Args {}
 
 /// Classification of the SQLite file at `<git-common-dir>/tk/tk.db`.
 ///
@@ -34,20 +42,13 @@ pub enum StoreKind {
 }
 
 /// Run `tk init` against the supplied `Deps`. Returns the process exit code.
+///
+/// Argument parsing and `--help` / `-h` rendering happen upstream in
+/// [`crate::cli`] via clap-derive; this entrypoint receives a parsed [`Args`]
+/// (currently empty) and proceeds directly to the discovery → classify →
+/// pragmas → migrations → seed pipeline.
 #[must_use]
-pub fn run(deps: Deps<'_>, args: &[String]) -> u8 {
-    if args.iter().any(|a| a == "--help" || a == "-h") {
-        let _ = write_help(deps.stdout);
-        return 0;
-    }
-    if let Some(unknown) = args.iter().find(|a| a.starts_with('-')) {
-        let _ = writeln!(
-            deps.stderr,
-            "tk init: unknown flag: {unknown}\nRun 'tk init --help' for usage."
-        );
-        return 2;
-    }
-
+pub fn run(deps: Deps<'_>, _args: Args) -> u8 {
     let outcome = discovery::discover_paths(deps.runner, deps.cwd);
     let paths = match outcome {
         Outcome::Ok(p) => p,
@@ -273,23 +274,6 @@ fn set_dir_mode_0700(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn write_help<W: Write + ?Sized>(stdout: &mut W) -> std::io::Result<()> {
-    let help = "\
-tk init - initialize the Repository Store
-
-Creates <git-common-dir>/tk/tk.db with the v1 schema. Must be run
-from within a Git repository. Idempotent: re-running on a current
-store is a no-op.
-
-Usage:
-  tk init [options]
-
-Options:
-  -h, --help  Display this help and exit.
-";
-    stdout.write_all(help.as_bytes())
-}
-
 // ---- Tests --------------------------------------------------------------
 
 #[cfg(test)]
@@ -297,7 +281,8 @@ mod tests {
     use super::*;
     use crate::clock::FakeClock;
     use crate::proc::{FakeRunner, RunOutput};
-    use crate::rng::RealRng;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
     use rusqlite::Connection;
     use std::path::PathBuf;
 
@@ -344,7 +329,7 @@ mod tests {
         stderr: Vec<u8>,
         runner: FakeRunner,
         clock: FakeClock,
-        rng: RealRng,
+        rng: StdRng,
         cwd: &'a Path,
     }
 
@@ -355,7 +340,7 @@ mod tests {
                 stderr: Vec::new(),
                 runner: FakeRunner::new(),
                 clock: FakeClock::new(1_778_457_600_000),
-                rng: RealRng::seeded(0),
+                rng: StdRng::seed_from_u64(0),
                 cwd,
             }
         }
@@ -366,7 +351,7 @@ mod tests {
                 stderr: &mut self.stderr,
                 runner: &self.runner,
                 clock: &self.clock,
-                rng: &self.rng,
+                rng: &mut self.rng,
                 cwd: self.cwd,
             }
         }
@@ -386,7 +371,7 @@ mod tests {
             },
         );
 
-        let code = run(h.deps(), &[]);
+        let code = run(h.deps(), Args {});
         assert_eq!(code, 1);
         assert!(h.stdout.is_empty());
         let stderr = String::from_utf8_lossy(&h.stderr);
@@ -405,23 +390,14 @@ mod tests {
                 stderr: Vec::new(),
             },
         );
-        let code = run(h.deps(), &[]);
+        let code = run(h.deps(), Args {});
         assert_eq!(code, 1);
         let stderr = String::from_utf8_lossy(&h.stderr);
-        assert!(stderr.contains(messages::INIT_OUTSIDE_GIT_DEFAULT));
+        assert!(stderr.contains(messages::GIT_OUTSIDE_DEFAULT));
     }
 
-    #[test]
-    fn help_prints_to_stdout_exits_zero() {
-        let cwd = std::env::current_dir().unwrap();
-        let mut h = Harness::new(&cwd);
-        let code = run(h.deps(), &["--help".to_string()]);
-        assert_eq!(code, 0);
-        let stdout = String::from_utf8_lossy(&h.stdout);
-        assert!(stdout.contains("tk init"));
-        assert!(stdout.contains("Repository Store"));
-        assert!(h.stderr.is_empty());
-    }
+    // `--help` and `--version` rendering moved to clap-derive in cli.rs;
+    // covered by cli-level tests or scenario fixtures rather than per-command.
 
     #[test]
     fn success_creates_store_applies_migrations_seeds_prefix() {
@@ -437,7 +413,7 @@ mod tests {
             },
         );
 
-        let code = run(h.deps(), &[]);
+        let code = run(h.deps(), Args {});
         assert_eq!(code, 0);
         let stdout = String::from_utf8_lossy(&h.stdout);
         assert!(stdout.contains(messages::INIT_SUCCESS_FRESH));
@@ -477,7 +453,7 @@ mod tests {
                     stderr: Vec::new(),
                 },
             );
-            assert_eq!(run(h.deps(), &[]), 0);
+            assert_eq!(run(h.deps(), Args {}), 0);
         }
 
         // Overwrite prefix to assert init's idempotency doesn't clobber it.
@@ -501,7 +477,7 @@ mod tests {
                     stderr: Vec::new(),
                 },
             );
-            let code = run(h.deps(), &[]);
+            let code = run(h.deps(), Args {});
             assert_eq!(code, 0);
             let stdout = String::from_utf8_lossy(&h.stdout);
             assert!(stdout.contains(messages::INIT_SUCCESS_EXISTING));
@@ -563,7 +539,7 @@ mod tests {
             },
         );
 
-        let code = run(h.deps(), &[]);
+        let code = run(h.deps(), Args {});
         assert_eq!(code, 1);
         let stderr = String::from_utf8_lossy(&h.stderr);
         assert!(stderr.contains(messages::INIT_REFUSE_FOREIGN));
@@ -594,7 +570,7 @@ mod tests {
                 stderr: Vec::new(),
             },
         );
-        let code = run(h.deps(), &[]);
+        let code = run(h.deps(), Args {});
         assert_eq!(code, 1);
         let stderr = String::from_utf8_lossy(&h.stderr);
         assert!(stderr.contains(messages::INIT_REFUSE_FUTURE_VERSION));
@@ -613,9 +589,9 @@ mod tests {
                 stderr: Vec::new(),
             },
         );
-        let code = run(h.deps(), &[]);
+        let code = run(h.deps(), Args {});
         assert_eq!(code, 1);
         let stderr = String::from_utf8_lossy(&h.stderr);
-        assert!(stderr.contains(messages::INIT_GIT_UNPARSEABLE));
+        assert!(stderr.contains(messages::GIT_UNPARSEABLE));
     }
 }

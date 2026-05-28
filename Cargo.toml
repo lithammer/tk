@@ -58,6 +58,11 @@ collapsible_else_if = "allow"
 # more than it helps; the slice 0 idiom is to keep command pipelines together.
 too_many_lines = "allow"
 
+# Domain names occasionally collide with their plural / shortened forms
+# (`argv` vs `args`, `Cli` vs `cli`, `Args` vs `args`). Renaming for the
+# lint forces less expressive identifiers.
+similar_names = "allow"
+
 [profile.release]
 # Single static binary is part of the distribution contract (ADR-0011/0012);
 # LTO + strip make `cargo-zigbuild` artifacts comparable to the Zig build.
