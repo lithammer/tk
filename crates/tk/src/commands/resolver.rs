@@ -12,7 +12,7 @@ use std::path::Path;
 
 use thiserror::Error;
 
-use crate::git::discovery::{self, Outcome as DiscoveryOutcome};
+use crate::git::discovery::{self, DiscoveryError};
 use crate::proc::ProcRunner;
 use crate::store::repository::{
     self, OpenError as RepoOpenError, OpenOutcome, ResolveEpicOutcome,
@@ -23,10 +23,10 @@ use crate::store::repository::{
 /// rendered message needs; [`render_open_error`] picks the right line.
 #[derive(Debug, Error)]
 pub enum OpenError {
-    /// `git rev-parse` failed; the inner outcome carries the exact shape
+    /// `git rev-parse` failed; the inner error carries the exact message
     /// the shared `discovery::render_failure` consumes.
     #[error("git discovery failed")]
-    DiscoveryFailed(DiscoveryOutcome),
+    DiscoveryFailed(DiscoveryError),
     #[error("Repository Store not initialized")]
     StoreMissing,
     #[error("not a tk Repository Store")]

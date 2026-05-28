@@ -32,12 +32,10 @@ impl RunOutput {
 
 /// Failure modes returned by [`ProcRunner`].
 ///
-/// Bare distinguishing-only tags: callers map them to typed `Outcome`
-/// variants (see [`crate::git::discovery::Outcome`]). The variants are
-/// payload-free because every current consumer
-/// ([`crate::git::discovery::discover_paths`]) renders a fixed stderr line
-/// from the tag alone — adding payloads would invite drift from the curated
-/// `messages` constants.
+/// Bare distinguishing-only tags: callers map them to their own typed errors
+/// (e.g. [`crate::git::discovery::DiscoveryError`]). The variants are
+/// payload-free because consumers render a fixed stderr line from the tag
+/// alone; their own `#[error]` strings carry the user-visible phrasing.
 #[derive(Debug, Clone, Copy, Error)]
 pub enum ProcError {
     /// The binary was not found on PATH (POSIX `ENOENT`).

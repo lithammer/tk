@@ -23,7 +23,7 @@ use crate::cli::Deps;
 use crate::commands::resolver;
 use crate::domain::item_class::ItemClass;
 use crate::domain::status::ItemStatus;
-use crate::git::discovery::{self, Outcome as DiscoveryOutcome};
+use crate::git::discovery;
 use crate::proc::{ProcError, ProcRunner};
 use crate::store::repository::Store;
 use crate::store::repository::status::{
@@ -404,9 +404,8 @@ fn build_default_path<R: ProcRunner + ?Sized, W: Write + ?Sized>(
     display_id: &str,
     slug: &str,
 ) -> Option<String> {
-    let outcome = discovery::discover_paths(runner, cwd);
-    match outcome {
-        DiscoveryOutcome::Ok(paths) => {
+    match discovery::discover_paths(runner, cwd) {
+        Ok(paths) => {
             let parent = paths.toplevel.parent().unwrap_or_else(|| Path::new("/"));
             let repo = paths
                 .toplevel
@@ -421,8 +420,8 @@ fn build_default_path<R: ProcRunner + ?Sized, W: Write + ?Sized>(
             };
             Some(parent.join(&leaf).to_string_lossy().into_owned())
         }
-        other => {
-            discovery::render_failure(stderr, "worktree start", &other);
+        Err(err) => {
+            discovery::render_failure(stderr, "worktree start", &err);
             None
         }
     }

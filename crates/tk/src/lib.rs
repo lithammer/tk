@@ -4,7 +4,6 @@
 //!
 //! - [`cli`]: top-level dispatch and shared `Deps`.
 //! - [`commands`]: one module per subcommand.
-//! - [`messages`]: verbatim user-visible substrings (ADR-0017).
 //! - [`platform`]: compile-time OS predicates.
 //! - [`proc`]: subprocess runner trait + real/fake implementations.
 //! - [`clock`]: injectable wall clock with `TK_NOW` override.
@@ -25,7 +24,6 @@ pub mod clock;
 pub mod commands;
 pub mod domain;
 pub mod git;
-pub mod messages;
 pub mod platform;
 pub mod proc;
 pub mod remote;

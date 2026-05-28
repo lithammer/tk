@@ -6,13 +6,15 @@
 //! [`Outcome`] so callers can render diagnostics without this module reaching
 //! for stderr itself.
 //!
-//! Ports `src/git/discovery.zig`; preserves the same variants and the
-//! caller-rendered failure message contract.
+//! Discovery failures are a typed [`DiscoveryError`]: each variant carries its
+//! own user-visible phrasing via `#[error]` (ADR-0017 stable strings), so the
+//! caller renders one line without a central message catalogue.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::messages;
+use thiserror::Error;
+
 use crate::platform;
 use crate::proc::{ProcError, ProcRunner};
 
@@ -25,27 +27,36 @@ pub struct DiscoveredPaths {
     pub toplevel: PathBuf,
 }
 
-/// Outcome of [`discover_paths`]. Each variant maps to a stable, caller-rendered
-/// stderr message; this module never writes to stderr itself.
-#[derive(Debug)]
-pub enum Outcome {
-    Ok(DiscoveredPaths),
+/// Why [`discover_paths`] could not locate the Repository Store.
+///
+/// Each variant's `#[error]` string is the stable user-visible phrasing
+/// (ADR-0017); [`render_failure`] prints it verbatim behind the `tk <command>:`
+/// prefix.
+#[derive(Debug, Error)]
+pub enum DiscoveryError {
     /// `git` is not on PATH (runner returned `ExecutableNotFound`).
+    #[error("git not found on PATH")]
     GitMissing,
-    /// Spawning `git` failed for a reason other than missing binary.
+    /// Spawning `git` failed for a reason other than a missing binary.
+    #[error("failed to invoke git")]
     SpawnFailed,
-    /// `git rev-parse` exited non-zero. Payload is the trimmed stderr if Git
-    /// produced any (caller renders it verbatim); `None` means Git failed
-    /// silently and the caller should render the default not-in-repo message.
+    /// `git rev-parse` exited non-zero. `Some` carries git's trimmed stderr,
+    /// rendered verbatim; `None` (git failed silently) renders the default
+    /// not-in-repo line.
+    #[error("{}", .0.as_deref().unwrap_or("not in a git repository"))]
     GitRejected(Option<String>),
     /// `git rev-parse` exited zero but stdout did not contain both expected
     /// lines.
+    #[error("git produced unexpected rev-parse output")]
     GitOutputUnparseable,
 }
 
 /// Run `git rev-parse --path-format=absolute --git-common-dir --show-toplevel`
 /// through `runner` and classify the result.
-pub fn discover_paths<R: ProcRunner + ?Sized>(runner: &R, cwd: &Path) -> Outcome {
+pub fn discover_paths<R: ProcRunner + ?Sized>(
+    runner: &R,
+    cwd: &Path,
+) -> Result<DiscoveredPaths, DiscoveryError> {
     let argv = [
         "git",
         "rev-parse",
@@ -55,8 +66,8 @@ pub fn discover_paths<R: ProcRunner + ?Sized>(runner: &R, cwd: &Path) -> Outcome
     ];
     let out = match runner.run(&argv, cwd) {
         Ok(out) => out,
-        Err(ProcError::ExecutableNotFound) => return Outcome::GitMissing,
-        Err(ProcError::SpawnFailed) => return Outcome::SpawnFailed,
+        Err(ProcError::ExecutableNotFound) => return Err(DiscoveryError::GitMissing),
+        Err(ProcError::SpawnFailed) => return Err(DiscoveryError::SpawnFailed),
     };
 
     if !out.succeeded() {
@@ -67,9 +78,9 @@ pub fn discover_paths<R: ProcRunner + ?Sized>(runner: &R, cwd: &Path) -> Outcome
             .unwrap_or_else(|e| String::from_utf8_lossy(&e.into_bytes()).into_owned());
         let trimmed = stderr.trim();
         if trimmed.is_empty() {
-            return Outcome::GitRejected(None);
+            return Err(DiscoveryError::GitRejected(None));
         }
-        return Outcome::GitRejected(Some(trimmed.to_string()));
+        return Err(DiscoveryError::GitRejected(Some(trimmed.to_string())));
     }
 
     // Path bytes must round-trip to a real on-disk location, so refuse rather
@@ -78,17 +89,17 @@ pub fn discover_paths<R: ProcRunner + ?Sized>(runner: &R, cwd: &Path) -> Outcome
     // path uses an encoding we cannot represent as `Path` without OS-specific
     // handling (deferred to a follow-up slice).
     let Ok(stdout) = String::from_utf8(out.stdout) else {
-        return Outcome::GitOutputUnparseable;
+        return Err(DiscoveryError::GitOutputUnparseable);
     };
     let mut lines = stdout.split('\n').filter(|line| !line.trim().is_empty());
     let (Some(common_raw), Some(toplevel_raw)) = (lines.next(), lines.next()) else {
-        return Outcome::GitOutputUnparseable;
+        return Err(DiscoveryError::GitOutputUnparseable);
     };
 
     let common = normalize_native_sep(common_raw.trim().to_string());
     let toplevel = normalize_native_sep(toplevel_raw.trim().to_string());
 
-    Outcome::Ok(DiscoveredPaths {
+    Ok(DiscoveredPaths {
         git_common_dir: PathBuf::from(common),
         toplevel: PathBuf::from(toplevel),
     })
@@ -105,33 +116,15 @@ fn normalize_native_sep(s: String) -> String {
     }
 }
 
-/// Render an [`Outcome`] failure to `stderr` with a `tk <command>: ` prefix.
+/// Render a [`DiscoveryError`] to `stderr` behind a `tk <command>: ` prefix.
 ///
-/// Callers branch on `Outcome::Ok` themselves before delegating here; this
-/// helper exists to keep the four discovery failure arms identical across
-/// every command that opens a Repository Store.
+/// The error's `Display` is the stable message (ADR-0017), so this is a single
+/// formatted line shared by every command that opens a Repository Store.
 ///
 /// `command` is the bare subcommand name (`"init"`, `"add"`), without the
 /// `tk ` or the trailing colon — those are formatted in.
-pub fn render_failure<W: Write + ?Sized>(stderr: &mut W, command: &str, outcome: &Outcome) {
-    match outcome {
-        Outcome::Ok(_) => unreachable!("render_failure called on Outcome::Ok"),
-        Outcome::GitMissing => {
-            let _ = writeln!(stderr, "tk {command}: {}", messages::GIT_MISSING);
-        }
-        Outcome::SpawnFailed => {
-            let _ = writeln!(stderr, "tk {command}: {}", messages::GIT_SPAWN_FAILED);
-        }
-        Outcome::GitRejected(Some(msg)) => {
-            let _ = writeln!(stderr, "tk {command}: {msg}");
-        }
-        Outcome::GitRejected(None) => {
-            let _ = writeln!(stderr, "tk {command}: {}", messages::GIT_OUTSIDE_DEFAULT);
-        }
-        Outcome::GitOutputUnparseable => {
-            let _ = writeln!(stderr, "tk {command}: {}", messages::GIT_UNPARSEABLE);
-        }
-    }
+pub fn render_failure<W: Write + ?Sized>(stderr: &mut W, command: &str, err: &DiscoveryError) {
+    let _ = writeln!(stderr, "tk {command}: {err}");
 }
 
 // ---- Tests --------------------------------------------------------------
@@ -159,7 +152,7 @@ mod tests {
         );
         let outcome = discover_paths(&fake, &cwd());
         match outcome {
-            Outcome::Ok(paths) => {
+            Ok(paths) => {
                 if platform::IS_WINDOWS {
                     assert_eq!(paths.git_common_dir, PathBuf::from("\\repo\\.git"));
                     assert_eq!(paths.toplevel, PathBuf::from("\\repo"));
@@ -168,7 +161,7 @@ mod tests {
                     assert_eq!(paths.toplevel, PathBuf::from("/repo"));
                 }
             }
-            other => panic!("expected Ok, got {other:?}"),
+            Err(other) => panic!("expected Ok, got {other:?}"),
         }
     }
 
@@ -185,7 +178,7 @@ mod tests {
             },
         );
         match discover_paths(&fake, &cwd()) {
-            Outcome::GitRejected(Some(msg)) => assert_eq!(
+            Err(DiscoveryError::GitRejected(Some(msg))) => assert_eq!(
                 msg,
                 "fatal: not a git repository (or any of the parent directories): .git"
             ),
@@ -206,7 +199,7 @@ mod tests {
         );
         assert!(matches!(
             discover_paths(&fake, &cwd()),
-            Outcome::GitRejected(None)
+            Err(DiscoveryError::GitRejected(None))
         ));
     }
 
@@ -223,7 +216,7 @@ mod tests {
         );
         assert!(matches!(
             discover_paths(&fake, &cwd()),
-            Outcome::GitOutputUnparseable
+            Err(DiscoveryError::GitOutputUnparseable)
         ));
     }
 
@@ -240,7 +233,7 @@ mod tests {
         );
         assert!(matches!(
             discover_paths(&fake, &cwd()),
-            Outcome::GitOutputUnparseable
+            Err(DiscoveryError::GitOutputUnparseable)
         ));
     }
 
@@ -251,7 +244,7 @@ mod tests {
         };
         assert!(matches!(
             discover_paths(&runner, &cwd()),
-            Outcome::GitMissing
+            Err(DiscoveryError::GitMissing)
         ));
     }
 
@@ -262,45 +255,45 @@ mod tests {
         };
         assert!(matches!(
             discover_paths(&runner, &cwd()),
-            Outcome::SpawnFailed
+            Err(DiscoveryError::SpawnFailed)
         ));
     }
 
     #[test]
     fn render_failure_formats_each_arm() {
         let mut buf = Vec::new();
-        render_failure(&mut buf, "init", &Outcome::GitMissing);
+        render_failure(&mut buf, "init", &DiscoveryError::GitMissing);
         assert_eq!(
             std::str::from_utf8(&buf).unwrap(),
-            format!("tk init: {}\n", messages::GIT_MISSING)
+            "tk init: git not found on PATH\n"
         );
 
         let mut buf = Vec::new();
-        render_failure(&mut buf, "add", &Outcome::SpawnFailed);
+        render_failure(&mut buf, "add", &DiscoveryError::SpawnFailed);
         assert_eq!(
             std::str::from_utf8(&buf).unwrap(),
-            format!("tk add: {}\n", messages::GIT_SPAWN_FAILED)
+            "tk add: failed to invoke git\n"
         );
 
         let mut buf = Vec::new();
-        render_failure(&mut buf, "init", &Outcome::GitOutputUnparseable);
+        render_failure(&mut buf, "init", &DiscoveryError::GitOutputUnparseable);
         assert_eq!(
             std::str::from_utf8(&buf).unwrap(),
-            format!("tk init: {}\n", messages::GIT_UNPARSEABLE)
+            "tk init: git produced unexpected rev-parse output\n"
         );
 
         let mut buf = Vec::new();
-        render_failure(&mut buf, "init", &Outcome::GitRejected(None));
+        render_failure(&mut buf, "init", &DiscoveryError::GitRejected(None));
         assert_eq!(
             std::str::from_utf8(&buf).unwrap(),
-            format!("tk init: {}\n", messages::GIT_OUTSIDE_DEFAULT)
+            "tk init: not in a git repository\n"
         );
 
         let mut buf = Vec::new();
         render_failure(
             &mut buf,
             "add",
-            &Outcome::GitRejected(Some("fatal: not a git repository".to_string())),
+            &DiscoveryError::GitRejected(Some("fatal: not a git repository".to_string())),
         );
         assert_eq!(
             std::str::from_utf8(&buf).unwrap(),

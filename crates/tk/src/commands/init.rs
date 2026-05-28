@@ -16,8 +16,7 @@ use clap::Args as ClapArgs;
 use rusqlite::{Connection, OpenFlags};
 
 use crate::cli::Deps;
-use crate::git::discovery::{self, DiscoveredPaths, Outcome};
-use crate::messages;
+use crate::git::discovery::{self, DiscoveredPaths};
 use crate::platform;
 use crate::store::{display_prefix, migrations};
 
@@ -49,11 +48,10 @@ pub enum StoreKind {
 /// pragmas → migrations → seed pipeline.
 #[must_use]
 pub fn run(deps: Deps<'_>, _args: Args) -> u8 {
-    let outcome = discovery::discover_paths(deps.runner, deps.cwd);
-    let paths = match outcome {
-        Outcome::Ok(p) => p,
-        other => {
-            discovery::render_failure(deps.stderr, "init", &other);
+    let paths = match discovery::discover_paths(deps.runner, deps.cwd) {
+        Ok(p) => p,
+        Err(err) => {
+            discovery::render_failure(deps.stderr, "init", &err);
             return 1;
         }
     };
@@ -113,9 +111,8 @@ pub fn run(deps: Deps<'_>, _args: Args) -> u8 {
         StoreKind::Foreign => {
             let _ = writeln!(
                 deps.stderr,
-                "tk init: {} exists but is {}",
+                "tk init: {} exists but is not a tk Repository Store",
                 db_path.display(),
-                messages::INIT_REFUSE_FOREIGN
             );
             return 1;
         }
@@ -138,9 +135,8 @@ pub fn run(deps: Deps<'_>, _args: Args) -> u8 {
             migrations::ApplyError::StoreFromFutureVersion => {
                 let _ = writeln!(
                     deps.stderr,
-                    "tk init: {} was created by a {}",
+                    "tk init: {} was created by a newer tk version",
                     db_path.display(),
-                    messages::INIT_REFUSE_FUTURE_VERSION
                 );
             }
             migrations::ApplyError::Sqlite(sqlite_err) => {
@@ -155,10 +151,12 @@ pub fn run(deps: Deps<'_>, _args: Args) -> u8 {
         return 1;
     }
 
+    // ADR-0017 stable status lines; the trailing space is intentional — the
+    // db path is appended directly after the prefix.
     let prefix = if is_existing {
-        messages::INIT_SUCCESS_EXISTING
+        "Repository Store already initialized at "
     } else {
-        messages::INIT_SUCCESS_FRESH
+        "Initialized Repository Store at "
     };
     let _ = writeln!(deps.stdout, "{prefix}{}", db_path.display());
     0
@@ -402,7 +400,7 @@ mod tests {
         let code = run(h.deps(), Args {});
         assert_eq!(code, 1);
         let stderr = String::from_utf8_lossy(&h.stderr);
-        assert!(stderr.contains(messages::GIT_OUTSIDE_DEFAULT));
+        assert!(stderr.contains("not in a git repository"));
     }
 
     // `--help` and `--version` rendering moved to clap-derive in cli.rs;
@@ -425,7 +423,7 @@ mod tests {
         let code = run(h.deps(), Args {});
         assert_eq!(code, 0);
         let stdout = String::from_utf8_lossy(&h.stdout);
-        assert!(stdout.contains(messages::INIT_SUCCESS_FRESH));
+        assert!(stdout.contains("Initialized Repository Store at "));
         assert!(h.stderr.is_empty());
 
         let conn = Connection::open(store.db_path()).unwrap();
@@ -489,7 +487,7 @@ mod tests {
             let code = run(h.deps(), Args {});
             assert_eq!(code, 0);
             let stdout = String::from_utf8_lossy(&h.stdout);
-            assert!(stdout.contains(messages::INIT_SUCCESS_EXISTING));
+            assert!(stdout.contains("Repository Store already initialized at "));
         }
 
         let conn = Connection::open(store.db_path()).unwrap();
@@ -551,7 +549,7 @@ mod tests {
         let code = run(h.deps(), Args {});
         assert_eq!(code, 1);
         let stderr = String::from_utf8_lossy(&h.stderr);
-        assert!(stderr.contains(messages::INIT_REFUSE_FOREIGN));
+        assert!(stderr.contains("not a tk Repository Store"));
         drop(store);
     }
 
@@ -582,7 +580,7 @@ mod tests {
         let code = run(h.deps(), Args {});
         assert_eq!(code, 1);
         let stderr = String::from_utf8_lossy(&h.stderr);
-        assert!(stderr.contains(messages::INIT_REFUSE_FUTURE_VERSION));
+        assert!(stderr.contains("newer tk version"));
         drop(store);
     }
 
@@ -601,6 +599,6 @@ mod tests {
         let code = run(h.deps(), Args {});
         assert_eq!(code, 1);
         let stderr = String::from_utf8_lossy(&h.stderr);
-        assert!(stderr.contains(messages::GIT_UNPARSEABLE));
+        assert!(stderr.contains("git produced unexpected rev-parse output"));
     }
 }

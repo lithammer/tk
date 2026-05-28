@@ -71,10 +71,9 @@ pub enum OpenOutcome {
     /// Repository Store was opened and is at a schema version this binary
     /// understands.
     Ok(Store),
-    /// `git rev-parse` failed; the wrapped [`discovery::Outcome`] carries
-    /// the exact message shape so the standard discovery renderer can
-    /// format it.
-    DiscoveryFailed(discovery::Outcome),
+    /// `git rev-parse` failed; the wrapped [`discovery::DiscoveryError`] carries
+    /// the exact message so the standard discovery renderer can format it.
+    DiscoveryFailed(discovery::DiscoveryError),
     /// `<git-common-dir>/tk/tk.db` does not exist; the user has not run
     /// `tk init` in this repository.
     StoreMissing,
@@ -103,10 +102,9 @@ pub fn open_existing<R: ProcRunner + ?Sized>(
     runner: &R,
     cwd: &Path,
 ) -> Result<OpenOutcome, OpenError> {
-    let discovery_outcome = discovery::discover_paths(runner, cwd);
-    let paths = match discovery_outcome {
-        discovery::Outcome::Ok(p) => p,
-        failure => return Ok(OpenOutcome::DiscoveryFailed(failure)),
+    let paths = match discovery::discover_paths(runner, cwd) {
+        Ok(p) => p,
+        Err(failure) => return Ok(OpenOutcome::DiscoveryFailed(failure)),
     };
     let db_path = paths.git_common_dir.join("tk").join("tk.db");
 
