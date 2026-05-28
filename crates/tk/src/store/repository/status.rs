@@ -6,7 +6,7 @@
 //! bumping `updated_at` or writing a Mutation row.
 //!
 //! ADR-0006 makes `Done` terminal in v1. A pre-read short-circuit refuses
-//! any request that would leave `Done`, returning [`SetStatusOutcome::LockedDone`]
+//! any request that would leave `Done`, returning [`SetStatusError::LockedDone`]
 //! so callers can render a typed diagnostic before the
 //! `items_no_escape_from_done` schema trigger fires. The trigger remains
 //! as defence-in-depth for write paths that skip the pre-read.
@@ -41,23 +41,21 @@ pub struct StatusChangedItem {
     pub status: ItemStatus,
 }
 
-/// Outcome of [`set_item_status`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SetStatusOutcome {
-    /// Transition committed (or no-op for an already-current state).
-    Ok(StatusChangedItem),
+/// Why [`set_item_status`] did not commit a transition. Success is
+/// `Ok(StatusChangedItem)` — a real transition or a no-op for an
+/// already-current state. The miss variants render at exit 1; the `#[error]`
+/// strings are internal — `tk start/stop/done` interpolate the id into their
+/// own lines, and `tk worktree start` treats a miss as a best-effort no-op.
+#[derive(Debug, thiserror::Error)]
+pub enum SetStatusError {
     /// The requested `id` does not resolve to a live row.
+    #[error("item not found")]
     NotFound,
     /// Refused: the item is already `Done` and the request is for any
     /// non-`Done` status. Carries the persisted [`ItemClass`] so callers
     /// can render "Ticket" vs "Epic" without a second round-trip.
+    #[error("item is already done")]
     LockedDone(ItemClass),
-}
-
-/// Errors that surface as exit-code 3 ("internal error"). Domain misses
-/// — not found, locked-done — ride on [`SetStatusOutcome`] instead.
-#[derive(Debug, thiserror::Error)]
-pub enum SetStatusError {
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
@@ -69,7 +67,7 @@ pub fn set_item_status<C: Clock + ?Sized>(
     store: &mut Store,
     clock: &C,
     req: SetStatusRequest<'_>,
-) -> Result<SetStatusOutcome, SetStatusError> {
+) -> Result<StatusChangedItem, SetStatusError> {
     let now_iso = clock.now_iso();
     let tx = store.conn.transaction()?;
 
@@ -90,7 +88,7 @@ pub fn set_item_status<C: Clock + ?Sized>(
         .ok();
     let Some((origin_text, status_text, class_text, display_id, title)) = current else {
         // No write happened — drop the transaction implicitly.
-        return Ok(SetStatusOutcome::NotFound);
+        return Err(SetStatusError::NotFound);
     };
 
     let origin = origin_from_text(&origin_text);
@@ -99,17 +97,17 @@ pub fn set_item_status<C: Clock + ?Sized>(
 
     if current_status == ItemStatus::Done && req.status != ItemStatus::Done {
         tx.commit()?;
-        return Ok(SetStatusOutcome::LockedDone(item_class));
+        return Err(SetStatusError::LockedDone(item_class));
     }
 
     if current_status == req.status {
         tx.commit()?;
-        return Ok(SetStatusOutcome::Ok(StatusChangedItem {
+        return Ok(StatusChangedItem {
             display_id,
             title,
             item_class,
             status: req.status,
-        }));
+        });
     }
 
     tx.execute(
@@ -131,12 +129,12 @@ pub fn set_item_status<C: Clock + ?Sized>(
     }
 
     tx.commit()?;
-    Ok(SetStatusOutcome::Ok(StatusChangedItem {
+    Ok(StatusChangedItem {
         display_id,
         title,
         item_class,
         status: req.status,
-    }))
+    })
 }
 
 #[cfg(test)]
@@ -209,7 +207,7 @@ mod tests {
         let mut store = open_seeded();
         seed_open_ticket(&store, "t1", "tk-1", 1);
 
-        let outcome = set_item_status(
+        let item = set_item_status(
             &mut store,
             &clock(),
             SetStatusRequest {
@@ -219,10 +217,6 @@ mod tests {
         )
         .unwrap();
 
-        let item = match outcome {
-            SetStatusOutcome::Ok(item) => item,
-            other => panic!("expected Ok, got {other:?}"),
-        };
         assert_eq!(item.status, ItemStatus::Active);
         assert_eq!(item.item_class, ItemClass::Ticket);
 
@@ -300,7 +294,7 @@ mod tests {
         let mut store = open_seeded();
         seed_done_ticket(&store, "t1", "tk-1", 1);
 
-        let outcome = set_item_status(
+        let err = set_item_status(
             &mut store,
             &clock(),
             SetStatusRequest {
@@ -308,8 +302,11 @@ mod tests {
                 status: ItemStatus::Open,
             },
         )
-        .unwrap();
-        assert_eq!(outcome, SetStatusOutcome::LockedDone(ItemClass::Ticket));
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            SetStatusError::LockedDone(ItemClass::Ticket)
+        ));
 
         let stored: String = store
             .conn
@@ -323,7 +320,7 @@ mod tests {
         let mut store = open_seeded();
         seed_done_ticket(&store, "t1", "tk-1", 1);
 
-        let outcome = set_item_status(
+        let item = set_item_status(
             &mut store,
             &clock(),
             SetStatusRequest {
@@ -332,16 +329,13 @@ mod tests {
             },
         )
         .unwrap();
-        match outcome {
-            SetStatusOutcome::Ok(item) => assert_eq!(item.status, ItemStatus::Done),
-            other => panic!("expected Ok, got {other:?}"),
-        }
+        assert_eq!(item.status, ItemStatus::Done);
     }
 
     #[test]
     fn unknown_id_returns_not_found() {
         let mut store = open_seeded();
-        let outcome = set_item_status(
+        let err = set_item_status(
             &mut store,
             &clock(),
             SetStatusRequest {
@@ -349,7 +343,7 @@ mod tests {
                 status: ItemStatus::Active,
             },
         )
-        .unwrap();
-        assert_eq!(outcome, SetStatusOutcome::NotFound);
+        .unwrap_err();
+        assert!(matches!(err, SetStatusError::NotFound));
     }
 }

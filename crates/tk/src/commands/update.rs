@@ -17,7 +17,7 @@ use crate::commands::message::{self, Input as MessageInput};
 use crate::commands::resolver;
 use crate::domain::item_class::ItemClass;
 use crate::domain::priority::Priority;
-use crate::store::repository::update::{self, ParentOp, UpdateOutcome, UpdateRequest};
+use crate::store::repository::update::{self, ParentOp, UpdateRequest};
 
 const COMMAND: &str = "update";
 
@@ -179,20 +179,8 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
         parent: parent_op,
     };
 
-    let outcome = match update::update_item(&mut store, clock, req) {
-        Ok(outcome) => outcome,
-        Err(update::UpdateError::Sqlite(err)) => {
-            resolver::render_storage_error(stderr, COMMAND, &err);
-            return 1;
-        }
-        Err(update::UpdateError::Mutation(err)) => {
-            let _ = writeln!(stderr, "tk update: failed to append Mutation: {err}");
-            return 1;
-        }
-    };
-
-    match outcome {
-        UpdateOutcome::Ok(updated) => {
+    match update::update_item(&mut store, clock, req) {
+        Ok(updated) => {
             let label = match updated.item_class {
                 ItemClass::Ticket => "Updated Ticket",
                 ItemClass::Epic => "Updated Epic",
@@ -204,12 +192,20 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
             );
             0
         }
-        UpdateOutcome::NotFound => {
+        Err(update::UpdateError::NotFound) => {
             let _ = writeln!(
                 stderr,
                 "tk update: '{id}' is not a known Display ID or Alias",
                 id = args.id
             );
+            1
+        }
+        Err(update::UpdateError::Sqlite(err)) => {
+            resolver::render_storage_error(stderr, COMMAND, &err);
+            1
+        }
+        Err(update::UpdateError::Mutation(err)) => {
+            let _ = writeln!(stderr, "tk update: failed to append Mutation: {err}");
             1
         }
     }

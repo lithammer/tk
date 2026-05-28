@@ -66,16 +66,14 @@ pub struct UpdatedItem {
     pub item_class: ItemClass,
 }
 
-/// Outcome of [`update_item`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UpdateOutcome {
-    Ok(UpdatedItem),
-    /// `id` does not resolve to a live row.
-    NotFound,
-}
-
+/// Why [`update_item`] did not return an [`UpdatedItem`]. `NotFound` renders
+/// at exit 1; its `#[error]` string is internal — `tk update` interpolates the
+/// id into its own line.
 #[derive(Debug, thiserror::Error)]
 pub enum UpdateError {
+    /// `id` does not resolve to a live row.
+    #[error("item not found")]
+    NotFound,
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
@@ -104,7 +102,7 @@ pub fn update_item<C: Clock + ?Sized>(
     store: &mut Store,
     clock: &C,
     req: UpdateRequest<'_>,
-) -> Result<UpdateOutcome, UpdateError> {
+) -> Result<UpdatedItem, UpdateError> {
     let now_iso = clock.now_iso();
     let tx = store.conn.transaction()?;
 
@@ -130,7 +128,7 @@ pub fn update_item<C: Clock + ?Sized>(
         )
         .ok();
     let Some(current) = current else {
-        return Ok(UpdateOutcome::NotFound);
+        return Err(UpdateError::NotFound);
     };
 
     let new_title: Option<&str> = req
@@ -179,14 +177,14 @@ pub fn update_item<C: Clock + ?Sized>(
             )
             .ok();
         let Some((display_id, title)) = snap else {
-            return Ok(UpdateOutcome::NotFound);
+            return Err(UpdateError::NotFound);
         };
         tx.commit()?;
-        return Ok(UpdateOutcome::Ok(UpdatedItem {
+        return Ok(UpdatedItem {
             display_id,
             title,
             item_class: req.item_class,
-        }));
+        });
     }
 
     let effective_title: &str = new_title.unwrap_or(&current.title);
@@ -255,14 +253,14 @@ pub fn update_item<C: Clock + ?Sized>(
         )
         .ok();
     let Some((display_id, title)) = snap else {
-        return Ok(UpdateOutcome::NotFound);
+        return Err(UpdateError::NotFound);
     };
     tx.commit()?;
-    Ok(UpdateOutcome::Ok(UpdatedItem {
+    Ok(UpdatedItem {
         display_id,
         title,
         item_class: req.item_class,
-    }))
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -390,7 +388,7 @@ mod tests {
         let mut store = open_seeded();
         seed_backend_ticket(&store, "t1", "tk-1", 1);
 
-        let outcome = update_item(
+        let item = update_item(
             &mut store,
             &clock(),
             UpdateRequest {
@@ -402,10 +400,7 @@ mod tests {
             },
         )
         .unwrap();
-        match outcome {
-            UpdateOutcome::Ok(item) => assert_eq!(item.title, "New title"),
-            UpdateOutcome::NotFound => panic!("expected Ok, got NotFound"),
-        }
+        assert_eq!(item.title, "New title");
         let (title, body, updated_at): (String, String, String) = store
             .conn
             .query_row(
@@ -630,7 +625,7 @@ mod tests {
     #[test]
     fn unknown_id_returns_not_found() {
         let mut store = open_seeded();
-        let outcome = update_item(
+        let err = update_item(
             &mut store,
             &clock(),
             UpdateRequest {
@@ -640,8 +635,8 @@ mod tests {
                 ..UpdateRequest::default()
             },
         )
-        .unwrap();
-        assert_eq!(outcome, UpdateOutcome::NotFound);
+        .unwrap_err();
+        assert!(matches!(err, UpdateError::NotFound));
     }
 
     #[test]

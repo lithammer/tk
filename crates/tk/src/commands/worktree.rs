@@ -27,7 +27,7 @@ use crate::git::discovery;
 use crate::proc::{ProcError, ProcRunner};
 use crate::store::repository::Store;
 use crate::store::repository::status::{
-    self as set_status, SetStatusError, SetStatusOutcome, SetStatusRequest,
+    self as set_status, SetStatusError, SetStatusRequest,
 };
 use crate::worktree::scope::{self as worktree_scope, ResolveOutcome, ScopeSource};
 
@@ -314,12 +314,11 @@ fn run_start(deps: Deps<'_>, args: StartArgs) -> u8 {
                 status: ItemStatus::Active,
             },
         );
+        // Marking active is best-effort: a successful transition and the
+        // benign misses (item vanished, already Done) are all no-ops here;
+        // only a genuine storage/mutation fault aborts the worktree command.
         match outcome {
-            Ok(
-                SetStatusOutcome::Ok(_)
-                | SetStatusOutcome::NotFound
-                | SetStatusOutcome::LockedDone(_),
-            ) => {}
+            Ok(_) | Err(SetStatusError::NotFound | SetStatusError::LockedDone(_)) => {}
             Err(SetStatusError::Sqlite(err)) => {
                 resolver::render_storage_error(stderr, "worktree start", &err);
                 return 1;

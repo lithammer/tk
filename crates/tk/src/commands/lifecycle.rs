@@ -11,7 +11,7 @@ use crate::cli::Deps;
 use crate::commands::resolver;
 use crate::domain::item_class::ItemClass;
 use crate::domain::status::ItemStatus;
-use crate::store::repository::status::{self, SetStatusError, SetStatusOutcome, SetStatusRequest};
+use crate::store::repository::status::{self, SetStatusError, SetStatusRequest};
 
 /// Per-command success prefix tokens. `tk start` says "Started Ticket: …";
 /// `tk stop` says "Stopped Ticket: …"; `tk done` says "Done Ticket: …".
@@ -75,7 +75,7 @@ pub fn transition(
         }
     };
 
-    let outcome = match status::set_item_status(
+    match status::set_item_status(
         &mut store,
         clock,
         SetStatusRequest {
@@ -83,24 +83,12 @@ pub fn transition(
             status: target,
         },
     ) {
-        Ok(o) => o,
-        Err(SetStatusError::Sqlite(err)) => {
-            resolver::render_storage_error(stderr, command, &err);
-            return 1;
-        }
-        Err(SetStatusError::Mutation(err)) => {
-            let _ = writeln!(stderr, "tk {command}: failed to append Mutation: {err}");
-            return 1;
-        }
-    };
-
-    match outcome {
-        SetStatusOutcome::Ok(item) => {
+        Ok(item) => {
             let prefix = success.select(item.item_class);
             let _ = writeln!(stdout, "{prefix}{} - {}", item.display_id, item.title);
             0
         }
-        SetStatusOutcome::NotFound => {
+        Err(SetStatusError::NotFound) => {
             // Race: row vanished between resolve and the BEGIN IMMEDIATE.
             let _ = writeln!(
                 stderr,
@@ -108,12 +96,20 @@ pub fn transition(
             );
             1
         }
-        SetStatusOutcome::LockedDone(class) => {
+        Err(SetStatusError::LockedDone(class)) => {
             let _ = writeln!(
                 stderr,
                 "tk {command}: {label} '{id}' is done and cannot be reopened",
                 label = class.label()
             );
+            1
+        }
+        Err(SetStatusError::Sqlite(err)) => {
+            resolver::render_storage_error(stderr, command, &err);
+            1
+        }
+        Err(SetStatusError::Mutation(err)) => {
+            let _ = writeln!(stderr, "tk {command}: failed to append Mutation: {err}");
             1
         }
     }
