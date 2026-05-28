@@ -11,7 +11,7 @@
 //! `items_no_escape_from_done` schema trigger fires. The trigger remains
 //! as defence-in-depth for write paths that skip the pre-read.
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 
 use crate::clock::Clock;
 use crate::domain::item_class::ItemClass;
@@ -85,7 +85,7 @@ pub fn set_item_status<C: Clock + ?Sized>(
                 Ok((origin, status, class, display, title))
             },
         )
-        .ok();
+        .optional()?;
     let Some((origin_text, status_text, class_text, display_id, title)) = current else {
         // No write happened — drop the transaction implicitly.
         return Err(SetStatusError::NotFound);

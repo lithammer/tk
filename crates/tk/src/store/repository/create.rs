@@ -7,7 +7,7 @@
 //! `(display_value, id, display_source) -> item_ids` holds at COMMIT.
 
 use rand::Rng;
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 
 use crate::clock::Clock;
 use crate::domain::item_class::ItemClass;
@@ -219,7 +219,7 @@ fn next_display_id(conn: &rusqlite::Connection) -> Result<String, CreateError> {
             [],
             |r| r.get(0),
         )
-        .ok();
+        .optional()?;
     let prefix = prefix.ok_or(CreateError::DisplayPrefixMissing)?;
     Ok(format!("{prefix}-{display_seq}"))
 }

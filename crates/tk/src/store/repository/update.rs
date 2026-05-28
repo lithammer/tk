@@ -11,7 +11,7 @@
 //! a request whose values all match the stored state commits a no-op
 //! transaction and returns the same snapshot the caller already had.
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 
 use crate::clock::Clock;
 use crate::domain::item_class::ItemClass;
@@ -126,7 +126,7 @@ pub fn update_item<C: Clock + ?Sized>(
                 })
             },
         )
-        .ok();
+        .optional()?;
     let Some(current) = current else {
         return Err(UpdateError::NotFound);
     };
@@ -175,7 +175,7 @@ pub fn update_item<C: Clock + ?Sized>(
                     Ok((display, title))
                 },
             )
-            .ok();
+            .optional()?;
         let Some((display_id, title)) = snap else {
             return Err(UpdateError::NotFound);
         };
@@ -251,7 +251,7 @@ pub fn update_item<C: Clock + ?Sized>(
                 Ok((display, title))
             },
         )
-        .ok();
+        .optional()?;
     let Some((display_id, title)) = snap else {
         return Err(UpdateError::NotFound);
     };
