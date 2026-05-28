@@ -12,9 +12,9 @@
 //! `tk/proj-1-foo-bar` still picks up the `proj-1` Item. Two non-resolving
 //! cases are distinguished:
 //!
-//! - configured value with no `item_ids` row → [`ResolveOutcome::ConfiguredUnresolved`]
+//! - configured value with no `item_ids` row → [`ScopeError::ConfiguredUnresolved`]
 //!   so callers can render `tk worktree: Workspace Scope '<stored>' is not …`.
-//! - branch inference miss → [`ResolveOutcome::None`].
+//! - branch inference miss → `Ok(None)`.
 
 use std::path::Path;
 
@@ -52,16 +52,18 @@ pub struct Raw {
     pub branch_name: Option<String>,
 }
 
-/// Outcome of [`resolve_against_store`].
-#[derive(Debug, Clone)]
-pub enum ResolveOutcome {
-    /// No Workspace Scope.
-    None,
-    /// Configured or inferred scope, resolved to a live item.
-    Scope(Scope),
-    /// `tk.scope` held a value the resolver could not find. Carries the
-    /// stored string so callers can render it verbatim.
+/// Why [`resolve_against_store`] could not produce a Workspace Scope. A
+/// successful resolve returns `Ok(Some(Scope))` (configured or inferred) or
+/// `Ok(None)` (no scope configured and no branch match). `ConfiguredUnresolved`
+/// is the one error: a `tk.scope` value that no longer resolves to a live Item.
+#[derive(Debug, thiserror::Error)]
+pub enum ScopeError {
+    /// `tk.scope` held a value the resolver could not find. Carries the stored
+    /// string so callers can render it verbatim.
+    #[error("workspace scope '{0}' is not a known Display ID or Alias")]
     ConfiguredUnresolved(String),
+    #[error(transparent)]
+    Storage(#[from] rusqlite::Error),
 }
 
 /// Read the two git-side inputs needed to resolve Workspace Scope.
@@ -105,29 +107,25 @@ fn read_single_line<R: ProcRunner + ?Sized>(
 }
 
 /// Resolve raw discovery output against the Repository Store.
-pub fn resolve_against_store(store: &Store, raw: &Raw) -> Result<ResolveOutcome, rusqlite::Error> {
+///
+/// `Ok(Some(scope))` — a configured or branch-inferred scope that resolves;
+/// `Ok(None)` — nothing configured and no branch match; `Err` — a stale
+/// configured value or a SQLite fault.
+pub fn resolve_against_store(store: &Store, raw: &Raw) -> Result<Option<Scope>, ScopeError> {
     if let Some(stored) = raw.configured_value.as_deref() {
         return match crate::store::repository::resolve_item_ref(store.conn(), stored)? {
-            Some(resolved) => Ok(ResolveOutcome::Scope(load_scope(
-                store,
-                &resolved.id,
-                ScopeSource::Configured,
-            )?)),
-            None => Ok(ResolveOutcome::ConfiguredUnresolved(stored.to_owned())),
+            Some(resolved) => Ok(Some(load_scope(store, &resolved.id, ScopeSource::Configured)?)),
+            None => Err(ScopeError::ConfiguredUnresolved(stored.to_owned())),
         };
     }
     if let Some(branch) = raw.branch_name.as_deref() {
         if let Some(tail) = branch.strip_prefix(TICKET_BRANCH_PREFIX) {
             if let Some(item_id) = longest_prefix_match(store, tail)? {
-                return Ok(ResolveOutcome::Scope(load_scope(
-                    store,
-                    &item_id,
-                    ScopeSource::Inferred,
-                )?));
+                return Ok(Some(load_scope(store, &item_id, ScopeSource::Inferred)?));
             }
         }
     }
-    Ok(ResolveOutcome::None)
+    Ok(None)
 }
 
 fn load_scope(store: &Store, item_id: &str, source: ScopeSource) -> Result<Scope, rusqlite::Error> {
@@ -248,37 +246,33 @@ mod tests {
     fn resolves_configured_scope_when_present() {
         let store = open_seeded();
         seed(&store, "t1", "tk-1", 1);
-        let outcome = resolve_against_store(
+        let s = resolve_against_store(
             &store,
             &Raw {
                 configured_value: Some("tk-1".into()),
                 branch_name: Some("tk/other".into()),
             },
         )
-        .unwrap();
-        match outcome {
-            ResolveOutcome::Scope(s) => {
-                assert_eq!(s.source, ScopeSource::Configured);
-                assert_eq!(s.display_id, "tk-1");
-            }
-            other => panic!("expected Scope, got {other:?}"),
-        }
+        .unwrap()
+        .expect("a resolved scope");
+        assert_eq!(s.source, ScopeSource::Configured);
+        assert_eq!(s.display_id, "tk-1");
     }
 
     #[test]
     fn reports_configured_unresolved_when_stored_value_misses() {
         let store = open_seeded();
-        let outcome = resolve_against_store(
+        let err = resolve_against_store(
             &store,
             &Raw {
                 configured_value: Some("nope".into()),
                 branch_name: None,
             },
         )
-        .unwrap();
+        .unwrap_err();
         assert!(matches!(
-            outcome,
-            ResolveOutcome::ConfiguredUnresolved(s) if s == "nope"
+            err,
+            ScopeError::ConfiguredUnresolved(s) if s == "nope"
         ));
     }
 
@@ -286,21 +280,17 @@ mod tests {
     fn infers_scope_from_tk_branch_prefix_match() {
         let store = open_seeded();
         seed(&store, "t1", "tk-1", 1);
-        let outcome = resolve_against_store(
+        let s = resolve_against_store(
             &store,
             &Raw {
                 configured_value: None,
                 branch_name: Some("tk/tk-1-port-the-thing".into()),
             },
         )
-        .unwrap();
-        match outcome {
-            ResolveOutcome::Scope(s) => {
-                assert_eq!(s.source, ScopeSource::Inferred);
-                assert_eq!(s.display_id, "tk-1");
-            }
-            other => panic!("expected Scope, got {other:?}"),
-        }
+        .unwrap()
+        .expect("a resolved scope");
+        assert_eq!(s.source, ScopeSource::Inferred);
+        assert_eq!(s.display_id, "tk-1");
     }
 
     #[test]
@@ -310,18 +300,16 @@ mod tests {
         let store = open_seeded();
         seed(&store, "t-short", "tk-1", 1);
         seed(&store, "t-long", "tk-12", 2);
-        let outcome = resolve_against_store(
+        let s = resolve_against_store(
             &store,
             &Raw {
                 configured_value: None,
                 branch_name: Some("tk/tk-12-foo".into()),
             },
         )
-        .unwrap();
-        match outcome {
-            ResolveOutcome::Scope(s) => assert_eq!(s.display_id, "tk-12"),
-            other => panic!("expected Scope, got {other:?}"),
-        }
+        .unwrap()
+        .expect("a resolved scope");
+        assert_eq!(s.display_id, "tk-12");
     }
 
     #[test]
@@ -336,7 +324,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(matches!(outcome, ResolveOutcome::None));
+        assert!(outcome.is_none());
     }
 
     #[test]
@@ -344,18 +332,16 @@ mod tests {
         let store = open_seeded();
         seed(&store, "t1", "tk-1", 1);
         insert_alias(store.conn(), "alpha", "t1").unwrap();
-        let outcome = resolve_against_store(
+        let s = resolve_against_store(
             &store,
             &Raw {
                 configured_value: None,
                 branch_name: Some("tk/alpha-extra".into()),
             },
         )
-        .unwrap();
-        match outcome {
-            ResolveOutcome::Scope(s) => assert_eq!(s.display_id, "tk-1"),
-            other => panic!("expected Scope, got {other:?}"),
-        }
+        .unwrap()
+        .expect("a resolved scope");
+        assert_eq!(s.display_id, "tk-1");
     }
 
     #[test]

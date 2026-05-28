@@ -42,26 +42,24 @@ pub fn run(deps: Deps<'_>, _args: Args) -> u8 {
     };
 
     let raw = worktree_scope::read_git_side(runner, cwd);
-    let scope = match worktree_scope::resolve_against_store(&store, &raw) {
-        Ok(s) => s,
-        Err(err) => {
-            resolver::render_storage_error(stderr, COMMAND, &err);
-            return 1;
-        }
-    };
-
-    let (next_scope, has_scope) = match &scope {
-        worktree_scope::ResolveOutcome::None => (NextScope::None, false),
-        worktree_scope::ResolveOutcome::Scope(s) => {
-            (NextScope::DisplayArg(s.display_id.as_str()), true)
-        }
-        worktree_scope::ResolveOutcome::ConfiguredUnresolved(stored) => {
+    let resolved_scope = match worktree_scope::resolve_against_store(&store, &raw) {
+        Ok(scope) => scope,
+        Err(worktree_scope::ScopeError::ConfiguredUnresolved(stored)) => {
             let _ = writeln!(
                 stderr,
                 "tk next: Workspace Scope '{stored}' is not a known Display ID or Alias"
             );
             return 1;
         }
+        Err(worktree_scope::ScopeError::Storage(err)) => {
+            resolver::render_storage_error(stderr, COMMAND, &err);
+            return 1;
+        }
+    };
+
+    let (next_scope, has_scope) = match &resolved_scope {
+        None => (NextScope::None, false),
+        Some(s) => (NextScope::DisplayArg(s.display_id.as_str()), true),
     };
 
     match next::next_ready_ticket(&store, NextOptions { scope: next_scope }) {

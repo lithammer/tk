@@ -29,7 +29,7 @@ use crate::store::repository::Store;
 use crate::store::repository::status::{
     self as set_status, SetStatusError, SetStatusRequest,
 };
-use crate::worktree::scope::{self as worktree_scope, ResolveOutcome, ScopeSource};
+use crate::worktree::scope::{self as worktree_scope, ScopeError, ScopeSource};
 
 /// Flags for `tk worktree`.
 #[derive(Debug, ClapArgs)]
@@ -94,19 +94,12 @@ fn run_status(deps: Deps<'_>) -> u8 {
     };
 
     let raw = worktree_scope::read_git_side(runner, cwd);
-    let outcome = match worktree_scope::resolve_against_store(&store, &raw) {
-        Ok(o) => o,
-        Err(err) => {
-            resolver::render_storage_error(stderr, "worktree", &err);
-            return 1;
-        }
-    };
-    match outcome {
-        ResolveOutcome::None => {
+    match worktree_scope::resolve_against_store(&store, &raw) {
+        Ok(None) => {
             let _ = writeln!(stdout, "No Workspace Scope.");
             0
         }
-        ResolveOutcome::Scope(s) => {
+        Ok(Some(s)) => {
             let _ = writeln!(stdout, "Scope:  {} - {}", s.display_id, s.title);
             match s.source {
                 ScopeSource::Configured => {
@@ -119,11 +112,15 @@ fn run_status(deps: Deps<'_>) -> u8 {
             }
             0
         }
-        ResolveOutcome::ConfiguredUnresolved(stored) => {
+        Err(ScopeError::ConfiguredUnresolved(stored)) => {
             let _ = writeln!(
                 stderr,
                 "tk worktree: Workspace Scope '{stored}' is not a known Display ID or Alias"
             );
+            1
+        }
+        Err(ScopeError::Storage(err)) => {
+            resolver::render_storage_error(stderr, "worktree", &err);
             1
         }
     }
