@@ -80,35 +80,7 @@ pub fn parse_from_paragraphs(paragraphs: &[String]) -> Result<ParsedMessage, Par
 }
 
 fn normalize_line_endings(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    let bytes = raw.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b == b'\r' {
-            out.push('\n');
-            i += 1;
-            if i < bytes.len() && bytes[i] == b'\n' {
-                i += 1;
-            }
-            continue;
-        }
-        // Safe: the original string was UTF-8 and we only branch on ASCII
-        // bytes; copying the full UTF-8 char keeps multi-byte sequences
-        // intact.
-        let ch_end = next_char_boundary(bytes, i);
-        out.push_str(&raw[i..ch_end]);
-        i = ch_end;
-    }
-    out
-}
-
-fn next_char_boundary(bytes: &[u8], start: usize) -> usize {
-    let mut end = start + 1;
-    while end < bytes.len() && (bytes[end] & 0xc0) == 0x80 {
-        end += 1;
-    }
-    end
+    raw.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 fn is_blank(line: &str) -> bool {
