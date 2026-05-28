@@ -9,7 +9,7 @@
 //! a handler in [`commands`]; clap takes care of `--help`, `-h`, `--version`,
 //! `-V`, and suggestion-style errors on typos.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 
 use clap::{Parser, Subcommand};
@@ -32,6 +32,9 @@ use crate::render::Styler;
 pub struct Deps<'a> {
     pub stdout: &'a mut dyn Write,
     pub stderr: &'a mut dyn Write,
+    /// Stdin reader; consumed only by write commands that accept
+    /// `-F -` to read a Ticket message from a pipe.
+    pub stdin: &'a mut dyn Read,
     pub runner: &'a dyn ProcRunner,
     pub clock: &'a dyn Clock,
     pub rng: &'a mut dyn Rng,
@@ -62,6 +65,8 @@ struct Cli {
 /// to land a new command.
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Create a local Ticket or Epic.
+    Add(commands::add::Args),
     /// Initialize the Repository Store in the current Git repository.
     Init(commands::init::Args),
     /// Render the Repository Store List Tree.
@@ -85,6 +90,7 @@ pub fn run_argv(deps: Deps<'_>, argv: &[String]) -> std::io::Result<u8> {
         Err(err) => return Ok(render_clap_error(deps, &err)),
     };
     match cli.command {
+        Command::Add(args) => Ok(commands::add::run(deps, args)),
         Command::Init(args) => Ok(commands::init::run(deps, args)),
         Command::List(args) => Ok(commands::list::run(deps, args)),
         Command::Next(args) => Ok(commands::next::run(deps, args)),

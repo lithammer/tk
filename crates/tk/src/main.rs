@@ -40,6 +40,8 @@ fn main() -> ExitCode {
     // itself.
     let mut stdout = anstream::AutoStream::new(io::stdout().lock(), to_anstream(styler.stdout));
     let mut stderr = anstream::AutoStream::new(io::stderr().lock(), to_anstream(styler.stderr));
+    let stdin_handle = io::stdin();
+    let mut stdin = stdin_handle.lock();
 
     let runner = tk::proc::RealRunner::new();
     let clock = tk::clock::RealClock::new();
@@ -69,6 +71,7 @@ fn main() -> ExitCode {
     let deps = cli::Deps {
         stdout: &mut stdout,
         stderr: &mut stderr,
+        stdin: &mut stdin,
         runner: &runner,
         clock: &clock,
         rng: &mut rng,

@@ -385,6 +385,7 @@ mod tests {
     struct Harness<'a> {
         stdout: Vec<u8>,
         stderr: Vec<u8>,
+        stdin: std::io::Cursor<Vec<u8>>,
         runner: FakeRunner,
         clock: FakeClock,
         rng: StdRng,
@@ -396,6 +397,7 @@ mod tests {
             Self {
                 stdout: Vec::new(),
                 stderr: Vec::new(),
+                stdin: std::io::Cursor::new(Vec::new()),
                 runner: FakeRunner::new(),
                 clock: FakeClock::new(1_778_284_800_000),
                 rng: StdRng::seed_from_u64(0),
@@ -406,6 +408,7 @@ mod tests {
             Deps {
                 stdout: &mut self.stdout,
                 stderr: &mut self.stderr,
+                stdin: &mut self.stdin,
                 runner: &self.runner,
                 clock: &self.clock,
                 rng: &mut self.rng,
