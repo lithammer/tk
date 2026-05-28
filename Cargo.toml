@@ -1,0 +1,66 @@
+[workspace]
+resolver = "3"
+members = ["crates/tk"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+repository = "https://github.com/lithammer/tk"
+
+# Slice 0 ratifies the lint posture for every downstream slice. `pedantic` is
+# enabled as warnings from day one (cheap on greenfield, expensive to retrofit)
+# per ADR-0018. The allow-list below is the working draft discovered while
+# porting `tk init`; CI flips to `-D warnings` only once it has settled.
+#
+# `nursery` and `restriction` are excluded as groups: `nursery` ships WIP lints,
+# `restriction` contains mutually-contradictory rules. Pull individual lints
+# from either only when specifically motivated.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+
+# tk's domain-qualified names (Repository Store, Workspace Scope, Display ID)
+# produce types like `store::Store`, `mutation::Mutation`. Renaming for the
+# lint would erase the vocabulary that CONTEXT.md keeps in lockstep.
+module_name_repetitions = "allow"
+
+# Doc comments anchor in CONTEXT.md prose — "Repository Store", "Display ID",
+# "Workspace Scope" appear constantly and are vocabulary, not code symbols.
+# Backticking each occurrence would noisy them up without aiding navigation.
+doc_markdown = "allow"
+
+# Typed errors in slice 0 are already `thiserror`-annotated; the function-level
+# `# Errors` section duplicates the `#[error("…")]` strings. Same for
+# `# Panics`: command-side stderr (ADR-0017) is the user-facing failure
+# contract, and library panics are reserved for truly unreachable invariants
+# documented inline. Revisit if we expose tk as a library to third parties.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+# `Deps<'_>` is a borrowed view of injectables; passing it by value mirrors the
+# Zig oracle's `cli.Deps` and keeps command handler signatures free of
+# wildcard lifetimes.
+needless_pass_by_value = "allow"
+
+# Style: a nested `if` reads better than `if a && b` when each predicate has
+# its own paragraph of justification or when one of the inner branches grows
+# during a later slice. The Zig oracle nests for the same reason.
+collapsible_if = "allow"
+collapsible_else_if = "allow"
+
+# Command handlers (and the scenario script executor) are intentionally
+# straight-line — each top-level step of `tk init` (discovery, classify,
+# pragmas, migrations, seed, render) is one block in one function. Splitting
+# for the 100-line cap forces an arbitrary boundary that hurts readability
+# more than it helps; the slice 0 idiom is to keep command pipelines together.
+too_many_lines = "allow"
+
+[profile.release]
+# Single static binary is part of the distribution contract (ADR-0011/0012);
+# LTO + strip make `cargo-zigbuild` artifacts comparable to the Zig build.
+lto = "thin"
+strip = "symbols"
+codegen-units = 1
