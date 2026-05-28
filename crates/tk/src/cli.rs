@@ -49,10 +49,16 @@ pub struct Deps<'a> {
 }
 
 /// Top-level argument parser.
+///
+/// `version = env!("TK_VERSION_STRING")` makes `tk --version` emit
+/// `v<crate-version> (<triple>)` — the shape `tk self-update`'s smoke
+/// verification (ADR-0013) scans for the embedded tag and triple as whole
+/// tokens. `build.rs` injects `TK_VERSION_STRING`; the dev-build refusal
+/// branch in `commands::self_update` keys off the `dev` triple sentinel.
 #[derive(Debug, Parser)]
 #[command(
     name = "tk",
-    version,
+    version = env!("TK_VERSION_STRING"),
     about = "Repository-local work tracker",
     disable_help_subcommand = true
 )]
@@ -93,6 +99,8 @@ enum Command {
     Prime(commands::prime::Args),
     /// Print or install the tk manpage.
     Manpage(commands::manpage::Args),
+    /// Replace the running tk binary with the latest release.
+    SelfUpdate(commands::self_update::Args),
 }
 
 /// Entrypoint that the binary's `main.rs` and the scenario harness share.
@@ -122,6 +130,7 @@ pub fn run_argv(deps: Deps<'_>, argv: &[String]) -> std::io::Result<u8> {
         Command::Worktree(args) => Ok(commands::worktree::run(deps, args)),
         Command::Prime(args) => Ok(commands::prime::run(deps, args)),
         Command::Manpage(args) => Ok(commands::manpage::run(deps, args)),
+        Command::SelfUpdate(args) => Ok(commands::self_update::run(deps, args)),
     }
 }
 

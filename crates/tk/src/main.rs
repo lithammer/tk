@@ -14,6 +14,15 @@ use tk::cli;
 use tk::render::{ColorChoice, resolve_styler_from_env};
 
 fn main() -> ExitCode {
+    // Best-effort sweep of a `tk.exe.old` sidecar left by a prior Windows
+    // self-update commit. Safe to call early — the helper guards against
+    // deleting the user's only recoverable copy when the canonical binary
+    // is missing. POSIX self-updates use atomic rename and need no
+    // cross-launch cleanup.
+    if tk::platform::IS_WINDOWS {
+        tk::commands::self_update::cleanup_stale_exe();
+    }
+
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let cwd = match std::env::current_dir() {
         Ok(p) => p,

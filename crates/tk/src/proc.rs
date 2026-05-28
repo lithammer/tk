@@ -8,7 +8,7 @@
 //! `tk init` only spawns `git rev-parse`, but the trait must already be shaped
 //! correctly for downstream slices (see [`crate::git::discovery`]).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use thiserror::Error;
@@ -103,10 +103,15 @@ impl ProcRunner for RealRunner {
 #[derive(Debug, Clone)]
 pub struct FakeCall {
     /// Argv prefix that must match (e.g. `["git", "rev-parse"]`). Extra args
-    /// beyond the prefix are allowed; this mirrors `fake_runner.expect` in
-    /// the Zig oracle.
+    /// beyond the prefix are allowed.
     pub argv_prefix: Vec<String>,
     pub output: RunOutput,
+    /// Optional file write performed before the call returns. Models
+    /// commands that drop bytes to disk as a side effect — currently
+    /// `curl -o <stage_path>` in [`crate::commands::self_update`] — so the
+    /// in-process FakeRunner stays a sufficient seam without mutating PATH
+    /// or shelling out to a real shim.
+    pub side_effect_write: Option<(PathBuf, Vec<u8>)>,
 }
 
 /// Strict subprocess fake: an unmatched call panics so a regression that
@@ -128,6 +133,25 @@ impl FakeRunner {
         self.calls.borrow_mut().push(FakeCall {
             argv_prefix: argv_prefix.iter().map(|s| (*s).to_string()).collect(),
             output,
+            side_effect_write: None,
+        });
+    }
+
+    /// Queue a scripted response that also writes `body` to `path` before
+    /// returning. Models `curl -o <stage_path>` so [`crate::commands::self_update`]
+    /// tests can exercise stage → smoke → rename end-to-end without a real
+    /// curl binary on PATH.
+    pub fn expect_writing(
+        &self,
+        argv_prefix: &[&str],
+        output: RunOutput,
+        path: PathBuf,
+        body: Vec<u8>,
+    ) {
+        self.calls.borrow_mut().push(FakeCall {
+            argv_prefix: argv_prefix.iter().map(|s| (*s).to_string()).collect(),
+            output,
+            side_effect_write: Some((path, body)),
         });
     }
 }
@@ -157,6 +181,11 @@ impl ProcRunner for FakeRunner {
             expected.argv_prefix,
             argv
         );
+        if let Some((ref path, ref body)) = expected.side_effect_write {
+            std::fs::write(path, body).unwrap_or_else(|err| {
+                panic!("FakeRunner side-effect write to {}: {err}", path.display())
+            });
+        }
         Ok(expected.output)
     }
 }

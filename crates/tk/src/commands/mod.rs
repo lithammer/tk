@@ -14,6 +14,7 @@ pub mod message;
 pub mod next;
 pub mod prime;
 pub mod resolver;
+pub mod self_update;
 pub mod show;
 pub mod start;
 pub mod stop;
