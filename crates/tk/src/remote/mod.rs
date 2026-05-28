@@ -8,6 +8,7 @@
 //! and the test-only [`fake::FakeAdapter`] the engine's tests substitute.
 
 pub mod adapter;
+pub mod factory;
 
 #[cfg(test)]
 pub mod fake;
