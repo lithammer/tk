@@ -2,57 +2,29 @@
 //!
 //! Every item command runs the same prologue: open the Repository Store,
 //! then resolve a Display ID or Alias into an internal stable item ID.
-//! This module exposes the prologue plus typed error enums; per-command
-//! handlers render the diagnostic with their stable phrasing (ADR-0017)
-//! and return exit code 1.
-//!
-//! Errors are the standard Rust `Result` shape: [`OpenError`],
-//! [`ResolveError`], [`ResolveEpicError`]. They carry the failure
-//! discriminator (`NotFound`, `NotAnEpic`, an underlying SQLite error)
-//! without baking in any rendering templates — the caller owns the
-//! per-command phrasing.
+//! This module owns the typed errors that prologue can raise plus the
+//! shared stderr-rendering helpers; the per-command not-found phrasing
+//! is owned by the command itself, inlined into its own typed error
+//! variant.
 
 use std::io::Write;
 use std::path::Path;
 
+use thiserror::Error;
+
 use crate::git::discovery::{self, Outcome as DiscoveryOutcome};
-use crate::messages;
 use crate::proc::ProcRunner;
 use crate::store::repository::{
     self, OpenError as RepoOpenError, OpenOutcome, ResolveEpicOutcome,
     ResolveEpicWithDisplayOutcome, ResolvedItemRef, ResolvedItemRefWithDisplay, Store,
 };
 
-/// Per-command storage-error phrasing for the [`render_storage_error`]
-/// helper. `fallback` is the non-transient diagnostic; the renderer
-/// appends the underlying error's `Display` so the SQLite errmsg reaches
-/// stderr verbatim.
-#[derive(Debug, Clone, Copy)]
-pub struct StorageErrorMessages {
-    pub busy_retry: &'static str,
-    pub out_of_memory: &'static str,
-    pub fallback: &'static str,
-}
-
-/// Per-command phrasing for [`render_open_error`].
-#[derive(Debug, Clone, Copy)]
-pub struct OpenErrorMessages {
-    /// Subcommand name as it appears in diagnostics, e.g. `"show"`.
-    pub command_name: &'static str,
-    /// Pre-formatted "Repository Store not initialized" line.
-    pub missing_store: &'static str,
-    pub storage: StorageErrorMessages,
-}
-
-/// Result of [`open_for_command`].
-pub struct OpenedStore {
-    pub store: Store,
-    pub storage: StorageErrorMessages,
-}
-
-/// Failure of [`open_for_command`].
-#[derive(Debug, thiserror::Error)]
+/// Failure of [`open_for_command`]. Each variant carries the data its
+/// rendered message needs; [`render_open_error`] picks the right line.
+#[derive(Debug, Error)]
 pub enum OpenError {
+    /// `git rev-parse` failed; the inner outcome carries the exact shape
+    /// the shared `discovery::render_failure` consumes.
     #[error("git discovery failed")]
     DiscoveryFailed(DiscoveryOutcome),
     #[error("Repository Store not initialized")]
@@ -65,8 +37,8 @@ pub enum OpenError {
     Storage(rusqlite::Error),
 }
 
-/// Failure of [`resolve_or_render`].
-#[derive(Debug, thiserror::Error)]
+/// Failure of [`resolve`] / [`resolve_with_display`].
+#[derive(Debug, Error)]
 pub enum ResolveError {
     #[error("Display ID or Alias not found")]
     NotFound,
@@ -75,7 +47,7 @@ pub enum ResolveError {
 }
 
 /// Failure of [`resolve_epic`] / [`resolve_epic_with_display`].
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Error)]
 pub enum ResolveEpicError {
     #[error("Display ID or Alias not found")]
     NotFound,
@@ -85,22 +57,17 @@ pub enum ResolveEpicError {
     Storage(rusqlite::Error),
 }
 
-/// Open the Repository Store for a command. Errors are typed; the caller
-/// renders the curated stderr line and returns exit code 1.
+/// Open the Repository Store for a command.
 pub fn open_for_command<R: ProcRunner + ?Sized>(
     runner: &R,
     cwd: &Path,
-    msgs: StorageErrorMessages,
-) -> Result<OpenedStore, OpenError> {
+) -> Result<Store, OpenError> {
     let outcome = match repository::open_existing(runner, cwd) {
         Ok(outcome) => outcome,
         Err(RepoOpenError::Sqlite(err)) => return Err(OpenError::Storage(err)),
     };
     match outcome {
-        OpenOutcome::Ok(store) => Ok(OpenedStore {
-            store,
-            storage: msgs,
-        }),
+        OpenOutcome::Ok(store) => Ok(store),
         OpenOutcome::DiscoveryFailed(inner) => Err(OpenError::DiscoveryFailed(inner)),
         OpenOutcome::StoreMissing => Err(OpenError::StoreMissing),
         OpenOutcome::NotTicketStore => Err(OpenError::NotTicketStore),
@@ -108,8 +75,7 @@ pub fn open_for_command<R: ProcRunner + ?Sized>(
     }
 }
 
-/// Resolve a Display ID or Alias against an opened store, propagating a
-/// typed `NotFound` for unknown values.
+/// Resolve a Display ID or Alias against an opened store.
 pub fn resolve(store: &Store, arg: &str) -> Result<ResolvedItemRef, ResolveError> {
     match repository::resolve_item_ref(store.conn(), arg) {
         Ok(Some(r)) => Ok(r),
@@ -118,7 +84,7 @@ pub fn resolve(store: &Store, arg: &str) -> Result<ResolvedItemRef, ResolveError
     }
 }
 
-/// Like [`resolve`] but also returns the current Display ID.
+/// Like [`resolve`] but with the current Display ID attached.
 pub fn resolve_with_display(
     store: &Store,
     arg: &str,
@@ -130,8 +96,7 @@ pub fn resolve_with_display(
     }
 }
 
-/// Resolve a Display ID or Alias that must refer to an Epic. The
-/// `NotAnEpic` arm fires when the value resolves but to a Ticket.
+/// Resolve a Display ID or Alias that must refer to an Epic.
 pub fn resolve_epic(store: &Store, arg: &str) -> Result<ResolvedItemRef, ResolveEpicError> {
     match repository::resolve_as_epic(store.conn(), arg) {
         Ok(ResolveEpicOutcome::Epic(r)) => Ok(r),
@@ -141,8 +106,7 @@ pub fn resolve_epic(store: &Store, arg: &str) -> Result<ResolvedItemRef, Resolve
     }
 }
 
-/// Like [`resolve_epic`] but with the current Display ID attached for
-/// success diagnostics.
+/// Like [`resolve_epic`] but with the current Display ID attached.
 pub fn resolve_epic_with_display(
     store: &Store,
     arg: &str,
@@ -155,54 +119,52 @@ pub fn resolve_epic_with_display(
     }
 }
 
-/// Render an [`OpenError`] using the caller's per-command phrasing.
-pub fn render_open_error<W: Write + ?Sized>(
-    stderr: &mut W,
-    err: &OpenError,
-    msgs: OpenErrorMessages,
-) {
+/// Render an [`OpenError`] to stderr with the supplied `tk <command>:`
+/// prefix. The phrasing is identical across commands — only the
+/// command-name token varies.
+pub fn render_open_error<W: Write + ?Sized>(stderr: &mut W, command: &str, err: &OpenError) {
     match err {
-        OpenError::DiscoveryFailed(inner) => {
-            discovery::render_failure(stderr, msgs.command_name, inner);
-        }
+        OpenError::DiscoveryFailed(inner) => discovery::render_failure(stderr, command, inner),
         OpenError::StoreMissing => {
-            let _ = writeln!(stderr, "{}", msgs.missing_store);
-        }
-        OpenError::NotTicketStore => {
             let _ = writeln!(
                 stderr,
-                "tk {}: Repository Store is {}",
-                msgs.command_name,
-                messages::INIT_REFUSE_FOREIGN
+                "tk {command}: Repository Store not initialized; run 'tk init'"
             );
+        }
+        OpenError::NotTicketStore => {
+            let _ = writeln!(stderr, "tk {command}: Repository Store is not a tk Repository Store");
         }
         OpenError::FromFutureVersion => {
             let _ = writeln!(
                 stderr,
-                "tk {}: Repository Store was created by a {}",
-                msgs.command_name,
-                messages::INIT_REFUSE_FUTURE_VERSION
+                "tk {command}: Repository Store was created by a newer tk version"
             );
         }
-        OpenError::Storage(err) => render_storage_error(stderr, err, msgs.storage),
+        OpenError::Storage(err) => render_storage_error(stderr, command, err),
     }
 }
 
-/// Render a Repository Store storage failure.
+/// Render a Repository Store storage error to stderr.
 ///
-/// Busy/locked classes — `SQLITE_BUSY` / `SQLITE_LOCKED` — get a dedicated
-/// "retry" diagnostic. Everything else falls through to `fallback`
+/// `SQLITE_BUSY` / `SQLITE_LOCKED` get the "retry the command" line;
+/// everything else falls through to `failed to read Repository Store`
 /// followed by the underlying error's `Display`.
 pub fn render_storage_error<W: Write + ?Sized>(
     stderr: &mut W,
+    command: &str,
     err: &rusqlite::Error,
-    msgs: StorageErrorMessages,
 ) {
     if is_busy_error(err) {
-        let _ = writeln!(stderr, "{}", msgs.busy_retry);
+        let _ = writeln!(
+            stderr,
+            "tk {command}: Repository Store is busy; retry the command"
+        );
         return;
     }
-    let _ = writeln!(stderr, "{}\n{err}", msgs.fallback);
+    let _ = writeln!(
+        stderr,
+        "tk {command}: failed to read Repository Store\n{err}"
+    );
 }
 
 fn is_busy_error(err: &rusqlite::Error) -> bool {

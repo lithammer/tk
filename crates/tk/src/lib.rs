@@ -28,3 +28,4 @@ pub mod platform;
 pub mod proc;
 pub mod render;
 pub mod store;
+pub mod worktree;

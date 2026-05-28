@@ -26,16 +26,17 @@ use anstyle::Style;
 use clap::Args as ClapArgs;
 
 use crate::cli::Deps;
-use crate::commands::resolver::{self, OpenErrorMessages, StorageErrorMessages};
+use crate::commands::resolver;
 use crate::domain::item_class::ItemClass;
 use crate::domain::priority::Priority;
 use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
-use crate::messages;
 use crate::render::palette;
 use crate::render::sanitize;
 use crate::render::styler::SubStyler;
 use crate::store::repository::show::{self, ExternalBlockerSummary, ItemDetail, ItemSummary};
+
+const COMMAND: &str = "show";
 
 /// Flags for `tk show`.
 #[derive(Debug, ClapArgs)]
@@ -44,18 +45,6 @@ pub struct Args {
     #[arg(value_name = "ID")]
     pub id: String,
 }
-
-const STORAGE_MSGS: StorageErrorMessages = StorageErrorMessages {
-    busy_retry: messages::SHOW_STORE_BUSY_RETRY,
-    out_of_memory: messages::SHOW_READ_FAILED,
-    fallback: messages::SHOW_READ_FAILED,
-};
-
-const OPEN_MSGS: OpenErrorMessages = OpenErrorMessages {
-    command_name: "show",
-    missing_store: messages::SHOW_MISSING_STORE,
-    storage: STORAGE_MSGS,
-};
 
 /// Run `tk show <id>` against the supplied `Deps`. Returns the process exit code.
 #[must_use]
@@ -69,28 +58,26 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
         ..
     } = deps;
 
-    let opened = match resolver::open_for_command(runner, cwd, STORAGE_MSGS) {
-        Ok(opened) => opened,
+    let store = match resolver::open_for_command(runner, cwd) {
+        Ok(store) => store,
         Err(err) => {
-            resolver::render_open_error(stderr, &err, OPEN_MSGS);
+            resolver::render_open_error(stderr, COMMAND, &err);
             return 1;
         }
     };
 
-    let detail = match show::show_item(&opened.store, &args.id) {
+    let detail = match show::show_item(&store, &args.id) {
         Ok(Some(detail)) => detail,
         Ok(None) => {
             let _ = writeln!(
                 stderr,
-                "{}{}{}",
-                messages::SHOW_ID_NOT_FOUND_PREFIX,
-                args.id,
-                messages::SHOW_ID_NOT_FOUND_SUFFIX
+                "tk {COMMAND}: '{id}' is not a known Display ID or Alias",
+                id = args.id
             );
             return 1;
         }
         Err(err) => {
-            resolver::render_storage_error(stderr, &err, opened.storage);
+            resolver::render_storage_error(stderr, COMMAND, &err);
             return 1;
         }
     };
@@ -160,7 +147,7 @@ fn render<W: Write + ?Sized>(
 
     if !detail.body.is_empty() {
         stdout.write_all(b"\n")?;
-        write_section_header(stdout, styler, messages::SHOW_SECTION_DESCRIPTION)?;
+        write_section_header(stdout, styler, "DESCRIPTION")?;
         sanitize::write_sanitized_body(stdout, detail.body.as_bytes())?;
         if !detail.body.ends_with('\n') {
             stdout.write_all(b"\n")?;
@@ -172,7 +159,7 @@ fn render<W: Write + ?Sized>(
         if has_section {
             stdout.write_all(b"\n")?;
         }
-        write_section_header(stdout, styler, messages::SHOW_SECTION_PARENT)?;
+        write_section_header(stdout, styler, "PARENT")?;
         render_sub_row(stdout, "\u{2191}", parent, styler)?;
         has_section = true;
     }
@@ -181,7 +168,7 @@ fn render<W: Write + ?Sized>(
         if has_section {
             stdout.write_all(b"\n")?;
         }
-        write_section_header(stdout, styler, messages::SHOW_SECTION_TICKETS)?;
+        write_section_header(stdout, styler, "TICKETS")?;
         for child in &detail.children {
             render_sub_row(stdout, "\u{2193}", child, styler)?;
         }
@@ -192,7 +179,7 @@ fn render<W: Write + ?Sized>(
         if has_section {
             stdout.write_all(b"\n")?;
         }
-        write_section_header(stdout, styler, messages::SHOW_SECTION_BLOCKED_BY)?;
+        write_section_header(stdout, styler, "BLOCKED BY")?;
         for item in &detail.blocked_by {
             render_sub_row(stdout, "\u{2192}", item, styler)?;
         }
@@ -203,7 +190,7 @@ fn render<W: Write + ?Sized>(
         if has_section {
             stdout.write_all(b"\n")?;
         }
-        write_section_header(stdout, styler, messages::SHOW_SECTION_BLOCKING)?;
+        write_section_header(stdout, styler, "BLOCKING")?;
         for item in &detail.blocking {
             render_sub_row(stdout, "\u{2192}", item, styler)?;
         }
@@ -214,7 +201,7 @@ fn render<W: Write + ?Sized>(
         if has_section {
             stdout.write_all(b"\n")?;
         }
-        write_section_header(stdout, styler, messages::SHOW_SECTION_EXTERNAL_BLOCKERS)?;
+        write_section_header(stdout, styler, "EXTERNAL BLOCKERS")?;
         for eb in &detail.external_blockers {
             render_external_blocker(stdout, eb)?;
         }
@@ -393,7 +380,7 @@ mod tests {
         assert_eq!(code, 1);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(
-            stderr.contains(messages::SHOW_MISSING_STORE),
+            stderr.contains("tk show: Repository Store not initialized; run 'tk init'"),
             "stderr={stderr:?}"
         );
     }
@@ -488,7 +475,7 @@ mod tests {
         assert_eq!(code, 0);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(stdout.contains("EPIC"), "stdout={stdout:?}");
-        assert!(stdout.contains(messages::SHOW_SECTION_TICKETS));
+        assert!(stdout.contains("TICKETS"));
         assert!(stdout.contains("tk-2: Child ticket"));
     }
 
@@ -515,7 +502,7 @@ mod tests {
         expect_git(&h, &store);
         let _ = run(h.deps(), Args { id: "tk-1".into() });
         let stdout = String::from_utf8(h.stdout).unwrap();
-        assert!(stdout.contains(messages::SHOW_SECTION_DESCRIPTION));
+        assert!(stdout.contains("DESCRIPTION"));
         assert!(stdout.contains("Multi-line\nbody\n"));
     }
 }
