@@ -4,9 +4,7 @@ use clap::Args as ClapArgs;
 
 use crate::cli::Deps;
 use crate::commands::resolver;
-use crate::store::repository::dependency::{
-    self, AddDependencyOutcome, DependencyEdge, DependencyError,
-};
+use crate::store::repository::dependency::{self, AddDependencyError, DependencyEdge};
 
 const COMMAND: &str = "block";
 
@@ -75,7 +73,7 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
         return 1;
     }
 
-    let outcome = match dependency::add_dependency(
+    match dependency::add_dependency(
         &mut store,
         clock,
         DependencyEdge {
@@ -83,19 +81,7 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
             blocking_id: &blocking.id,
         },
     ) {
-        Ok(o) => o,
-        Err(DependencyError::Sqlite(err)) => {
-            resolver::render_storage_error(stderr, COMMAND, &err);
-            return 1;
-        }
-        Err(DependencyError::Mutation(err)) => {
-            let _ = writeln!(stderr, "tk block: failed to append Mutation: {err}");
-            return 1;
-        }
-    };
-
-    match outcome {
-        AddDependencyOutcome::Ok => {
+        Ok(()) => {
             let _ = writeln!(
                 stdout,
                 "Blocked: {} blocked by {}",
@@ -103,23 +89,23 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
             );
             0
         }
-        AddDependencyOutcome::EndpointMissing => {
+        Err(AddDependencyError::EndpointMissing) => {
             let _ = writeln!(stderr, "tk block: endpoint missing in items table");
             1
         }
-        AddDependencyOutcome::BlockedDone => {
+        Err(AddDependencyError::BlockedDone) => {
             let _ = writeln!(stderr, "tk block: blocked '{}' is done", args.blocked);
             1
         }
-        AddDependencyOutcome::BlockingDone => {
+        Err(AddDependencyError::BlockingDone) => {
             let _ = writeln!(stderr, "tk block: blocking '{}' is done", args.blocking);
             1
         }
-        AddDependencyOutcome::Cycle => {
+        Err(AddDependencyError::Cycle) => {
             let _ = writeln!(stderr, "tk block: dependency cycle");
             1
         }
-        AddDependencyOutcome::BackendBlockedLocalBlocking => {
+        Err(AddDependencyError::BackendBlockedLocalBlocking) => {
             let _ = writeln!(
                 stderr,
                 "tk block: Backend blocked '{}' cannot depend on Local blocking item '{}'",
@@ -127,12 +113,20 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
             );
             1
         }
-        AddDependencyOutcome::BackendKindMismatch => {
+        Err(AddDependencyError::BackendKindMismatch) => {
             let _ = writeln!(
                 stderr,
                 "tk block: Backend blocked '{}' cannot depend on blocking item '{}' from another Backend kind",
                 args.blocked, args.blocking
             );
+            1
+        }
+        Err(AddDependencyError::Sqlite(err)) => {
+            resolver::render_storage_error(stderr, COMMAND, &err);
+            1
+        }
+        Err(AddDependencyError::Mutation(err)) => {
+            let _ = writeln!(stderr, "tk block: failed to append Mutation: {err}");
             1
         }
     }

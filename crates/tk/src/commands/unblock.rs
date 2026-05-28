@@ -4,9 +4,7 @@ use clap::Args as ClapArgs;
 
 use crate::cli::Deps;
 use crate::commands::resolver;
-use crate::store::repository::dependency::{
-    self, DependencyEdge, DependencyError, RemoveDependencyOutcome,
-};
+use crate::store::repository::dependency::{self, DependencyEdge, RemoveDependencyError};
 
 const COMMAND: &str = "unblock";
 
@@ -75,7 +73,7 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
         return 1;
     }
 
-    let outcome = match dependency::remove_dependency(
+    match dependency::remove_dependency(
         &mut store,
         clock,
         DependencyEdge {
@@ -83,19 +81,7 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
             blocking_id: &blocking.id,
         },
     ) {
-        Ok(o) => o,
-        Err(DependencyError::Sqlite(err)) => {
-            resolver::render_storage_error(stderr, COMMAND, &err);
-            return 1;
-        }
-        Err(DependencyError::Mutation(err)) => {
-            let _ = writeln!(stderr, "tk unblock: failed to append Mutation: {err}");
-            return 1;
-        }
-    };
-
-    match outcome {
-        RemoveDependencyOutcome::Ok => {
+        Ok(()) => {
             let _ = writeln!(
                 stdout,
                 "Unblocked: {} no longer blocked by {}",
@@ -103,8 +89,16 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
             );
             0
         }
-        RemoveDependencyOutcome::EndpointMissing => {
+        Err(RemoveDependencyError::EndpointMissing) => {
             let _ = writeln!(stderr, "tk unblock: endpoint missing in items table");
+            1
+        }
+        Err(RemoveDependencyError::Sqlite(err)) => {
+            resolver::render_storage_error(stderr, COMMAND, &err);
+            1
+        }
+        Err(RemoveDependencyError::Mutation(err)) => {
+            let _ = writeln!(stderr, "tk unblock: failed to append Mutation: {err}");
             1
         }
     }

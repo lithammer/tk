@@ -3,7 +3,7 @@
 //! Dependencies are current-state relationship data; same-backend Dependency
 //! changes between two backend-origin endpoints also append intent through
 //! the Mutation Log. The cycle check happens before the INSERT so a typed
-//! [`AddDependencyOutcome::Cycle`] reaches the command layer rather than a
+//! [`AddDependencyError::Cycle`] reaches the command layer rather than a
 //! raw constraint-trigger SQLite error.
 
 use rusqlite::{OptionalExtension, params};
@@ -27,42 +27,48 @@ pub struct DependencyEdge<'a> {
     pub blocking_id: &'a str,
 }
 
-/// Outcome of [`add_dependency`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AddDependencyOutcome {
-    /// Edge present after the call. Idempotent — already-existing edges
-    /// resolve here without emitting a Mutation.
-    Ok,
+/// Why [`add_dependency`] refused or failed. Success is `Ok(())` — an edge is
+/// present after the call (idempotent; an already-existing edge succeeds
+/// without emitting a Mutation). The refusal variants render at exit 1; the
+/// `#[error]` strings are internal — `tk block` interpolates the user's
+/// arguments into its own per-variant lines.
+#[derive(Debug, thiserror::Error)]
+pub enum AddDependencyError {
     /// Either endpoint was missing in `items`. The schema's foreign keys
-    /// would surface this too, but distinguishing it lets the command
-    /// render the typed diagnostic before the FK fires.
+    /// would surface this too, but distinguishing it lets the command render
+    /// the typed diagnostic before the FK fires.
+    #[error("endpoint missing in items table")]
     EndpointMissing,
     /// The Blocked Item is already `Done`; v1 only models live blocking.
+    #[error("blocked item is done")]
     BlockedDone,
     /// The Blocking Item is already `Done`; v1 only models live blocking.
+    #[error("blocking item is done")]
     BlockingDone,
     /// The edge would close a cycle in the Dependency graph.
+    #[error("dependency cycle")]
     Cycle,
     /// A Backend Blocked Item cannot wait on a still-local Blocking Item:
     /// the Mutation would target an unaddressable reference.
+    #[error("backend blocked item cannot depend on a local blocking item")]
     BackendBlockedLocalBlocking,
     /// Two backend-origin endpoints from different backend kinds cannot
     /// share a Dependency Mutation.
+    #[error("backend endpoints from different backend kinds")]
     BackendKindMismatch,
+    #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
+    #[error(transparent)]
+    Mutation(#[from] mutations::AppendError),
 }
 
-/// Outcome of [`remove_dependency`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RemoveDependencyOutcome {
-    /// Edge absent after the call. Idempotent — missing edges resolve here
-    /// without emitting a Mutation.
-    Ok,
-    /// Either endpoint was missing in `items`.
-    EndpointMissing,
-}
-
+/// Why [`remove_dependency`] failed. Success is `Ok(())` — the edge is absent
+/// after the call (idempotent; a missing edge succeeds without a Mutation).
 #[derive(Debug, thiserror::Error)]
-pub enum DependencyError {
+pub enum RemoveDependencyError {
+    /// Either endpoint was missing in `items`.
+    #[error("endpoint missing in items table")]
+    EndpointMissing,
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
@@ -84,32 +90,32 @@ pub fn add_dependency<C: Clock + ?Sized>(
     store: &mut Store,
     clock: &C,
     edge: DependencyEdge<'_>,
-) -> Result<AddDependencyOutcome, DependencyError> {
+) -> Result<(), AddDependencyError> {
     let now_iso = clock.now_iso();
     let tx = store.conn.transaction()?;
 
     let Some(info) = read_endpoint_info(&tx, edge)? else {
-        return Ok(AddDependencyOutcome::EndpointMissing);
+        return Err(AddDependencyError::EndpointMissing);
     };
 
     if info.blocked_status == ItemStatus::Done {
         tx.commit()?;
-        return Ok(AddDependencyOutcome::BlockedDone);
+        return Err(AddDependencyError::BlockedDone);
     }
     if info.blocking_status == ItemStatus::Done {
         tx.commit()?;
-        return Ok(AddDependencyOutcome::BlockingDone);
+        return Err(AddDependencyError::BlockingDone);
     }
     if info.blocked_origin == Origin::Backend && info.blocking_origin == Origin::Local {
         tx.commit()?;
-        return Ok(AddDependencyOutcome::BackendBlockedLocalBlocking);
+        return Err(AddDependencyError::BackendBlockedLocalBlocking);
     }
     if info.blocked_origin == Origin::Backend
         && info.blocking_origin == Origin::Backend
         && info.blocked_backend_kind != info.blocking_backend_kind
     {
         tx.commit()?;
-        return Ok(AddDependencyOutcome::BackendKindMismatch);
+        return Err(AddDependencyError::BackendKindMismatch);
     }
 
     let cycles_into_existing = tx
@@ -128,7 +134,7 @@ pub fn add_dependency<C: Clock + ?Sized>(
         .optional()?;
     if cycles_into_existing.is_some() {
         tx.commit()?;
-        return Ok(AddDependencyOutcome::Cycle);
+        return Err(AddDependencyError::Cycle);
     }
 
     let had_edge = edge_exists(&tx, edge)?;
@@ -156,7 +162,7 @@ pub fn add_dependency<C: Clock + ?Sized>(
     }
 
     tx.commit()?;
-    Ok(AddDependencyOutcome::Ok)
+    Ok(())
 }
 
 /// Remove the Dependency edge from `blocking_id` to `blocked_id`. Missing
@@ -165,12 +171,12 @@ pub fn remove_dependency<C: Clock + ?Sized>(
     store: &mut Store,
     clock: &C,
     edge: DependencyEdge<'_>,
-) -> Result<RemoveDependencyOutcome, DependencyError> {
+) -> Result<(), RemoveDependencyError> {
     let now_iso = clock.now_iso();
     let tx = store.conn.transaction()?;
 
     let Some(info) = read_endpoint_info(&tx, edge)? else {
-        return Ok(RemoveDependencyOutcome::EndpointMissing);
+        return Err(RemoveDependencyError::EndpointMissing);
     };
     let had_edge = edge_exists(&tx, edge)?;
 
@@ -196,7 +202,7 @@ pub fn remove_dependency<C: Clock + ?Sized>(
     }
 
     tx.commit()?;
-    Ok(RemoveDependencyOutcome::Ok)
+    Ok(())
 }
 
 fn read_endpoint_info(
@@ -324,7 +330,7 @@ mod tests {
         seed_ticket(&store, "blocking", "tk-1", 1);
         seed_ticket(&store, "blocked", "tk-2", 2);
 
-        let outcome = add_dependency(
+        add_dependency(
             &mut store,
             &clock(),
             DependencyEdge {
@@ -333,7 +339,6 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(outcome, AddDependencyOutcome::Ok);
 
         let count: i64 = store
             .conn
@@ -381,7 +386,7 @@ mod tests {
         seed_backend(&store, "blocked", "tk-1", "github", "1", 1);
         seed_ticket(&store, "blocking", "tk-2", 2);
 
-        let outcome = add_dependency(
+        let err = add_dependency(
             &mut store,
             &clock(),
             DependencyEdge {
@@ -389,8 +394,11 @@ mod tests {
                 blocking_id: "blocking",
             },
         )
-        .unwrap();
-        assert_eq!(outcome, AddDependencyOutcome::BackendBlockedLocalBlocking);
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            AddDependencyError::BackendBlockedLocalBlocking
+        ));
         let count: i64 = store
             .conn
             .query_row("select count(*) from dependencies", [], |r| r.get(0))
@@ -404,7 +412,7 @@ mod tests {
         seed_backend(&store, "blocked", "tk-1", "github", "1", 1);
         seed_backend(&store, "blocking", "tk-2", "jira", "j-2", 2);
 
-        let outcome = add_dependency(
+        let err = add_dependency(
             &mut store,
             &clock(),
             DependencyEdge {
@@ -412,8 +420,8 @@ mod tests {
                 blocking_id: "blocking",
             },
         )
-        .unwrap();
-        assert_eq!(outcome, AddDependencyOutcome::BackendKindMismatch);
+        .unwrap_err();
+        assert!(matches!(err, AddDependencyError::BackendKindMismatch));
     }
 
     #[test]
@@ -423,7 +431,7 @@ mod tests {
         seed_ticket(&store, "open-block", "tk-2", 2);
 
         // Blocked is done.
-        let r = add_dependency(
+        let err = add_dependency(
             &mut store,
             &clock(),
             DependencyEdge {
@@ -431,11 +439,11 @@ mod tests {
                 blocking_id: "open-block",
             },
         )
-        .unwrap();
-        assert_eq!(r, AddDependencyOutcome::BlockedDone);
+        .unwrap_err();
+        assert!(matches!(err, AddDependencyError::BlockedDone));
 
         // Blocking is done.
-        let r = add_dependency(
+        let err = add_dependency(
             &mut store,
             &clock(),
             DependencyEdge {
@@ -443,8 +451,8 @@ mod tests {
                 blocking_id: "done-block",
             },
         )
-        .unwrap();
-        assert_eq!(r, AddDependencyOutcome::BlockingDone);
+        .unwrap_err();
+        assert!(matches!(err, AddDependencyError::BlockingDone));
     }
 
     #[test]
@@ -454,7 +462,7 @@ mod tests {
         seed_ticket(&store, "b", "tk-2", 2);
         insert_dependency(&store.conn, "a", "b").unwrap();
 
-        let r = add_dependency(
+        let err = add_dependency(
             &mut store,
             &clock(),
             DependencyEdge {
@@ -462,8 +470,8 @@ mod tests {
                 blocking_id: "b",
             },
         )
-        .unwrap();
-        assert_eq!(r, AddDependencyOutcome::Cycle);
+        .unwrap_err();
+        assert!(matches!(err, AddDependencyError::Cycle));
         let edges: i64 = store
             .conn
             .query_row("select count(*) from dependencies", [], |r| r.get(0))
@@ -503,10 +511,10 @@ mod tests {
     }
 
     #[test]
-    fn add_dependency_missing_endpoint_returns_typed_outcome() {
+    fn add_dependency_missing_endpoint_returns_typed_error() {
         let mut store = open_seeded();
         seed_ticket(&store, "lone", "tk-1", 1);
-        let r = add_dependency(
+        let err = add_dependency(
             &mut store,
             &clock(),
             DependencyEdge {
@@ -514,8 +522,8 @@ mod tests {
                 blocking_id: "nope",
             },
         )
-        .unwrap();
-        assert_eq!(r, AddDependencyOutcome::EndpointMissing);
+        .unwrap_err();
+        assert!(matches!(err, AddDependencyError::EndpointMissing));
     }
 
     #[test]
@@ -553,7 +561,7 @@ mod tests {
         seed_ticket(&store, "blocking", "tk-1", 1);
         seed_ticket(&store, "blocked", "tk-2", 2);
 
-        let outcome = remove_dependency(
+        remove_dependency(
             &mut store,
             &clock(),
             DependencyEdge {
@@ -562,6 +570,5 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(outcome, RemoveDependencyOutcome::Ok);
     }
 }
