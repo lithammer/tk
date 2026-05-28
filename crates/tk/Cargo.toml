@@ -61,6 +61,16 @@ jiff = { version = "0.2", default-features = false, features = ["std"] }
 # directly from `Deps`.
 rand = { version = "0.10", default-features = false, features = ["std", "std_rng", "sys_rng"] }
 
+# Mutation Log payloads serialize into the `mutations.payload_json` column,
+# which carries `check(json_valid(payload_json))`. Free-text titles, bodies,
+# and external blocker reasons demand a real JSON encoder rather than a
+# `format!`-style hand-roll. Derives sit on the per-variant payload structs
+# (TitleBody, EpicRef, …) so the on-disk shape stays flat — one object per
+# row — which keeps the Backend Adapter (tk-97) reading the same shape the
+# store writes.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
 [dev-dependencies]
 tempfile = "3"
 # Minimal CLI assertion helper for the scenario driver.

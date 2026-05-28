@@ -4,9 +4,13 @@
 //! the V1 `items.item_class` CHECK constraint; the `text()` spelling is the
 //! storage contract.
 
-/// The top-level item class stored in the Repository Store.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// The top-level item class stored in the Repository Store. The default is
+/// [`ItemClass::Ticket`] — Tickets outnumber Epics in every real repository
+/// and the discriminator drives mutation-type selection across the store
+/// layer, where a sensible default keeps request-builder boilerplate light.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ItemClass {
+    #[default]
     Ticket,
     Epic,
 }
