@@ -12,30 +12,16 @@ use std::path::Path;
 
 use thiserror::Error;
 
-use crate::git::discovery::{self, DiscoveryError};
 use crate::proc::ProcRunner;
 use crate::store::repository::{
-    self, OpenError as RepoOpenError, OpenOutcome, ResolveEpicOutcome,
-    ResolveEpicWithDisplayOutcome, ResolvedItemRef, ResolvedItemRefWithDisplay, Store,
+    self, ResolveEpicOutcome, ResolveEpicWithDisplayOutcome, ResolvedItemRef,
+    ResolvedItemRefWithDisplay, Store,
 };
 
-/// Failure of [`open_for_command`]. Each variant carries the data its
-/// rendered message needs; [`render_open_error`] picks the right line.
-#[derive(Debug, Error)]
-pub enum OpenError {
-    /// `git rev-parse` failed; the inner error carries the exact message
-    /// the shared `discovery::render_failure` consumes.
-    #[error("git discovery failed")]
-    DiscoveryFailed(DiscoveryError),
-    #[error("Repository Store not initialized")]
-    StoreMissing,
-    #[error("not a tk Repository Store")]
-    NotTicketStore,
-    #[error("Repository Store created by a newer tk version")]
-    FromFutureVersion,
-    #[error(transparent)]
-    Storage(rusqlite::Error),
-}
+/// Failure of [`open_for_command`], re-exported from the store layer where
+/// [`repository::open_existing`] produces it. [`render_open_error`] renders it
+/// behind the `tk <command>:` prefix.
+pub use crate::store::repository::OpenError;
 
 /// Failure of [`resolve`] / [`resolve_with_display`].
 #[derive(Debug, Error)]
@@ -58,21 +44,15 @@ pub enum ResolveEpicError {
 }
 
 /// Open the Repository Store for a command.
+///
+/// A thin command-facing alias for [`repository::open_existing`]; the rich
+/// [`OpenError`] now flows straight through (commands hand it to
+/// [`render_open_error`] without inspecting variants).
 pub fn open_for_command<R: ProcRunner + ?Sized>(
     runner: &R,
     cwd: &Path,
 ) -> Result<Store, OpenError> {
-    let outcome = match repository::open_existing(runner, cwd) {
-        Ok(outcome) => outcome,
-        Err(RepoOpenError::Sqlite(err)) => return Err(OpenError::Storage(err)),
-    };
-    match outcome {
-        OpenOutcome::Ok(store) => Ok(store),
-        OpenOutcome::DiscoveryFailed(inner) => Err(OpenError::DiscoveryFailed(inner)),
-        OpenOutcome::StoreMissing => Err(OpenError::StoreMissing),
-        OpenOutcome::NotTicketStore => Err(OpenError::NotTicketStore),
-        OpenOutcome::FromFutureVersion => Err(OpenError::FromFutureVersion),
-    }
+    repository::open_existing(runner, cwd)
 }
 
 /// Resolve a Display ID or Alias against an opened store.
@@ -124,26 +104,13 @@ pub fn resolve_epic_with_display(
 /// command-name token varies.
 pub fn render_open_error<W: Write + ?Sized>(stderr: &mut W, command: &str, err: &OpenError) {
     match err {
-        OpenError::DiscoveryFailed(inner) => discovery::render_failure(stderr, command, inner),
-        OpenError::StoreMissing => {
-            let _ = writeln!(
-                stderr,
-                "tk {command}: Repository Store not initialized; run 'tk init'"
-            );
+        // SQLite faults route through the busy-aware storage renderer; every
+        // other variant's `Display` is already the stable user-facing line
+        // (including DiscoveryFailed, which forwards git's own message).
+        OpenError::Sqlite(e) => render_storage_error(stderr, command, e),
+        _ => {
+            let _ = writeln!(stderr, "tk {command}: {err}");
         }
-        OpenError::NotTicketStore => {
-            let _ = writeln!(
-                stderr,
-                "tk {command}: Repository Store is not a tk Repository Store"
-            );
-        }
-        OpenError::FromFutureVersion => {
-            let _ = writeln!(
-                stderr,
-                "tk {command}: Repository Store was created by a newer tk version"
-            );
-        }
-        OpenError::Storage(err) => render_storage_error(stderr, command, err),
     }
 }
 

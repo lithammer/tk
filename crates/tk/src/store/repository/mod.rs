@@ -64,30 +64,30 @@ impl Store {
     }
 }
 
-/// Outcome of [`open_existing`]. Each non-OK variant corresponds to a
-/// stable, user-facing stderr message; command handlers render that message
-/// at exit 1 (ADR-0017) instead of treating any of these as an internal error.
-pub enum OpenOutcome {
-    /// Repository Store was opened and is at a schema version this binary
-    /// understands.
-    Ok(Store),
-    /// `git rev-parse` failed; the wrapped [`discovery::DiscoveryError`] carries
-    /// the exact message so the standard discovery renderer can format it.
-    DiscoveryFailed(discovery::DiscoveryError),
-    /// `<git-common-dir>/tk/tk.db` does not exist; the user has not run
-    /// `tk init` in this repository.
-    StoreMissing,
-    /// A SQLite file exists at the Repository Store path but `application_id`
-    /// is not tk's; refuse to touch a foreign database.
-    NotTicketStore,
-    /// The store records a higher schema version than this binary knows.
-    FromFutureVersion,
-}
-
-/// Error returned by [`open_existing`] for fault paths that are *not* expected
-/// domain outcomes — unexpected SQLite failures, path UTF-8 decoding, etc.
+/// Why [`open_existing`] could not return an opened [`Store`].
+///
+/// One enum for every non-success path: the expected refusals (no store yet,
+/// foreign file, future schema) that render at exit 1, the forwarded
+/// discovery failure, and the genuine SQLite faults. The command layer picks
+/// the exit code and phrasing per variant (see `resolver::render_open_error`);
+/// each `#[error]` string is the stable user-facing line (ADR-0017), so an
+/// arg-free renderer can print it directly.
 #[derive(Debug, Error)]
 pub enum OpenError {
+    /// `git rev-parse` failed; the inner error's `Display` is the message.
+    #[error(transparent)]
+    DiscoveryFailed(#[from] discovery::DiscoveryError),
+    /// `<git-common-dir>/tk/tk.db` does not exist — `tk init` has not run here.
+    #[error("Repository Store not initialized; run 'tk init'")]
+    StoreMissing,
+    /// A SQLite file exists at the Repository Store path but its
+    /// `application_id` is not tk's; refuse to touch a foreign database.
+    #[error("Repository Store is not a tk Repository Store")]
+    NotTicketStore,
+    /// The store records a higher schema version than this binary knows.
+    #[error("Repository Store was created by a newer tk version")]
+    FromFutureVersion,
+    /// Genuine SQLite fault opening or inspecting the store.
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
 }
@@ -98,18 +98,13 @@ pub enum OpenError {
 /// shares the store with its main checkout. `application_id` and
 /// `schema_migrations.version` are inspected before any pragma mutation so
 /// foreign files are refused without rewriting their headers.
-pub fn open_existing<R: ProcRunner + ?Sized>(
-    runner: &R,
-    cwd: &Path,
-) -> Result<OpenOutcome, OpenError> {
-    let paths = match discovery::discover_paths(runner, cwd) {
-        Ok(p) => p,
-        Err(failure) => return Ok(OpenOutcome::DiscoveryFailed(failure)),
-    };
+pub fn open_existing<R: ProcRunner + ?Sized>(runner: &R, cwd: &Path) -> Result<Store, OpenError> {
+    // `?` converts a DiscoveryError into OpenError::DiscoveryFailed via #[from].
+    let paths = discovery::discover_paths(runner, cwd)?;
     let db_path = paths.git_common_dir.join("tk").join("tk.db");
 
     if !db_path.exists() {
-        return Ok(OpenOutcome::StoreMissing);
+        return Err(OpenError::StoreMissing);
     }
 
     let conn = Connection::open_with_flags(
@@ -124,27 +119,15 @@ pub fn open_existing<R: ProcRunner + ?Sized>(
         .optional()?
         .unwrap_or(0);
     if app_id != i64::from(migrations::APPLICATION_ID) {
-        return Ok(OpenOutcome::NotTicketStore);
+        return Err(OpenError::NotTicketStore);
     }
 
     let version = migrations::current_version(&conn)?;
     if version > i64::from(migrations::MAX_KNOWN_VERSION) {
-        return Ok(OpenOutcome::FromFutureVersion);
+        return Err(OpenError::FromFutureVersion);
     }
 
-    Ok(OpenOutcome::Ok(Store { conn }))
-}
-
-impl std::fmt::Debug for OpenOutcome {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Ok(_) => f.write_str("OpenOutcome::Ok(<Store>)"),
-            Self::DiscoveryFailed(o) => f.debug_tuple("DiscoveryFailed").field(o).finish(),
-            Self::StoreMissing => f.write_str("OpenOutcome::StoreMissing"),
-            Self::NotTicketStore => f.write_str("OpenOutcome::NotTicketStore"),
-            Self::FromFutureVersion => f.write_str("OpenOutcome::FromFutureVersion"),
-        }
-    }
+    Ok(Store { conn })
 }
 
 /// A Display ID or Alias resolved to a stable internal item ID and class.
@@ -483,10 +466,8 @@ mod tests {
     //
     // Exercises the full discover → open → classify → version-check pipeline
     // against a tempfile database driven by a FakeRunner-replayed git
-    // rev-parse. Each variant of `OpenOutcome` (except `DiscoveryFailed`,
-    // which the discovery layer's own tests cover) is exercised here.
-
-    use std::path::Path;
+    // rev-parse. Each variant of `OpenError` plus the success path is
+    // exercised here.
 
     fn cwd() -> std::path::PathBuf {
         std::env::current_dir().unwrap()
@@ -512,19 +493,14 @@ mod tests {
         migrations::apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
     }
 
-    fn run_open(runner: &FakeRunner, cwd: &Path) -> OpenOutcome {
-        open_existing(runner, cwd).expect("open_existing should not fault")
-    }
-
     #[test]
     fn open_existing_reports_store_missing_when_db_file_does_not_exist() {
         let store = TmpStore::new("repo");
         let runner = fake_runner_for(&store);
-        let outcome = run_open(&runner, &cwd());
-        assert!(
-            matches!(outcome, OpenOutcome::StoreMissing),
-            "expected StoreMissing, got {outcome:?}"
-        );
+        assert!(matches!(
+            open_existing(&runner, &cwd()),
+            Err(OpenError::StoreMissing)
+        ));
     }
 
     #[test]
@@ -540,11 +516,10 @@ mod tests {
         drop(foreign);
 
         let runner = fake_runner_for(&store);
-        let outcome = run_open(&runner, &cwd());
-        assert!(
-            matches!(outcome, OpenOutcome::NotTicketStore),
-            "expected NotTicketStore, got {outcome:?}"
-        );
+        assert!(matches!(
+            open_existing(&runner, &cwd()),
+            Err(OpenError::NotTicketStore)
+        ));
     }
 
     #[test]
@@ -561,11 +536,10 @@ mod tests {
         drop(conn);
 
         let runner = fake_runner_for(&store);
-        let outcome = run_open(&runner, &cwd());
-        assert!(
-            matches!(outcome, OpenOutcome::FromFutureVersion),
-            "expected FromFutureVersion, got {outcome:?}"
-        );
+        assert!(matches!(
+            open_existing(&runner, &cwd()),
+            Err(OpenError::FromFutureVersion)
+        ));
     }
 
     #[test]
@@ -573,10 +547,9 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_tk_db(&store);
         let runner = fake_runner_for(&store);
-        let outcome = run_open(&runner, &cwd());
-        let opened = match outcome {
-            OpenOutcome::Ok(s) => s,
-            other => panic!("expected Ok, got {other:?}"),
+        let opened = match open_existing(&runner, &cwd()) {
+            Ok(s) => s,
+            Err(e) => panic!("expected Ok, got {e:?}"),
         };
         // Foreign keys pragma is connection-scoped; verify it survived the open.
         let fk: i64 = opened
@@ -599,10 +572,9 @@ mod tests {
                 stderr: b"fatal: not a git repository\n".to_vec(),
             },
         );
-        let outcome = run_open(&runner, &cwd());
-        assert!(
-            matches!(outcome, OpenOutcome::DiscoveryFailed(_)),
-            "expected DiscoveryFailed, got {outcome:?}"
-        );
+        assert!(matches!(
+            open_existing(&runner, &cwd()),
+            Err(OpenError::DiscoveryFailed(_))
+        ));
     }
 }
