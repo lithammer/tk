@@ -101,6 +101,10 @@ enum Command {
     Manpage(commands::manpage::Args),
     /// Replace the running tk binary with the latest release.
     SelfUpdate(commands::self_update::Args),
+    /// Apply pending Mutations through the configured Remote.
+    Sync(commands::sync::Args),
+    /// Promote a Local Ticket or Epic through the configured Remote.
+    Promote(commands::promote::Args),
 }
 
 /// Entrypoint that the binary's `main.rs` and the scenario harness share.
@@ -131,6 +135,8 @@ pub fn run_argv(deps: Deps<'_>, argv: &[String]) -> std::io::Result<u8> {
         Command::Prime(args) => Ok(commands::prime::run(deps, args)),
         Command::Manpage(args) => Ok(commands::manpage::run(deps, args)),
         Command::SelfUpdate(args) => Ok(commands::self_update::run(deps, args)),
+        Command::Sync(args) => Ok(commands::sync::run(deps, args)),
+        Command::Promote(args) => Ok(commands::promote::run(deps, args)),
     }
 }
 
