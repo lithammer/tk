@@ -1,17 +1,13 @@
 name: Rust CI
 
-# Slice-0 of the Rust rewrite lives on `rust-main`; per ADR-0018 the lint
-# allow-list in `Cargo.toml` is ratified before clippy hard-fails on warnings.
-# tk-83 is that flip. Lint severity (`deny`) lives in `[workspace.lints.*]` in
-# Cargo.toml, so plain `cargo clippy` and `cargo build` already error on
-# warnings — both locally and here. The existing `CI` workflow continues to
-# guard the Zig codebase on `main`; this workflow is the Rust gate on
-# `rust-main`.
+# CI gate for the Rust tk crate. Lint severity (`deny`) lives in
+# `[workspace.lints.*]` in Cargo.toml, so plain `cargo clippy` and `cargo test`
+# already error on warnings — both locally and here.
 on:
   push:
-    branches: [rust-main]
+    branches: [main]
   pull_request:
-    branches: [rust-main]
+    branches: [main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -32,3 +28,13 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets
       - run: cargo test
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # install.sh must stay POSIX (runs under /bin/sh on macOS, Alpine,
+      # etc.) so it is checked with `-s sh`. smoke.sh is bash and uses the
+      # default dialect detected from its shebang.
+      - run: shellcheck -s sh scripts/install.sh
+      - run: shellcheck scripts/smoke.sh
