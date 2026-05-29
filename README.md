@@ -8,8 +8,7 @@ from the command line. tk deliberately aims for a simpler architecture,
 local-first capture, and backend adapters for systems like GitHub Issues and
 Jira.
 
-Prebuilt releases are published for Linux, Apple Silicon macOS, Windows, and
-Windows ARM.
+Prebuilt releases are published for Linux, Apple Silicon macOS, and Windows.
 
 ## Install
 
@@ -21,7 +20,7 @@ curl -fsSL https://raw.githubusercontent.com/lithammer/tk/main/scripts/install.s
 
 ### Windows
 
-Download `tk-x86_64-windows-gnu.exe` or `tk-aarch64-windows-gnu.exe` from the
+Download `tk-x86_64-pc-windows-gnu.exe` from the
 [latest release](https://github.com/lithammer/tk/releases/latest), rename it to
 `tk.exe`, and place it in a directory on `PATH`. `tk self-update` works after
 that.
@@ -41,8 +40,7 @@ variables below for version pinning or ABI switching.
 
 ### Build from source <a id="build-from-source"></a>
 
-Run `mise install` to install the Zig version pinned in `.mise.toml`, then
-`zig build`; the binary is written to `zig-out/bin/tk`.
+Run `cargo build --release`; the binary is written to `target/release/tk`.
 
 ## Quick start
 
