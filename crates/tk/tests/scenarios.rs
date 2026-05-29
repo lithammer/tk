@@ -188,7 +188,8 @@ fn manpage_emits_embedded_manpage() {
 fn prime_emits_workflow_briefing() {
     let p = Repo::new("repo");
     let expected =
-        fs::read_to_string(repo_root().join("src/commands/prime.md")).expect("read prime.md");
+        fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/commands/prime.md"))
+            .expect("read prime.md");
     assert_eq!(p.run("prime"), expected);
 }
 

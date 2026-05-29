@@ -1,8 +1,8 @@
 //! Repository Store schema migrations.
 //!
 //! The migration SQL is the durable artefact (ADR-0005); it is reused
-//! *verbatim* via `include_str!` from the repository's `src/store/migrations/`
-//! so there is a single source of truth.
+//! *verbatim* via `include_str!` from the sibling `migrations/` directory so
+//! there is a single source of truth.
 //!
 //! Each migration runs inside its own transaction. The caller is responsible
 //! for connection-level setup (`foreign_keys`, `busy_timeout`, `journal_mode`)
@@ -25,16 +25,13 @@ pub struct Migration {
     pub sql: &'static str,
 }
 
-// `include_str!` resolves paths relative to this source file. From
-// `crates/tk/src/store/migrations.rs` the SQL files live four levels up under
-// the repository's `src/store/migrations/`. Pulling the SQL by reference keeps
-// the "verbatim" promise of ADR-0017 / ADR-0018 mechanical instead of typographic.
+// `include_str!` resolves paths relative to this source file; the SQL lives in
+// the sibling `migrations/` directory. Pulling the SQL by reference keeps the
+// "verbatim" promise of ADR-0017 / ADR-0018 mechanical instead of typographic.
 // CRLF safety is enforced by `.gitattributes` (`*.sql text eol=lf`) so a
 // Windows clone with `core.autocrlf=true` still checks the files out as LF.
-const MIGRATION_1_SQL: &str =
-    include_str!("../../../../src/store/migrations/001_repository_store.sql");
-const MIGRATION_2_SQL: &str =
-    include_str!("../../../../src/store/migrations/002_items_no_escape_from_done.sql");
+const MIGRATION_1_SQL: &str = include_str!("migrations/001_repository_store.sql");
+const MIGRATION_2_SQL: &str = include_str!("migrations/002_items_no_escape_from_done.sql");
 
 /// V1 Repository Store schema skeleton.
 pub const MIGRATION_1: Migration = Migration {
