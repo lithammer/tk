@@ -6,7 +6,7 @@
 //! - [`commands`]: one module per subcommand.
 //! - [`platform`]: compile-time OS predicates.
 //! - [`proc`]: subprocess runner trait + real/fake implementations.
-//! - [`clock`]: injectable wall clock with `TK_NOW` override.
+//! - [`clock`]: injectable wall clock.
 //! - [`git`]: git subprocess discovery façade.
 //! - [`store`]: Repository Store + migrations.
 //! - [`domain`]: pure domain helpers.
@@ -15,9 +15,8 @@
 //!
 //! RNG lives in the `rand` crate; `Deps::rng` is a borrowed
 //! `&mut dyn rand::Rng` (the dyn-compatible low-level trait; `RngCore` is
-//! still defined as a marker alias). `TK_RAND_SEED` is consumed in
-//! `main.rs` to pick between `StdRng::seed_from_u64` and
-//! `StdRng::try_from_rng(&mut SysRng)`.
+//! still defined as a marker alias). `main.rs` seeds `StdRng` from OS entropy
+//! (`SysRng`); tests inject a seeded `StdRng` through `Deps`.
 
 pub mod cli;
 pub mod clock;

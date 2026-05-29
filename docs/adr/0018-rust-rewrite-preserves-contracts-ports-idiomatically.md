@@ -58,6 +58,17 @@ not the `.zig` files (one reference implementation of them):
   files port verbatim; only the runner changes. This resolves the open `tk-6`
   fakeability TODO at `script.zig:224`. Migrating to `trycmd` stays **last** —
   the Rust subprocess driver is the intermediate oracle.
+
+  **Amended (tk-99 / tk-105):** the intermediate Rust subprocess driver is
+  replaced by an `insta` + `assert_cmd` harness, and the production binary's
+  determinism seams are removed. Determinism now comes from dependency
+  injection in in-process tests (`Deps` with `FakeClock` / a seeded `StdRng`)
+  and from `insta` redaction of the few nondeterministic spans (timestamps,
+  git's environment-variable stderr) in subprocess tests — the binary no longer
+  reads `TK_NOW` / `SOURCE_DATE_EPOCH` / `TK_RAND_SEED`. The runtime
+  `SOURCE_DATE_EPOCH` read was a determinism seam in disguise, not a
+  reproducible-builds feature (that convention is build-time), so removing it
+  closes an ambient-env footgun rather than dropping a capability.
 - **Freeze the Zig tree during the port.** A living oracle requires a still
   oracle. Justified by single-author / ~3-week-old / no externally visible
   users; feature work resumes on the Rust tree.

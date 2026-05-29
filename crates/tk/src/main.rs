@@ -54,28 +54,21 @@ fn main() -> ExitCode {
 
     let runner = tk::proc::RealRunner::new();
     let clock = tk::clock::RealClock::new();
-    // `TK_RAND_SEED` is the determinism seam (ADR-0018). When unset, seed
-    // ChaCha from the OS entropy source via rand's SysRng; otherwise use the
-    // explicit u64. `try_from_rng` only fails when the OS RNG is unavailable
-    // (e.g. exhausted /dev/random on Linux); treat that as fatal at startup
-    // rather than surfacing a confusing partial-entropy state to commands.
-    let mut rng: StdRng = match std::env::var("TK_RAND_SEED")
-        .ok()
-        .and_then(|s| s.trim().parse::<u64>().ok())
-    {
-        Some(seed) => StdRng::seed_from_u64(seed),
-        None => StdRng::try_from_rng(&mut SysRng).unwrap_or_else(|err| {
-            // Fatal-startup path: the AutoStream stderr hasn't been
-            // built yet (the styler is constructed but `stderr` above
-            // captures the lock by move). Write straight to the raw
-            // stderr lock so the diagnostic is unaffected by policy.
-            let _ = io::Write::write_all(
-                &mut io::stderr().lock(),
-                format!("tk: failed to seed RNG from OS entropy: {err}\n").as_bytes(),
-            );
-            std::process::exit(3);
-        }),
-    };
+    // Seed the RNG from OS entropy (rand's SysRng). `try_from_rng` only fails
+    // when the OS RNG is unavailable (e.g. exhausted /dev/random on Linux);
+    // treat that as fatal at startup rather than surfacing a confusing
+    // partial-entropy state to commands.
+    let mut rng: StdRng = StdRng::try_from_rng(&mut SysRng).unwrap_or_else(|err| {
+        // Fatal-startup path: the AutoStream stderr hasn't been built yet (the
+        // styler is constructed but `stderr` above captures the lock by move).
+        // Write straight to the raw stderr lock so the diagnostic is unaffected
+        // by policy.
+        let _ = io::Write::write_all(
+            &mut io::stderr().lock(),
+            format!("tk: failed to seed RNG from OS entropy: {err}\n").as_bytes(),
+        );
+        std::process::exit(3);
+    });
 
     let deps = cli::Deps {
         stdout: &mut stdout,

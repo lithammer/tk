@@ -1,9 +1,10 @@
 //! Injectable wall clock returning UTC milliseconds since the Unix epoch.
 //!
-//! ADR-0018 names a process-level determinism seam (`TK_NOW` /
-//! `SOURCE_DATE_EPOCH`) so the Rust binary can be driven from txtar scenarios
-//! without an in-process clock fake. The trait keeps the in-process seam too
-//! so command-handler tests can substitute a `FakeClock`.
+//! The [`Clock`] trait is the determinism seam: production uses [`RealClock`]
+//! (the system wall clock); command-handler tests substitute a [`FakeClock`].
+//! Subprocess scenario tests run the real clock and redact any timestamp they
+//! surface — the binary exposes no clock override env var (ADR-0018, amended
+//! by tk-105).
 //!
 //! Formatting and parsing are delegated to `jiff` (`Timestamp::parse`,
 //! `from_millisecond`, `strftime`) — calendar arithmetic edge cases on
@@ -26,79 +27,21 @@ pub trait Clock {
     }
 }
 
-/// Production clock. Reads `TK_NOW` at construction time so a deterministic
-/// override survives for the lifetime of the process — the env var is parsed
-/// once, not on every `now_ms` call.
-///
-/// Accepted forms:
-/// - `TK_NOW=<iso8601>`: any RFC 9557 / ISO-8601 timestamp jiff can parse,
-///   including offset-shifted forms (`+02:00`) which are normalized to UTC
-///   milliseconds. The output value (rendered back via `now_iso`) is always
-///   the UTC equivalent — pin `Z`-suffixed inputs in scenario fixtures if
-///   that matters for byte-exact comparison.
-/// - `TK_NOW=<unix_ms>`: integer milliseconds since the epoch.
-/// - `SOURCE_DATE_EPOCH=<unix_seconds>`: integer seconds since the epoch
-///   (the reproducible-builds convention).
-///
-/// `TK_NOW` takes precedence over `SOURCE_DATE_EPOCH` when both are set. An
-/// unparseable env var falls through silently to the wall clock — callers
-/// that need fail-fast semantics should validate before launch.
-pub struct RealClock {
-    pinned_ms: Option<i64>,
-}
+/// Production clock backed by the system wall clock.
+#[derive(Default)]
+pub struct RealClock;
 
 impl RealClock {
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            pinned_ms: read_clock_override(),
-        }
-    }
-}
-
-impl Default for RealClock {
-    fn default() -> Self {
-        Self::new()
+        Self
     }
 }
 
 impl Clock for RealClock {
     fn now_ms(&self) -> i64 {
-        self.pinned_ms
-            .unwrap_or_else(|| Timestamp::now().as_millisecond())
+        Timestamp::now().as_millisecond()
     }
-}
-
-fn read_clock_override() -> Option<i64> {
-    if let Ok(v) = std::env::var("TK_NOW") {
-        if let Some(ms) = parse_tk_now(&v) {
-            return Some(ms);
-        }
-    }
-    if let Ok(v) = std::env::var("SOURCE_DATE_EPOCH") {
-        // `checked_mul` keeps the rendered output within jiff's representable
-        // range. Overflow (or any other parse failure) falls through to the
-        // wall clock — the env var was almost certainly a unit confusion
-        // (user wrote ms but the convention is seconds), so wall-clock
-        // semantics are the safer default than e.g. clamping to i64::MAX ms.
-        if let Ok(secs) = v.trim().parse::<i64>() {
-            if let Some(ms) = secs.checked_mul(1000) {
-                return Some(ms);
-            }
-        }
-    }
-    None
-}
-
-fn parse_tk_now(raw: &str) -> Option<i64> {
-    let trimmed = raw.trim();
-    if let Ok(ms) = trimmed.parse::<i64>() {
-        return Some(ms);
-    }
-    trimmed
-        .parse::<Timestamp>()
-        .ok()
-        .map(Timestamp::as_millisecond)
 }
 
 /// Render `unix_ms` as `YYYY-MM-DDTHH:MM:SS.fffZ`.
@@ -123,9 +66,8 @@ pub fn format_iso(unix_ms: i64) -> String {
 // ---- Fake ---------------------------------------------------------------
 
 /// In-process fake for command-handler tests. Returns `pinned_ms` from every
-/// `now_ms`. The matching env-var seam (`TK_NOW`) is exercised through
-/// `RealClock`; tests that exercise that branch construct a process via
-/// `assert_cmd` rather than calling the fake directly.
+/// `now_ms`. Subprocess scenario tests use [`RealClock`] and redact any
+/// timestamp they surface, so there is no env-var clock branch to fake.
 pub struct FakeClock {
     pub pinned_ms: i64,
 }
@@ -153,20 +95,6 @@ mod tests {
     fn format_iso_renders_iso8601_milliseconds() {
         // 2026-05-09T00:00:00.000Z corresponds to 1_778_284_800_000 ms.
         assert_eq!(format_iso(1_778_284_800_000), "2026-05-09T00:00:00.000Z");
-    }
-
-    #[test]
-    fn parse_tk_now_accepts_integer_millis() {
-        assert_eq!(parse_tk_now("0"), Some(0));
-        assert_eq!(parse_tk_now("1778457600000"), Some(1_778_457_600_000));
-    }
-
-    #[test]
-    fn parse_tk_now_accepts_canonical_iso_form() {
-        // Round-trip the 24-byte form tk emits.
-        let canonical = "2026-05-09T12:34:56.789Z";
-        let ms = parse_tk_now(canonical).expect("canonical form must parse");
-        assert_eq!(format_iso(ms), canonical);
     }
 
     #[test]

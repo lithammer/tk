@@ -55,10 +55,10 @@ jiff = { version = "0.2", default-features = false, features = ["std"] }
 # RNG. tk init doesn't draw randomness; first consumers are `tk add` (internal
 # IDs), `tk self-update` / `tk manpage` (stage_name suffix), and `tk sync`.
 # Wired in slice 0 so the trait shape every downstream slice inherits is
-# `&mut dyn Rng` (the dyn-compatible low-level trait), with `StdRng::seed_from_u64`
-# as the deterministic seam keyed by `TK_RAND_SEED`. The `thread_rng` default
-# feature is dropped — tk dispatch is single-threaded and consumes `StdRng`
-# directly from `Deps`.
+# `&mut dyn Rng` (the dyn-compatible low-level trait); production seeds `StdRng`
+# from OS entropy (`SysRng`) and tests inject a seeded `StdRng` via `Deps`. The
+# `thread_rng` default feature is dropped — tk dispatch is single-threaded and
+# consumes `StdRng` directly from `Deps`.
 rand = { version = "0.10", default-features = false, features = ["std", "std_rng", "sys_rng"] }
 
 # Mutation Log payloads serialize into the `mutations.payload_json` column,

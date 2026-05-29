@@ -78,7 +78,7 @@ pub enum CreateError {
 /// Create a local Ticket and its current Display ID resolver row.
 ///
 /// `rng` supplies the 128-bit internal stable ID; production code threads
-/// `Deps::rng` so the seam is exercised under `TK_RAND_SEED`.
+/// `Deps::rng`, and tests inject a seeded `StdRng` for reproducible IDs.
 pub fn create_local_ticket<C, R>(
     store: &mut Store,
     clock: &C,
