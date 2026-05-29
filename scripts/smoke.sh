@@ -4,7 +4,7 @@
 # Repository Store. Used by .github/workflows/release.yml per-platform smoke
 # jobs and reusable locally:
 #
-#     scripts/smoke.sh ./zig-out/release/x86_64-linux-musl/tk
+#     scripts/smoke.sh ./dist/tk-x86_64-unknown-linux-musl
 #
 # See ADR 0011 for the broader release strategy.
 set -euo pipefail

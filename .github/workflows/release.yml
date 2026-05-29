@@ -4,22 +4,21 @@ on:
   release:
     types: [created]
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Version string to embed (e.g., v0.0.2-rc1)'
-        required: true
-        default: dev
 
-# Per ADR 0011, release builds cross-compile all six target triples on a single
-# Linux host and the smoke matrix verifies the artifacts on native runners.
-# Releases are authored by a human (or an agent skill) as drafts with a
-# hand-crafted changelog; this workflow attaches smoke-passing binaries to
-# whichever Release fired the `release: created` event. Per ADR 0013, the
-# install script and `tk self-update` resolve assets via the flat name
-# pattern tk-<triple>[.exe].
+# Per ADR-0011, release builds cross-compile every supported triple on a single
+# Linux host (cargo-zigbuild keeps Zig as the C cross-compiler/linker for the
+# bundled SQLite) and the smoke matrix verifies the artifacts on native runners.
+# ADR-0012 fixes the per-triple linkage. The five-triple matrix is the supported
+# install surface; ARM64 Windows is deferred (ADR-0011 Consequences).
+#
+# Releases are authored by a human as drafts with a hand-crafted changelog; this
+# workflow attaches smoke-passing binaries to whichever Release fired the
+# `release: created` event. Per ADR-0013 the install script and `tk self-update`
+# resolve assets via the flat name pattern tk-<triple>[.exe], where <triple> is
+# the Rust target triple the binary reports in `tk --version`.
 
-# Serialize publishes for the same tag so a force-update or rapid retry does
-# not race two `gh release upload` jobs against the same Release object.
+# Serialize publishes for the same tag so a force-update or rapid retry does not
+# race two `gh release upload` jobs against the same Release object.
 # cancel-in-progress is false so the in-flight publish finishes before the
 # second starts.
 concurrency:
@@ -27,25 +26,124 @@ concurrency:
   cancel-in-progress: false
 
 # Default to read-only GITHUB_TOKEN at the workflow level. The `publish` job
-# re-grants `contents: write` on its own scope so only the asset-upload step
-# has the elevated privilege.
+# re-grants `contents: write` on its own scope so only the asset-upload step has
+# the elevated privilege.
 permissions:
   contents: read
+
+env:
+  # Reproducibility levers recorded alongside rust-toolchain.toml (ADR-0011):
+  # the Zig CC version and the glibc floor are pinned so the same source
+  # revision produces the same artifacts. cargo-zigbuild is pinned too.
+  ZIG_VERSION: "0.16.0"
+  CARGO_ZIGBUILD_VERSION: "0.20.1"
+  # macOS SDK for cross-linking aarch64-apple-darwin from Linux. A 14.x SDK
+  # targets back to MACOSX_DEPLOYMENT_TARGET=11.0 (ADR-0012); the checksum turns
+  # a wrong or tampered download into a loud failure instead of a bad artifact.
+  MACOS_SDK_VERSION: "14.5"
+  MACOS_SDK_SHA256: "6e146275d19f027faa2e8354da5e0267513abf013b8f16ad65a231653a2b1c5d"
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # Guard the release contract: `tk --version` embeds CARGO_PKG_VERSION, and
+      # `tk self-update`'s smoke check (ADR-0013) requires that string to carry
+      # the release tag. Fail early if the tag and the crate version disagree
+      # rather than shipping binaries whose --version mismatches the Release.
+      - name: Verify crate version matches release tag
+        if: github.event_name == 'release'
+        run: |
+          set -euo pipefail
+          crate_version="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "tk") | .version')"
+          tag="${{ github.event.release.tag_name }}"
+          if [ "v${crate_version}" != "${tag}" ]; then
+            echo "release tag ${tag} does not match crate version v${crate_version}" >&2
+            echo "bump crates/tk/Cargo.toml to ${tag#v} before tagging" >&2
+            exit 1
+          fi
+
+      - name: Install Rust release targets
+        run: rustup target add
+          x86_64-unknown-linux-musl
+          x86_64-unknown-linux-gnu
+          aarch64-unknown-linux-musl
+          aarch64-apple-darwin
+          x86_64-pc-windows-gnu
+
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
-      - name: Cross-compile six triples
-        run: zig build release -Drelease-version=${{ inputs.version || github.ref_name }} --summary all
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --version "${CARGO_ZIGBUILD_VERSION}" --locked
+
+      # The x86_64-pc-windows-gnu build needs x86_64-w64-mingw32-dlltool: the
+      # windows-sys / getrandom build scripts call it to generate import
+      # libraries, and Zig does not ship a dlltool. binutils-mingw-w64-x86-64 is
+      # the minimal package that provides it.
+      - name: Install mingw-w64 binutils for the Windows import libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils-mingw-w64-x86-64
+
+      # The Apple SDK is the one cross-input not carried in the repo. Cache the
+      # extracted tree so a release run normally pays only the build cost.
+      - name: Cache macOS SDK
+        id: macos-sdk
+        uses: actions/cache@v4
+        with:
+          path: macos-sdk
+          key: macos-sdk-${{ env.MACOS_SDK_VERSION }}
+
+      - name: Fetch macOS SDK
+        if: steps.macos-sdk.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p macos-sdk
+          url="https://github.com/joseluisq/macosx-sdks/releases/download/${MACOS_SDK_VERSION}/MacOSX${MACOS_SDK_VERSION}.sdk.tar.xz"
+          curl -fsSL -o sdk.tar.xz "${url}"
+          echo "${MACOS_SDK_SHA256}  sdk.tar.xz" | sha256sum -c -
+          tar -xJf sdk.tar.xz -C macos-sdk
+          rm -f sdk.tar.xz
+
+      # One ubuntu host builds every triple. TK_TRIPLE is set explicitly per
+      # target so the embedded `tk --version` triple, the target/<triple>/
+      # output directory, and the tk-<triple> asset name all agree — the glibc
+      # floor rides the cargo-zigbuild `.2.28` suffix, which cargo strips before
+      # it reaches the rustc target directory (so the dir is the bare triple).
+      - name: Cross-compile release triples
+        env:
+          SDKROOT: ${{ github.workspace }}/macos-sdk/MacOSX${{ env.MACOS_SDK_VERSION }}.sdk
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # asset triple (== TK_TRIPLE == target/<dir>) : cargo-zigbuild --target
+          build() {
+            local triple="$1" zig_target="$2" bin="tk" asset="tk-$1"
+            case "$triple" in
+              *-windows-*) bin="tk.exe"; asset="tk-${triple}.exe" ;;
+            esac
+            echo "::group::build ${triple} (${zig_target})"
+            TK_TRIPLE="${triple}" cargo zigbuild --release -p tk --target "${zig_target}"
+            cp "target/${triple}/release/${bin}" "dist/${asset}"
+            echo "::endgroup::"
+          }
+          build x86_64-unknown-linux-musl  x86_64-unknown-linux-musl
+          build x86_64-unknown-linux-gnu   x86_64-unknown-linux-gnu.2.28
+          build aarch64-unknown-linux-musl aarch64-unknown-linux-musl
+          build aarch64-apple-darwin       aarch64-apple-darwin
+          build x86_64-pc-windows-gnu      x86_64-pc-windows-gnu
+          ls -l dist
+
       - uses: actions/upload-artifact@v4
         with:
           name: tk-release-binaries
-          path: zig-out/release/
+          path: dist/
           if-no-files-found: error
           retention-days: 14
 
@@ -55,53 +153,40 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - triple: x86_64-linux-musl
+          - triple: x86_64-unknown-linux-musl
             runner: ubuntu-latest
-            bin: tk
-          - triple: x86_64-linux-gnu
+          - triple: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
-            bin: tk
-          - triple: aarch64-linux-musl
+          - triple: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
-            bin: tk
-          - triple: aarch64-macos
+          - triple: aarch64-apple-darwin
             runner: macos-14
-            bin: tk
-          - triple: x86_64-windows-gnu
+          - triple: x86_64-pc-windows-gnu
             runner: windows-latest
-            bin: tk.exe
-          - triple: aarch64-windows-gnu
-            runner: windows-11-arm
-            bin: tk.exe
-            experimental: true
+            ext: .exe
     runs-on: ${{ matrix.runner }}
-    # windows-11-arm is in GitHub Actions preview; allow that one smoke job to
-    # fail (or the runner to be unavailable) without blocking the workflow.
-    continue-on-error: ${{ matrix.experimental == true }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: tk-release-binaries
-          path: zig-out/release
+          path: dist
       - name: Smoke ${{ matrix.triple }}
         shell: bash
-        run: ./scripts/smoke.sh ./zig-out/release/${{ matrix.triple }}/${{ matrix.bin }}
+        run: ./scripts/smoke.sh ./dist/tk-${{ matrix.triple }}${{ matrix.ext }}
       # Publish gates per-triple asset upload on smoke success. Each smoke job
-      # writes a marker file and uploads it as a per-triple artifact; the
-      # publish job downloads all markers and renames only the triples that
-      # produced one. `if: success()` makes the gate explicit so a future
-      # `if: always()` step added between smoke and marker cannot accidentally
-      # publish a binary that failed smoke. Works uniformly for the required
-      # triples and the experimental aarch64-windows-gnu one (per ADR 0011,
-      # that triple is best-effort and may be omitted from a given release).
+      # writes a marker file and uploads it as a per-triple artifact; the publish
+      # job downloads all markers and attaches only the triples that produced
+      # one. `if: success()` makes the gate explicit so a future `if: always()`
+      # step added between smoke and marker cannot accidentally publish a binary
+      # that failed smoke.
       - name: Record smoke pass for ${{ matrix.triple }}
         if: success()
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p smoke-markers
-          : > smoke-markers/${{ matrix.triple }}
+          : > "smoke-markers/${{ matrix.triple }}"
       - if: success()
         uses: actions/upload-artifact@v4
         with:
@@ -113,8 +198,8 @@ jobs:
   publish:
     needs: smoke
     # Only attach assets when triggered by a Release event. workflow_dispatch
-    # still exercises build and smoke for manual verification but does not
-    # touch an existing Release.
+    # still exercises build and smoke for manual verification but does not touch
+    # an existing Release.
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
     permissions:
@@ -123,39 +208,36 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: tk-release-binaries
-          path: zig-out/release
+          path: dist
       # Collect every smoke-pass-<triple> marker. merge-multiple flattens all
-      # matching artifacts into one directory so the rename loop can iterate
-      # over the marker filenames to learn which triples passed smoke. A
-      # missing marker means that triple's smoke failed (or, for the
-      # experimental aarch64-windows-gnu runner, was unavailable) and its
+      # matching artifacts into one directory so the loop can learn which triples
+      # passed smoke. A missing marker means that triple's smoke failed and its
       # binary is excluded from this release.
       - uses: actions/download-artifact@v4
         with:
           pattern: smoke-pass-*
           path: smoke-markers
           merge-multiple: true
-      - name: Flatten binaries for smoke-passing triples
+      - name: Stage smoke-passing assets
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p release-flat
           shopt -s nullglob
           for marker in smoke-markers/*; do
-            triple="$(basename "$marker")"
-            case "$triple" in
-              *windows*) bin="tk.exe"; asset="tk-${triple}.exe" ;;
-              *) bin="tk"; asset="tk-${triple}" ;;
+            triple="$(basename "${marker}")"
+            case "${triple}" in
+              *-windows-*) asset="tk-${triple}.exe" ;;
+              *)           asset="tk-${triple}" ;;
             esac
-            mv "zig-out/release/$triple/$bin" "release-flat/$asset"
-            echo "publish: staged $asset"
+            mv "dist/${asset}" "release-flat/${asset}"
+            echo "publish: staged ${asset}"
           done
-          # needs:smoke short-circuits the publish job when any required
-          # triple fails, so this guard exists for the residual case where a
-          # future refactor (relaxing a smoke step to continue-on-error, or
-          # dropping the needs: dependency) lets publish run with no markers.
-          # Without it, `gh release upload` on an empty file list would
-          # succeed silently and the Release would stay asset-less.
+          # needs:smoke short-circuits publish when any required triple fails, so
+          # this guard is for the residual case where a future refactor lets
+          # publish run with no markers. Without it, `gh release upload` on an
+          # empty file list would succeed silently and the Release would stay
+          # asset-less.
           if [ -z "$(ls -A release-flat)" ]; then
             echo "publish: no smoke-passing binaries; refusing to attach to release" >&2
             exit 1
