@@ -1,0 +1,15 @@
+---
+source: crates/tk/tests/scenarios.rs
+expression: "p.run(&format!(\"{command} --help\"))"
+---
+Render the Repository Store List Tree
+
+Usage: tk list [OPTIONS]
+
+Options:
+      --ready    Show ready Tickets (open, no unresolved blockers)
+      --blocked  Show blocked Tickets (open/active with unresolved blockers)
+      --active   Show active Tickets and Epics
+      --local    Restrict to locally-authored items
+      --remote   Restrict to Remote-backed items
+  -h, --help     Print help

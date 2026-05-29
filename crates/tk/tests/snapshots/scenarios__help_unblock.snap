@@ -1,0 +1,14 @@
+---
+source: crates/tk/tests/scenarios.rs
+expression: "p.run(&format!(\"{command} --help\"))"
+---
+Remove a blocking relationship
+
+Usage: tk unblock <BLOCKED> <BLOCKING>
+
+Arguments:
+  <BLOCKED>   Item that was being blocked
+  <BLOCKING>  Item that no longer blocks
+
+Options:
+  -h, --help  Print help

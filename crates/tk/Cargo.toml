@@ -73,5 +73,11 @@ serde_json = "1"
 
 [dev-dependencies]
 tempfile = "3"
-# Minimal CLI assertion helper for the scenario driver.
+# CLI scenario harness: assert_cmd runs the built `tk` binary, insta captures
+# stdout/stderr/exit (inline for behavioural scenarios, file snapshots for the
+# clap-generated `--help` contract), and shlex splits the command strings.
 assert_cmd = "2"
+# `filters` enables regex redaction (the init refusal surfaces git's
+# environment-variable stderr).
+insta = { version = "1", features = ["filters"] }
+shlex = "1"

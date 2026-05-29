@@ -1,0 +1,18 @@
+---
+source: crates/tk/tests/scenarios.rs
+expression: "p.run(&format!(\"{command} --help\"))"
+---
+Update the title, body, priority, or parent of a Ticket or Epic
+
+Usage: tk update [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Display ID or Alias of the Ticket or Epic to update
+
+Options:
+  -m, --message <MESSAGE>    Message paragraph; repeatable. Conflicts with -F
+  -F, --file <PATH>          Read the message from a file, or '-' for stdin
+  -p, --priority <PRIORITY>  Set Priority (P0..P4). Tickets only
+  -P, --parent <EPIC>        Set the containing Epic by Display ID or Alias. Tickets only
+      --no-parent            Remove the Ticket from its current Epic. Tickets only
+  -h, --help                 Print help

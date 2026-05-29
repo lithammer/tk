@@ -1,0 +1,14 @@
+---
+source: crates/tk/tests/scenarios.rs
+expression: "p.run(&format!(\"{command} --help\"))"
+---
+Record that one item blocks another
+
+Usage: tk block <BLOCKED> <BLOCKING>
+
+Arguments:
+  <BLOCKED>   Item being blocked
+  <BLOCKING>  Item that must finish first
+
+Options:
+  -h, --help  Print help

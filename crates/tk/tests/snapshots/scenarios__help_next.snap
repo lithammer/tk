@@ -1,0 +1,10 @@
+---
+source: crates/tk/tests/scenarios.rs
+expression: "p.run(&format!(\"{command} --help\"))"
+---
+Select the next ready Ticket
+
+Usage: tk next
+
+Options:
+  -h, --help  Print help
