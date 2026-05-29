@@ -12,15 +12,15 @@
 //!
 //! Isolation: every `tk` runs as its own subprocess, so the per-child env set
 //! here is never the test process's global state and scenarios run in parallel
-//! safely. The colour-policy and determinism env knobs are scrubbed so a
-//! developer's shell cannot perturb a run: the random `items.id` never appears
-//! in output (and OS entropy keeps it distinct across a scenario's `tk add`
-//! calls), and no current scenario surfaces a timestamp. A value that does vary
-//! (git's refusal stderr) is redacted with an insta filter rather than by
-//! controlling the binary — the binary still reads the determinism seams today,
-//! but tk-105 removes those production reads. `GIT_CEILING_DIRECTORIES` pins git
-//! discovery to the scratch tree so a `$TESTROOT` under an ambient repo cannot
-//! make a refusal scenario pass spuriously.
+//! safely. The colour-policy env (`NO_COLOR` / `CLICOLOR_FORCE`) is scrubbed so
+//! a developer's shell cannot tint the output. The binary reads no determinism
+//! env knobs (tk-105), so nothing else needs pinning: the random `items.id`
+//! never appears in output and OS entropy keeps it distinct across a scenario's
+//! `tk add` calls; no current scenario surfaces a timestamp; and a value that
+//! does vary (git's refusal stderr) is handled with an insta redaction filter.
+//! `GIT_CEILING_DIRECTORIES` pins git discovery to the scratch tree so a
+//! `$TESTROOT` under an ambient repo cannot make a refusal scenario pass
+//! spuriously.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -71,14 +71,12 @@ impl Repo {
             .args(&args)
             .current_dir(&self.cwd)
             .env("GIT_CEILING_DIRECTORIES", &self.root)
-            // Scrub ambient knobs (per-child, never the test process's global
-            // env): colour policy and the determinism seams the binary still
-            // reads until tk-105.
+            // Scrub the colour-policy env (per-child, never the test process's
+            // global state) so a developer's shell cannot tint the output. The
+            // binary reads no determinism env knobs (tk-105), so there is
+            // nothing else to scrub.
             .env_remove("NO_COLOR")
             .env_remove("CLICOLOR_FORCE")
-            .env_remove("TK_NOW")
-            .env_remove("TK_RAND_SEED")
-            .env_remove("SOURCE_DATE_EPOCH")
             .output()
             .expect("run tk");
         render(&out, &self.root)

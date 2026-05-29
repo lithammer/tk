@@ -2,8 +2,7 @@
 //!
 //! ADR-0018 models the subprocess seam as a Rust trait. Every
 //! subprocess in tk (git / gh / acli / curl) flows through this seam so tests
-//! can fake them with `FakeRunner` and the determinism harness can swap a
-//! `TK_FAKE_RUNNER` mode in without per-call-site changes.
+//! can substitute a `FakeRunner` without per-call-site changes.
 //!
 //! `tk init` only spawns `git rev-parse`, but the trait must already be shaped
 //! correctly for downstream slices (see [`crate::git::discovery`]).

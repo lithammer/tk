@@ -110,7 +110,7 @@ it:
   backtrace/span-trace reports are an *anti-goal* for tk's stable, verbatim,
   oracle-asserted error lines. A reporter is acceptable only in test/dev glue,
   not on the user-facing path.
-- **Testing:** `insta` (snapshots; `INSTA_UPDATE` ≈ `TK_UPDATE=1`), `assert_cmd`
+- **Testing:** `insta` (snapshots; `INSTA_UPDATE` / `cargo insta`), `assert_cmd`
   + `predicates`, `tempfile`; `trycmd` last.
 - **Lints:** `clippy::pedantic` enabled as **warnings** via
   `[workspace.lints.clippy]` in `Cargo.toml` from day one — cheap on greenfield,
