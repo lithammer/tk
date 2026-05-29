@@ -117,11 +117,14 @@ jobs:
       # it reaches the rustc target directory (so the dir is the bare triple).
       - name: Cross-compile release triples
         env:
-          SDKROOT: ${{ github.workspace }}/macos-sdk/MacOSX${{ env.MACOS_SDK_VERSION }}.sdk
           MACOSX_DEPLOYMENT_TARGET: "11.0"
         run: |
           set -euo pipefail
           mkdir -p dist
+          # Resolve the extracted SDK directory by glob rather than hardcoding
+          # the MacOSX<ver>.sdk name; a missing SDK fails the darwin link loudly.
+          sdk_dir="$(ls -d macos-sdk/*.sdk)"
+          export SDKROOT="${PWD}/${sdk_dir}"
           # asset triple (== TK_TRIPLE == target/<dir>) : cargo-zigbuild --target
           build() {
             local triple="$1" zig_target="$2" bin="tk" asset="tk-$1"
