@@ -14,22 +14,24 @@ command reference lives in `tk --help`, `tk <command> --help`, and
 ## Module Map
 
 ```text
-src/
-  main.zig                 process entrypoint
-  cli.zig                  top-level dispatch and shared Deps
-  messages.zig             stable user-visible substrings
-  commands/                per-command parsing and handlers
+crates/tk/src/
+  main.rs                  process entrypoint
+  cli.rs                   top-level dispatch and shared Deps
+  commands/                per-command clap-derive Args and handlers
   domain/                  pure domain enums and helpers (incl. sync contract
                            types: MutationPayload, MutationView,
-                           BackendItemSnapshot, Outcome, Diagnostic)
+                           BackendItemSnapshot, ApplyOutcome)
   git/                     Git subprocess discovery façade
-  proc/                    subprocess runner abstraction and fakes
+  proc.rs                  subprocess runner trait and fakes
   remote/                  Backend Adapter trait, factory, and FakeAdapter
+  render/                  terminal-rendering subsystem (palette, styler,
+                           sanitize)
   store/                   Repository Store, migrations, Mutation Log, and
                            sync helpers
-  sync/                    sync engine orchestration
+  sync.rs                  sync engine orchestration
   worktree/                Workspace Scope storage and discovery
-  testing/                 CLI harnesses, txtar runner, smoke tests
+crates/tk/tests/
+  scenarios.rs             CLI scenario harness (insta + assert_cmd)
 ```
 
 Only add modules when a slice needs them. Prefer moving reusable behavior into a
@@ -37,42 +39,43 @@ small boundary module after the second caller proves the shape.
 
 ## Boundaries
 
-- `main.zig` is a thin process shim. It builds real `cli.Deps`, calls
-  `runArgv`, maps unexpected propagated errors to exit code `3`, and does not
-  own command logic.
-- `cli.zig` owns top-level routing only. The command tuple is the single place
-  to register a command module; help text and dispatch derive from it.
-- `commands/<cmd>.zig` owns that command's zig-clap spec, command-specific
-  validation, rendering, and calls into store/worktree/git/remote/sync helpers.
+- `main.rs` is a thin process shim. It builds real `cli::Deps`, calls
+  `cli::run_argv`, maps unexpected propagated errors to exit code `3`, and does
+  not own command logic.
+- `cli.rs` owns top-level routing only. The `Command` enum is the single place
+  to register a command module; clap derives help text and dispatch from it.
+- `commands/<cmd>.rs` owns that command's clap-derive `Args` struct,
+  command-specific validation, rendering, and calls into
+  store/worktree/git/remote/sync helpers.
 - `domain/` stays pure: no SQLite, filesystem paths, Git, subprocesses, or
   command rendering. Houses the tk vocabulary types and the
   infrastructure-free sync contract types shared by `store/`, `remote/`,
-  and `sync/`.
-- `proc/` captures subprocess output for callers to classify. Commands should
+  and `sync`.
+- `proc.rs` captures subprocess output for callers to classify. Commands should
   not stream Git or Backend Adapter subprocess output directly to user writers.
 - `git/` classifies Git discovery outcomes and keeps shared Git diagnostic
   phrasing out of command modules.
 - `store/` owns Repository Store opening, migrations, current-state reads and
   writes, Display ID / Alias resolution, sequence allocation, and Mutation Log
-  persistence. `store/sync.zig` exposes the SQL helpers the sync engine and
+  persistence. `store/sync.rs` exposes the SQL helpers the sync engine and
   the `tk sync` / `tk remote` commands compose against.
 - `remote/` owns the type-erased Backend Adapter trait (mirroring
-  `proc.Runner`), the factory that dispatches by configured backend kind, and
-  the FakeAdapter used by engine tests. It imports `store/`, `proc/`, and
-  `domain/` but never `sync/`.
-- `sync/` owns the engine that composes Adapter Pull and Apply with the
-  store's sync helpers. Single entry point `sync.engine.runSync`; the engine
-  reaches the database only through `store/sync.zig` helpers, never via raw
+  `ProcRunner`), the factory that dispatches by configured backend kind, and
+  the FakeAdapter used by engine tests. It imports `store/`, `proc`, and
+  `domain/` but never `sync`.
+- `sync.rs` owns the engine that composes Adapter Pull and Apply with the
+  store's sync helpers. Single entry point `sync::run_sync`; the engine
+  reaches the database only through `store/sync.rs` helpers, never via raw
   SQL.
 - `worktree/` owns Workspace Scope storage, branch-name inference, and slug
   derivation. Commands compose its free functions rather than growing a service
   object prematurely.
 
-`cli.Deps` carries explicit dependencies: stdout/stderr/stdin writers, general
-allocator, `std.Io`, cwd handle, subprocess runner, UTC millisecond clock, and
-random source. Writers are borrowed for one command invocation and must not be
-retained past return. `Deps` grows additively as slices need more injectable
-boundaries.
+`cli::Deps` carries explicit dependencies: stdout/stderr/stdin writers, cwd
+path, subprocess runner, UTC millisecond clock, random source, and a resolved
+`Styler` for colour output. Writers are borrowed for one command invocation and
+must not be retained past return. `Deps` grows additively as slices need more
+injectable boundaries.
 
 Exit codes returned by command dispatch:
 
@@ -155,7 +158,7 @@ default unless `--no-status` is used. The default path layout is recorded in
 [ADR 0007](./docs/adr/0007-default-worktree-path-layout.md). On a path or
 branch collision `tk worktree start` does not preflight: it runs the git
 operation and forwards git's own stderr beneath a framing line (see
-`runGitOrFail`), treating git as the authority rather than reimplementing
+`run_git_or_fail`), treating git as the authority rather than reimplementing
 git's existence checks with the TOCTOU gap that implies (`tk-15`).
 Configurable path layout is tracked by `tk-16`.
 
@@ -165,20 +168,19 @@ agents should pass IDs selected by `tk next` or `tk list`.
 
 ## Release Targets
 
-`tk` ships prebuilt binaries for six target triples produced by a `zig build
-release` step that cross-compiles from a single `ubuntu-latest` runner with
-Zig 0.16.0 pinned exactly:
+`tk` ships prebuilt binaries for five target triples produced by a
+`cargo zigbuild` step that cross-compiles from a single `ubuntu-latest` runner
+with Zig 0.16.0 pinned exactly (Zig is the C cross-compiler/linker for the
+bundled SQLite):
 
-- `x86_64-linux-musl` and `aarch64-linux-musl` — fully static
-- `x86_64-linux-gnu` — dynamic glibc, floor `2.28`
-- `aarch64-macos` — dynamic `libSystem`, `-mmacos-version-min=11.0`
-- `x86_64-windows-gnu` and `aarch64-windows-gnu` — `-static-libgcc` with
-  dynamic `msvcrt`
+- `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` — fully static
+- `x86_64-unknown-linux-gnu` — dynamic glibc, floor `2.28`
+- `aarch64-apple-darwin` — dynamic `libSystem`, `MACOSX_DEPLOYMENT_TARGET=11.0`
+- `x86_64-pc-windows-gnu` — static libgcc with dynamic msvcrt
 
-Cross-compile rationale, linkage choices, the L2 reproducibility level, and
-the best-effort policy for `aarch64-windows-gnu` are recorded in [ADR
+Cross-compile rationale, linkage choices, and the L2 reproducibility level are
+recorded in [ADR
 0011](./docs/adr/0011-single-host-cross-compile-release.md). Smoke
 verification runs the cross-compiled artifact on a matching native GHA runner
-through a minimal `tk init / add / list` scenario; smoke failure (or runner
-unavailability for `windows-11-arm`) gates artifact upload, so a given GitHub
-Release may omit `aarch64-windows-gnu`.
+through a minimal `tk init / add / list` scenario; smoke failure gates artifact
+upload, so a given GitHub Release may omit a triple whose smoke job failed.

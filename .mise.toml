@@ -1,5 +1,4 @@
 [tools]
-zig = "0.16.0"
 
 [env]
-_.path = ["./zig-out/bin/"]
+_.path = ["./target/debug/"]

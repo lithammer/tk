@@ -2,31 +2,19 @@
 .DELETE_ON_ERROR:
 .SUFFIXES:
 
-ZIG ?= zig
-ZIGFLAGS ?= --summary all
-BIN := zig-out/bin/tk
-EMBED := $(wildcard src/store/migrations/*.sql) \
-	src/commands/prime.md
-SRC := $(shell find src -name '*.zig') \
-	build.zig \
-	build.zig.zon
-
-all: $(BIN)
-
-$(BIN): $(SRC) $(EMBED)
-	$(ZIG) build $(ZIGFLAGS)
-	@touch $@
+all:
+	cargo build
 
 test:
-	$(ZIG) build $(ZIGFLAGS) test
+	cargo test
 
 run:
-	$(ZIG) build $(ZIGFLAGS) run -- $(ARGS)
+	cargo run -- $(ARGS)
 
 release:
-	$(ZIG) build $(ZIGFLAGS) release
+	cargo build --release
 
 clean:
-	$(RM) -r .zig-cache zig-out zig-pkg
+	cargo clean
 
 .PHONY: all test run release clean

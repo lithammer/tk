@@ -299,7 +299,7 @@ _Avoid_: ticket, tickets
 - **`tk worktree clear`** removes configured **Workspace Scope** without disabling **Inferred Workspace Scope**.
 - **`tk show`**, **`tk update`**, **`tk start`**, **`tk stop`**, **`tk done`**, and **`tk promote`** require an explicit **Display ID** in v1.
 - **Prime** provides agent workflow guidance, essential commands, and close-out reminders.
-- v1 **Prime** prints static command-owned Markdown embedded from `src/commands/prime.md` with Zig `@embedFile`.
+- v1 **Prime** prints static command-owned Markdown embedded from `crates/tk/src/commands/prime.md` via Rust `include_str!`.
 - Commands that inspect **Workspace Scope** identify the active **Workspace Scope** and **Workspace Scope Source** rather than using scope as a hidden item target.
 - A **Repository Store** is shared by all **Workspaces** for the same version-control repository.
 - A **Workspace Scope** belongs to one **Workspace**, not the **Repository Store**.

@@ -48,14 +48,13 @@ doc_markdown = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 
-# `Deps<'_>` is a borrowed view of injectables; passing it by value mirrors the
-# Zig oracle's `cli.Deps` and keeps command handler signatures free of
-# wildcard lifetimes.
+# `Deps<'_>` is a borrowed view of injectables; passing it by value keeps
+# command handler signatures free of wildcard lifetimes.
 needless_pass_by_value = "allow"
 
 # Style: a nested `if` reads better than `if a && b` when each predicate has
 # its own paragraph of justification or when one of the inner branches grows
-# during a later slice. The Zig oracle nests for the same reason.
+# during a later slice.
 collapsible_if = "allow"
 collapsible_else_if = "allow"
 
@@ -73,7 +72,7 @@ similar_names = "allow"
 
 [profile.release]
 # Single static binary is part of the distribution contract (ADR-0011/0012);
-# LTO + strip make `cargo-zigbuild` artifacts comparable to the Zig build.
+# LTO + strip keep the `cargo-zigbuild` release artifacts slim.
 lto = "thin"
 strip = "symbols"
 codegen-units = 1
