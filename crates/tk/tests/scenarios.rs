@@ -10,14 +10,18 @@
 //! - The clap-generated `--help` output is captured as file snapshots: a
 //!   change is surfaced for review, not asserted as a hand-authored contract.
 //!
-//! Determinism seams: `TK_NOW` is fixed, `TK_RAND_SEED` is varied per command
-//! (so the 16-byte `items.id` differs across the multiple `tk add` calls a
-//! scenario makes — see tk-103), and the colour-policy env is scrubbed so
-//! output is plain regardless of the developer's shell. `GIT_CEILING_DIRECTORIES`
-//! pins git discovery to the scratch tree so a `$TESTROOT` that happens to sit
-//! under an ambient repo cannot make a refusal scenario pass spuriously.
+//! Isolation: every `tk` runs as its own subprocess, so the per-child env set
+//! here is never the test process's global state and scenarios run in parallel
+//! safely. The colour-policy and determinism env knobs are scrubbed so a
+//! developer's shell cannot perturb a run: the random `items.id` never appears
+//! in output (and OS entropy keeps it distinct across a scenario's `tk add`
+//! calls), and no current scenario surfaces a timestamp. A value that does vary
+//! (git's refusal stderr) is redacted with an insta filter rather than by
+//! controlling the binary — the binary still reads the determinism seams today,
+//! but tk-105 removes those production reads. `GIT_CEILING_DIRECTORIES` pins git
+//! discovery to the scratch tree so a `$TESTROOT` under an ambient repo cannot
+//! make a refusal scenario pass spuriously.
 
-use std::cell::Cell;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -30,7 +34,6 @@ struct Repo {
     _tmp: TempDir,
     root: PathBuf,
     cwd: PathBuf,
-    seed: Cell<u64>,
 }
 
 impl Repo {
@@ -57,24 +60,25 @@ impl Repo {
             _tmp: tmp,
             root,
             cwd,
-            seed: Cell::new(0),
         }
     }
 
     /// Run `tk <cmd>` (shell-split) in the repo and return the rendered output.
     fn run(&self, cmd: &str) -> String {
         let args = shlex::split(cmd).expect("command must shell-split");
-        let seed = self.seed.get();
-        self.seed.set(seed + 1);
         let out = Command::cargo_bin("tk")
             .expect("cargo bin tk")
             .args(&args)
             .current_dir(&self.cwd)
-            .env("TK_NOW", "2026-05-09T00:00:00.000Z")
-            .env("TK_RAND_SEED", seed.to_string())
             .env("GIT_CEILING_DIRECTORIES", &self.root)
+            // Scrub ambient knobs (per-child, never the test process's global
+            // env): colour policy and the determinism seams the binary still
+            // reads until tk-105.
             .env_remove("NO_COLOR")
             .env_remove("CLICOLOR_FORCE")
+            .env_remove("TK_NOW")
+            .env_remove("TK_RAND_SEED")
+            .env_remove("SOURCE_DATE_EPOCH")
             .output()
             .expect("run tk");
         render(&out, &self.root)
