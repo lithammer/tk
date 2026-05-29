@@ -1,6 +1,6 @@
 # Release artifacts cross-compile from a single Linux host
 
-Release builds produce all six supported triples from one
+Release builds produce all five supported triples from one
 `ubuntu-latest` GitHub Actions runner. The active build (Rust) uses
 `cargo-zigbuild`, which keeps Zig as the C cross-compiler/linker for
 bundled SQLite; the toolchain (Rust + Zig CC pin) is recorded so the
@@ -19,7 +19,11 @@ artifact with no compensating benefit.
 
 ## Consequences
 
-`aarch64-windows-gnu` smoke is `continue-on-error: true` while
-`windows-11-arm` is in GitHub Actions preview; the release-publish step
-gates upload on smoke success, so that triple is best-effort per
-release.
+The release matrix is five triples: `x86_64-unknown-linux-musl`,
+`x86_64-unknown-linux-gnu` (glibc 2.28 floor), `aarch64-unknown-linux-musl`,
+`aarch64-apple-darwin`, and `x86_64-pc-windows-gnu`. ARM64 Windows is
+deferred indefinitely: Rust ships no tier-2 mingw target for it
+(`aarch64-pc-windows-gnullvm` is tier-3, needing `-Zbuild-std` on stable)
+and the `windows-11-arm` smoke runner is in GitHub Actions preview. The
+release-publish step gates upload on smoke success, so a triple whose smoke
+fails is omitted from that release rather than blocking it.

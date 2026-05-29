@@ -5,3 +5,8 @@
 channel = "1.95.0"
 components = ["rustfmt", "clippy"]
 profile = "minimal"
+
+# Companion release-pipeline pins (.github/workflows/release.yml env block):
+# Zig 0.16.0 as the cross C compiler via cargo-zigbuild 0.20.1, glibc 2.28
+# floor. Those are the reproducibility levers (ADR-0011/0012); bump them
+# together with this channel.
