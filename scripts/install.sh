@@ -49,25 +49,25 @@ case "$OS" in
     Linux)
         case "$ARCH" in
             x86_64)
-                TRIPLE="x86_64-linux-${TK_LINUX_ABI}"
+                TRIPLE="x86_64-unknown-linux-${TK_LINUX_ABI}"
                 ;;
             aarch64)
                 if [ "$TK_LINUX_ABI" = "gnu" ]; then
-                    echo "tk: aarch64-linux-gnu is not a supported release target." >&2
-                    echo "    Only aarch64-linux-musl is published for aarch64 Linux." >&2
+                    echo "tk: aarch64-unknown-linux-gnu is not a supported release target." >&2
+                    echo "    Only aarch64-unknown-linux-musl is published for aarch64 Linux." >&2
                     exit 1
                 fi
-                TRIPLE="aarch64-linux-musl"
+                TRIPLE="aarch64-unknown-linux-musl"
                 ;;
         esac
         ;;
     Darwin)
         case "$ARCH" in
             arm64|aarch64)
-                TRIPLE="aarch64-macos"
+                TRIPLE="aarch64-apple-darwin"
                 ;;
             x86_64)
-                echo "tk: x86_64-macos is not a supported release target." >&2
+                echo "tk: x86_64-apple-darwin is not a supported release target." >&2
                 echo "    Build from source: https://github.com/lithammer/tk#build-from-source" >&2
                 exit 1
                 ;;
