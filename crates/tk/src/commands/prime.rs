@@ -1,13 +1,15 @@
-//! `tk prime` — print the embedded agent-workflow briefing.
+//! `tk prime` — print the embedded agent-workflow briefing when the current
+//! directory has an initialized Repository Store.
 //!
-//! No Repository Store precondition; safe for agent session-start hooks
-//! before `tk init` has run. The briefing text lives at
-//! `commands/prime.md` (a symlink to the source-of-truth markdown) and
-//! is baked into the binary via `include_str!`.
+//! Gated on store presence so a global agent hook can run `tk prime` in any
+//! directory: with no openable Repository Store it exits 0 with empty stdout
+//! and stderr instead of printing (ADR-0020). The briefing text lives at
+//! `commands/prime.md` and is baked into the binary via `include_str!`.
 
 use clap::Args as ClapArgs;
 
 use crate::cli::Deps;
+use crate::commands::resolver;
 
 /// Embedded briefing. CR bytes are forbidden inside the file (LF only) and
 /// trailing whitespace is trimmed so the rendered output ends with exactly
@@ -17,11 +19,25 @@ const PRIME_RAW: &str = include_str!("prime.md");
 #[derive(Debug, ClapArgs)]
 pub struct Args {}
 
+/// The briefing bytes: the embedded markdown trimmed to end with exactly one
+/// `\n`. Pure and store-independent so the formatting contract is unit-tested
+/// without opening a Repository Store.
+fn briefing() -> String {
+    let trimmed = PRIME_RAW.trim_end_matches([' ', '\t', '\r', '\n']);
+    let mut out = String::with_capacity(trimmed.len() + 1);
+    out.push_str(trimmed);
+    out.push('\n');
+    out
+}
+
 #[must_use]
 pub fn run(deps: Deps<'_>, _args: Args) -> u8 {
-    let trimmed = PRIME_RAW.trim_end_matches([' ', '\t', '\r', '\n']);
-    let _ = deps.stdout.write_all(trimmed.as_bytes());
-    let _ = deps.stdout.write_all(b"\n");
+    // Prime prints only when a Repository Store is initialized here; with no
+    // openable store it exits 0 silently so a global agent hook stays quiet in
+    // any directory (ADR-0020).
+    if resolver::open_for_command(deps.runner, deps.cwd).is_ok() {
+        let _ = deps.stdout.write_all(briefing().as_bytes());
+    }
     0
 }
 
@@ -40,39 +56,12 @@ mod tests {
     };
 
     use super::*;
-    use crate::clock::FakeClock;
-    use crate::proc::FakeRunner;
-    use crate::render::Styler;
-    use rand::SeedableRng;
-    use rand::rngs::StdRng;
 
     #[test]
-    fn prints_briefing_with_single_trailing_newline() {
-        let cwd = std::env::current_dir().unwrap();
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let mut stdin = std::io::Cursor::new(Vec::new());
-        let runner = FakeRunner::new();
-        let clock = FakeClock::new(0);
-        let mut rng = StdRng::seed_from_u64(0);
-        let code = run(
-            Deps {
-                stdout: &mut stdout,
-                stderr: &mut stderr,
-                stdin: &mut stdin,
-                runner: &runner,
-                clock: &clock,
-                rng: &mut rng,
-                cwd: cwd.as_path(),
-                styler: Styler::plain(),
-            },
-            Args {},
-        );
-        assert_eq!(code, 0);
-        let body = String::from_utf8(stdout).unwrap();
+    fn briefing_ends_with_single_trailing_newline() {
+        let body = briefing();
         assert!(body.ends_with('\n'));
         assert!(!body.ends_with("\n\n"));
         assert!(body.starts_with("# tk Workflow Context"));
-        assert!(stderr.is_empty());
     }
 }

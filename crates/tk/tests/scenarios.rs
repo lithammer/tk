@@ -187,10 +187,23 @@ fn manpage_emits_embedded_manpage() {
 #[test]
 fn prime_emits_workflow_briefing() {
     let p = Repo::new("repo");
+    p.run("init");
     let expected =
         fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/commands/prime.md"))
             .expect("read prime.md");
     assert_eq!(p.run("prime"), expected);
+}
+
+#[test]
+fn prime_is_silent_without_initialized_store() {
+    let p = Repo::new("repo");
+    assert_eq!(p.run("prime"), "");
+}
+
+#[test]
+fn prime_is_silent_outside_git_repository() {
+    let p = Repo::bare("scratch");
+    assert_eq!(p.run("prime"), "");
 }
 
 /// Clap owns `--help` formatting; these snapshots exist to surface an

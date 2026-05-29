@@ -233,11 +233,13 @@ to standard error.
 .SS Agent briefing
 .TP
 .B tk prime
-Print static agent workflow guidance to standard output.
+Print static agent workflow guidance to standard output when the current
+directory has an initialized Repository Store.
 .PP
 .B tk prime
-does not require an initialized Repository Store and writes nothing to
-standard error on success.
+exits successfully with no output when there is no initialized Repository
+Store, including outside a git repository, so a global agent hook can run it
+in any directory.
 .SH EXIT STATUS
 .TP
 .B 0
