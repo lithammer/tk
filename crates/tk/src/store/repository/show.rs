@@ -11,7 +11,6 @@
 use rusqlite::params;
 
 use crate::domain::item_class::ItemClass;
-use crate::domain::origin::Origin;
 use crate::domain::priority::Priority;
 use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
@@ -45,9 +44,6 @@ pub struct ItemDetail {
     pub title: String,
     pub body: String,
     pub status: ItemStatus,
-    pub origin: Origin,
-    pub backend_kind: Option<String>,
-    pub backend_key: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub parent: Option<ItemSummary>,
@@ -66,8 +62,7 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
 
     let row = store.conn.query_row(
         "select id, display_value, item_class, ticket_kind, priority, title, body, \
-                status, origin, backend_kind, backend_key, created_at, updated_at, \
-                container_id \
+                status, created_at, updated_at, container_id \
            from items where id = ?1",
         params![&reference.id],
         |r| {
@@ -80,12 +75,9 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
                 r.get::<_, String>(5)?,
                 r.get::<_, String>(6)?,
                 r.get::<_, ItemStatus>(7)?,
-                r.get::<_, Origin>(8)?,
-                r.get::<_, Option<String>>(9)?,
+                r.get::<_, String>(8)?,
+                r.get::<_, String>(9)?,
                 r.get::<_, Option<String>>(10)?,
-                r.get::<_, String>(11)?,
-                r.get::<_, String>(12)?,
-                r.get::<_, Option<String>>(13)?,
             ))
         },
     );
@@ -98,9 +90,6 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
         title,
         body,
         status,
-        origin,
-        backend_kind,
-        backend_key,
         created_at,
         updated_at,
         container_id,
@@ -137,9 +126,6 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
         title,
         body,
         status,
-        origin,
-        backend_kind,
-        backend_key,
         created_at,
         updated_at,
         parent,
@@ -305,7 +291,6 @@ mod tests {
         assert_eq!(item.ticket_kind, Some(TicketKind::Task));
         assert_eq!(item.priority, Some(Priority::P2));
         assert_eq!(item.status, ItemStatus::Open);
-        assert_eq!(item.origin, Origin::Local);
         assert!(item.parent.is_none());
         assert!(item.children.is_empty());
         assert!(item.blocked_by.is_empty());
