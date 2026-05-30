@@ -115,7 +115,7 @@ Status: open
 .RE
 .SS Reading the List Tree
 .TP
-\fBtk list\fR [\fB\-\-ready\fR | \fB\-\-blocked\fR | \fB\-\-active\fR] [\fB\-\-local\fR | \fB\-\-remote\fR]
+\fBtk list\fR [\fB\-\-ready\fR | \fB\-\-blocked\fR | \fB\-\-active\fR] [\fB\-\-local\fR | \fB\-\-remote\fR] [\fB\-\-epic\fR]
 Render the Repository Store List Tree.
 .PP
 The default view shows open and active Tickets and Epics. Epics render as
@@ -136,6 +136,9 @@ shows only local items.
 shows only Backend-backed items. The current binary can read backend-origin
 rows seeded by tests or future sync paths, but it does not promote or pull
 backend items yet.
+.PP
+.B \-\-epic
+restricts the listing to Epics and composes with any view or Origin filter.
 .PP
 On success with one local Ticket,
 .B tk list

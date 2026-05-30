@@ -79,16 +79,38 @@ impl ListOriginFilter {
     }
 }
 
+/// Item-class filter for `tk list`. Orthogonal to [`ListView`] and
+/// [`ListOriginFilter`] — it narrows the result set to Epics without
+/// changing which view or Origin is selected, so it composes with any
+/// of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ListClassFilter {
+    #[default]
+    Any,
+    Epic,
+}
+
+impl ListClassFilter {
+    fn sql_text(self) -> &'static str {
+        match self {
+            Self::Any => "any",
+            Self::Epic => "epic",
+        }
+    }
+}
+
 /// Read options for the List Tree query.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ListOptions {
     pub view: ListView,
     pub origin: ListOriginFilter,
+    pub class: ListClassFilter,
 }
 
-/// SQL for the List Tree read. Bound with two text parameters:
+/// SQL for the List Tree read. Bound with three text parameters:
 ///   `?1` — [`ListView::sql_text`] selecting which items match.
 ///   `?2` — [`ListOriginFilter::sql_text`] filtering stored Origin.
+///   `?3` — [`ListClassFilter::sql_text`] narrowing to a single Item class.
 ///
 /// The `case ?1 when '<tag>' then ...` arms cover every [`ListView`]
 /// variant; the test below catches a missing arm.
@@ -135,6 +157,7 @@ select id, display_value, item_class, ticket_kind, priority, title, \
        (has_unresolved_dependency or has_unresolved_external_blocker) as has_unresolved_blocker \
   from matching parent \
  where (?2 = 'any' or parent.origin = ?2) \
+   and (?3 = 'any' or parent.item_class = ?3) \
    and ( \
        parent.self_matches \
        or ( \
@@ -157,7 +180,11 @@ pub fn list_rows(store: &Store, options: ListOptions) -> Result<Vec<ListRow>, ru
     let mut stmt = store.conn.prepare(LIST_ROWS_SQL)?;
     let rows = stmt
         .query_map(
-            params![options.view.sql_text(), options.origin.sql_text()],
+            params![
+                options.view.sql_text(),
+                options.origin.sql_text(),
+                options.class.sql_text()
+            ],
             row_from_sql,
         )?
         .collect::<Result<Vec<_>, _>>()?;
@@ -374,6 +401,106 @@ mod tests {
             ListOptions {
                 origin: ListOriginFilter::Local,
                 ..ListOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(display_ids(&rows), vec!["tk-1"]);
+    }
+
+    #[test]
+    fn epic_class_filter_returns_only_epics() {
+        let store = open_seeded();
+        seed_epic(&store, "epic", "tk-1", "open", 1);
+        seed_ticket(&store, "ticket", "tk-2", "open", 2);
+        let rows = list_rows(
+            &store,
+            ListOptions {
+                class: ListClassFilter::Epic,
+                ..ListOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(display_ids(&rows), vec!["tk-1"]);
+    }
+
+    #[test]
+    fn epic_class_filter_keeps_parent_epic_in_ready_view() {
+        // The epic-parent-inclusion branch surfaces an Epic whose child is
+        // ready; the class filter drops the child Ticket but keeps the Epic,
+        // so `--ready --epic` answers "which Epics contain ready work?".
+        let store = open_seeded();
+        seed_epic(&store, "epic", "tk-1", "open", 1);
+        insert_fixture_item(
+            &store.conn,
+            FixtureItem {
+                id: "child",
+                display: "tk-2",
+                title: "Child",
+                container_id: Some("epic"),
+                container_class: Some("epic"),
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        let rows = list_rows(
+            &store,
+            ListOptions {
+                view: ListView::Ready,
+                class: ListClassFilter::Epic,
+                ..ListOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(display_ids(&rows), vec!["tk-1"]);
+    }
+
+    #[test]
+    fn ready_epic_origin_filter_applies_to_child_subquery() {
+        // The epic-parent-inclusion branch re-applies the Origin filter to the
+        // child (`child.origin = ?2`), so under `--ready --epic --local` a Local
+        // Epic surfaces only when it has a ready *Local* child — not merely any
+        // ready child. Both Epics here are Local (they pass the parent Origin
+        // filter); they differ only in the Origin of their ready child.
+        let store = open_seeded();
+        seed_epic(&store, "epic-local-child", "tk-1", "open", 1);
+        insert_fixture_item(
+            &store.conn,
+            FixtureItem {
+                id: "local-child",
+                display: "tk-2",
+                title: "Local child",
+                container_id: Some("epic-local-child"),
+                container_class: Some("epic"),
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        seed_epic(&store, "epic-backend-child", "tk-3", "open", 3);
+        insert_fixture_item(
+            &store.conn,
+            FixtureItem {
+                id: "backend-child",
+                display: "tk-4",
+                title: "Backend child",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("99"),
+                container_id: Some("epic-backend-child"),
+                container_class: Some("epic"),
+                created_seq: 4,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+
+        let rows = list_rows(
+            &store,
+            ListOptions {
+                view: ListView::Ready,
+                class: ListClassFilter::Epic,
+                origin: ListOriginFilter::Local,
             },
         )
         .unwrap();

@@ -12,4 +12,5 @@ Options:
       --active   Show active Tickets and Epics
       --local    Restrict to locally-authored items
       --remote   Restrict to Remote-backed items
+      --epic     Show only Epics
   -h, --help     Print help

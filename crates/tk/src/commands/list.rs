@@ -3,7 +3,10 @@
 //! View selection (`--ready` / `--blocked` / `--active`) and origin
 //! filtering (`--local` / `--remote`) are mutually exclusive within
 //! their group; clap's `conflicts_with` enforces the policy so the
-//! handler doesn't repeat it. Rendering keeps ADR-0014 styling — status
+//! handler doesn't repeat it. The `--epic` class filter is orthogonal
+//! to both groups — it composes with any view and Origin (e.g.
+//! `--ready --epic` lists Epics that contain ready child Tickets), so it
+//! carries no conflicts. Rendering keeps ADR-0014 styling — status
 //! glyph, priority text, kind_bug / kind_epic spans, dim row for
 //! blocked items — and ends with a separator line and a status legend.
 
@@ -21,16 +24,19 @@ use crate::domain::ticket_kind::TicketKind;
 use crate::render::palette;
 use crate::render::sanitize;
 use crate::render::styler::SubStyler;
-use crate::store::repository::list::{self, ListOptions, ListOriginFilter, ListRow, ListView};
+use crate::store::repository::list::{
+    self, ListClassFilter, ListOptions, ListOriginFilter, ListRow, ListView,
+};
 
 const COMMAND: &str = "list";
 
 /// Flags for `tk list`.
 ///
-/// Five `bool`s exceed pedantic's `struct_excessive_bools` cap, but clap's
+/// Six `bool`s exceed pedantic's `struct_excessive_bools` cap, but clap's
 /// derive API needs one field per `--flag`; collapsing into an enum would
 /// fight clap's help generation. The `conflicts_with*` attrs make the
-/// invalid combinations unrepresentable at the parser layer.
+/// invalid combinations unrepresentable at the parser layer; `--epic` is
+/// an orthogonal class filter and carries none.
 #[derive(Debug, ClapArgs)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Args {
@@ -49,6 +55,9 @@ pub struct Args {
     /// Restrict to Remote-backed items.
     #[arg(long, conflicts_with = "local")]
     pub remote: bool,
+    /// Show only Epics.
+    #[arg(long)]
+    pub epic: bool,
 }
 
 #[must_use]
@@ -65,6 +74,7 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
     let options = ListOptions {
         view: select_view(&args),
         origin: select_origin(&args),
+        class: select_class(&args),
     };
 
     let store = match resolver::open_for_command(runner, cwd) {
@@ -108,6 +118,14 @@ fn select_origin(args: &Args) -> ListOriginFilter {
         ListOriginFilter::Remote
     } else {
         ListOriginFilter::Any
+    }
+}
+
+fn select_class(args: &Args) -> ListClassFilter {
+    if args.epic {
+        ListClassFilter::Epic
+    } else {
+        ListClassFilter::Any
     }
 }
 
@@ -210,11 +228,17 @@ fn count_rendered_children(rows: &[ListRow], parent_id: &str) -> usize {
 }
 
 fn empty_message(options: ListOptions) -> &'static str {
+    // Only the Default view distinguishes Epic-vs-Any and Origin in its empty
+    // message; the Ready / Blocked / Active views keep their per-view phrasing
+    // because Epics may still exist there but simply contain no matching child.
     match options.view {
-        ListView::Default => match options.origin {
-            ListOriginFilter::Local => "No local items.",
-            ListOriginFilter::Remote => "No remote items.",
-            ListOriginFilter::Any => "No open or active items.",
+        ListView::Default => match (options.class, options.origin) {
+            (ListClassFilter::Epic, ListOriginFilter::Local) => "No local epics.",
+            (ListClassFilter::Epic, ListOriginFilter::Remote) => "No remote epics.",
+            (ListClassFilter::Epic, ListOriginFilter::Any) => "No epics.",
+            (ListClassFilter::Any, ListOriginFilter::Local) => "No local items.",
+            (ListClassFilter::Any, ListOriginFilter::Remote) => "No remote items.",
+            (ListClassFilter::Any, ListOriginFilter::Any) => "No open or active items.",
         },
         ListView::Ready => "No ready items.",
         ListView::Blocked => "No blocked items.",
@@ -436,6 +460,7 @@ mod tests {
             active: false,
             local: false,
             remote: false,
+            epic: false,
         }
     }
 
@@ -538,6 +563,140 @@ mod tests {
         assert!(stdout.contains("tk-1"));
         assert!(stdout.contains("tk-3"));
         assert!(!stdout.contains("tk-2"), "stdout={stdout:?}");
+    }
+
+    #[test]
+    fn epic_flag_lists_only_epics() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "epic",
+                display: "tk-1",
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                title: "Epic",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "ticket",
+                display: "tk-2",
+                title: "Ticket",
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run(
+            h.deps(),
+            Args {
+                epic: true,
+                ..default_args()
+            },
+        );
+        assert_eq!(code, 0);
+        let stdout = String::from_utf8(h.stdout).unwrap();
+        assert!(stdout.contains("[epic] Epic"), "stdout={stdout:?}");
+        assert!(!stdout.contains("tk-2"), "stdout={stdout:?}");
+    }
+
+    #[test]
+    fn epic_flag_with_no_epics_prints_no_epics() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "ticket",
+                display: "tk-1",
+                title: "Ticket",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run(
+            h.deps(),
+            Args {
+                epic: true,
+                ..default_args()
+            },
+        );
+        assert_eq!(code, 0);
+        assert_eq!(String::from_utf8(h.stdout).unwrap(), "No epics.\n");
+    }
+
+    #[test]
+    fn epic_flag_in_ready_view_keeps_per_view_message() {
+        // The "No epics." empty message is Default-view-only. A ready Ticket
+        // exists but is not an Epic, so `--ready --epic` matches nothing; the
+        // Ready view must keep "No ready items." rather than claim "No epics.".
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "ready-ticket",
+                display: "tk-1",
+                title: "Ready ticket",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run(
+            h.deps(),
+            Args {
+                ready: true,
+                epic: true,
+                ..default_args()
+            },
+        );
+        assert_eq!(code, 0);
+        assert_eq!(String::from_utf8(h.stdout).unwrap(), "No ready items.\n");
+    }
+
+    #[test]
+    fn epic_flag_with_local_filter_names_local_epics_when_empty() {
+        // The Default-view empty message reflects the Origin filter under
+        // `--epic`, mirroring the non-epic path's "No local items.".
+        let store = TmpStore::new("repo");
+        seed_store(&store);
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run(
+            h.deps(),
+            Args {
+                epic: true,
+                local: true,
+                ..default_args()
+            },
+        );
+        assert_eq!(code, 0);
+        assert_eq!(String::from_utf8(h.stdout).unwrap(), "No local epics.\n");
     }
 
     #[test]
