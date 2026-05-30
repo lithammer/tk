@@ -8,6 +8,9 @@ all:
 test:
 	cargo test
 
+lint:
+	cargo clippy
+
 run:
 	cargo run -- $(ARGS)
 
@@ -17,4 +20,4 @@ release:
 clean:
 	cargo clean
 
-.PHONY: all test run release clean
+.PHONY: all test lint run release clean
