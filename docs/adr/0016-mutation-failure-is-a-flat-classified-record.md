@@ -78,3 +78,27 @@ fixed contract and the recovery work unblocks with the vocabulary it needs.
   are settled.
 - Amends ADR-0009: the typed-failure graduation it deferred is now
   specified as a flat classified record rather than a union.
+
+## Amendment (tk-34): the graduation lands in the first adapter
+
+tk-11 shipped this ADR and the CONTEXT.md Adapter Failure entry but
+deferred the code (a design ticket). tk-34, the GitHub Backend Adapter,
+is the "whichever ticket first does" this ADR named, and it settles the
+two questions left open here:
+
+- **In-memory and persisted types collapse into one.** The adapter's
+  returned `Failure` and the persisted record are structurally identical
+  (`detail`, `class`, `retry_after_s`) and every field is adapter-owned,
+  so `FailureClass` and `Failure` carry `serde` directly and persist
+  without a separate wire type — the `FailureJsonWrapper` placeholder is
+  removed. This follows the `MutationPayload` precedent (the domain type
+  owns its JSON). The split stays deferred until an engine-owned field
+  (`attempt_count`, `first_failed_at`) actually appears, per the
+  divergence trigger above.
+- **Conservative, evidence-grounded classifier.** The GitHub adapter
+  classifies from a `gh` failure-mode spike, as a pure `(exit_code,
+  stderr) -> FailureClass` function: high-signal stable patterns map to
+  `auth` / `rate_limited` / `validation` / `sync_conflict` / `transient`,
+  and everything else defaults to `unknown`. `retry_after_s` stays `null`
+  in v1 — `gh issue` does not reliably surface a reset time, and tk-23
+  (recovery policy) is its consumer. No schema migration, per this ADR.
