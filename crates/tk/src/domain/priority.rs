@@ -11,7 +11,6 @@ use std::fmt;
 /// `Priority::P0` is the highest-priority ticket and `Priority::P4` the lowest.
 /// `Priority::P2` is the default for newly-created local Tickets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-#[allow(clippy::enum_variant_names)]
 pub enum Priority {
     P0,
     P1,
