@@ -33,7 +33,7 @@ A local-only ranking for a **Ticket**: `P0`, `P1`, `P2`, `P3`, or `P4`.
 _Avoid_: Severity
 
 **Effective Priority**:
-The priority used to order a candidate **Ticket** in **`tk next`**, derived from its own **Priority** and the **Priorities** of items it transitively blocks within the active **Workspace Scope**. Selection-only; not stored, not displayed by **`tk show`** or **`tk list`**, not synced to **Backends**.
+The priority used to order a candidate **Ticket** in **`tk next`**, derived from its own **Priority** and the **Priorities** of items it transitively blocks within the active **Scope**. Selection-only; not stored, not displayed by **`tk show`** or **`tk list`**, not synced to **Backends**.
 _Avoid_: Inherited Priority, Critical Path Priority, Derived Priority
 
 **List Tree**:
@@ -77,23 +77,15 @@ The **Ticket** or **Epic** waiting on a **Blocking Item**.
 _Avoid_: Child
 
 **Workspace**:
-A local checkout context, usually a git worktree, scoped to a **Ticket** or **Epic**.
+A local checkout of the repository, usually a git worktree, that shares the **Repository Store** with every other checkout of the same repository.
 _Avoid_: Worktree
 
-**Workspace Scope**:
-The local-only association between a **Workspace** and a **Ticket** or **Epic**.
-_Avoid_: Workspace Binding
-
-**Worktree Config**:
-Git's per-worktree configuration used to store **Workspace Scope** in v1.
-_Avoid_: Workspace File
-
-**Inferred Workspace Scope**:
-A **Workspace Scope** discovered from the current branch name rather than stored configuration.
-_Avoid_: Implicit Binding
+**Scope**:
+The **Epic** that narrows **`tk next`** and **`tk list`**, supplied as an explicit `<epic-id>` argument or the `TK_SCOPE` environment variable. A **Scope** is **Epic**-only and is never persisted; an absent **Scope** means the whole **Repository Store**.
+_Avoid_: Workspace Scope, Workspace Binding, Inferred Workspace Scope, Filter
 
 **Ticket Branch**:
-A git branch created or recognized by **`tk`** using the pattern `tk/<display-id>-<slug>`.
+An optional branch-naming convention, `tk/<display-id>-<slug>`, that humans and agents may follow. **`tk`** neither creates nor requires it.
 _Avoid_: Work Branch
 
 **Start**:
@@ -107,10 +99,6 @@ _Avoid_: Reopen, Pause
 **Prime**:
 The **`tk`** command intent for generating scope-aware agent briefing output.
 _Avoid_: Memory Dump
-
-**Workspace Scope Source**:
-The way **`tk`** determined the active **Workspace Scope**: configured, inferred, or none.
-_Avoid_: Binding Source, Scope Source
 
 **Repository Store**:
 The shared SQLite-backed local state for **tk** within one version-control repository.
@@ -246,10 +234,10 @@ _Avoid_: ticket, tickets
 - **Priority** is a **Local Field** in v1.
 - The default **Priority** is `P2`.
 - Lower **Priority** numbers sort before higher **Priority** numbers.
-- A candidate **Ticket**'s **Effective Priority** is the lowest of its own **Priority** and the **Effective Priorities** of every unfinished **Blocked Item** (**Item Status** `open` or `active`) it reaches through transitive `blocked_by` **Dependencies** within the active **Workspace Scope**.
+- A candidate **Ticket**'s **Effective Priority** is the lowest of its own **Priority** and the **Effective Priorities** of every unfinished **Blocked Item** (**Item Status** `open` or `active`) it reaches through transitive `blocked_by` **Dependencies** within the active **Scope**.
 - A `done` **Blocked Item** resolves the **Dependency** and does not contribute to **Effective Priority**.
 - An **Epic** in the **Effective Priority** chain contributes the lowest **Effective Priority** over its unfinished child **Tickets**.
-- **Effective Priority** propagation stops at the **Workspace Scope** boundary; items outside the active **Workspace Scope** do not contribute.
+- **Effective Priority** propagation stops at the **Scope** boundary; items outside the active **Scope** do not contribute.
 - **External Blockers** carry no **Priority** and do not interrupt **Effective Priority** propagation.
 - **Labels** are descriptive facets and do not replace **Priority**, **Ticket Kind**, **Epic** membership, **Item Status**, **Dependencies**, or **External Blockers**.
 - **Labels** are deferred from v1.
@@ -273,37 +261,25 @@ _Avoid_: ticket, tickets
   unblocked.
 - Parent **Epic** **Dependencies** and **External Blockers** do not change
   child **Ticket** readiness.
-- A **Workspace** may have zero or one **Workspace Scope**.
-- A **Workspace Scope** references exactly one **Ticket** or **Epic**.
-- **Workspace Scope** provides context for scoped selection and reporting; it is not an implicit target for item commands.
-- Whether **`tk list`** defaults to **Workspace Scope** is deferred from v1.
-- **Workspace Scope** is local-only and is not synced to backends.
-- **Workspace Scope** is stored in **Worktree Config** in v1.
-- Non-git **Workspace Scope** storage is deferred from v1.
-- **Worktree Config** scope takes precedence over **Inferred Workspace Scope**.
-- **Inferred Workspace Scope** is read-only and may come from branch names containing a **Display ID** or **Alias**.
-- A **Ticket Branch** includes a **Display ID** so **Workspace Scope** can be inferred.
-- **Aliases** keep old **Ticket Branches** inferable after **Promotion** replaces the **Display ID**.
+- A **Scope** references exactly one **Epic**; a **Ticket** supplied as a **Scope** is a typed error.
+- **Scope** narrows **`tk next`** and **`tk list`** to an **Epic** and its child **Tickets**; it is not an implicit target for item commands.
+- **Scope** is supplied as an explicit `<epic-id>` argument or the `TK_SCOPE` environment variable; the argument wins when both are present.
+- An absent **Scope** means **`tk next`** and **`tk list`** consider the whole **Repository Store**.
+- **Scope** is never persisted; it is read per invocation from the argument or environment.
+- **Scope** is local-only and is not synced to backends.
+- **`tk`** does not store, infer, or report **Scope** from git state.
 - **Display IDs** are globally unique across **Tickets** and **Epics**.
 - **Aliases** are globally unique across **Tickets** and **Epics**.
 - **Start** sets a **Ticket** or **Epic** to `active`.
 - **Stop** moves an active **Ticket** or **Epic** back to `open`.
 - **`done`** is terminal in v1: once a **Ticket** or **Epic** is `done`, **Start** and **Stop** refuse to transition it back to `active` or `open`. The **Repository Store** enforces this with a schema trigger; resurrection through a dedicated `tk reopen` command is deferred from v1.
 - The **`done`** terminal rule constrains **Item Status** transitions only; title, body, **Priority**, and **Epic** membership remain editable on a `done` item.
-- **`tk worktree start`** creates a **Ticket Branch**, creates a git worktree, stores **Workspace Scope**, and marks the scoped item `active` by default.
-- **`tk worktree start`** accepts an optional positional path for the worktree.
-- Without an explicit path, **`tk worktree start`** creates a sibling worktree by default.
-- Configurable worktree layout is deferred from v1.
-- **`tk worktree`** reports the current **Workspace Scope** and **Workspace Scope Source**.
-- **`tk worktree set <id>`** writes **Workspace Scope** to **Worktree Config**.
-- **`tk worktree clear`** removes configured **Workspace Scope** without disabling **Inferred Workspace Scope**.
+- **`tk`** does not manage git worktrees; checkout creation is the harness's or the user's responsibility via `git worktree`.
 - **`tk show`**, **`tk update`**, **`tk start`**, **`tk stop`**, **`tk done`**, and **`tk promote`** require an explicit **Display ID** in v1.
 - **Prime** provides agent workflow guidance, essential commands, and close-out reminders.
 - v1 **Prime** prints static command-owned Markdown embedded from `crates/tk/src/commands/prime.md` via Rust `include_str!`.
 - **Prime** prints its briefing only when a **Repository Store** is initialized and openable in the current directory; in every other case — no store, outside a git repository, or any store-open failure — it exits 0 with empty stdout and empty stderr so a global agent hook can run it in any directory without noise.
-- Commands that inspect **Workspace Scope** identify the active **Workspace Scope** and **Workspace Scope Source** rather than using scope as a hidden item target.
 - A **Repository Store** is shared by all **Workspaces** for the same version-control repository.
-- A **Workspace Scope** belongs to one **Workspace**, not the **Repository Store**.
 - A **Repository Store** is untracked local state by default.
 - A **Backend Adapter** maps **Tickets**, **Epics**, and **Mutations** to one **Backend**.
 - **Remote** is the CLI-facing name for **Backend** configuration.
@@ -371,30 +347,34 @@ _Avoid_: ticket, tickets
 - The **Repository Store** keeps current **Ticket** and **Epic** state.
 - The **Mutation Log** records replayable backend intent and is not the primary
   read model or a general local edit history.
-- **`tk next`** selects the ready **Ticket** with the lowest **Effective Priority**, then lowest own **Priority**, then lowest `created_seq`, within the active **Workspace Scope**.
+- **`tk next`** selects the ready **Ticket** with the lowest **Effective Priority**, then lowest own **Priority**, then lowest `created_seq`, within the active **Scope**.
 - **`tk next`** is deterministic and does not randomize among candidates.
 - **Ticket Kind** does not affect **`tk next`** ordering.
 - **Assignees** do not affect **`tk next`** readiness or ordering.
 - **`tk next`** does not explain skipped candidates, but may render a rationale for the selected **Ticket** when its **Effective Priority** comes from a **Blocked Item** rather than its own **Priority**. The rationale names the **Ticket** whose **Priority** drives the **Effective Priority** signal, which is not always the item the candidate directly unblocks — in an **Epic**-mediated chain, the named **Ticket** is a child of an **Epic** the candidate blocks, not a direct **Blocked Item**.
 - **`tk next`** has no JSON or structured-output mode in v1.
-- When there is no active **Workspace Scope**, **`tk next`** searches ready **Tickets** across the **Repository Store**.
-- When **Workspace Scope** references an **Epic**, **`tk next`** searches only
-  directly contained **Tickets**.
-- When **Workspace Scope** references a **Ticket** that is not ready,
-  **`tk next`** does not fall back to other ready **Tickets**.
+- When there is no active **Scope**, **`tk next`** searches ready **Tickets** across the **Repository Store**.
+- When a **Scope** is active, **`tk next`** searches only **Tickets** directly
+  contained by that **Epic**.
 - **`tk next`** does not filter by **Origin**.
 - **`tk next`** does not use **Mutation Log**, **Mutation Failure**, or **Sync
   Cursor** state as readiness inputs.
 - **`tk next`** does not emit sync-health warnings.
 - **`tk next`** does not change **Item Status**; selecting ready work is
   separate from starting work.
-- **`tk next`** has no explicit scope argument; **Workspace Scope** is the
-  only scoped selection input.
-- Store-facing **`tk next`** selection accepts a resolved **Workspace Scope**;
-  command code owns **Workspace Scope** discovery.
-- **`tk next`** is flagless in v1.
+- **`tk next`** takes an optional positional `<epic-id>` argument; absent it,
+  **`tk next`** reads `TK_SCOPE`, then falls back to the whole **Repository
+  Store**.
+- **`tk next`** and **`tk list`** reject a **Ticket** **Scope** argument with a
+  typed error rather than narrowing to a single **Ticket**.
+- Store-facing **`tk next`** selection accepts a resolved **Scope**; command
+  code owns **Scope** resolution from argument or environment.
+- **`tk next`** takes only the optional **Scope** argument; it has no other
+  flags in v1.
 - Done-item browsing is deferred until there is a concrete workflow for old
   completed work.
+- **`tk list`** takes an optional positional `<epic-id>` argument; absent it, **`tk list`** reads `TK_SCOPE`, then renders the whole **Repository Store**.
+- When a **Scope** is active, **`tk list`** renders only that **Epic** and its child **Tickets**, and prints a hint that the view is filtered.
 - **List Tree** renders **Epics** as top-level rows, child **Tickets** nested under their **Epic**, and unparented **Tickets** as top-level rows.
 - **List Tree** uses decorative tree glyphs and compact status, priority, and kind markers without column alignment.
 - **List Tree** status markers render **Item Status** as `○` for `open`, `◐`
@@ -423,34 +403,31 @@ _Avoid_: ticket, tickets
 > **Domain expert:** "No — v1 only supports creation, title/body updates, status, epic membership, dependencies, and promotion."
 >
 > **Dev:** "When **`tk`** runs inside a git worktree for a Jira backend feature, should it show unrelated work by default?"
-> **Domain expert:** "No — the **Workspace Scope** should point at the relevant **Epic** or **Ticket** unless the user asks for all work."
+> **Domain expert:** "Pass the relevant **Epic** as a **Scope** — `tk list <epic-id>` or `tk next <epic-id>` — when you want to stay inside that feature; otherwise it considers all work."
 >
-> **Dev:** "Should **Workspace Scope** be stored in an untracked file in every worktree?"
-> **Domain expert:** "No — v1 stores **Workspace Scope** in **Worktree Config** to avoid working-tree litter."
+> **Dev:** "Should **`tk`** infer a **Scope** from the current branch name?"
+> **Domain expert:** "No — **`tk`** does not infer **Scope** from git state. Branches are usually named after a single **Ticket**, so inference produced a useless one-**Ticket** narrowing and was invisible ambient state with no off-switch."
 >
-> **Dev:** "If a branch is named `tk/src-123-fix-login`, should **`tk`** infer scope?"
-> **Domain expert:** "Yes — if **Worktree Config** has no scope, **`tk`** may use **Inferred Workspace Scope** from the branch name."
+> **Dev:** "Then how does an AFK agent stay inside one **Epic** without restating the ID every call?"
+> **Domain expert:** "The launcher exports `TK_SCOPE=<epic-id>`; every **`tk`** subprocess inherits it, so the agent loops bare **`tk next`**. An explicit `<epic-id>` argument overrides it."
 >
 > **Dev:** "What should a **Ticket Branch** look like?"
-> **Domain expert:** "Use `tk/<display-id>-<slug>` so the branch is recognizable and scope can be inferred."
+> **Domain expert:** "`tk/<display-id>-<slug>` is a fine convention, but it is optional — **`tk`** neither creates nor requires it, and nothing infers **Scope** from it."
 >
-> **Dev:** "What should **`tk start src-123`** do?"
-> **Domain expert:** "It should mark **src-123** `active`; **`tk worktree start src-123`** creates a scoped git worktree."
->
-> **Dev:** "How should an agent know whether scope was configured or inferred?"
-> **Domain expert:** "**`tk worktree`** reports the **Workspace Scope** and **Workspace Scope Source**."
+> **Dev:** "Should **`tk`** own creating the git worktree for a feature?"
+> **Domain expert:** "No — `git worktree add` plus a branch is the harness's job. **`tk`** has no worktree command; it only resolves a **Scope** from the argument or `TK_SCOPE`."
 >
 > **Dev:** "How should an agent recover workflow context after compaction or a new session?"
 > **Domain expert:** "Run **Prime** to get **tk**'s agent workflow guidance and essential commands."
 >
-> **Dev:** "How does an agent inspect the active **Workspace Scope**?"
-> **Domain expert:** "It runs **`tk worktree`**, which reports the **Workspace Scope** and **Workspace Scope Source**."
+> **Dev:** "How does an agent inspect the active **Scope**?"
+> **Domain expert:** "There is no stored **Scope** to inspect — it is whatever `<epic-id>` argument or `TK_SCOPE` value the command was given (`echo $TK_SCOPE`)."
 >
-> **Dev:** "In an Epic-scoped **Workspace**, should **`tk done`** without an ID close the **Epic** or guess a child **Ticket**?"
-> **Domain expert:** "No — **Workspace Scope** is context for selection and reporting. Item commands require an explicit **Display ID**; agents should pass the ID from **`tk next`** or **`tk list`**."
+> **Dev:** "In an **Epic** **Scope**, should **`tk done`** without an ID close the **Epic** or guess a child **Ticket**?"
+> **Domain expert:** "No — **Scope** is context for selection and reporting. Item commands require an explicit **Display ID**; agents should pass the ID from **`tk next`** or **`tk list`**."
 >
 > **Dev:** "Should each git worktree have its own Repository Store database?"
-> **Domain expert:** "No — all **Workspaces** for a repository share one **Repository Store**, while each **Workspace** has its own **Workspace Scope**."
+> **Domain expert:** "No — all **Workspaces** for a repository share one **Repository Store**."
 >
 > **Dev:** "Should the **Repository Store** be committed to git so agents can review ticket state in diffs?"
 > **Domain expert:** "No — the **Repository Store** is untracked local state by default; portability comes from backend sync or explicit import/export."
@@ -495,7 +472,7 @@ _Avoid_: ticket, tickets
 > **Domain expert:** "No — **Epic** is separate from **Ticket**; only **Tickets** have **Ticket Kind**."
 >
 > **Dev:** "How can **`tk next`** choose work without guessing?"
-> **Domain expert:** "It uses **Effective Priority** first, then own **Priority**, then creation order, within the active **Workspace Scope**. **Effective Priority** lets a ready **Blocking Item** outrank lower-priority direct work when finishing it would unblock a higher-priority **Ticket**."
+> **Domain expert:** "It uses **Effective Priority** first, then own **Priority**, then creation order, within the active **Scope**. **Effective Priority** lets a ready **Blocking Item** outrank lower-priority direct work when finishing it would unblock a higher-priority **Ticket**."
 >
 > **Dev:** "Should **`tk list`** be a flat table?"
 > **Domain expert:** "No — **`tk list`** uses a **List Tree** so **Epics** and child **Tickets** are visible together."
@@ -513,20 +490,21 @@ _Avoid_: ticket, tickets
 - "type" was considered for ticket category — resolved: **Ticket Kind** is the canonical term, and `task` is a kind rather than the work-item object.
 - Backend priority mapping was considered for v1 — resolved: **Priority** is a local-only **Local Field**.
 - Sorting **`tk next`** by own **Priority** only was considered — resolved: **`tk next`** uses **Effective Priority** so a ready blocker can bubble above lower-priority direct work when it gates a higher-priority **Blocked Item**.
-- Propagating **Effective Priority** across **Workspace Scope** boundaries was considered — resolved: propagation stops at the scope boundary so feature-branch work stays ordered by what is internal to that scope.
+- Propagating **Effective Priority** across **Scope** boundaries was considered — resolved: propagation stops at the **Scope** boundary so an **Epic**-scoped run stays ordered by what is internal to that **Epic**.
 - "group", "batch", and "umbrella" were considered for related work — resolved: **Epic** is the canonical backend-agnostic grouping term.
 - "parent" and "child" were considered for blocking relationships — resolved: **Dependency** links a **Blocking Item** to a **Blocked Item**.
 - "worktree" was considered for local checkout scope — resolved: **Workspace** is the domain term because git worktrees are the main implementation, not the concept itself.
-- "workspace binding" was considered for local checkout association — resolved: **Workspace Scope** is the local-only domain term.
-- Working-tree files were considered for **Workspace Scope** storage — resolved: v1 uses **Worktree Config** and defers non-git storage.
-- Implicit branch scope was considered — resolved: **Inferred Workspace Scope** is read-only and lower precedence than **Worktree Config**.
-- Branch names without a Ticket-specific prefix were considered — resolved: **Ticket Branches** use `tk/<display-id>-<slug>`.
-- Combining status changes and worktree creation in **Start** was considered — resolved: **Start** marks work active, while **`tk worktree start`** creates scoped git worktrees.
+- A persisted "workspace binding" was considered for local checkout association — resolved: **Scope** is not persisted; it is an explicit `<epic-id>` argument or `TK_SCOPE`, supplied per invocation (ADR-0022).
+- Storing **Scope** in working-tree files or **Worktree Config** was considered — resolved: **Scope** is never stored; persisted scope has the same hidden-state smell as inference (ADR-0022).
+- Inferring **Scope** from branch names was considered, and shipped against the frozen oracle — resolved: removed; branch names target a single **Ticket**, so inference produced a useless narrowing and could not be turned off (ADR-0022).
+- A `tk/<display-id>-<slug>` **Ticket Branch** contract was considered — resolved: kept only as an optional convention; **`tk`** neither creates nor requires it.
+- Combining status changes and worktree creation in **Start** was considered — resolved: **Start** marks work active; **`tk`** does not create worktrees, leaving `git worktree` to the harness (ADR-0022).
 - Static agent workflow dumps were considered — resolved: v1 **Prime** prints reviewed project-specific workflow guidance.
 - Dynamic **Prime** output was considered for v1 — resolved: v1 prints static command-owned Markdown from `src/commands/prime.md`.
-- Configurable worktree root and layout were considered for v1 — resolved: **`tk worktree start`** supports default sibling worktrees and explicit paths only.
-- Hiding scope origin was considered — resolved: **`tk worktree`** reports **Workspace Scope Source**.
-- Defaulting item commands from **Workspace Scope** was considered — resolved: **Workspace Scope** is not an implicit item target; commands that inspect, update, or promote a specific item require an explicit **Display ID** in v1.
+- Configurable worktree root and layout were considered for v1 (ADR-0007) — superseded: **`tk`** no longer creates worktrees (ADR-0022).
+- Naming the **Epic**-narrowing concept **Filter** was considered — resolved: **Scope** is the term, because it bounds **Effective Priority** propagation and changes which **Ticket** **`tk next`** picks, not merely which rows **`tk list`** shows; "filter" is the verb **`tk list`** performs (ADR-0022).
+- Defaulting item commands from **Scope** was considered — resolved: **Scope** is not an implicit item target; commands that inspect, update, or promote a specific item require an explicit **Display ID** in v1.
+- A separate `tk list --parent <id>` filter flag was considered — resolved: the positional `<epic-id>` **Scope** subsumes it in v1, since the **Parent Argument** resolves only to an **Epic** and both return the same rows; `--parent` stays the **Parent Argument** flag on `tk add` (ADR-0022).
 - "workspace store" and "global store" were considered for local state — resolved: a **Repository Store** is shared across all **Workspaces** for one repository.
 - Checked-in ticket state was considered for portability — resolved: the **Repository Store** is untracked local state by default.
 - "facade", "provider", and "connector" were considered for integrations — resolved: **Backend Adapter** maps domain concepts to a **Backend**.

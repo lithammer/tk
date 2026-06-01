@@ -1,10 +1,10 @@
-# tk next orders by Effective Priority within Workspace Scope
+# tk next orders by Effective Priority within Scope
 
 `tk next` ranks ready **Tickets** by **Effective Priority** (lowest
 first), then own **Priority**, then `created_seq`, where **Effective
 Priority** is the minimum of a **Ticket**'s own **Priority** and the
 **Effective Priorities** of every item it transitively blocks through
-`blocked_by` **Dependencies** within the active **Workspace Scope**.
+`blocked_by` **Dependencies** within the active **Scope**.
 **Epics** in the chain contribute the minimum **Effective Priority**
 over their open child **Tickets**. **Effective Priority** never
 appears as a stored field or on `tk show` / `tk list` output. When
@@ -29,12 +29,14 @@ Item** still loses to a P2 unrelated chore, so the "chip away toward
 a blocked higher-**Priority** **Ticket**" case remains unsolved.
 
 **Scope-permeable propagation.** Walk the **Dependency** chain
-across the **Workspace Scope** boundary so an in-scope **Ticket**'s
+across the **Scope** boundary so an in-scope **Ticket**'s
 **Effective Priority** reflects out-of-scope **Blocked Items** it
-gates. Rejected because a **Workspace Scope** is paired with a
-**Ticket Branch**; ordering scoped work by out-of-scope signals
-prioritizes in-scope **Tickets** for reasons that have nothing to do
-with the active feature branch.
+gates. Rejected because a **Scope** narrows work to one **Epic**;
+ordering an **Epic**-scoped run by signals outside that **Epic**
+prioritizes its **Tickets** for reasons that have nothing to do with
+the feature being worked. (ADR-0022 later changed how a **Scope** is
+supplied — an explicit `<epic-id>` argument or `TK_SCOPE`, not a
+**Ticket Branch** — and re-affirmed this boundary.)
 
 **Display Effective Priority on every read view.** Rejected because
 **Effective Priority** is a derived selection signal, not a stored

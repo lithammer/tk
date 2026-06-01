@@ -148,6 +148,12 @@ Display ID structure.
 
 ## Workspace Scope and Worktrees
 
+> **Superseded by [ADR-0022](./docs/adr/0022-scope-is-an-explicit-epic-argument-not-persisted-state.md).**
+> Scope becomes an explicit `<epic-id>` argument or `TK_SCOPE`, never persisted
+> or inferred, and the `worktree/` module plus the `tk worktree` command are
+> slated for removal. This section describes the current code until that change
+> lands (tracked alongside tk-60); the module map above will be updated with it.
+
 Workspace Scope is local-only and stored in git Worktree Config in v1. Worktree
 Config scope takes precedence over read-only branch-name inference. Ticket
 Branches use `tk/<display-id>-<slug>` so scope remains inferable after manual

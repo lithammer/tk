@@ -39,7 +39,7 @@ decisions does not.
 - Anchor comments in the project docs: [CONTEXT.md](./CONTEXT.md),
   [ARCHITECTURE.md](./ARCHITECTURE.md), and [docs/adr/](./docs/adr/).
 - Use tk's domain vocabulary in comments instead of generic terms. For
-  example, prefer Repository Store, Workspace Scope, Display ID, Remote,
+  example, prefer Repository Store, Scope, Display ID, Remote,
   Backend Adapter, Mutation, and Mutation Log where those concepts apply.
 - Comments should explain contracts, ownership, lifetimes, invariants, and why
   a boundary exists. Avoid comments that only restate the next line of code.

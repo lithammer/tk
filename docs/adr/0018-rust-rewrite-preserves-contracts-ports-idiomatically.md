@@ -28,7 +28,7 @@ not the `.zig` files (one reference implementation of them):
   black-box (txtar scenarios + command-handler + migration tests).
 - **`CONTEXT.md`** — the domain vocabulary. Prose, so it fails no test; drift
   here yields idiomatic-but-vocabulary-frayed Rust. The names stay (Repository
-  Store, Workspace Scope, Display ID, Mutation, Backend Adapter, …).
+  Store, Display ID, Mutation, Backend Adapter, …).
 
 ## Frozen contracts vs. idiomatic internals
 
