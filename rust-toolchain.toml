@@ -2,7 +2,7 @@
 # Pin the Rust toolchain: the language is stable, but we still want
 # reproducible builds across contributor machines and CI. Bump deliberately,
 # never opportunistically.
-channel = "1.95.0"
+channel = "1.96.0"
 components = ["rustfmt", "clippy"]
 profile = "minimal"
 
