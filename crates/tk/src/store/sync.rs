@@ -22,6 +22,7 @@ use crate::domain::item_class::ItemClass;
 use crate::domain::mutation_payload::{
     DependencyRef, EpicRef, MutationPayload, StatusChange, TitleBody,
 };
+use crate::domain::mutation_state::MutationState;
 use crate::domain::mutation_type::MutationType;
 use crate::domain::mutation_view::MutationView;
 use crate::store::repository::create::generate_internal_id;
@@ -307,7 +308,7 @@ pub fn apply_mutation_outcome(
 ) -> Result<(), ApplyMutationOutcomeError> {
     let tx = conn.transaction()?;
 
-    let prior: Option<String> = tx
+    let prior: Option<MutationState> = tx
         .query_row(
             "select state from mutations where sequence = ?1",
             params![sequence],
@@ -315,9 +316,9 @@ pub fn apply_mutation_outcome(
         )
         .optional()?;
     let prior = prior.ok_or(ApplyMutationOutcomeError::MutationNotFound(sequence))?;
-    let prior_is_pending = prior == "pending";
-    let prior_is_failed = prior == "failed";
-    if !prior_is_pending && !prior_is_failed {
+    // Apply is only defined for entries the engine has not yet resolved; an
+    // already-`applied` or curated-`skipped` row is not re-applicable.
+    if !matches!(prior, MutationState::Pending | MutationState::Failed) {
         return Err(ApplyMutationOutcomeError::MutationNotApplicable(sequence));
     }
 
@@ -336,7 +337,7 @@ pub fn apply_mutation_outcome(
                 detail: failure.detail.clone(),
             })
             .expect("FailureJsonWrapper serializes infallibly");
-            if prior_is_pending {
+            if prior == MutationState::Pending {
                 tx.execute(
                     "update mutations \
                         set state = 'failed', failure_json = ?2, state_changed_at = ?3 \
@@ -397,7 +398,7 @@ pub fn mark_mutation_skipped(
 ) -> Result<(), MarkSkippedError> {
     let tx = conn.transaction()?;
 
-    let prior: Option<String> = tx
+    let prior: Option<MutationState> = tx
         .query_row(
             "select state from mutations where sequence = ?1",
             params![sequence],
@@ -405,7 +406,7 @@ pub fn mark_mutation_skipped(
         )
         .optional()?;
     let prior = prior.ok_or(MarkSkippedError::MutationNotFound(sequence))?;
-    if prior != "failed" {
+    if prior != MutationState::Failed {
         return Err(MarkSkippedError::MutationNotFailed(sequence));
     }
 
@@ -479,8 +480,8 @@ pub enum LogListFilter {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogListRow {
     pub sequence: i64,
-    pub state: String,
-    pub mutation_type: String,
+    pub state: MutationState,
+    pub mutation_type: MutationType,
     pub target_display_id: String,
     pub created_at: String,
     /// Decoded `failure.detail`; set only for `failed` rows.
@@ -491,10 +492,10 @@ pub struct LogListRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogDetailRow {
     pub sequence: i64,
-    pub state: String,
-    pub mutation_type: String,
+    pub state: MutationState,
+    pub mutation_type: MutationType,
     pub target_display_id: String,
-    pub item_class: String,
+    pub item_class: ItemClass,
     pub payload_json: String,
     pub failure_detail: Option<String>,
     pub created_at: String,
@@ -1311,10 +1312,10 @@ mod tests {
 
         let detail = show_mutation_log(&conn, 2).unwrap();
         assert_eq!(detail.sequence, 2);
-        assert_eq!(detail.state, "failed");
-        assert_eq!(detail.mutation_type, "set_item_status");
+        assert_eq!(detail.state, MutationState::Failed);
+        assert_eq!(detail.mutation_type, MutationType::SetItemStatus);
         assert_eq!(detail.target_display_id, "gh-2");
-        assert_eq!(detail.item_class, "ticket");
+        assert_eq!(detail.item_class, ItemClass::Ticket);
         assert_eq!(detail.payload_json, r#"{"status":"done"}"#);
         assert_eq!(detail.failure_detail.as_deref(), Some("HTTP 422: rejected"));
     }

@@ -12,7 +12,11 @@
 
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 
+use std::str::FromStr;
+
 use crate::domain::item_class::ItemClass;
+use crate::domain::mutation_state::MutationState;
+use crate::domain::mutation_type::MutationType;
 use crate::domain::origin::Origin;
 use crate::domain::priority::Priority;
 use crate::domain::status::ItemStatus;
@@ -102,6 +106,40 @@ impl ToSql for Origin {
     }
 }
 
+impl FromSql for MutationType {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        // Reuse the single-sourced `mutations.mutation_type` spelling table on
+        // `FromStr`; an unrecognized value is store corruption, not the
+        // `UnknownMutationType` domain error the Apply path raises.
+        let text = value.as_str()?;
+        Self::from_str(text).map_err(|_| corrupt("mutation_type", text))
+    }
+}
+
+impl ToSql for MutationType {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        self.text().to_sql()
+    }
+}
+
+impl FromSql for MutationState {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        match value.as_str()? {
+            "pending" => Ok(Self::Pending),
+            "failed" => Ok(Self::Failed),
+            "skipped" => Ok(Self::Skipped),
+            "applied" => Ok(Self::Applied),
+            other => Err(corrupt("state", other)),
+        }
+    }
+}
+
+impl ToSql for MutationState {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        self.text().to_sql()
+    }
+}
+
 /// Build the corruption error for a CHECK-violating column value. The message
 /// names the column and the offending spelling so a corrupt Repository Store is
 /// diagnosable from the rendered storage error.
@@ -136,6 +174,14 @@ mod tests {
         assert_eq!(
             Origin::column_result(ValueRef::Text(b"backend")).unwrap(),
             Origin::Backend
+        );
+        assert_eq!(
+            MutationState::column_result(ValueRef::Text(b"skipped")).unwrap(),
+            MutationState::Skipped
+        );
+        assert_eq!(
+            MutationType::column_result(ValueRef::Text(b"set_item_status")).unwrap(),
+            MutationType::SetItemStatus
         );
     }
 

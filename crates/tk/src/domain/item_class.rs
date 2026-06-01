@@ -4,6 +4,8 @@
 //! the V1 `items.item_class` CHECK constraint; the `text()` spelling is the
 //! storage contract.
 
+use std::fmt;
+
 /// The top-level item class stored in the Repository Store. The default is
 /// [`ItemClass::Ticket`] — Tickets outnumber Epics in every real repository
 /// and the discriminator drives mutation-type selection across the store
@@ -33,5 +35,14 @@ impl ItemClass {
             Self::Ticket => "Ticket",
             Self::Epic => "Epic",
         }
+    }
+}
+
+impl fmt::Display for ItemClass {
+    /// Single-sources the lowercase storage/CLI spelling on [`ItemClass::text`];
+    /// the capitalized [`ItemClass::label`] is a separate diagnostic form and is
+    /// intentionally not used here.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.text())
     }
 }

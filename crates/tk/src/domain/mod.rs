@@ -1,8 +1,9 @@
 //! Pure domain helpers — no SQLite, filesystem, Git, or subprocess access.
 //!
 //! The schema-determined value types: Priority, ItemStatus, TicketKind,
-//! ItemClass, Origin, MutationType, MutationPayload, MutationView, and
-//! BackendItemSnapshot. Each one is pinned by an existing SQL CHECK constraint
+//! ItemClass, Origin, MutationType, MutationState, MutationPayload,
+//! MutationView, and BackendItemSnapshot. Each one is pinned by an existing SQL
+//! CHECK constraint
 //! or by an ADR — the shape exists independently of any future Backend Adapter
 //! — so the rest of the codebase uses typed values instead of raw strings at
 //! the store boundary.
@@ -28,6 +29,7 @@ pub mod apply_outcome;
 pub mod backend_item_snapshot;
 pub mod item_class;
 pub mod mutation_payload;
+pub mod mutation_state;
 pub mod mutation_type;
 pub mod mutation_view;
 pub mod origin;
