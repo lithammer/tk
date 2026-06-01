@@ -11,7 +11,7 @@ Scope Source reporting — and supersedes ADR-0007 (default worktree path
 layout), whose only consumer was `tk worktree start`.
 
 Scope is **Epic-only**. Passing a Ticket where a Scope is expected is a typed
-error (`tk-123 is a Ticket; scope expects an Epic`) rather than a degenerate
+error (`tk next: scope 'tk-123' is not an Epic`) rather than a degenerate
 single-item narrowing or a magic widen-to-parent. A Ticket Scope was the
 whole motivation for this change: narrowing `tk next` or `tk list` to one
 Ticket only ever echoes back the Ticket the caller already named, so it does
@@ -25,7 +25,8 @@ outside it, so the same Ticket can rank differently scoped and unscoped. This
 is why the concept is named **Scope** (a boundary of consideration that
 changes `tk next`'s answer) and not **Filter** (a presentational subset that
 would not). "Filter" is the verb `tk list` performs and the word its hint
-uses (`tk list — filtered to <epic-id>`); it is not the concept.
+uses (`Scope: <epic-id> (filtered to this Epic and its child Tickets)`); it is
+not the concept.
 
 ## Why persisted and inferred scope did not earn their place
 
