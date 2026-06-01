@@ -10,8 +10,8 @@ Run `tk prime` after compaction, clear, or a new agent session.
   agent session.
 - Promotion and sync are explicit, human-visible operations.
 - Use `tk next` to choose agent work.
-- Use `tk worktree` to inspect the current Workspace Scope.
-- Workspace Scope is not an implicit item target; pass explicit Display IDs to item commands.
+- Scope `tk next` / `tk list` to an Epic with `tk next <epic-id>` / `tk list <epic-id>` or the `TK_SCOPE` environment variable; absent a Scope they cover the whole store.
+- Scope is not an implicit item target; pass explicit Display IDs to item commands.
 - Use `tk sync log` to inspect pending, failed, skipped, and applied Mutations.
 - Do not run `git push` unless the user explicitly asks for it.
 
@@ -19,7 +19,6 @@ Run `tk prime` after compaction, clear, or a new agent session.
 
 ```sh
 tk prime
-tk worktree
 tk next
 ```
 
@@ -82,17 +81,16 @@ tk unblock <blocked-id> <blocking-id>
 
 Blocking affects `tk next` and `tk list --ready`.
 
-### Worktrees
+### Scope
 
 ```sh
-tk worktree
-tk worktree start <id>
-tk worktree set <id>
-tk worktree clear
+tk next <epic-id>
+tk list <epic-id>
 ```
 
-`tk worktree start <id>` creates a Ticket branch and scoped git worktree. `tk
-worktree` reports whether Workspace Scope is configured, inferred, or absent.
+Pass an Epic to narrow `tk next` / `tk list` to that Epic and its child
+Tickets, or export `TK_SCOPE=<epic-id>` to scope a whole session. tk does not
+create or manage git worktrees; use `git worktree` directly.
 
 ### Human Curation
 

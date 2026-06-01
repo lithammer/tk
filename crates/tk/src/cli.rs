@@ -129,8 +129,6 @@ enum Command {
     Block(commands::block::Args),
     /// Remove a blocking relationship.
     Unblock(commands::unblock::Args),
-    /// Inspect or configure the current Workspace Scope.
-    Worktree(commands::worktree::Args),
     /// Print the agent workflow briefing.
     Prime(commands::prime::Args),
     /// Print or install the tk manpage.
@@ -167,7 +165,6 @@ pub fn run_argv(deps: Deps<'_>, argv: &[String]) -> std::io::Result<Exit> {
         Command::Done(args) => Ok(commands::done::run(deps, args)),
         Command::Block(args) => Ok(commands::block::run(deps, args)),
         Command::Unblock(args) => Ok(commands::unblock::run(deps, args)),
-        Command::Worktree(args) => Ok(commands::worktree::run(deps, args)),
         Command::Prime(args) => Ok(commands::prime::run(deps, args)),
         Command::Manpage(args) => Ok(commands::manpage::run(deps, args)),
         Command::SelfUpdate(args) => Ok(commands::self_update::run(deps, args)),

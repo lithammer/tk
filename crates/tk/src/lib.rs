@@ -29,4 +29,3 @@ pub mod remote;
 pub mod render;
 pub mod store;
 pub mod sync;
-pub mod worktree;

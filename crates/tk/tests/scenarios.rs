@@ -212,9 +212,7 @@ fn prime_is_silent_outside_git_repository() {
 #[test]
 fn command_help_snapshots() {
     let p = Repo::new("repo");
-    for command in [
-        "block", "done", "list", "next", "show", "unblock", "update", "worktree",
-    ] {
+    for command in ["block", "done", "list", "next", "show", "unblock", "update"] {
         insta::assert_snapshot!(
             format!("help_{command}"),
             p.run(&format!("{command} --help"))

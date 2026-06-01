@@ -30,4 +30,3 @@ pub mod stop;
 pub mod sync;
 pub mod unblock;
 pub mod update;
-pub mod worktree;

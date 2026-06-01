@@ -29,7 +29,6 @@ crates/tk/src/
   store/                   Repository Store, migrations, Mutation Log, and
                            sync helpers
   sync.rs                  sync engine orchestration
-  worktree/                Workspace Scope storage and discovery
 crates/tk/tests/
   scenarios.rs             CLI scenario harness (insta + assert_cmd)
 ```
@@ -67,9 +66,9 @@ small boundary module after the second caller proves the shape.
   store's sync helpers. Single entry point `sync::run_sync`; the engine
   reaches the database only through `store/sync.rs` helpers, never via raw
   SQL.
-- `worktree/` owns Workspace Scope storage, branch-name inference, and slug
-  derivation. Commands compose its free functions rather than growing a service
-  object prematurely.
+- `commands/scope.rs` owns Scope resolution (ADR-0022): the `<epic-id>`
+  argument / `TK_SCOPE` precedence and Epic-only validation. `tk next` and
+  `tk list` compose it; tk neither stores, infers, nor manages git worktrees.
 
 `cli::Deps` carries explicit dependencies: stdout/stderr/stdin writers, cwd
 path, subprocess runner, UTC millisecond clock, random source, and a resolved
@@ -146,31 +145,23 @@ sequence for Tickets and Epics: `<store-prefix>-<n>`. The prefix identifies the
 local repository context, not item class. Containment lives in `items`, not in
 Display ID structure.
 
-## Workspace Scope and Worktrees
+## Scope
 
-> **Superseded by [ADR-0022](./docs/adr/0022-scope-is-an-explicit-epic-argument-not-persisted-state.md).**
-> Scope becomes an explicit `<epic-id>` argument or `TK_SCOPE`, never persisted
-> or inferred, and the `worktree/` module plus the `tk worktree` command are
-> slated for removal. This section describes the current code until that change
-> lands (tracked alongside tk-60); the module map above will be updated with it.
+Scope ([ADR-0022](./docs/adr/0022-scope-is-an-explicit-epic-argument-not-persisted-state.md))
+is the Epic that narrows `tk next` and `tk list`. It is supplied per
+invocation as an explicit `<epic-id>` argument or the `TK_SCOPE` environment
+variable — the argument wins — and is never persisted or inferred from git
+state. `commands/scope.rs` owns the argument/`TK_SCOPE` precedence; the command
+resolves the value Epic-only (a Ticket is a typed error) before the
+store-facing selection runs, so the store receives an already-resolved Epic id.
 
-Workspace Scope is local-only and stored in git Worktree Config in v1. Worktree
-Config scope takes precedence over read-only branch-name inference. Ticket
-Branches use `tk/<display-id>-<slug>` so scope remains inferable after manual
-worktree creation and after Promotion through Aliases.
-
-`tk worktree start` creates a scoped git worktree and marks the item `active` by
-default unless `--no-status` is used. The default path layout is recorded in
-[ADR 0007](./docs/adr/0007-default-worktree-path-layout.md). On a path or
-branch collision `tk worktree start` does not preflight: it runs the git
-operation and forwards git's own stderr beneath a framing line (see
-`run_git_or_fail`), treating git as the authority rather than reimplementing
-git's existence checks with the TOCTOU gap that implies (`tk-15`).
-Configurable path layout is tracked by `tk-16`.
-
-Workspace Scope is a selection context, not an implicit item target. Commands
-that inspect, update, or promote a specific item require explicit Display IDs;
+Scope is a selection context, not an implicit item target. Commands that
+inspect, update, or promote a specific item require explicit Display IDs;
 agents should pass IDs selected by `tk next` or `tk list`.
+
+tk does not create or manage git worktrees; `git worktree` is the user's or
+harness's tool. An orchestrated / AFK run exports `TK_SCOPE=<epic-id>` so every
+`tk` subprocess inherits the same Epic without restating it.
 
 ## Release Targets
 
