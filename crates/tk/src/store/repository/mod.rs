@@ -13,6 +13,14 @@
 //! split lets command handlers render the user-facing diagnostic for an
 //! expected miss without having to discriminate against a generic `Err`.
 
+// Each operation takes its request/input/options struct (`UpdateRequest`,
+// `CreateLocalTicketInput`, `NextOptions`, …) by value: a single-use parameter
+// object the caller builds inline and hands over, not a value it keeps.
+// `needless_pass_by_value` (pedantic) can't model that sink ownership, so it is
+// allowed for this module; it stays active crate-wide to catch genuine
+// owned-by-value (`String`/`Vec`) params elsewhere.
+#![allow(clippy::needless_pass_by_value)]
+
 use std::path::Path;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};

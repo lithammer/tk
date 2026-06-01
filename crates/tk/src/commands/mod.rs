@@ -3,6 +3,13 @@
 //! `resolver` is the shared open / resolve / diagnostic-rendering seam
 //! used by every item command (ADR-0017).
 
+// Handlers take their parsed `Args` by value: it is a single-use parameter
+// object clap built for exactly this call, moved to its one consumer rather
+// than a value the caller keeps. `needless_pass_by_value` (pedantic) can't
+// model that sink ownership, so it is allowed for this module; it stays active
+// crate-wide to catch genuine owned-by-value (`String`/`Vec`) params elsewhere.
+#![allow(clippy::needless_pass_by_value)]
+
 pub mod add;
 pub mod block;
 pub mod done;

@@ -48,10 +48,6 @@ doc_markdown = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 
-# `Deps<'_>` is a borrowed view of injectables; passing it by value keeps
-# command handler signatures free of wildcard lifetimes.
-needless_pass_by_value = "allow"
-
 # Style: a nested `if` reads better than `if a && b` when each predicate has
 # its own paragraph of justification or when one of the inner branches grows
 # during a later slice.
