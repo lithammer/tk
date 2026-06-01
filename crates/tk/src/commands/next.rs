@@ -1,30 +1,37 @@
 //! `tk next` — select the next ready Ticket.
 //!
 //! Ranks ready Tickets by Effective Priority (lowest first), then own
-//! Priority, then created_seq, within the active Workspace Scope (per
-//! ADR-0015). Prints one Display ID to stdout. When the pick's Effective
-//! Priority is lower than its own Priority, also writes a rationale line
-//! to stderr (`<display>: Effective Priority <ep> (via <contributor>)`)
-//! so `id="$(tk next)"` scripting stays uncluttered.
+//! Priority, then created_seq, within the active Scope (per ADR-0015).
+//! Prints one Display ID to stdout. When the pick's Effective Priority is
+//! lower than its own Priority, also writes a rationale line to stderr
+//! (`<display>: Effective Priority <ep> (via <contributor>)`) so
+//! `id="$(tk next)"` scripting stays uncluttered.
+//!
+//! Scope is the optional `<epic-id>` argument or `TK_SCOPE` (ADR-0022),
+//! resolved Epic-only here before selection runs.
 
 use std::io::Write;
 
 use clap::Args as ClapArgs;
 
 use crate::cli::{Deps, Exit};
-use crate::commands::resolver;
+use crate::commands::{resolver, scope};
 use crate::store::repository::next::{self, NextError, NextOptions, NextScope, Rationale};
-use crate::worktree::scope as worktree_scope;
 
 const COMMAND: &str = "next";
 
-/// Flags for `tk next`. No options today; reserved for future scope
-/// overrides (e.g. `--all` to ignore Workspace Scope).
+/// Flags for `tk next`.
 #[derive(Debug, ClapArgs)]
-pub struct Args {}
+pub struct Args {
+    /// Restrict selection to this Epic's child Tickets. Falls back to the
+    /// `TK_SCOPE` environment variable; absent both, all ready Tickets are
+    /// considered.
+    #[arg(value_name = "EPIC_ID")]
+    pub epic: Option<String>,
+}
 
 #[must_use]
-pub fn run(deps: Deps<'_>, _args: Args) -> Exit {
+pub fn run(deps: Deps<'_>, args: Args) -> Exit {
     let Deps {
         stdout,
         stderr,
@@ -41,25 +48,32 @@ pub fn run(deps: Deps<'_>, _args: Args) -> Exit {
         }
     };
 
-    let raw = worktree_scope::read_git_side(runner, cwd);
-    let resolved_scope = match worktree_scope::resolve_against_store(&store, &raw) {
-        Ok(scope) => scope,
-        Err(worktree_scope::ScopeError::ConfiguredUnresolved(stored)) => {
-            let _ = writeln!(
-                stderr,
-                "tk next: Workspace Scope '{stored}' is not a known Display ID or Alias"
-            );
-            return Exit::Failure;
-        }
-        Err(worktree_scope::ScopeError::Storage(err)) => {
-            resolver::render_storage_error(stderr, COMMAND, &err);
-            return Exit::Failure;
-        }
+    let scope_value = scope::effective_value(args.epic.as_deref(), scope::env_value().as_deref());
+    let scope_epic = match scope_value.as_deref() {
+        None => None,
+        Some(value) => match resolver::resolve_epic_with_display(&store, value) {
+            Ok(epic) => Some(epic),
+            Err(resolver::ResolveEpicError::NotFound) => {
+                let _ = writeln!(
+                    stderr,
+                    "tk next: scope '{value}' is not a known Display ID or Alias"
+                );
+                return Exit::Failure;
+            }
+            Err(resolver::ResolveEpicError::NotAnEpic) => {
+                let _ = writeln!(stderr, "tk next: scope '{value}' is not an Epic");
+                return Exit::Failure;
+            }
+            Err(resolver::ResolveEpicError::Storage(err)) => {
+                resolver::render_storage_error(stderr, COMMAND, &err);
+                return Exit::Failure;
+            }
+        },
     };
 
-    let (next_scope, has_scope) = match &resolved_scope {
-        None => (NextScope::None, false),
-        Some(s) => (NextScope::DisplayArg(s.display_id.as_str()), true),
+    let next_scope = match &scope_epic {
+        None => NextScope::None,
+        Some(epic) => NextScope::Epic(epic.id.as_str()),
     };
 
     match next::next_ready_ticket(&store, NextOptions { scope: next_scope }) {
@@ -71,19 +85,18 @@ pub fn run(deps: Deps<'_>, _args: Args) -> Exit {
             Exit::Ok
         }
         Ok(None) => {
-            let line = if has_scope {
-                "tk next: no ready Tickets in Workspace Scope"
-            } else {
-                "tk next: no ready Tickets"
-            };
-            let _ = writeln!(stderr, "{line}");
-            Exit::Failure
-        }
-        Err(NextError::ScopeNotFound) => {
-            let _ = writeln!(
-                stderr,
-                "tk next: Workspace Scope does not resolve to a Ticket or Epic"
-            );
+            match &scope_epic {
+                Some(epic) => {
+                    let _ = writeln!(
+                        stderr,
+                        "tk next: no ready Tickets in Epic {}",
+                        epic.display_id
+                    );
+                }
+                None => {
+                    let _ = writeln!(stderr, "tk next: no ready Tickets");
+                }
+            }
             Exit::Failure
         }
         Err(NextError::Storage(err)) => {
@@ -183,9 +196,9 @@ mod tests {
         }
     }
 
-    /// Stage one fake git invocation: `git rev-parse` succeeds with the
-    /// repo's paths, scope reads fail (treated as "no scope").
-    fn expect_open_and_no_scope(h: &Harness<'_>, store: &TmpStore) {
+    /// Stage the single git call store-open makes (`git rev-parse` for
+    /// repository discovery). Scope no longer reads git state (ADR-0022).
+    fn expect_open(h: &Harness<'_>, store: &TmpStore) {
         h.runner.expect(
             &["git", "rev-parse"],
             RunOutput {
@@ -194,24 +207,53 @@ mod tests {
                 stderr: Vec::new(),
             },
         );
-        // scope: tk.scope absent.
-        h.runner.expect(
-            &["git", "config", "--worktree", "--get", "tk.scope"],
-            RunOutput {
-                exit_code: 1,
-                stdout: Vec::new(),
-                stderr: Vec::new(),
+    }
+
+    fn seed_epic(conn: &Connection, id: &str, display: &str, created_seq: i64) {
+        insert_fixture_item(
+            conn,
+            FixtureItem {
+                id,
+                display,
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                title: id,
+                created_seq,
+                ..FixtureItem::default()
             },
-        );
-        // scope: branch name detached.
-        h.runner.expect(
-            &["git", "symbolic-ref", "--short", "HEAD"],
-            RunOutput {
-                exit_code: 1,
-                stdout: Vec::new(),
-                stderr: Vec::new(),
+        )
+        .unwrap();
+    }
+
+    fn seed_child(
+        conn: &Connection,
+        id: &str,
+        display: &str,
+        priority: &str,
+        epic: &str,
+        created_seq: i64,
+    ) {
+        insert_fixture_item(
+            conn,
+            FixtureItem {
+                id,
+                display,
+                title: id,
+                priority: Some(priority),
+                container_id: Some(epic),
+                container_class: Some("epic"),
+                created_seq,
+                ..FixtureItem::default()
             },
-        );
+        )
+        .unwrap();
+    }
+
+    fn args(epic: Option<&str>) -> Args {
+        Args {
+            epic: epic.map(str::to_owned),
+        }
     }
 
     #[test]
@@ -220,12 +262,12 @@ mod tests {
         seed_store(&store);
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_open_and_no_scope(&h, &store);
-        let code = run(h.deps(), Args {});
+        expect_open(&h, &store);
+        let code = run(h.deps(), args(None));
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk next: no ready Tickets"));
-        assert!(!stderr.contains("Workspace Scope"));
+        assert!(!stderr.contains("Epic"));
     }
 
     #[test]
@@ -238,8 +280,8 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_open_and_no_scope(&h, &store);
-        let code = run(h.deps(), Args {});
+        expect_open(&h, &store);
+        let code = run(h.deps(), args(None));
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert_eq!(stdout.trim(), "tk-2");
@@ -257,8 +299,8 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_open_and_no_scope(&h, &store);
-        let code = run(h.deps(), Args {});
+        expect_open(&h, &store);
+        let code = run(h.deps(), args(None));
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         let stderr = String::from_utf8(h.stderr).unwrap();
@@ -270,89 +312,79 @@ mod tests {
     }
 
     #[test]
-    fn configured_scope_filters_selection_and_changes_empty_message() {
+    fn epic_scope_selects_a_child_over_a_higher_priority_outsider() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
-        seed_ticket(&conn, "in-scope-blocked", "tk-1", "P0", 1);
-        seed_ticket(&conn, "out-of-scope", "tk-2", "P0", 2);
-        seed_ticket(&conn, "blocker", "tk-3", "P0", 3);
-        insert_dependency(&conn, "blocker", "in-scope-blocked").unwrap();
+        seed_epic(&conn, "epic", "tk-1", 1);
+        seed_child(&conn, "child", "tk-2", "P2", "epic", 2);
+        seed_ticket(&conn, "outside", "tk-3", "P0", 3);
         drop(conn);
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        // open
-        h.runner.expect(
-            &["git", "rev-parse"],
-            RunOutput {
-                exit_code: 0,
-                stdout: store.git_rev_parse_stdout(),
-                stderr: Vec::new(),
-            },
-        );
-        // scope configured to tk-1
-        h.runner.expect(
-            &["git", "config", "--worktree", "--get", "tk.scope"],
-            RunOutput {
-                exit_code: 0,
-                stdout: b"tk-1\n".to_vec(),
-                stderr: Vec::new(),
-            },
-        );
-        h.runner.expect(
-            &["git", "symbolic-ref", "--short", "HEAD"],
-            RunOutput {
-                exit_code: 0,
-                stdout: b"main\n".to_vec(),
-                stderr: Vec::new(),
-            },
-        );
-        let code = run(h.deps(), Args {});
-        // tk-1 is blocked; with scope=tk-1, no other Ticket is in scope.
+        expect_open(&h, &store);
+        let code = run(h.deps(), args(Some("tk-1")));
+        assert_eq!(code, Exit::Ok);
+        // tk-3 outranks tk-2 globally, but the Epic Scope confines selection.
+        assert_eq!(String::from_utf8(h.stdout).unwrap().trim(), "tk-2");
+    }
+
+    #[test]
+    fn epic_scope_with_no_ready_child_names_the_epic_in_the_empty_message() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        seed_epic(&conn, "epic", "tk-1", 1);
+        seed_child(&conn, "blocked-child", "tk-2", "P0", "epic", 2);
+        seed_ticket(&conn, "blocker", "tk-3", "P0", 3);
+        insert_dependency(&conn, "blocker", "blocked-child").unwrap();
+        // A ready Ticket outside the Epic must not rescue the empty result.
+        seed_ticket(&conn, "outside", "tk-4", "P0", 4);
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_open(&h, &store);
+        let code = run(h.deps(), args(Some("tk-1")));
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(
-            stderr.contains("tk next: no ready Tickets in Workspace Scope"),
+            stderr.contains("tk next: no ready Tickets in Epic tk-1"),
             "stderr={stderr:?}"
         );
     }
 
     #[test]
-    fn configured_scope_value_that_does_not_resolve_renders_typed_error() {
+    fn unknown_scope_value_renders_typed_error() {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        h.runner.expect(
-            &["git", "rev-parse"],
-            RunOutput {
-                exit_code: 0,
-                stdout: store.git_rev_parse_stdout(),
-                stderr: Vec::new(),
-            },
-        );
-        h.runner.expect(
-            &["git", "config", "--worktree", "--get", "tk.scope"],
-            RunOutput {
-                exit_code: 0,
-                stdout: b"vanished\n".to_vec(),
-                stderr: Vec::new(),
-            },
-        );
-        h.runner.expect(
-            &["git", "symbolic-ref", "--short", "HEAD"],
-            RunOutput {
-                exit_code: 1,
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            },
-        );
-        let code = run(h.deps(), Args {});
+        expect_open(&h, &store);
+        let code = run(h.deps(), args(Some("vanished")));
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(
-            stderr
-                .contains("tk next: Workspace Scope 'vanished' is not a known Display ID or Alias")
+            stderr.contains("tk next: scope 'vanished' is not a known Display ID or Alias"),
+            "stderr={stderr:?}"
+        );
+    }
+
+    #[test]
+    fn ticket_scope_is_rejected_as_not_an_epic() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        seed_ticket(&conn, "t1", "tk-1", "P2", 1);
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_open(&h, &store);
+        let code = run(h.deps(), args(Some("tk-1")));
+        assert_eq!(code, Exit::Failure);
+        let stderr = String::from_utf8(h.stderr).unwrap();
+        assert!(
+            stderr.contains("tk next: scope 'tk-1' is not an Epic"),
+            "stderr={stderr:?}"
         );
     }
 }

@@ -100,17 +100,26 @@ impl ListClassFilter {
 }
 
 /// Read options for the List Tree query.
+///
+/// `scope` is the stable `items.id` of an Epic when a Scope is active
+/// (ADR-0022), confining rows to that Epic and its direct child Tickets;
+/// `None` reads the whole store. The command layer resolves and
+/// Epic-validates the `<epic-id>` argument / `TK_SCOPE` before setting it.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct ListOptions {
+pub struct ListOptions<'a> {
     pub view: ListView,
     pub origin: ListOriginFilter,
     pub class: ListClassFilter,
+    pub scope: Option<&'a str>,
 }
 
-/// SQL for the List Tree read. Bound with three text parameters:
+/// SQL for the List Tree read. Bound with four text parameters:
 ///   `?1` — [`ListView::sql_text`] selecting which items match.
 ///   `?2` — [`ListOriginFilter::sql_text`] filtering stored Origin.
 ///   `?3` — [`ListClassFilter::sql_text`] narrowing to a single Item class.
+///   `?4` — Scope (ADR-0022): the stable `items.id` of an Epic, or `''`
+///          for no Scope. When set, rows are confined to that Epic and its
+///          direct child Tickets.
 ///
 /// The `case ?1 when '<tag>' then ...` arms cover every [`ListView`]
 /// variant; the test below catches a missing arm.
@@ -158,6 +167,7 @@ select id, display_value, item_class, ticket_kind, priority, title, \
   from matching parent \
  where (?2 = 'any' or parent.origin = ?2) \
    and (?3 = 'any' or parent.item_class = ?3) \
+   and (?4 = '' or parent.id = ?4 or parent.container_id = ?4) \
    and ( \
        parent.self_matches \
        or ( \
@@ -176,14 +186,15 @@ select id, display_value, item_class, ticket_kind, priority, title, \
  order by created_seq asc";
 
 /// Read current-state rows for the List Tree.
-pub fn list_rows(store: &Store, options: ListOptions) -> Result<Vec<ListRow>, rusqlite::Error> {
+pub fn list_rows(store: &Store, options: ListOptions<'_>) -> Result<Vec<ListRow>, rusqlite::Error> {
     let mut stmt = store.conn.prepare(LIST_ROWS_SQL)?;
     let rows = stmt
         .query_map(
             params![
                 options.view.sql_text(),
                 options.origin.sql_text(),
-                options.class.sql_text()
+                options.class.sql_text(),
+                options.scope.unwrap_or(""),
             ],
             row_from_sql,
         )?
@@ -501,10 +512,43 @@ mod tests {
                 view: ListView::Ready,
                 class: ListClassFilter::Epic,
                 origin: ListOriginFilter::Local,
+                scope: None,
             },
         )
         .unwrap();
         assert_eq!(display_ids(&rows), vec!["tk-1"]);
+    }
+
+    #[test]
+    fn scope_confines_rows_to_the_epic_and_its_children() {
+        let store = open_seeded();
+        seed_epic(&store, "epic", "tk-1", "open", 1);
+        insert_fixture_item(
+            &store.conn,
+            FixtureItem {
+                id: "child",
+                display: "tk-2",
+                title: "Child",
+                container_id: Some("epic"),
+                container_class: Some("epic"),
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        // An unrelated Epic and a top-level Ticket must be excluded.
+        seed_epic(&store, "other-epic", "tk-3", "open", 3);
+        seed_ticket(&store, "loose", "tk-4", "open", 4);
+
+        let rows = list_rows(
+            &store,
+            ListOptions {
+                scope: Some("epic"),
+                ..ListOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(display_ids(&rows), vec!["tk-1", "tk-2"]);
     }
 
     #[test]

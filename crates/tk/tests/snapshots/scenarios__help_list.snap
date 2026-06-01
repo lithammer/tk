@@ -4,7 +4,10 @@ expression: "p.run(&format!(\"{command} --help\"))"
 ---
 Render the Repository Store List Tree
 
-Usage: tk list [OPTIONS]
+Usage: tk list [OPTIONS] [EPIC_ID]
+
+Arguments:
+  [EPIC_ID]  Scope the listing to this Epic and its child Tickets. Falls back to the `TK_SCOPE` environment variable
 
 Options:
       --ready    Show ready Tickets (open, no unresolved blockers)

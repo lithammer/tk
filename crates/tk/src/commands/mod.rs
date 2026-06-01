@@ -22,6 +22,7 @@ pub mod next;
 pub mod prime;
 pub mod promote;
 pub mod resolver;
+pub mod scope;
 pub mod self_update;
 pub mod show;
 pub mod start;

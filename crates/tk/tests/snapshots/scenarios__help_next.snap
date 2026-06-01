@@ -4,7 +4,10 @@ expression: "p.run(&format!(\"{command} --help\"))"
 ---
 Select the next ready Ticket
 
-Usage: tk next
+Usage: tk next [EPIC_ID]
+
+Arguments:
+  [EPIC_ID]  Restrict selection to this Epic's child Tickets. Falls back to the `TK_SCOPE` environment variable; absent both, all ready Tickets are considered
 
 Options:
   -h, --help  Print help

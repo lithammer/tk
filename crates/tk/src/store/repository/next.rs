@@ -16,9 +16,7 @@
 
 use rusqlite::params;
 
-use crate::domain::item_class::ItemClass;
-
-use super::{Store, resolve_item_ref};
+use super::Store;
 
 /// One ready Ticket selected by [`next_ready_ticket`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,13 +36,16 @@ pub struct Rationale {
     pub blocked_display_id: String,
 }
 
-/// Workspace Scope input for ready-Ticket selection.
+/// Scope input for ready-Ticket selection.
 #[derive(Debug, Clone)]
 pub enum NextScope<'a> {
-    /// No scope; consider every ready Ticket in the store.
+    /// No Scope; consider every ready Ticket in the store.
     None,
-    /// A Display ID or Alias the user supplied; the store resolves it.
-    DisplayArg(&'a str),
+    /// Restrict selection to a resolved Epic's child Tickets, carrying the
+    /// stable `items.id`. The command layer resolves the `<epic-id>`
+    /// argument / `TK_SCOPE` and rejects a Ticket before reaching here, so
+    /// the store trusts the value is an Epic (ADR-0022).
+    Epic(&'a str),
 }
 
 /// Read options for ready-Ticket selection.
@@ -64,12 +65,10 @@ impl Default for NextOptions<'_> {
 /// Why [`next_ready_ticket`] returned no Ticket. A successful query returns
 /// `Ok(Some(NextTicket))` when something is ready and `Ok(None)` when nothing
 /// is — `tk next` maps the empty case to exit 1, but it is a normal result,
-/// not a failure, so it rides the `Ok(None)` channel.
+/// not a failure, so it rides the `Ok(None)` channel. Scope resolution lives
+/// in the command layer, so the only error the store raises is a SQLite fault.
 #[derive(Debug, thiserror::Error)]
 pub enum NextError {
-    /// A Workspace Scope Display ID was supplied but did not resolve to a row.
-    #[error("workspace scope does not resolve to a Ticket or Epic")]
-    ScopeNotFound,
     #[error(transparent)]
     Storage(#[from] rusqlite::Error),
 }
@@ -106,7 +105,6 @@ with recursive \
        where b.status <> 'done' \
          and ( \
              ?1 = 'all' \
-             or (?1 = 'ticket' and b.id = ?2) \
              or (?1 = 'epic' and (b.id = ?2 or b.container_id = ?2)) \
          ) \
       union all \
@@ -117,7 +115,6 @@ with recursive \
          and i.status <> 'done' \
          and ( \
              ?1 = 'all' \
-             or (?1 = 'ticket' and i.id = ?2) \
              or (?1 = 'epic' and (i.id = ?2 or i.container_id = ?2)) \
          ) \
   ), \
@@ -128,7 +125,6 @@ with recursive \
          and status = 'open' \
          and ( \
              ?1 = 'all' \
-             or (?1 = 'ticket' and id = ?2) \
              or (?1 = 'epic' and container_id = ?2) \
          ) \
       union all \
@@ -168,7 +164,6 @@ select ann.display_value, ann.priority, eff.ep, \
    and not ann.has_unresolved_external_blocker \
    and ( \
        ?1 = 'all' \
-       or (?1 = 'ticket' and ann.id = ?2) \
        or (?1 = 'epic' and ann.container_id = ?2) \
    ) \
  order by eff.ep asc, ann.priority asc, ann.created_seq asc \
@@ -179,23 +174,14 @@ pub fn next_ready_ticket(
     store: &Store,
     options: NextOptions<'_>,
 ) -> Result<Option<NextTicket>, NextError> {
-    let (scope_mode, scope_id_owned) = match options.scope {
-        NextScope::None => ("all", String::new()),
-        NextScope::DisplayArg(arg) => {
-            let Some(resolved) = resolve_item_ref(&store.conn, arg)? else {
-                return Err(NextError::ScopeNotFound);
-            };
-            let mode = match resolved.item_class {
-                ItemClass::Ticket => "ticket",
-                ItemClass::Epic => "epic",
-            };
-            (mode, resolved.id)
-        }
+    let (scope_mode, scope_id) = match options.scope {
+        NextScope::None => ("all", ""),
+        NextScope::Epic(id) => ("epic", id),
     };
 
     let row = store.conn.query_row(
         NEXT_READY_TICKET_SQL,
-        params![scope_mode, scope_id_owned.as_str()],
+        params![scope_mode, scope_id],
         |row| {
             let display_id: String = row.get(0)?;
             let own_priority: String = row.get(1)?;
@@ -334,47 +320,77 @@ mod tests {
         assert_eq!(rationale.blocked_display_id, "tk-2");
     }
 
-    #[test]
-    fn scope_unknown_display_arg_returns_scope_not_found() {
-        let store = open_seeded();
-        seed(&store, "t1", "tk-1", "P1", 1);
-        let err = next_ready_ticket(
-            &store,
-            NextOptions {
-                scope: NextScope::DisplayArg("missing"),
+    fn seed_epic(store: &Store, id: &str, display: &str, created_seq: i64) {
+        insert_fixture_item(
+            &store.conn,
+            FixtureItem {
+                id,
+                display,
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                title: id,
+                created_seq,
+                ..FixtureItem::default()
             },
         )
-        .unwrap_err();
-        assert!(matches!(err, NextError::ScopeNotFound));
+        .unwrap();
+    }
+
+    fn seed_child(
+        store: &Store,
+        id: &str,
+        display: &str,
+        priority: &str,
+        epic: &str,
+        created_seq: i64,
+    ) {
+        insert_fixture_item(
+            &store.conn,
+            FixtureItem {
+                id,
+                display,
+                title: id,
+                priority: Some(priority),
+                container_id: Some(epic),
+                container_class: Some("epic"),
+                created_seq,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
     }
 
     #[test]
-    fn scope_to_a_ticket_only_considers_that_ticket() {
+    fn epic_scope_only_considers_that_epics_children() {
         let store = open_seeded();
-        seed(&store, "scope-target", "tk-1", "P3", 1);
-        seed(&store, "other", "tk-2", "P0", 2);
+        seed_epic(&store, "epic", "tk-1", 1);
+        seed_child(&store, "child", "tk-2", "P3", "epic", 2);
+        // A higher-priority Ticket outside the Epic must be ignored.
+        seed(&store, "outside", "tk-3", "P0", 3);
 
         let ticket = next_ready_ticket(
             &store,
             NextOptions {
-                scope: NextScope::DisplayArg("tk-1"),
+                scope: NextScope::Epic("epic"),
             },
         )
         .unwrap()
         .expect("a ready ticket");
-        assert_eq!(ticket.display_id, "tk-1");
+        assert_eq!(ticket.display_id, "tk-2");
     }
 
     #[test]
-    fn ticket_scope_returns_no_ready_when_the_scoped_ticket_is_blocked() {
+    fn epic_scope_returns_no_ready_when_every_child_is_blocked() {
         let store = open_seeded();
-        seed(&store, "scope-target", "tk-1", "P1", 1);
-        seed(&store, "blocker", "tk-2", "P4", 2);
-        insert_dependency(&store.conn, "blocker", "scope-target").unwrap();
+        seed_epic(&store, "epic", "tk-1", 1);
+        seed_child(&store, "child", "tk-2", "P1", "epic", 2);
+        seed(&store, "blocker", "tk-3", "P4", 3);
+        insert_dependency(&store.conn, "blocker", "child").unwrap();
         let outcome = next_ready_ticket(
             &store,
             NextOptions {
-                scope: NextScope::DisplayArg("tk-1"),
+                scope: NextScope::Epic("epic"),
             },
         )
         .unwrap();

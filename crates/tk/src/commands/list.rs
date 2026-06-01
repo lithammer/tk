@@ -16,7 +16,7 @@ use anstyle::Style;
 use clap::Args as ClapArgs;
 
 use crate::cli::{Deps, Exit};
-use crate::commands::resolver;
+use crate::commands::{resolver, scope};
 use crate::domain::item_class::ItemClass;
 use crate::domain::priority::Priority;
 use crate::domain::status::ItemStatus;
@@ -58,6 +58,10 @@ pub struct Args {
     /// Show only Epics.
     #[arg(long)]
     pub epic: bool,
+    /// Scope the listing to this Epic and its child Tickets. Falls back to
+    /// the `TK_SCOPE` environment variable.
+    #[arg(value_name = "EPIC_ID")]
+    pub epic_id: Option<String>,
 }
 
 #[must_use]
@@ -71,18 +75,43 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
         ..
     } = deps;
 
-    let options = ListOptions {
-        view: select_view(&args),
-        origin: select_origin(&args),
-        class: select_class(&args),
-    };
-
     let store = match resolver::open_for_command(runner, cwd) {
         Ok(s) => s,
         Err(err) => {
             resolver::render_open_error(stderr, COMMAND, &err);
             return Exit::Failure;
         }
+    };
+
+    let scope_value =
+        scope::effective_value(args.epic_id.as_deref(), scope::env_value().as_deref());
+    let scope_epic = match scope_value.as_deref() {
+        None => None,
+        Some(value) => match resolver::resolve_epic_with_display(&store, value) {
+            Ok(epic) => Some(epic),
+            Err(resolver::ResolveEpicError::NotFound) => {
+                let _ = writeln!(
+                    stderr,
+                    "tk list: scope '{value}' is not a known Display ID or Alias"
+                );
+                return Exit::Failure;
+            }
+            Err(resolver::ResolveEpicError::NotAnEpic) => {
+                let _ = writeln!(stderr, "tk list: scope '{value}' is not an Epic");
+                return Exit::Failure;
+            }
+            Err(resolver::ResolveEpicError::Storage(err)) => {
+                resolver::render_storage_error(stderr, COMMAND, &err);
+                return Exit::Failure;
+            }
+        },
+    };
+
+    let options = ListOptions {
+        view: select_view(&args),
+        origin: select_origin(&args),
+        class: select_class(&args),
+        scope: scope_epic.as_ref().map(|epic| epic.id.as_str()),
     };
 
     let rows = match list::list_rows(&store, options) {
@@ -92,6 +121,19 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
             return Exit::Failure;
         }
     };
+
+    // Hint so a Scope-filtered tree never reads as the full store (ADR-0022).
+    if let Some(epic) = scope_epic.as_ref() {
+        if writeln!(
+            stdout,
+            "Scope: {} (filtered to this Epic and its child Tickets)",
+            epic.display_id
+        )
+        .is_err()
+        {
+            return Exit::Failure;
+        }
+    }
 
     if render(stdout, &rows, options, styler.for_stdout()).is_err() {
         return Exit::Failure;
@@ -132,7 +174,7 @@ fn select_class(args: &Args) -> ListClassFilter {
 fn render<W: Write + ?Sized>(
     stdout: &mut W,
     rows: &[ListRow],
-    options: ListOptions,
+    options: ListOptions<'_>,
     styler: SubStyler,
 ) -> std::io::Result<()> {
     if rows.is_empty() {
@@ -227,7 +269,7 @@ fn count_rendered_children(rows: &[ListRow], parent_id: &str) -> usize {
         .count()
 }
 
-fn empty_message(options: ListOptions) -> &'static str {
+fn empty_message(options: ListOptions<'_>) -> &'static str {
     // Only the Default view distinguishes Epic-vs-Any and Origin in its empty
     // message; the Ready / Blocked / Active views keep their per-view phrasing
     // because Epics may still exist there but simply contain no matching child.
@@ -461,6 +503,7 @@ mod tests {
             local: false,
             remote: false,
             epic: false,
+            epic_id: None,
         }
     }
 
@@ -709,6 +752,106 @@ mod tests {
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk list: Repository Store not initialized; run 'tk init'"));
+    }
+
+    #[test]
+    fn scope_filters_to_epic_and_prints_a_hint() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "epic",
+                display: "tk-1",
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                title: "Epic",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "child",
+                display: "tk-2",
+                title: "Child",
+                container_id: Some("epic"),
+                container_class: Some("epic"),
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "loose",
+                display: "tk-3",
+                title: "Loose",
+                created_seq: 3,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run(
+            h.deps(),
+            Args {
+                epic_id: Some("tk-1".to_owned()),
+                ..default_args()
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        let stdout = String::from_utf8(h.stdout).unwrap();
+        assert!(
+            stdout.contains("Scope: tk-1 (filtered to this Epic and its child Tickets)"),
+            "stdout={stdout:?}"
+        );
+        assert!(stdout.contains("[epic] Epic"));
+        assert!(stdout.contains("tk-2"));
+        assert!(!stdout.contains("tk-3"), "stdout={stdout:?}");
+    }
+
+    #[test]
+    fn scope_to_a_ticket_is_rejected_as_not_an_epic() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Ticket",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run(
+            h.deps(),
+            Args {
+                epic_id: Some("tk-1".to_owned()),
+                ..default_args()
+            },
+        );
+        assert_eq!(code, Exit::Failure);
+        let stderr = String::from_utf8(h.stderr).unwrap();
+        assert!(
+            stderr.contains("tk list: scope 'tk-1' is not an Epic"),
+            "stderr={stderr:?}"
+        );
     }
 
     #[test]
