@@ -65,9 +65,15 @@ impl Repo {
 
     /// Run `tk <cmd>` (shell-split) in the repo and return the rendered output.
     fn run(&self, cmd: &str) -> String {
+        self.run_env(cmd, &[])
+    }
+
+    /// Like [`run`] but with extra environment variables set on the child,
+    /// used to exercise the `TK_SCOPE` Scope channel (ADR-0022).
+    fn run_env(&self, cmd: &str, env: &[(&str, &str)]) -> String {
         let args = shlex::split(cmd).expect("command must shell-split");
-        let out = Command::cargo_bin("tk")
-            .expect("cargo bin tk")
+        let mut command = Command::cargo_bin("tk").expect("cargo bin tk");
+        command
             .args(&args)
             .current_dir(&self.cwd)
             .env("GIT_CEILING_DIRECTORIES", &self.root)
@@ -77,8 +83,11 @@ impl Repo {
             // nothing else to scrub.
             .env_remove("NO_COLOR")
             .env_remove("CLICOLOR_FORCE")
-            .output()
-            .expect("run tk");
+            .env_remove("TK_SCOPE");
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let out = command.output().expect("run tk");
         render(&out, &self.root)
     }
 }
@@ -204,6 +213,26 @@ fn prime_is_silent_without_initialized_store() {
 fn prime_is_silent_outside_git_repository() {
     let p = Repo::bare("scratch");
     assert_eq!(p.run("prime"), "");
+}
+
+/// `TK_SCOPE` is the orchestrator/AFK Scope channel (ADR-0022): a child
+/// inherits it and `tk list` filters to that Epic without a positional
+/// argument. Guards the env-read wiring that unit tests cannot reach.
+#[test]
+fn tk_scope_env_filters_list_to_the_epic() {
+    let p = Repo::new("project");
+    p.run("init");
+    p.run("add --epic -m 'Auth epic'"); // project-1
+    p.run("add --parent project-1 -m 'Login form'"); // project-2
+    p.run("add -m 'Unrelated chore'"); // project-3
+
+    let out = p.run_env("list", &[("TK_SCOPE", "project-1")]);
+    assert!(
+        out.contains("Scope: project-1 (filtered to this Epic and its child Tickets)"),
+        "out={out}"
+    );
+    assert!(out.contains("project-2"), "out={out}");
+    assert!(!out.contains("project-3"), "out={out}");
 }
 
 /// Clap owns `--help` formatting; these snapshots exist to surface an
