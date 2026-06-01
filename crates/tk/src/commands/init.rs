@@ -47,10 +47,18 @@ pub enum StoreKind {
 /// pragmas → migrations → seed pipeline.
 #[must_use]
 pub fn run(deps: Deps<'_>, _args: Args) -> Exit {
-    let paths = match discovery::discover_paths(deps.runner, deps.cwd) {
+    let Deps {
+        stdout,
+        stderr,
+        runner,
+        clock,
+        cwd,
+        ..
+    } = deps;
+    let paths = match discovery::discover_paths(runner, cwd) {
         Ok(p) => p,
         Err(err) => {
-            discovery::render_failure(deps.stderr, "init", &err);
+            discovery::render_failure(stderr, "init", &err);
             return Exit::Failure;
         }
     };
@@ -60,7 +68,7 @@ pub fn run(deps: Deps<'_>, _args: Args) -> Exit {
         Ok(c) => c,
         Err(err) => {
             let _ = writeln!(
-                deps.stderr,
+                stderr,
                 "tk init: failed to create {}: {err}",
                 tk_dir.display()
             );
@@ -84,7 +92,7 @@ pub fn run(deps: Deps<'_>, _args: Args) -> Exit {
         Ok(c) => c,
         Err(err) => {
             let _ = writeln!(
-                deps.stderr,
+                stderr,
                 "tk init: failed to open {}: {err}",
                 db_path.display()
             );
@@ -99,7 +107,7 @@ pub fn run(deps: Deps<'_>, _args: Args) -> Exit {
         Ok(k) => k,
         Err(err) => {
             let _ = writeln!(
-                deps.stderr,
+                stderr,
                 "tk init: failed to inspect {}: {err}",
                 db_path.display()
             );
@@ -109,7 +117,7 @@ pub fn run(deps: Deps<'_>, _args: Args) -> Exit {
     let is_existing = match kind {
         StoreKind::Foreign => {
             let _ = writeln!(
-                deps.stderr,
+                stderr,
                 "tk init: {} exists but is not a tk Repository Store",
                 db_path.display(),
             );
@@ -121,32 +129,32 @@ pub fn run(deps: Deps<'_>, _args: Args) -> Exit {
 
     if let Err(err) = configure_for_ticket_store(&conn) {
         let _ = writeln!(
-            deps.stderr,
+            stderr,
             "tk init: failed to configure {}: {err}",
             db_path.display()
         );
         return Exit::Failure;
     }
 
-    let now_iso = deps.clock.now_iso();
+    let now_iso = clock.now_iso();
     if let Err(err) = migrations::apply_all(&mut conn, &now_iso) {
         match err {
             migrations::ApplyError::StoreFromFutureVersion => {
                 let _ = writeln!(
-                    deps.stderr,
+                    stderr,
                     "tk init: {} was created by a newer tk version",
                     db_path.display(),
                 );
             }
             migrations::ApplyError::Sqlite(sqlite_err) => {
-                let _ = writeln!(deps.stderr, "tk init: migration failed: {sqlite_err}");
+                let _ = writeln!(stderr, "tk init: migration failed: {sqlite_err}");
             }
         }
         return Exit::Failure;
     }
 
     if let Err(err) = seed_display_prefix(&conn, &paths) {
-        let _ = writeln!(deps.stderr, "tk init: failed to seed display_prefix: {err}");
+        let _ = writeln!(stderr, "tk init: failed to seed display_prefix: {err}");
         return Exit::Failure;
     }
 
@@ -157,7 +165,7 @@ pub fn run(deps: Deps<'_>, _args: Args) -> Exit {
     } else {
         "Initialized Repository Store at "
     };
-    let _ = writeln!(deps.stdout, "{prefix}{}", db_path.display());
+    let _ = writeln!(stdout, "{prefix}{}", db_path.display());
     Exit::Ok
 }
 

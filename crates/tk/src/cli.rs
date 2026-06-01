@@ -184,15 +184,16 @@ pub fn run_argv(deps: Deps<'_>, argv: &[String]) -> std::io::Result<Exit> {
 ///   rendered to stderr.
 fn render_clap_error(deps: Deps<'_>, err: &clap::Error) -> Exit {
     use clap::error::ErrorKind;
+    let Deps { stdout, stderr, .. } = deps;
     let rendered = err.render();
     let bytes = rendered.to_string();
     match err.kind() {
         ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => {
-            let _ = deps.stdout.write_all(bytes.as_bytes());
+            let _ = stdout.write_all(bytes.as_bytes());
             Exit::Ok
         }
         _ => {
-            let _ = deps.stderr.write_all(bytes.as_bytes());
+            let _ = stderr.write_all(bytes.as_bytes());
             Exit::Usage
         }
     }

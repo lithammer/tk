@@ -19,9 +19,10 @@ pub struct Args {
 
 #[must_use]
 pub fn run(deps: Deps<'_>, _args: Args) -> Exit {
-    let _ = writeln!(deps.stderr, "tk promote: not yet implemented");
+    let Deps { stderr, .. } = deps;
+    let _ = writeln!(stderr, "tk promote: not yet implemented");
     let _ = writeln!(
-        deps.stderr,
+        stderr,
         "Planned: later slice once Remote and sync are in place."
     );
     Exit::Failure

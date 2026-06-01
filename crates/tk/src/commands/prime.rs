@@ -32,11 +32,17 @@ fn briefing() -> String {
 
 #[must_use]
 pub fn run(deps: Deps<'_>, _args: Args) -> Exit {
+    let Deps {
+        stdout,
+        runner,
+        cwd,
+        ..
+    } = deps;
     // Prime prints only when a Repository Store is initialized here; with no
     // openable store it exits 0 silently so a global agent hook stays quiet in
     // any directory (ADR-0020).
-    if resolver::open_for_command(deps.runner, deps.cwd).is_ok() {
-        let _ = deps.stdout.write_all(briefing().as_bytes());
+    if resolver::open_for_command(runner, cwd).is_ok() {
+        let _ = stdout.write_all(briefing().as_bytes());
     }
     Exit::Ok
 }
