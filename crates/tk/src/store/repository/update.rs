@@ -97,6 +97,31 @@ struct Current {
     container_id: Option<String>,
 }
 
+/// The new column values for an item update, grouped so [`write_columns`]
+/// takes one parameter object instead of a row of positional scalars. Only
+/// built once a real change is detected, so `title`/`body` always carry the
+/// effective (possibly unchanged) value.
+struct ColumnWrites<'a> {
+    title: &'a str,
+    body: &'a str,
+    /// `Some` only when the priority actually changed; `None` leaves the
+    /// column untouched.
+    priority: Option<Priority>,
+    parent: ParentWrite<'a>,
+}
+
+/// Whether an update rewrites the container columns, and to what. Replaces a
+/// `parent_changed: bool` + `new_epic_id: Option<_>` pair whose
+/// `false`/`Some` combination was unrepresentable nonsense.
+#[derive(Clone, Copy)]
+enum ParentWrite<'a> {
+    /// Leave `container_id` / `container_class` as they are.
+    Unchanged,
+    /// Rewrite the container: `Some(epic_id)` reparents under that Epic,
+    /// `None` clears the parent.
+    Changed(Option<&'a str>),
+}
+
 /// Apply per-field updates to a Ticket or Epic.
 pub fn update_item<C: Clock + ?Sized>(
     store: &mut Store,
@@ -185,14 +210,20 @@ pub fn update_item<C: Clock + ?Sized>(
     let effective_title: &str = new_title.unwrap_or(&current.title);
     let effective_body: &str = new_body.unwrap_or(&current.body);
 
+    let parent = if parent_changed {
+        ParentWrite::Changed(new_epic_id)
+    } else {
+        ParentWrite::Unchanged
+    };
     write_columns(
         &tx,
         req.id,
-        effective_title,
-        effective_body,
-        new_priority,
-        parent_changed,
-        new_epic_id,
+        &ColumnWrites {
+            title: effective_title,
+            body: effective_body,
+            priority: new_priority,
+            parent,
+        },
         &now_iso,
     )?;
 
@@ -258,53 +289,54 @@ pub fn update_item<C: Clock + ?Sized>(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn write_columns(
     conn: &rusqlite::Connection,
     id: &str,
-    title: &str,
-    body: &str,
-    priority: Option<Priority>,
-    parent_changed: bool,
-    new_epic_id: Option<&str>,
+    writes: &ColumnWrites<'_>,
     now_iso: &str,
 ) -> Result<(), rusqlite::Error> {
-    let new_container_class: Option<&str> = new_epic_id.map(|_| "epic");
-    if parent_changed {
-        if let Some(p) = priority {
-            conn.execute(
-                "update items set title = ?2, body = ?3, priority = ?4, \
-                                  container_id = ?5, container_class = ?6, updated_at = ?7 \
-                  where id = ?1",
-                params![
-                    id,
-                    title,
-                    body,
-                    p,
-                    new_epic_id,
-                    new_container_class,
-                    now_iso
-                ],
-            )?;
-        } else {
-            conn.execute(
-                "update items set title = ?2, body = ?3, \
-                                  container_id = ?4, container_class = ?5, updated_at = ?6 \
-                  where id = ?1",
-                params![id, title, body, new_epic_id, new_container_class, now_iso],
-            )?;
+    let (title, body) = (writes.title, writes.body);
+    match writes.parent {
+        ParentWrite::Changed(new_epic_id) => {
+            let new_container_class: Option<&str> = new_epic_id.map(|_| "epic");
+            if let Some(p) = writes.priority {
+                conn.execute(
+                    "update items set title = ?2, body = ?3, priority = ?4, \
+                                      container_id = ?5, container_class = ?6, updated_at = ?7 \
+                      where id = ?1",
+                    params![
+                        id,
+                        title,
+                        body,
+                        p,
+                        new_epic_id,
+                        new_container_class,
+                        now_iso
+                    ],
+                )?;
+            } else {
+                conn.execute(
+                    "update items set title = ?2, body = ?3, \
+                                      container_id = ?4, container_class = ?5, updated_at = ?6 \
+                      where id = ?1",
+                    params![id, title, body, new_epic_id, new_container_class, now_iso],
+                )?;
+            }
         }
-    } else if let Some(p) = priority {
-        conn.execute(
-            "update items set title = ?2, body = ?3, priority = ?4, updated_at = ?5 \
-              where id = ?1",
-            params![id, title, body, p, now_iso],
-        )?;
-    } else {
-        conn.execute(
-            "update items set title = ?2, body = ?3, updated_at = ?4 where id = ?1",
-            params![id, title, body, now_iso],
-        )?;
+        ParentWrite::Unchanged => {
+            if let Some(p) = writes.priority {
+                conn.execute(
+                    "update items set title = ?2, body = ?3, priority = ?4, updated_at = ?5 \
+                      where id = ?1",
+                    params![id, title, body, p, now_iso],
+                )?;
+            } else {
+                conn.execute(
+                    "update items set title = ?2, body = ?3, updated_at = ?4 where id = ?1",
+                    params![id, title, body, now_iso],
+                )?;
+            }
+        }
     }
     Ok(())
 }
