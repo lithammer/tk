@@ -53,13 +53,15 @@ fn write_sanitized<W: io::Write + ?Sized>(
     text: &[u8],
     shape: TextShape,
 ) -> io::Result<()> {
-    // Chunked emission: walk the input and defer writing until a
-    // non-`Clean` byte is reached so all-clean spans emit as a single
-    // `write_all`.
-    let mut clean_start: usize = 0;
-    let mut i: usize = 0;
-    while i < text.len() {
-        match classify(text, i, shape) {
+    // Chunked emission: defer writing until a non-`Clean` byte forces a
+    // substitution so all-clean spans emit as a single `write_all`.
+    // `clean_start` marks the start of the pending span; `peekable` supplies
+    // the one-byte lookahead the Body shape needs to fold `\r\n` into `\n`.
+    let mut clean_start = 0;
+    let mut bytes = text.iter().copied().enumerate().peekable();
+    while let Some((i, byte)) = bytes.next() {
+        let next = bytes.peek().map(|&(_, b)| b);
+        match classify(byte, next, shape) {
             Replacement::Clean => {}
             Replacement::Space => {
                 writer.write_all(&text[clean_start..i])?;
@@ -68,7 +70,7 @@ fn write_sanitized<W: io::Write + ?Sized>(
             }
             Replacement::Escape => {
                 writer.write_all(&text[clean_start..i])?;
-                write_hex(writer, text[i])?;
+                write_hex(writer, byte)?;
                 clean_start = i + 1;
             }
             Replacement::Skip => {
@@ -76,13 +78,14 @@ fn write_sanitized<W: io::Write + ?Sized>(
                 clean_start = i + 1;
             }
         }
-        i += 1;
     }
     writer.write_all(&text[clean_start..])
 }
 
-fn classify(text: &[u8], index: usize, shape: TextShape) -> Replacement {
-    let byte = text[index];
+/// Classify one byte given the byte that follows it (`None` at end of input).
+/// The `next` lookahead is what lets the Body shape drop the `\r` of a `\r\n`
+/// pair while still escaping a bare `\r`.
+fn classify(byte: u8, next: Option<u8>, shape: TextShape) -> Replacement {
     match shape {
         TextShape::Line => {
             if byte == b'\r' || byte == b'\n' || byte == b'\t' {
@@ -95,7 +98,7 @@ fn classify(text: &[u8], index: usize, shape: TextShape) -> Replacement {
         }
         TextShape::Body => {
             if byte == b'\r' {
-                if index + 1 < text.len() && text[index + 1] == b'\n' {
+                if next == Some(b'\n') {
                     Replacement::Skip
                 } else {
                     Replacement::Escape
