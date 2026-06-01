@@ -2,7 +2,7 @@
 
 use clap::Args as ClapArgs;
 
-use crate::cli::Deps;
+use crate::cli::{Deps, Exit};
 use crate::commands::lifecycle::{self, SuccessLabel};
 use crate::domain::status::ItemStatus;
 
@@ -18,6 +18,6 @@ const SUCCESS: SuccessLabel = SuccessLabel {
 };
 
 #[must_use]
-pub fn run(deps: Deps<'_>, args: Args) -> u8 {
+pub fn run(deps: Deps<'_>, args: Args) -> Exit {
     lifecycle::transition(deps, "start", &args.id, ItemStatus::Active, SUCCESS)
 }

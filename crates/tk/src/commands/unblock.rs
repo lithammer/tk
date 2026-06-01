@@ -2,7 +2,7 @@
 
 use clap::Args as ClapArgs;
 
-use crate::cli::Deps;
+use crate::cli::{Deps, Exit};
 use crate::commands::resolver;
 use crate::store::repository::dependency::{self, DependencyEdge, RemoveDependencyError};
 
@@ -19,7 +19,7 @@ pub struct Args {
 }
 
 #[must_use]
-pub fn run(deps: Deps<'_>, args: Args) -> u8 {
+pub fn run(deps: Deps<'_>, args: Args) -> Exit {
     let Deps {
         stdout,
         stderr,
@@ -33,7 +33,7 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
         Ok(s) => s,
         Err(err) => {
             resolver::render_open_error(stderr, COMMAND, &err);
-            return 1;
+            return Exit::Failure;
         }
     };
 
@@ -45,11 +45,11 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
                 "tk unblock: blocked '{}' is not a known Display ID or Alias",
                 args.blocked
             );
-            return 1;
+            return Exit::Failure;
         }
         Err(resolver::ResolveError::Storage(err)) => {
             resolver::render_storage_error(stderr, COMMAND, &err);
-            return 1;
+            return Exit::Failure;
         }
     };
     let blocking = match resolver::resolve(&store, &args.blocking) {
@@ -60,17 +60,17 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
                 "tk unblock: blocking '{}' is not a known Display ID or Alias",
                 args.blocking
             );
-            return 1;
+            return Exit::Failure;
         }
         Err(resolver::ResolveError::Storage(err)) => {
             resolver::render_storage_error(stderr, COMMAND, &err);
-            return 1;
+            return Exit::Failure;
         }
     };
 
     if blocked.id == blocking.id {
         let _ = writeln!(stderr, "tk unblock: an item cannot block itself");
-        return 1;
+        return Exit::Failure;
     }
 
     match dependency::remove_dependency(
@@ -87,19 +87,19 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
                 "Unblocked: {} no longer blocked by {}",
                 args.blocked, args.blocking
             );
-            0
+            Exit::Ok
         }
         Err(RemoveDependencyError::EndpointMissing) => {
             let _ = writeln!(stderr, "tk unblock: endpoint missing in items table");
-            1
+            Exit::Failure
         }
         Err(RemoveDependencyError::Sqlite(err)) => {
             resolver::render_storage_error(stderr, COMMAND, &err);
-            1
+            Exit::Failure
         }
         Err(RemoveDependencyError::Mutation(err)) => {
             let _ = writeln!(stderr, "tk unblock: failed to append Mutation: {err}");
-            1
+            Exit::Failure
         }
     }
 }

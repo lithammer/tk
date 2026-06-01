@@ -7,7 +7,7 @@
 //! `command` and `target` parameters carry the only per-command
 //! variation.
 
-use crate::cli::Deps;
+use crate::cli::{Deps, Exit};
 use crate::commands::resolver;
 use crate::domain::item_class::ItemClass;
 use crate::domain::status::ItemStatus;
@@ -42,7 +42,7 @@ pub fn transition(
     id: &str,
     target: ItemStatus,
     success: SuccessLabel,
-) -> u8 {
+) -> Exit {
     let Deps {
         stdout,
         stderr,
@@ -56,7 +56,7 @@ pub fn transition(
         Ok(s) => s,
         Err(err) => {
             resolver::render_open_error(stderr, command, &err);
-            return 1;
+            return Exit::Failure;
         }
     };
 
@@ -67,11 +67,11 @@ pub fn transition(
                 stderr,
                 "tk {command}: '{id}' is not a known Display ID or Alias"
             );
-            return 1;
+            return Exit::Failure;
         }
         Err(resolver::ResolveError::Storage(err)) => {
             resolver::render_storage_error(stderr, command, &err);
-            return 1;
+            return Exit::Failure;
         }
     };
 
@@ -86,7 +86,7 @@ pub fn transition(
         Ok(item) => {
             let prefix = success.select(item.item_class);
             let _ = writeln!(stdout, "{prefix}{} - {}", item.display_id, item.title);
-            0
+            Exit::Ok
         }
         Err(SetStatusError::NotFound) => {
             // Race: row vanished between resolve and the BEGIN IMMEDIATE.
@@ -94,7 +94,7 @@ pub fn transition(
                 stderr,
                 "tk {command}: '{id}' is not a known Display ID or Alias"
             );
-            1
+            Exit::Failure
         }
         Err(SetStatusError::LockedDone(class)) => {
             let _ = writeln!(
@@ -102,15 +102,15 @@ pub fn transition(
                 "tk {command}: {label} '{id}' is done and cannot be reopened",
                 label = class.label()
             );
-            1
+            Exit::Failure
         }
         Err(SetStatusError::Sqlite(err)) => {
             resolver::render_storage_error(stderr, command, &err);
-            1
+            Exit::Failure
         }
         Err(SetStatusError::Mutation(err)) => {
             let _ = writeln!(stderr, "tk {command}: failed to append Mutation: {err}");
-            1
+            Exit::Failure
         }
     }
 }
@@ -218,7 +218,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
         let code = transition(h.deps(), "start", "tk-1", ItemStatus::Active, STARTED);
-        assert_eq!(code, 0);
+        assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(stdout.contains("Started Ticket: tk-1 - Subject"));
     }
@@ -245,7 +245,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
         let code = transition(h.deps(), "start", "tk-1", ItemStatus::Active, STARTED);
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk start: Ticket 'tk-1' is done and cannot be reopened"));
     }
@@ -258,7 +258,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
         let code = transition(h.deps(), "stop", "tk-9999", ItemStatus::Open, STARTED);
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk stop: 'tk-9999' is not a known Display ID or Alias"));
     }

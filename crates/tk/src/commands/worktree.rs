@@ -19,7 +19,7 @@ use std::path::Path;
 
 use clap::{Args as ClapArgs, Subcommand};
 
-use crate::cli::Deps;
+use crate::cli::{Deps, Exit};
 use crate::commands::resolver;
 use crate::domain::item_class::ItemClass;
 use crate::domain::status::ItemStatus;
@@ -65,7 +65,7 @@ pub struct StartArgs {
 }
 
 #[must_use]
-pub fn run(deps: Deps<'_>, args: Args) -> u8 {
+pub fn run(deps: Deps<'_>, args: Args) -> Exit {
     match args.subcommand {
         None => run_status(deps),
         Some(Sub::Set(a)) => run_set(deps, a),
@@ -74,7 +74,7 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
     }
 }
 
-fn run_status(deps: Deps<'_>) -> u8 {
+fn run_status(deps: Deps<'_>) -> Exit {
     let Deps {
         stdout,
         stderr,
@@ -87,7 +87,7 @@ fn run_status(deps: Deps<'_>) -> u8 {
         Ok(s) => s,
         Err(err) => {
             resolver::render_open_error(stderr, "worktree", &err);
-            return 1;
+            return Exit::Failure;
         }
     };
 
@@ -95,7 +95,7 @@ fn run_status(deps: Deps<'_>) -> u8 {
     match worktree_scope::resolve_against_store(&store, &raw) {
         Ok(None) => {
             let _ = writeln!(stdout, "No Workspace Scope.");
-            0
+            Exit::Ok
         }
         Ok(Some(s)) => {
             let _ = writeln!(stdout, "Scope:  {} - {}", s.display_id, s.title);
@@ -108,23 +108,23 @@ fn run_status(deps: Deps<'_>) -> u8 {
                     let _ = writeln!(stdout, "Source: inferred from branch '{branch}'");
                 }
             }
-            0
+            Exit::Ok
         }
         Err(ScopeError::ConfiguredUnresolved(stored)) => {
             let _ = writeln!(
                 stderr,
                 "tk worktree: Workspace Scope '{stored}' is not a known Display ID or Alias"
             );
-            1
+            Exit::Failure
         }
         Err(ScopeError::Storage(err)) => {
             resolver::render_storage_error(stderr, "worktree", &err);
-            1
+            Exit::Failure
         }
     }
 }
 
-fn run_set(deps: Deps<'_>, args: SetArgs) -> u8 {
+fn run_set(deps: Deps<'_>, args: SetArgs) -> Exit {
     let Deps {
         stdout,
         stderr,
@@ -137,7 +137,7 @@ fn run_set(deps: Deps<'_>, args: SetArgs) -> u8 {
         Ok(s) => s,
         Err(err) => {
             resolver::render_open_error(stderr, "worktree set", &err);
-            return 1;
+            return Exit::Failure;
         }
     };
 
@@ -149,11 +149,11 @@ fn run_set(deps: Deps<'_>, args: SetArgs) -> u8 {
                 "tk worktree set: '{}' is not a known Display ID or Alias",
                 args.id
             );
-            return 1;
+            return Exit::Failure;
         }
         Err(resolver::ResolveError::Storage(err)) => {
             resolver::render_storage_error(stderr, "worktree set", &err);
-            return 1;
+            return Exit::Failure;
         }
     }
 
@@ -164,7 +164,7 @@ fn run_set(deps: Deps<'_>, args: SetArgs) -> u8 {
         &["git", "config", "extensions.worktreeConfig", "true"],
         "tk worktree set: failed to enable worktreeConfig",
     ) {
-        return 1;
+        return Exit::Failure;
     }
     if !run_git_or_fail(
         runner,
@@ -173,14 +173,14 @@ fn run_set(deps: Deps<'_>, args: SetArgs) -> u8 {
         &["git", "config", "--worktree", "tk.scope", &args.id],
         "tk worktree set: failed to write tk.scope",
     ) {
-        return 1;
+        return Exit::Failure;
     }
 
     let _ = writeln!(stdout, "Set Workspace Scope to {}", args.id);
-    0
+    Exit::Ok
 }
 
-fn run_clear(deps: Deps<'_>) -> u8 {
+fn run_clear(deps: Deps<'_>) -> Exit {
     let Deps {
         stdout,
         stderr,
@@ -193,7 +193,7 @@ fn run_clear(deps: Deps<'_>) -> u8 {
         Ok(o) => o,
         Err(err) => {
             let _ = writeln!(stderr, "tk worktree clear: failed to invoke git\n{err}");
-            return 1;
+            return Exit::Failure;
         }
     };
     // Exit 5 is git's "key already absent" code — idempotent success path.
@@ -204,13 +204,13 @@ fn run_clear(deps: Deps<'_>) -> u8 {
         if !trimmed.is_empty() {
             let _ = writeln!(stderr, "{trimmed}");
         }
-        return 1;
+        return Exit::Failure;
     }
     let _ = writeln!(stdout, "Cleared Workspace Scope");
-    0
+    Exit::Ok
 }
 
-fn run_start(deps: Deps<'_>, args: StartArgs) -> u8 {
+fn run_start(deps: Deps<'_>, args: StartArgs) -> Exit {
     let Deps {
         stdout,
         stderr,
@@ -224,7 +224,7 @@ fn run_start(deps: Deps<'_>, args: StartArgs) -> u8 {
         Ok(s) => s,
         Err(err) => {
             resolver::render_open_error(stderr, "worktree start", &err);
-            return 1;
+            return Exit::Failure;
         }
     };
 
@@ -236,11 +236,11 @@ fn run_start(deps: Deps<'_>, args: StartArgs) -> u8 {
                 "tk worktree start: '{}' is not a known Display ID or Alias",
                 args.id
             );
-            return 1;
+            return Exit::Failure;
         }
         Err(err) => {
             resolver::render_storage_error(stderr, "worktree start", &err);
-            return 1;
+            return Exit::Failure;
         }
     };
 
@@ -250,7 +250,7 @@ fn run_start(deps: Deps<'_>, args: StartArgs) -> u8 {
             "tk worktree start: refusing to start a done {label}",
             label = target.item_class.label()
         );
-        return 1;
+        return Exit::Failure;
     }
 
     let branch_slug = worktree_scope::sanitize(&target.title, 40);
@@ -260,7 +260,7 @@ fn run_start(deps: Deps<'_>, args: StartArgs) -> u8 {
         Some(p) => p.to_owned(),
         None => match build_default_path(runner, cwd, stderr, &target.display_id, &path_slug) {
             Some(p) => p,
-            None => return 1,
+            None => return Exit::Failure,
         },
     };
 
@@ -271,7 +271,7 @@ fn run_start(deps: Deps<'_>, args: StartArgs) -> u8 {
         &["git", "config", "extensions.worktreeConfig", "true"],
         "tk worktree start: failed to enable worktreeConfig",
     ) {
-        return 1;
+        return Exit::Failure;
     }
     if !run_git_or_fail(
         runner,
@@ -280,7 +280,7 @@ fn run_start(deps: Deps<'_>, args: StartArgs) -> u8 {
         &["git", "worktree", "add", "-b", &branch, &worktree_path],
         "tk worktree start: failed to add worktree",
     ) {
-        return 1;
+        return Exit::Failure;
     }
     if !run_git_or_fail(
         runner,
@@ -297,7 +297,7 @@ fn run_start(deps: Deps<'_>, args: StartArgs) -> u8 {
         ],
         "tk worktree start: failed to write tk.scope",
     ) {
-        return 1;
+        return Exit::Failure;
     }
 
     if !args.no_status {
@@ -316,14 +316,14 @@ fn run_start(deps: Deps<'_>, args: StartArgs) -> u8 {
             Ok(_) | Err(SetStatusError::NotFound | SetStatusError::LockedDone(_)) => {}
             Err(SetStatusError::Sqlite(err)) => {
                 resolver::render_storage_error(stderr, "worktree start", &err);
-                return 1;
+                return Exit::Failure;
             }
             Err(SetStatusError::Mutation(err)) => {
                 let _ = writeln!(
                     stderr,
                     "tk worktree start: failed to append Mutation: {err}"
                 );
-                return 1;
+                return Exit::Failure;
             }
         }
     }
@@ -340,7 +340,7 @@ fn run_start(deps: Deps<'_>, args: StartArgs) -> u8 {
     }
     let _ = writeln!(stdout, "Branch: {branch}");
     let _ = writeln!(stdout, "Path:   {worktree_path}");
-    0
+    Exit::Ok
 }
 
 struct StartTarget {

@@ -35,7 +35,7 @@ fn main() -> ExitCode {
                 &mut io::stderr().lock(),
                 format!("tk: failed to read current directory: {err}\n").as_bytes(),
             );
-            return ExitCode::from(3);
+            return ExitCode::from(cli::Exit::Internal.code());
         }
     };
     let styler = resolve_styler_from_env();
@@ -67,7 +67,7 @@ fn main() -> ExitCode {
             &mut io::stderr().lock(),
             format!("tk: failed to seed RNG from OS entropy: {err}\n").as_bytes(),
         );
-        std::process::exit(3);
+        std::process::exit(cli::Exit::Internal.code().into());
     });
 
     let deps = cli::Deps {
@@ -81,8 +81,8 @@ fn main() -> ExitCode {
         styler,
     };
 
-    let code = match cli::run_argv(deps, &argv) {
-        Ok(code) => code,
+    let exit = match cli::run_argv(deps, &argv) {
+        Ok(exit) => exit,
         Err(err) => {
             // Internal/unexpected error: surface the type as a last-resort
             // diagnostic and exit 3. Per ADR-0017, command-side stderr already
@@ -93,10 +93,10 @@ fn main() -> ExitCode {
                 &mut io::stderr().lock(),
                 format!("tk: internal error: {err}\n").as_bytes(),
             );
-            3
+            cli::Exit::Internal
         }
     };
-    ExitCode::from(code)
+    ExitCode::from(exit.code())
 }
 
 /// Translate tk's resolved [`ColorChoice`] into the `anstream`

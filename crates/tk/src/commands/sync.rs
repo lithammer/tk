@@ -18,7 +18,7 @@ use std::io::Write;
 
 use clap::{Args as ClapArgs, Subcommand};
 
-use crate::cli::Deps;
+use crate::cli::{Deps, Exit};
 use crate::commands::resolver;
 use crate::remote::adapter::PullError;
 use crate::remote::factory::{self, OpenError as FactoryOpenError};
@@ -65,14 +65,14 @@ pub struct LogArgs {
 }
 
 #[must_use]
-pub fn run(deps: Deps<'_>, args: Args) -> u8 {
+pub fn run(deps: Deps<'_>, args: Args) -> Exit {
     match args.subcommand {
         Some(Sub::Log(log_args)) => run_log(deps, log_args),
         None => run_sync(deps, args.skip),
     }
 }
 
-fn run_sync(deps: Deps<'_>, skip: Option<i64>) -> u8 {
+fn run_sync(deps: Deps<'_>, skip: Option<i64>) -> Exit {
     let Deps {
         stdout,
         stderr,
@@ -87,7 +87,7 @@ fn run_sync(deps: Deps<'_>, skip: Option<i64>) -> u8 {
         Ok(s) => s,
         Err(err) => {
             resolver::render_open_error(stderr, COMMAND, &err);
-            return 1;
+            return Exit::Failure;
         }
     };
     let now = clock.now_iso();
@@ -97,7 +97,7 @@ fn run_sync(deps: Deps<'_>, skip: Option<i64>) -> u8 {
     if let Some(seq) = skip {
         if let Err(err) = store_sync::mark_mutation_skipped(store.conn_mut(), seq, &now) {
             render_skip_error(stderr, &err);
-            return 1;
+            return Exit::Failure;
         }
     }
 
@@ -108,11 +108,11 @@ fn run_sync(deps: Deps<'_>, skip: Option<i64>) -> u8 {
                 stderr,
                 "tk sync: the configured Remote's adapter is not implemented in this build"
             );
-            return 1;
+            return Exit::Failure;
         }
         Err(FactoryOpenError::Storage(err)) => {
             resolver::render_storage_error(stderr, COMMAND, &err);
-            return 1;
+            return Exit::Failure;
         }
     };
     let Some(mut adapter) = adapter_opt else {
@@ -120,21 +120,21 @@ fn run_sync(deps: Deps<'_>, skip: Option<i64>) -> u8 {
             stderr,
             "tk sync: no Remote configured; run 'tk remote set <kind>' first"
         );
-        return 1;
+        return Exit::Failure;
     };
 
     let report = match sync::run_sync(store.conn_mut(), &mut *adapter, &now, rng) {
         Ok(report) => report,
         Err(err) => {
             render_run_sync_error(stderr, &err);
-            return 1;
+            return Exit::Failure;
         }
     };
     render_sync_report(stdout, &report, skip);
-    0
+    Exit::Ok
 }
 
-fn run_log(deps: Deps<'_>, args: LogArgs) -> u8 {
+fn run_log(deps: Deps<'_>, args: LogArgs) -> Exit {
     let Deps {
         stdout,
         stderr,
@@ -147,7 +147,7 @@ fn run_log(deps: Deps<'_>, args: LogArgs) -> u8 {
         Ok(s) => s,
         Err(err) => {
             resolver::render_open_error(stderr, LOG_COMMAND, &err);
-            return 1;
+            return Exit::Failure;
         }
     };
 
@@ -155,22 +155,22 @@ fn run_log(deps: Deps<'_>, args: LogArgs) -> u8 {
         return match store_sync::show_mutation_log(store.conn(), seq) {
             Ok(detail) => {
                 render_log_detail(stdout, &detail);
-                0
+                Exit::Ok
             }
             Err(LogError::MutationNotFound(seq)) => {
                 let _ = writeln!(stderr, "tk sync log: Mutation {seq} not found");
-                1
+                Exit::Failure
             }
             Err(LogError::Storage(err)) => {
                 resolver::render_storage_error(stderr, LOG_COMMAND, &err);
-                1
+                Exit::Failure
             }
             Err(LogError::FailureJson(err)) => {
                 let _ = writeln!(
                     stderr,
                     "tk sync log: failed to read Repository Store\n{err}"
                 );
-                1
+                Exit::Failure
             }
         };
     }
@@ -189,25 +189,25 @@ fn run_log(deps: Deps<'_>, args: LogArgs) -> u8 {
         Ok(rows) => rows,
         Err(LogError::Storage(err)) => {
             resolver::render_storage_error(stderr, LOG_COMMAND, &err);
-            return 1;
+            return Exit::Failure;
         }
         Err(err) => {
             let _ = writeln!(
                 stderr,
                 "tk sync log: failed to read Repository Store\n{err}"
             );
-            return 1;
+            return Exit::Failure;
         }
     };
 
     if rows.is_empty() {
         let _ = writeln!(stdout, "{}", empty_log_message(filter));
-        return 0;
+        return Exit::Ok;
     }
     for row in &rows {
         render_log_row(stdout, row);
     }
-    0
+    Exit::Ok
 }
 
 fn empty_log_message(filter: LogListFilter) -> &'static str {
@@ -425,7 +425,7 @@ mod tests {
                 skip: None,
             },
         );
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         assert!(
             String::from_utf8(h.stderr)
                 .unwrap()
@@ -458,7 +458,7 @@ mod tests {
                 skip: None,
             },
         );
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         assert!(
             String::from_utf8(h.stderr)
                 .unwrap()
@@ -498,7 +498,7 @@ mod tests {
                 skip: Some(1),
             },
         );
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
 
         let conn = Connection::open(store.db_path()).unwrap();
         let state: String = conn
@@ -538,7 +538,7 @@ mod tests {
                 skip: Some(1),
             },
         );
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         assert!(
             String::from_utf8(h.stderr)
                 .unwrap()
@@ -568,7 +568,7 @@ mod tests {
                 skip: None,
             },
         );
-        assert_eq!(code, 0);
+        assert_eq!(code, Exit::Ok);
         assert!(
             String::from_utf8(h.stdout)
                 .unwrap()
@@ -624,7 +624,7 @@ mod tests {
                 skip: None,
             },
         );
-        assert_eq!(code, 0);
+        assert_eq!(code, Exit::Ok);
         let out = String::from_utf8(h.stdout).unwrap();
         assert!(out.contains("1 pending update_ticket tk-1"));
         assert!(out.contains("2 failed set_item_status tk-2"));
@@ -666,7 +666,7 @@ mod tests {
                 skip: None,
             },
         );
-        assert_eq!(code, 0);
+        assert_eq!(code, Exit::Ok);
         let out = String::from_utf8(h.stdout).unwrap();
         assert!(out.contains("Mutation 7  [failed]"));
         assert!(out.contains("Type:       set_item_status"));
@@ -694,7 +694,7 @@ mod tests {
                 skip: None,
             },
         );
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         assert!(
             String::from_utf8(h.stderr)
                 .unwrap()

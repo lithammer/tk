@@ -2,7 +2,7 @@
 
 use clap::Args as ClapArgs;
 
-use crate::cli::Deps;
+use crate::cli::{Deps, Exit};
 use crate::commands::resolver;
 use crate::store::repository::dependency::{self, AddDependencyError, DependencyEdge};
 
@@ -19,7 +19,7 @@ pub struct Args {
 }
 
 #[must_use]
-pub fn run(deps: Deps<'_>, args: Args) -> u8 {
+pub fn run(deps: Deps<'_>, args: Args) -> Exit {
     let Deps {
         stdout,
         stderr,
@@ -33,7 +33,7 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
         Ok(s) => s,
         Err(err) => {
             resolver::render_open_error(stderr, COMMAND, &err);
-            return 1;
+            return Exit::Failure;
         }
     };
 
@@ -45,11 +45,11 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
                 "tk block: blocked '{}' is not a known Display ID or Alias",
                 args.blocked
             );
-            return 1;
+            return Exit::Failure;
         }
         Err(resolver::ResolveError::Storage(err)) => {
             resolver::render_storage_error(stderr, COMMAND, &err);
-            return 1;
+            return Exit::Failure;
         }
     };
     let blocking = match resolver::resolve(&store, &args.blocking) {
@@ -60,17 +60,17 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
                 "tk block: blocking '{}' is not a known Display ID or Alias",
                 args.blocking
             );
-            return 1;
+            return Exit::Failure;
         }
         Err(resolver::ResolveError::Storage(err)) => {
             resolver::render_storage_error(stderr, COMMAND, &err);
-            return 1;
+            return Exit::Failure;
         }
     };
 
     if blocked.id == blocking.id {
         let _ = writeln!(stderr, "tk block: an item cannot block itself");
-        return 1;
+        return Exit::Failure;
     }
 
     match dependency::add_dependency(
@@ -87,23 +87,23 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
                 "Blocked: {} blocked by {}",
                 args.blocked, args.blocking
             );
-            0
+            Exit::Ok
         }
         Err(AddDependencyError::EndpointMissing) => {
             let _ = writeln!(stderr, "tk block: endpoint missing in items table");
-            1
+            Exit::Failure
         }
         Err(AddDependencyError::BlockedDone) => {
             let _ = writeln!(stderr, "tk block: blocked '{}' is done", args.blocked);
-            1
+            Exit::Failure
         }
         Err(AddDependencyError::BlockingDone) => {
             let _ = writeln!(stderr, "tk block: blocking '{}' is done", args.blocking);
-            1
+            Exit::Failure
         }
         Err(AddDependencyError::Cycle) => {
             let _ = writeln!(stderr, "tk block: dependency cycle");
-            1
+            Exit::Failure
         }
         Err(AddDependencyError::BackendBlockedLocalBlocking) => {
             let _ = writeln!(
@@ -111,7 +111,7 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
                 "tk block: Backend blocked '{}' cannot depend on Local blocking item '{}'",
                 args.blocked, args.blocking
             );
-            1
+            Exit::Failure
         }
         Err(AddDependencyError::BackendKindMismatch) => {
             let _ = writeln!(
@@ -119,15 +119,15 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
                 "tk block: Backend blocked '{}' cannot depend on blocking item '{}' from another Backend kind",
                 args.blocked, args.blocking
             );
-            1
+            Exit::Failure
         }
         Err(AddDependencyError::Sqlite(err)) => {
             resolver::render_storage_error(stderr, COMMAND, &err);
-            1
+            Exit::Failure
         }
         Err(AddDependencyError::Mutation(err)) => {
             let _ = writeln!(stderr, "tk block: failed to append Mutation: {err}");
-            1
+            Exit::Failure
         }
     }
 }
@@ -247,7 +247,7 @@ mod tests {
                 blocking: "tk-1".into(),
             },
         );
-        assert_eq!(code, 0);
+        assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(stdout.contains("Blocked: tk-2 blocked by tk-1"));
     }
@@ -279,7 +279,7 @@ mod tests {
                 blocking: "tk-1".into(),
             },
         );
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk block: an item cannot block itself"));
     }

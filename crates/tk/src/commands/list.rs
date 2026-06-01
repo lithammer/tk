@@ -15,7 +15,7 @@ use std::io::Write;
 use anstyle::Style;
 use clap::Args as ClapArgs;
 
-use crate::cli::Deps;
+use crate::cli::{Deps, Exit};
 use crate::commands::resolver;
 use crate::domain::item_class::ItemClass;
 use crate::domain::priority::Priority;
@@ -61,7 +61,7 @@ pub struct Args {
 }
 
 #[must_use]
-pub fn run(deps: Deps<'_>, args: Args) -> u8 {
+pub fn run(deps: Deps<'_>, args: Args) -> Exit {
     let Deps {
         stdout,
         stderr,
@@ -81,7 +81,7 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
         Ok(s) => s,
         Err(err) => {
             resolver::render_open_error(stderr, COMMAND, &err);
-            return 1;
+            return Exit::Failure;
         }
     };
 
@@ -89,14 +89,14 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
         Ok(rows) => rows,
         Err(err) => {
             resolver::render_storage_error(stderr, COMMAND, &err);
-            return 1;
+            return Exit::Failure;
         }
     };
 
     if render(stdout, &rows, options, styler.for_stdout()).is_err() {
-        return 1;
+        return Exit::Failure;
     }
-    0
+    Exit::Ok
 }
 
 fn select_view(args: &Args) -> ListView {
@@ -472,7 +472,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
         let code = run(h.deps(), default_args());
-        assert_eq!(code, 0);
+        assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert_eq!(stdout, "No open or active items.\n");
     }
@@ -498,7 +498,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
         let code = run(h.deps(), default_args());
-        assert_eq!(code, 0);
+        assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(
             stdout.contains("\u{25cb} tk-1 \u{25cf} P2 Ship it\n"),
@@ -558,7 +558,7 @@ mod tests {
                 ..default_args()
             },
         );
-        assert_eq!(code, 0);
+        assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(stdout.contains("tk-1"));
         assert!(stdout.contains("tk-3"));
@@ -606,7 +606,7 @@ mod tests {
                 ..default_args()
             },
         );
-        assert_eq!(code, 0);
+        assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(stdout.contains("[epic] Epic"), "stdout={stdout:?}");
         assert!(!stdout.contains("tk-2"), "stdout={stdout:?}");
@@ -639,7 +639,7 @@ mod tests {
                 ..default_args()
             },
         );
-        assert_eq!(code, 0);
+        assert_eq!(code, Exit::Ok);
         assert_eq!(String::from_utf8(h.stdout).unwrap(), "No epics.\n");
     }
 
@@ -674,7 +674,7 @@ mod tests {
                 ..default_args()
             },
         );
-        assert_eq!(code, 0);
+        assert_eq!(code, Exit::Ok);
         assert_eq!(String::from_utf8(h.stdout).unwrap(), "No ready items.\n");
     }
 
@@ -695,7 +695,7 @@ mod tests {
                 ..default_args()
             },
         );
-        assert_eq!(code, 0);
+        assert_eq!(code, Exit::Ok);
         assert_eq!(String::from_utf8(h.stdout).unwrap(), "No local epics.\n");
     }
 
@@ -706,7 +706,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
         let code = run(h.deps(), default_args());
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk list: Repository Store not initialized; run 'tk init'"));
     }
@@ -748,7 +748,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
         let code = run(h.deps(), default_args());
-        assert_eq!(code, 0);
+        assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         // Epic line and the single └── child below it.
         assert!(stdout.contains("[epic] Epic"));

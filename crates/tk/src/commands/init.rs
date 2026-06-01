@@ -14,7 +14,7 @@ use std::path::Path;
 use clap::Args as ClapArgs;
 use rusqlite::{Connection, OpenFlags};
 
-use crate::cli::Deps;
+use crate::cli::{Deps, Exit};
 use crate::git::discovery::{self, DiscoveredPaths};
 use crate::platform;
 use crate::store::{display_prefix, migrations};
@@ -46,12 +46,12 @@ pub enum StoreKind {
 /// (currently empty) and proceeds directly to the discovery → classify →
 /// pragmas → migrations → seed pipeline.
 #[must_use]
-pub fn run(deps: Deps<'_>, _args: Args) -> u8 {
+pub fn run(deps: Deps<'_>, _args: Args) -> Exit {
     let paths = match discovery::discover_paths(deps.runner, deps.cwd) {
         Ok(p) => p,
         Err(err) => {
             discovery::render_failure(deps.stderr, "init", &err);
-            return 1;
+            return Exit::Failure;
         }
     };
 
@@ -64,7 +64,7 @@ pub fn run(deps: Deps<'_>, _args: Args) -> u8 {
                 "tk init: failed to create {}: {err}",
                 tk_dir.display()
             );
-            return 1;
+            return Exit::Failure;
         }
     };
     if dir_created {
@@ -88,7 +88,7 @@ pub fn run(deps: Deps<'_>, _args: Args) -> u8 {
                 "tk init: failed to open {}: {err}",
                 db_path.display()
             );
-            return 1;
+            return Exit::Failure;
         }
     };
 
@@ -103,7 +103,7 @@ pub fn run(deps: Deps<'_>, _args: Args) -> u8 {
                 "tk init: failed to inspect {}: {err}",
                 db_path.display()
             );
-            return 1;
+            return Exit::Failure;
         }
     };
     let is_existing = match kind {
@@ -113,7 +113,7 @@ pub fn run(deps: Deps<'_>, _args: Args) -> u8 {
                 "tk init: {} exists but is not a tk Repository Store",
                 db_path.display(),
             );
-            return 1;
+            return Exit::Failure;
         }
         StoreKind::Ours => true,
         StoreKind::Fresh => false,
@@ -125,7 +125,7 @@ pub fn run(deps: Deps<'_>, _args: Args) -> u8 {
             "tk init: failed to configure {}: {err}",
             db_path.display()
         );
-        return 1;
+        return Exit::Failure;
     }
 
     let now_iso = deps.clock.now_iso();
@@ -142,12 +142,12 @@ pub fn run(deps: Deps<'_>, _args: Args) -> u8 {
                 let _ = writeln!(deps.stderr, "tk init: migration failed: {sqlite_err}");
             }
         }
-        return 1;
+        return Exit::Failure;
     }
 
     if let Err(err) = seed_display_prefix(&conn, &paths) {
         let _ = writeln!(deps.stderr, "tk init: failed to seed display_prefix: {err}");
-        return 1;
+        return Exit::Failure;
     }
 
     // ADR-0017 stable status lines; the trailing space is intentional — the
@@ -158,7 +158,7 @@ pub fn run(deps: Deps<'_>, _args: Args) -> u8 {
         "Initialized Repository Store at "
     };
     let _ = writeln!(deps.stdout, "{prefix}{}", db_path.display());
-    0
+    Exit::Ok
 }
 
 /// Classify an opened SQLite connection as fresh, ours, or foreign.
@@ -378,7 +378,7 @@ mod tests {
         );
 
         let code = run(h.deps(), Args {});
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         assert!(h.stdout.is_empty());
         let stderr = String::from_utf8_lossy(&h.stderr);
         assert!(stderr.contains("git repository"), "stderr = {stderr:?}");
@@ -397,7 +397,7 @@ mod tests {
             },
         );
         let code = run(h.deps(), Args {});
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8_lossy(&h.stderr);
         assert!(stderr.contains("not in a git repository"));
     }
@@ -420,7 +420,7 @@ mod tests {
         );
 
         let code = run(h.deps(), Args {});
-        assert_eq!(code, 0);
+        assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8_lossy(&h.stdout);
         assert!(stdout.contains("Initialized Repository Store at "));
         assert!(h.stderr.is_empty());
@@ -459,7 +459,7 @@ mod tests {
                     stderr: Vec::new(),
                 },
             );
-            assert_eq!(run(h.deps(), Args {}), 0);
+            assert_eq!(run(h.deps(), Args {}), Exit::Ok);
         }
 
         // Overwrite prefix to assert init's idempotency doesn't clobber it.
@@ -484,7 +484,7 @@ mod tests {
                 },
             );
             let code = run(h.deps(), Args {});
-            assert_eq!(code, 0);
+            assert_eq!(code, Exit::Ok);
             let stdout = String::from_utf8_lossy(&h.stdout);
             assert!(stdout.contains("Repository Store already initialized at "));
         }
@@ -546,7 +546,7 @@ mod tests {
         );
 
         let code = run(h.deps(), Args {});
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8_lossy(&h.stderr);
         assert!(stderr.contains("not a tk Repository Store"));
         drop(store);
@@ -577,7 +577,7 @@ mod tests {
             },
         );
         let code = run(h.deps(), Args {});
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8_lossy(&h.stderr);
         assert!(stderr.contains("newer tk version"));
         drop(store);
@@ -596,7 +596,7 @@ mod tests {
             },
         );
         let code = run(h.deps(), Args {});
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8_lossy(&h.stderr);
         assert!(stderr.contains("git produced unexpected rev-parse output"));
     }

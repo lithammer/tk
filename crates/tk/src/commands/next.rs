@@ -11,7 +11,7 @@ use std::io::Write;
 
 use clap::Args as ClapArgs;
 
-use crate::cli::Deps;
+use crate::cli::{Deps, Exit};
 use crate::commands::resolver;
 use crate::store::repository::next::{self, NextError, NextOptions, NextScope, Rationale};
 use crate::worktree::scope as worktree_scope;
@@ -24,7 +24,7 @@ const COMMAND: &str = "next";
 pub struct Args {}
 
 #[must_use]
-pub fn run(deps: Deps<'_>, _args: Args) -> u8 {
+pub fn run(deps: Deps<'_>, _args: Args) -> Exit {
     let Deps {
         stdout,
         stderr,
@@ -37,7 +37,7 @@ pub fn run(deps: Deps<'_>, _args: Args) -> u8 {
         Ok(s) => s,
         Err(err) => {
             resolver::render_open_error(stderr, COMMAND, &err);
-            return 1;
+            return Exit::Failure;
         }
     };
 
@@ -49,11 +49,11 @@ pub fn run(deps: Deps<'_>, _args: Args) -> u8 {
                 stderr,
                 "tk next: Workspace Scope '{stored}' is not a known Display ID or Alias"
             );
-            return 1;
+            return Exit::Failure;
         }
         Err(worktree_scope::ScopeError::Storage(err)) => {
             resolver::render_storage_error(stderr, COMMAND, &err);
-            return 1;
+            return Exit::Failure;
         }
     };
 
@@ -68,7 +68,7 @@ pub fn run(deps: Deps<'_>, _args: Args) -> u8 {
             if let Some(rationale) = ticket.rationale.as_ref() {
                 render_rationale(stderr, &ticket.display_id, rationale);
             }
-            0
+            Exit::Ok
         }
         Ok(None) => {
             let line = if has_scope {
@@ -77,18 +77,18 @@ pub fn run(deps: Deps<'_>, _args: Args) -> u8 {
                 "tk next: no ready Tickets"
             };
             let _ = writeln!(stderr, "{line}");
-            1
+            Exit::Failure
         }
         Err(NextError::ScopeNotFound) => {
             let _ = writeln!(
                 stderr,
                 "tk next: Workspace Scope does not resolve to a Ticket or Epic"
             );
-            1
+            Exit::Failure
         }
         Err(NextError::Storage(err)) => {
             resolver::render_storage_error(stderr, COMMAND, &err);
-            1
+            Exit::Failure
         }
     }
 }
@@ -222,7 +222,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path);
         expect_open_and_no_scope(&h, &store);
         let code = run(h.deps(), Args {});
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk next: no ready Tickets"));
         assert!(!stderr.contains("Workspace Scope"));
@@ -240,7 +240,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path);
         expect_open_and_no_scope(&h, &store);
         let code = run(h.deps(), Args {});
-        assert_eq!(code, 0);
+        assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert_eq!(stdout.trim(), "tk-2");
     }
@@ -259,7 +259,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path);
         expect_open_and_no_scope(&h, &store);
         let code = run(h.deps(), Args {});
-        assert_eq!(code, 0);
+        assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert_eq!(stdout.trim(), "tk-1");
@@ -309,7 +309,7 @@ mod tests {
         );
         let code = run(h.deps(), Args {});
         // tk-1 is blocked; with scope=tk-1, no other Ticket is in scope.
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(
             stderr.contains("tk next: no ready Tickets in Workspace Scope"),
@@ -348,7 +348,7 @@ mod tests {
             },
         );
         let code = run(h.deps(), Args {});
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(
             stderr

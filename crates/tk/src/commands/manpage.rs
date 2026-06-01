@@ -12,7 +12,7 @@ use std::path::Path;
 use clap::Args as ClapArgs;
 use rand::Rng;
 
-use crate::cli::Deps;
+use crate::cli::{Deps, Exit};
 use crate::platform;
 
 const MANPAGE_BYTES: &[u8] = include_bytes!("tk.1");
@@ -27,7 +27,7 @@ pub struct Args {
 }
 
 #[must_use]
-pub fn run(deps: Deps<'_>, args: Args) -> u8 {
+pub fn run(deps: Deps<'_>, args: Args) -> Exit {
     // CR-byte guard at startup so a future change to tk.1 can't slip in
     // CRLF endings unnoticed.
     debug_assert!(
@@ -39,10 +39,10 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
         return install(deps);
     }
     let _ = deps.stdout.write_all(MANPAGE_BYTES);
-    0
+    Exit::Ok
 }
 
-fn install(deps: Deps<'_>) -> u8 {
+fn install(deps: Deps<'_>) -> Exit {
     let Deps {
         stdout,
         stderr,
@@ -52,7 +52,7 @@ fn install(deps: Deps<'_>) -> u8 {
 
     if platform::IS_WINDOWS {
         let _ = writeln!(stderr, "tk manpage: skipping install on Windows");
-        return 0;
+        return Exit::Ok;
     }
 
     let exe_path = match std::env::current_exe() {
@@ -62,7 +62,7 @@ fn install(deps: Deps<'_>) -> u8 {
                 stderr,
                 "tk manpage: install failed: cannot resolve executable path: {err}"
             );
-            return 1;
+            return Exit::Failure;
         }
     };
     let Some(exe_dir) = exe_path.parent() else {
@@ -70,7 +70,7 @@ fn install(deps: Deps<'_>) -> u8 {
             stderr,
             "tk manpage: install failed: cannot resolve executable path: executable path has no parent directory"
         );
-        return 1;
+        return Exit::Failure;
     };
 
     let target_dir = exe_dir.join("..").join("share").join("man").join("man1");
@@ -78,7 +78,7 @@ fn install(deps: Deps<'_>) -> u8 {
 
     if let Err(err) = std::fs::create_dir_all(&target_dir) {
         render_install_failure(stderr, &target_path, &err.to_string());
-        return 1;
+        return Exit::Failure;
     }
 
     let stage_name = render_stage_name(rng);
@@ -87,17 +87,17 @@ fn install(deps: Deps<'_>) -> u8 {
     if let Err(err) = std::fs::write(&stage_path, MANPAGE_BYTES) {
         let _ = std::fs::remove_file(&stage_path);
         render_install_failure(stderr, &target_path, &err.to_string());
-        return 1;
+        return Exit::Failure;
     }
 
     if let Err(err) = std::fs::rename(&stage_path, &target_path) {
         let _ = std::fs::remove_file(&stage_path);
         render_install_failure(stderr, &target_path, &err.to_string());
-        return 1;
+        return Exit::Failure;
     }
 
     let _ = writeln!(stdout, "Installed manpage at {}", target_path.display());
-    0
+    Exit::Ok
 }
 
 fn render_install_failure<W: Write + ?Sized>(stderr: &mut W, path: &Path, reason: &str) {
@@ -153,7 +153,7 @@ mod tests {
             },
             Args { install: false },
         );
-        assert_eq!(code, 0);
+        assert_eq!(code, Exit::Ok);
         assert_eq!(stdout.as_slice(), MANPAGE_BYTES);
         assert!(stderr.is_empty());
     }

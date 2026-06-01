@@ -20,6 +20,42 @@ use crate::commands;
 use crate::proc::ProcRunner;
 use crate::render::Styler;
 
+/// Process exit status returned by every command handler.
+///
+/// The numeric `code()` values are a frozen contract (ADR-0018, "CLI flags /
+/// stdout-stderr bytes / exit codes"): commands return the semantic variant and
+/// `main` maps it to [`std::process::ExitCode`], so the magic `0`/`1`/`2`
+/// literals never leak into command control flow.
+///
+/// - [`Exit::Ok`] (`0`) — success.
+/// - [`Exit::Failure`] (`1`) — a curated command failure; the handler has
+///   already written its ADR-0017 diagnostic to stderr.
+/// - [`Exit::Usage`] (`2`) — a usage error (bad flags / arguments), including
+///   clap's own parse failures.
+/// - [`Exit::Internal`] (`3`) — an unexpected error bubbled out of a handler as
+///   `io::Error` / `rusqlite::Error`; constructed only by `main`, never by a
+///   command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Exit {
+    Ok,
+    Failure,
+    Usage,
+    Internal,
+}
+
+impl Exit {
+    /// The frozen process exit code this status maps to.
+    #[must_use]
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Ok => 0,
+            Self::Failure => 1,
+            Self::Usage => 2,
+            Self::Internal => 3,
+        }
+    }
+}
+
 /// Dependencies shared by every command. Holds borrowed I/O streams and trait
 /// objects for the determinism seams (`runner`, `clock`, `rng`).
 ///
@@ -109,8 +145,8 @@ enum Command {
 
 /// Entrypoint that the binary's `main.rs` and the scenario harness share.
 ///
-/// `argv` is the post-`tk` argument vector. Returns the process exit code.
-pub fn run_argv(deps: Deps<'_>, argv: &[String]) -> std::io::Result<u8> {
+/// `argv` is the post-`tk` argument vector. Returns the process [`Exit`] status.
+pub fn run_argv(deps: Deps<'_>, argv: &[String]) -> std::io::Result<Exit> {
     // `try_parse_from` expects argv[0] to be the binary name; prepend it.
     let full_argv: Vec<&str> = std::iter::once("tk")
         .chain(argv.iter().map(String::as_str))
@@ -146,18 +182,18 @@ pub fn run_argv(deps: Deps<'_>, argv: &[String]) -> std::io::Result<u8> {
 /// - `DisplayHelp` / `DisplayVersion`: success (exit 0), rendered to stdout.
 /// - any other error (unknown flag, missing subcommand, …): exit 2,
 ///   rendered to stderr.
-fn render_clap_error(deps: Deps<'_>, err: &clap::Error) -> u8 {
+fn render_clap_error(deps: Deps<'_>, err: &clap::Error) -> Exit {
     use clap::error::ErrorKind;
     let rendered = err.render();
     let bytes = rendered.to_string();
     match err.kind() {
         ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => {
             let _ = deps.stdout.write_all(bytes.as_bytes());
-            0
+            Exit::Ok
         }
         _ => {
             let _ = deps.stderr.write_all(bytes.as_bytes());
-            2
+            Exit::Usage
         }
     }
 }

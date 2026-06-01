@@ -25,7 +25,7 @@ use std::io::Write;
 use anstyle::Style;
 use clap::Args as ClapArgs;
 
-use crate::cli::Deps;
+use crate::cli::{Deps, Exit};
 use crate::commands::resolver;
 use crate::domain::item_class::ItemClass;
 use crate::domain::priority::Priority;
@@ -48,7 +48,7 @@ pub struct Args {
 
 /// Run `tk show <id>` against the supplied `Deps`. Returns the process exit code.
 #[must_use]
-pub fn run(deps: Deps<'_>, args: Args) -> u8 {
+pub fn run(deps: Deps<'_>, args: Args) -> Exit {
     let Deps {
         stdout,
         stderr,
@@ -62,7 +62,7 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
         Ok(store) => store,
         Err(err) => {
             resolver::render_open_error(stderr, COMMAND, &err);
-            return 1;
+            return Exit::Failure;
         }
     };
 
@@ -74,11 +74,11 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
                 "tk {COMMAND}: '{id}' is not a known Display ID or Alias",
                 id = args.id
             );
-            return 1;
+            return Exit::Failure;
         }
         Err(err) => {
             resolver::render_storage_error(stderr, COMMAND, &err);
-            return 1;
+            return Exit::Failure;
         }
     };
 
@@ -86,9 +86,9 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
     if render(stdout, &detail, sub).is_err() {
         // stdout writes that fail are surfaced through the normal io::Error
         // path; `tk` does not retry a broken pipe.
-        return 1;
+        return Exit::Failure;
     }
-    0
+    Exit::Ok
 }
 
 fn render<W: Write + ?Sized>(
@@ -380,7 +380,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
         let code = run(h.deps(), Args { id: "tk-1".into() });
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(
             stderr.contains("tk show: Repository Store not initialized; run 'tk init'"),
@@ -401,7 +401,7 @@ mod tests {
                 id: "tk-9999".into(),
             },
         );
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk show: 'tk-9999' is not a known Display ID or Alias"));
     }
@@ -427,7 +427,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
         let code = run(h.deps(), Args { id: "tk-1".into() });
-        assert_eq!(code, 0);
+        assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         // Status glyph + Display ID + title on the label line.
         assert!(
@@ -475,7 +475,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
         let code = run(h.deps(), Args { id: "tk-1".into() });
-        assert_eq!(code, 0);
+        assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(stdout.contains("EPIC"), "stdout={stdout:?}");
         assert!(stdout.contains("TICKETS"));

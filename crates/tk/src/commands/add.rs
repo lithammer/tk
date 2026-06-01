@@ -13,7 +13,7 @@ use std::io::Write;
 
 use clap::Args as ClapArgs;
 
-use crate::cli::Deps;
+use crate::cli::{Deps, Exit};
 use crate::commands::message::{self, Input as MessageInput};
 use crate::commands::resolver;
 use crate::domain::priority::Priority;
@@ -66,7 +66,7 @@ fn parse_priority(s: &str) -> Result<Priority, String> {
 }
 
 #[must_use]
-pub fn run(deps: Deps<'_>, args: Args) -> u8 {
+pub fn run(deps: Deps<'_>, args: Args) -> Exit {
     let Deps {
         stdout,
         stderr,
@@ -82,7 +82,7 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
         Ok(input) => input,
         Err(line) => {
             let _ = writeln!(stderr, "{line}");
-            return 2;
+            return Exit::Usage;
         }
     };
 
@@ -90,7 +90,7 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
         Ok(parsed) => parsed,
         Err(err) => {
             render_message_error(stderr, &err);
-            return 1;
+            return Exit::Failure;
         }
     };
 
@@ -98,7 +98,7 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
         Ok(s) => s,
         Err(err) => {
             resolver::render_open_error(stderr, COMMAND, &err);
-            return 1;
+            return Exit::Failure;
         }
     };
 
@@ -110,15 +110,15 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
                     stderr,
                     "tk add: parent '{arg}' is not a known Display ID or Alias"
                 );
-                return 1;
+                return Exit::Failure;
             }
             Err(resolver::ResolveEpicError::NotAnEpic) => {
                 let _ = writeln!(stderr, "tk add: parent '{arg}' is not an Epic");
-                return 1;
+                return Exit::Failure;
             }
             Err(resolver::ResolveEpicError::Storage(err)) => {
                 resolver::render_storage_error(stderr, COMMAND, &err);
-                return 1;
+                return Exit::Failure;
             }
         }
     } else {
@@ -139,12 +139,12 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
             Ok(e) => e,
             Err(err) => {
                 render_create_error(stderr, &err);
-                return 1;
+                return Exit::Failure;
             }
         };
         let _ = writeln!(stdout, "Created Epic: {} - {}", epic.display_id, epic.title);
         let _ = writeln!(stdout, "Status: {}", epic.status);
-        return 0;
+        return Exit::Ok;
     }
 
     let kind = if args.bug {
@@ -170,7 +170,7 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
         Ok(t) => t,
         Err(err) => {
             render_create_error(stderr, &err);
-            return 1;
+            return Exit::Failure;
         }
     };
 
@@ -185,7 +185,7 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
     if let Some(parent) = parent_ref.as_ref() {
         let _ = writeln!(stdout, "Parent: {}", parent.display_id);
     }
-    0
+    Exit::Ok
 }
 
 fn select_input(args: &Args) -> Result<MessageInput<'_>, &'static str> {
@@ -331,7 +331,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
         let code = run(h.deps(), args_with(vec!["Ship it".into()]));
-        assert_eq!(code, 0);
+        assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(stdout.contains("Created Ticket: tk-1 - Ship it"));
         assert!(stdout.contains("Kind: task"));
@@ -349,7 +349,7 @@ mod tests {
         let mut a = args_with(vec!["Crash on click".into()]);
         a.bug = true;
         let code = run(h.deps(), a);
-        assert_eq!(code, 0);
+        assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(stdout.contains("Kind: bug"));
     }
@@ -364,7 +364,7 @@ mod tests {
         let mut a = args_with(vec!["Big work".into()]);
         a.epic = true;
         let code = run(h.deps(), a);
-        assert_eq!(code, 0);
+        assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(stdout.contains("Created Epic: tk-1 - Big work"));
         assert!(!stdout.contains("Priority:"));
@@ -383,7 +383,7 @@ mod tests {
             expect_git(&h, &store);
             let mut a = args_with(vec!["Epic".into()]);
             a.epic = true;
-            assert_eq!(run(h.deps(), a), 0);
+            assert_eq!(run(h.deps(), a), Exit::Ok);
         }
 
         // Then a child ticket referencing it. Distinct seed so the internal
@@ -395,7 +395,7 @@ mod tests {
         let code = run(h.deps(), a);
         let stderr = String::from_utf8(h.stderr.clone()).unwrap();
         let stdout = String::from_utf8(h.stdout.clone()).unwrap();
-        assert_eq!(code, 0, "stderr={stderr:?} stdout={stdout:?}");
+        assert_eq!(code, Exit::Ok, "stderr={stderr:?} stdout={stdout:?}");
         assert!(stdout.contains("Created Ticket: tk-2"));
         assert!(stdout.contains("Parent: tk-1"));
     }
@@ -410,7 +410,7 @@ mod tests {
         let mut a = args_with(vec!["Title".into()]);
         a.parent = Some("nope".into());
         let code = run(h.deps(), a);
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk add: parent 'nope' is not a known Display ID or Alias"));
     }
@@ -425,7 +425,10 @@ mod tests {
         {
             let mut h = Harness::new(&cwd_path);
             expect_git(&h, &store);
-            assert_eq!(run(h.deps(), args_with(vec!["Standalone".into()])), 0);
+            assert_eq!(
+                run(h.deps(), args_with(vec!["Standalone".into()])),
+                Exit::Ok
+            );
         }
 
         // Trying to parent a new ticket under that ticket should fail.
@@ -434,7 +437,7 @@ mod tests {
         let mut a = args_with(vec!["Child".into()]);
         a.parent = Some("tk-1".into());
         let code = run(h.deps(), a);
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk add: parent 'tk-1' is not an Epic"));
     }
@@ -447,7 +450,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
         let code = run(h.deps(), args_with(vec!["   ".into()]));
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk add: message is empty"));
     }
@@ -459,7 +462,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         let code = run(h.deps(), args_with(vec![]));
-        assert_eq!(code, 2);
+        assert_eq!(code, Exit::Usage);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk add: a message is required"));
     }
@@ -475,7 +478,7 @@ mod tests {
         let mut a = args_with(vec![]);
         a.file = Some("-".into());
         let code = run(h.deps(), a);
-        assert_eq!(code, 0);
+        assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(stdout.contains("Created Ticket: tk-1 - From stdin"));
     }

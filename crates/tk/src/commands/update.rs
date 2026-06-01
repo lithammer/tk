@@ -12,7 +12,7 @@ use std::io::Write;
 
 use clap::Args as ClapArgs;
 
-use crate::cli::Deps;
+use crate::cli::{Deps, Exit};
 use crate::commands::message::{self, Input as MessageInput};
 use crate::commands::resolver;
 use crate::domain::item_class::ItemClass;
@@ -63,7 +63,7 @@ fn parse_priority(s: &str) -> Result<Priority, String> {
 }
 
 #[must_use]
-pub fn run(deps: Deps<'_>, args: Args) -> u8 {
+pub fn run(deps: Deps<'_>, args: Args) -> Exit {
     let Deps {
         stdout,
         stderr,
@@ -83,7 +83,7 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
             "tk update: no changes requested; supply at least one of \
              -m / -F / -p / -P / --no-parent"
         );
-        return 2;
+        return Exit::Usage;
     }
 
     let parsed_msg = if has_message_input {
@@ -96,7 +96,7 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
             Ok(parsed) => Some(parsed),
             Err(err) => {
                 render_message_error(stderr, &err);
-                return 1;
+                return Exit::Failure;
             }
         }
     } else {
@@ -107,7 +107,7 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
         Ok(s) => s,
         Err(err) => {
             resolver::render_open_error(stderr, COMMAND, &err);
-            return 1;
+            return Exit::Failure;
         }
     };
 
@@ -119,25 +119,25 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
                 "tk update: '{id}' is not a known Display ID or Alias",
                 id = args.id
             );
-            return 1;
+            return Exit::Failure;
         }
         Err(resolver::ResolveError::Storage(err)) => {
             resolver::render_storage_error(stderr, COMMAND, &err);
-            return 1;
+            return Exit::Failure;
         }
     };
 
     if resolved.item_class == ItemClass::Epic {
         if args.priority.is_some() {
             let _ = writeln!(stderr, "tk update: --priority cannot be set on an Epic");
-            return 2;
+            return Exit::Usage;
         }
         if has_parent_op {
             let _ = writeln!(
                 stderr,
                 "tk update: --parent / --no-parent cannot be set on an Epic"
             );
-            return 2;
+            return Exit::Usage;
         }
     }
 
@@ -149,15 +149,15 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
                     stderr,
                     "tk update: parent '{arg}' is not a known Display ID or Alias"
                 );
-                return 1;
+                return Exit::Failure;
             }
             Err(resolver::ResolveEpicError::NotAnEpic) => {
                 let _ = writeln!(stderr, "tk update: parent '{arg}' is not an Epic");
-                return 1;
+                return Exit::Failure;
             }
             Err(resolver::ResolveEpicError::Storage(err)) => {
                 resolver::render_storage_error(stderr, COMMAND, &err);
-                return 1;
+                return Exit::Failure;
             }
         }
     } else {
@@ -190,7 +190,7 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
                 "{label}: {} - {}",
                 updated.display_id, updated.title
             );
-            0
+            Exit::Ok
         }
         Err(update::UpdateError::NotFound) => {
             let _ = writeln!(
@@ -198,15 +198,15 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
                 "tk update: '{id}' is not a known Display ID or Alias",
                 id = args.id
             );
-            1
+            Exit::Failure
         }
         Err(update::UpdateError::Sqlite(err)) => {
             resolver::render_storage_error(stderr, COMMAND, &err);
-            1
+            Exit::Failure
         }
         Err(update::UpdateError::Mutation(err)) => {
             let _ = writeln!(stderr, "tk update: failed to append Mutation: {err}");
-            1
+            Exit::Failure
         }
     }
 }
@@ -326,7 +326,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         let code = run(h.deps(), args("tk-1"));
-        assert_eq!(code, 2);
+        assert_eq!(code, Exit::Usage);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk update: no changes requested"));
     }
@@ -354,7 +354,7 @@ mod tests {
         let mut a = args("tk-1");
         a.message = vec!["New title".into(), "New body line".into()];
         let code = run(h.deps(), a);
-        assert_eq!(code, 0);
+        assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(stdout.contains("Updated Ticket: tk-1 - New title"));
 
@@ -391,7 +391,7 @@ mod tests {
         let mut a = args("tk-1");
         a.priority = Some(Priority::P0);
         let code = run(h.deps(), a);
-        assert_eq!(code, 0);
+        assert_eq!(code, Exit::Ok);
         let conn = Connection::open(store.db_path()).unwrap();
         let priority: String = conn
             .query_row("select priority from items", [], |r| r.get(0))
@@ -429,7 +429,7 @@ mod tests {
         let mut a = args("tk-1");
         a.priority = Some(Priority::P0);
         let code = run(h.deps(), a);
-        assert_eq!(code, 2);
+        assert_eq!(code, Exit::Usage);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk update: --priority cannot be set on an Epic"));
     }
@@ -460,7 +460,7 @@ mod tests {
         let mut a = args("tk-1");
         a.no_parent = true;
         let code = run(h.deps(), a);
-        assert_eq!(code, 2);
+        assert_eq!(code, Exit::Usage);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk update: --parent / --no-parent cannot be set on an Epic"));
     }
@@ -475,7 +475,7 @@ mod tests {
         let mut a = args("tk-9999");
         a.message = vec!["X".into()];
         let code = run(h.deps(), a);
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk update: 'tk-9999' is not a known Display ID or Alias"));
     }

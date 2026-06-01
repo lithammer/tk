@@ -8,7 +8,7 @@
 
 use clap::Args as ClapArgs;
 
-use crate::cli::Deps;
+use crate::cli::{Deps, Exit};
 use crate::commands::resolver;
 
 /// Embedded briefing. CR bytes are forbidden inside the file (LF only) and
@@ -31,14 +31,14 @@ fn briefing() -> String {
 }
 
 #[must_use]
-pub fn run(deps: Deps<'_>, _args: Args) -> u8 {
+pub fn run(deps: Deps<'_>, _args: Args) -> Exit {
     // Prime prints only when a Repository Store is initialized here; with no
     // openable store it exits 0 silently so a global agent hook stays quiet in
     // any directory (ADR-0020).
     if resolver::open_for_command(deps.runner, deps.cwd).is_ok() {
         let _ = deps.stdout.write_all(briefing().as_bytes());
     }
-    0
+    Exit::Ok
 }
 
 #[cfg(test)]

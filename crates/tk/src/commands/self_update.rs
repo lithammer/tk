@@ -20,7 +20,7 @@ use clap::Args as ClapArgs;
 use rand::Rng;
 use thiserror::Error;
 
-use crate::cli::Deps;
+use crate::cli::{Deps, Exit};
 use crate::platform;
 
 /// Sentinel for non-release builds. The dev refusal in [`run_with`]
@@ -81,7 +81,7 @@ pub struct Args {
 }
 
 #[must_use]
-pub fn run(deps: Deps<'_>, args: Args) -> u8 {
+pub fn run(deps: Deps<'_>, args: Args) -> Exit {
     run_with(deps, args, embedded_version(), embedded_triple())
 }
 
@@ -94,20 +94,20 @@ pub fn run(deps: Deps<'_>, args: Args) -> u8 {
 /// any networking happens. A dev build has no canonical upstream tag to
 /// compare against, so even the read-only `--check` query has nothing
 /// meaningful to report.
-fn run_with(mut deps: Deps<'_>, args: Args, embedded_version: &str, embedded_triple: &str) -> u8 {
+fn run_with(mut deps: Deps<'_>, args: Args, embedded_version: &str, embedded_triple: &str) -> Exit {
     if embedded_triple == DEV_TRIPLE {
         let _ = writeln!(
             deps.stderr,
             "tk self-update: development builds cannot self-update; install a release via the curl|sh script in README.md"
         );
-        return 1;
+        return Exit::Failure;
     }
 
     let tag = match fetch_latest_tag(deps.runner, deps.cwd, embedded_version) {
         Ok(tag) => tag,
         Err(err) => {
             render_query_error(&mut deps.stderr, &err);
-            return 1;
+            return Exit::Failure;
         }
     };
 
@@ -115,7 +115,7 @@ fn run_with(mut deps: Deps<'_>, args: Args, embedded_version: &str, embedded_tri
         Ok(cmp) => cmp,
         Err(err) => {
             render_version_parse_failure(&mut deps.stderr, &err, embedded_version, &tag);
-            return 1;
+            return Exit::Failure;
         }
     };
 
@@ -288,28 +288,28 @@ fn render_check_result<W: Write + ?Sized>(
     cmp: Comparison,
     embedded_version: &str,
     latest_tag: &str,
-) -> u8 {
+) -> Exit {
     match cmp {
         Comparison::UpToDate => {
             let _ = writeln!(
                 stdout,
                 "tk self-update: already on latest release {latest_tag}"
             );
-            0
+            Exit::Ok
         }
         Comparison::NewerAvailable => {
             let _ = writeln!(
                 stdout,
                 "tk self-update: newer release available: {latest_tag} (current: {embedded_version})"
             );
-            1
+            Exit::Failure
         }
         Comparison::Ahead => {
             let _ = writeln!(
                 stdout,
                 "tk self-update: local build {embedded_version} is ahead of latest published release {latest_tag}; nothing to do"
             );
-            0
+            Exit::Ok
         }
     }
 }
@@ -326,7 +326,7 @@ fn render_version_parse_failure<W: Write + ?Sized>(
 /// Resolve the running binary's exe directory and basename, then delegate
 /// to [`perform_update`]. Tests bypass the `current_exe` resolution by
 /// calling [`perform_update`] directly with a tmpdir.
-fn perform_full_update(deps: Deps<'_>, embedded_triple: &str, latest_tag: &str) -> u8 {
+fn perform_full_update(deps: Deps<'_>, embedded_triple: &str, latest_tag: &str) -> Exit {
     let exe_path = match std::env::current_exe() {
         Ok(p) => p,
         Err(err) => {
@@ -334,7 +334,7 @@ fn perform_full_update(deps: Deps<'_>, embedded_triple: &str, latest_tag: &str) 
                 deps.stderr,
                 "tk self-update: cannot resolve current binary path: {err}"
             );
-            return 1;
+            return Exit::Failure;
         }
     };
     let Some(exe_dir) = exe_path.parent() else {
@@ -342,14 +342,14 @@ fn perform_full_update(deps: Deps<'_>, embedded_triple: &str, latest_tag: &str) 
             deps.stderr,
             "tk self-update: cannot resolve current binary path: no parent directory"
         );
-        return 1;
+        return Exit::Failure;
     };
     let Some(target_name) = exe_path.file_name().and_then(|n| n.to_str()) else {
         let _ = writeln!(
             deps.stderr,
             "tk self-update: cannot resolve current binary path: non-utf8 basename"
         );
-        return 1;
+        return Exit::Failure;
     };
     perform_update(deps, exe_dir, target_name, embedded_triple, latest_tag)
 }
@@ -367,7 +367,7 @@ fn perform_update(
     target_name: &str,
     embedded_triple: &str,
     latest_tag: &str,
-) -> u8 {
+) -> Exit {
     let Deps {
         stdout,
         stderr,
@@ -401,7 +401,7 @@ fn perform_update(
                 stage_path.display()
             );
         }
-        return 1;
+        return Exit::Failure;
     }
 
     let user_agent = format!("{USER_AGENT_PREFIX}{}", embedded_version());
@@ -412,7 +412,7 @@ fn perform_update(
             "tk self-update: failed to stage download at {}: non-utf8 path",
             stage_path.display()
         );
-        return 1;
+        return Exit::Failure;
     };
     let argv = curl_get_argv(&user_agent, &asset_url, Some(stage_path_str));
     let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
@@ -423,7 +423,7 @@ fn perform_update(
             stderr,
             "tk self-update: failed to download release asset: network error"
         );
-        return 1;
+        return Exit::Failure;
     };
     let Some(status) = parse_status_only(&dl_output.stdout) else {
         let _ = fs::remove_file(&stage_path);
@@ -431,7 +431,7 @@ fn perform_update(
             stderr,
             "tk self-update: failed to download release asset: server returned an unparseable response (redirect loop or invalid headers)"
         );
-        return 1;
+        return Exit::Failure;
     };
     if let Err(err) = classify_curl_outcome(dl_output.exit_code, status) {
         let _ = fs::remove_file(&stage_path);
@@ -462,7 +462,7 @@ fn perform_update(
             }
             QueryError::Malformed | QueryError::MissingTag => unreachable!(),
         }
-        return 1;
+        return Exit::Failure;
     }
 
     // Make the staged file executable on POSIX so the smoke subprocess can
@@ -477,7 +477,7 @@ fn perform_update(
                 stderr,
                 "tk self-update: failed to write staged binary: {err}"
             );
-            return 1;
+            return Exit::Failure;
         }
     }
 
@@ -495,7 +495,7 @@ fn perform_update(
                 stderr,
                 "tk self-update: staged binary smoke check failed: spawn failed ({err})"
             );
-            return 1;
+            return Exit::Failure;
         }
     };
     if smoke.exit_code != 0 {
@@ -510,7 +510,7 @@ fn perform_update(
             let _ = stderr.write_all(trimmed);
             let _ = stderr.write_all(b"\n");
         }
-        return 1;
+        return Exit::Failure;
     }
     if !smoke_output_contains_token(&smoke.stdout, latest_tag) {
         let _ = fs::remove_file(&stage_path);
@@ -518,7 +518,7 @@ fn perform_update(
             stderr,
             "tk self-update: staged binary did not report expected version: {latest_tag}"
         );
-        return 1;
+        return Exit::Failure;
     }
     if !smoke_output_contains_token(&smoke.stdout, embedded_triple) {
         let _ = fs::remove_file(&stage_path);
@@ -526,7 +526,7 @@ fn perform_update(
             stderr,
             "tk self-update: staged binary did not report expected triple: {embedded_triple}"
         );
-        return 1;
+        return Exit::Failure;
     }
 
     match commit_install(target_dir, &stage_name, target_name, platform::IS_WINDOWS) {
@@ -537,7 +537,7 @@ fn perform_update(
                 stderr,
                 "tk self-update: failed to install new binary: {err}"
             );
-            return 1;
+            return Exit::Failure;
         }
         Err(CommitError::PrimaryRecovered(err)) => {
             let _ = fs::remove_file(&stage_path);
@@ -545,14 +545,14 @@ fn perform_update(
                 stderr,
                 "tk self-update: failed to install new binary: {err}; rolled back to previous binary"
             );
-            return 1;
+            return Exit::Failure;
         }
         Err(CommitError::RollbackFailed { primary, rollback }) => {
             let _ = writeln!(
                 stderr,
                 "tk self-update: cannot recover from rename failure: primary={primary}, rollback={rollback}; original preserved at {target_name}.old (restore with: mv {target_name}.old {target_name})"
             );
-            return 1;
+            return Exit::Failure;
         }
     }
 
@@ -570,7 +570,7 @@ fn perform_update(
                 stderr,
                 "tk self-update: manpage update failed; run `tk manpage --install` to retry: spawn failed: {err}"
             );
-            return 1;
+            return Exit::Failure;
         }
     };
     if manpage.exit_code != 0 {
@@ -584,9 +584,9 @@ fn perform_update(
             let _ = stderr.write_all(trimmed);
             let _ = stderr.write_all(b"\n");
         }
-        return 1;
+        return Exit::Failure;
     }
-    0
+    Exit::Ok
 }
 
 /// Exclusive create that surfaces `PermissionDenied` distinctly from
@@ -852,7 +852,7 @@ mod tests {
             &cwd,
         );
         let code = run_with(deps, Args { check: false }, "v0.0.1", DEV_TRIPLE);
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         assert!(stdout.is_empty());
         let s = String::from_utf8(stderr).unwrap();
         assert!(s.contains("development builds cannot self-update"));
@@ -877,7 +877,7 @@ mod tests {
             &cwd,
         );
         let code = run_with(deps, Args { check: true }, "v0.0.1", DEV_TRIPLE);
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let s = String::from_utf8(stderr).unwrap();
         assert!(s.contains("development builds cannot self-update"));
     }
@@ -902,7 +902,7 @@ mod tests {
             &cwd,
         );
         let code = run_with(deps, Args { check: true }, "v0.5.0", TEST_TRIPLE);
-        assert_eq!(code, 0);
+        assert_eq!(code, Exit::Ok);
         let s = String::from_utf8(stdout).unwrap();
         assert!(s.contains("already on latest release v0.5.0"));
         assert!(stderr.is_empty());
@@ -928,7 +928,7 @@ mod tests {
             &cwd,
         );
         let code = run_with(deps, Args { check: true }, "v0.5.0", TEST_TRIPLE);
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let s = String::from_utf8(stdout).unwrap();
         assert!(s.contains("newer release available: v0.6.0"));
         assert!(s.contains("current: v0.5.0"));
@@ -954,7 +954,7 @@ mod tests {
             &cwd,
         );
         let code = run_with(deps, Args { check: true }, "v0.5.0", TEST_TRIPLE);
-        assert_eq!(code, 0);
+        assert_eq!(code, Exit::Ok);
         let s = String::from_utf8(stdout).unwrap();
         assert!(s.contains("local build v0.5.0"));
         assert!(s.contains("latest published release v0.4.0"));
@@ -986,7 +986,7 @@ mod tests {
             &cwd,
         );
         let code = run_with(deps, Args { check: true }, "v0.5.0", TEST_TRIPLE);
-        assert_eq!(code, 0);
+        assert_eq!(code, Exit::Ok);
         let s = String::from_utf8(stdout).unwrap();
         assert!(s.contains("already on latest release"));
     }
@@ -1011,7 +1011,7 @@ mod tests {
             &cwd,
         );
         let code = run_with(deps, Args { check: true }, "v0.5.0", TEST_TRIPLE);
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let s = String::from_utf8(stderr).unwrap();
         assert!(s.contains("GitHub Releases API returned HTTP 503"));
     }
@@ -1044,7 +1044,7 @@ mod tests {
             &cwd,
         );
         let code = run_with(deps, Args { check: true }, "v0.5.0", TEST_TRIPLE);
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let s = String::from_utf8(stderr).unwrap();
         assert!(s.contains("failed to query GitHub Releases API: network error"));
     }
@@ -1077,7 +1077,7 @@ mod tests {
             &cwd,
         );
         let code = run_with(deps, Args { check: true }, "v0.5.0", TEST_TRIPLE);
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let s = String::from_utf8(stderr).unwrap();
         assert!(s.contains("TLS handshake failed"));
     }
@@ -1102,7 +1102,7 @@ mod tests {
             &cwd,
         );
         let code = run_with(deps, Args { check: true }, "v0.5.0", TEST_TRIPLE);
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let s = String::from_utf8(stderr).unwrap();
         assert!(s.contains("unparseable response"));
     }
@@ -1127,7 +1127,7 @@ mod tests {
             &cwd,
         );
         let code = run_with(deps, Args { check: true }, "v0.5.0", TEST_TRIPLE);
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let s = String::from_utf8(stderr).unwrap();
         assert!(s.contains("did not include a tag_name"));
     }
@@ -1152,7 +1152,7 @@ mod tests {
             &cwd,
         );
         let code = run_with(deps, Args { check: true }, "v0.5.0", TEST_TRIPLE);
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let s = String::from_utf8(stderr).unwrap();
         assert!(s.contains("latest release tag is not valid semver: not-semver"));
     }
@@ -1177,7 +1177,7 @@ mod tests {
             &cwd,
         );
         let code = run_with(deps, Args { check: true }, "not-semver", TEST_TRIPLE);
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let s = String::from_utf8(stderr).unwrap();
         assert!(s.contains("embedded version is not valid semver: not-semver"));
     }
@@ -1235,7 +1235,12 @@ mod tests {
             &cwd,
         );
         let code = perform_update(deps, target_dir, "tk", TEST_TRIPLE, "v0.6.0");
-        assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+        assert_eq!(
+            code,
+            Exit::Ok,
+            "stderr: {}",
+            String::from_utf8_lossy(&stderr)
+        );
         assert_eq!(fs::read(&target_path).unwrap(), b"new-bytes");
         assert!(!stage_path.exists());
     }
@@ -1271,7 +1276,7 @@ mod tests {
             &cwd,
         );
         let code = perform_update(deps, target_dir, "tk", "aarch64-windows-gnu", "v0.6.0");
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let s = String::from_utf8(stderr).unwrap();
         assert!(s.contains("tk-aarch64-windows-gnu.exe is not in release v0.6.0"));
         assert!(s.contains("releases/tag/v0.6.0"));
@@ -1310,7 +1315,7 @@ mod tests {
             &cwd,
         );
         let code = perform_update(deps, target_dir, "tk", TEST_TRIPLE, "v0.6.0");
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let s = String::from_utf8(stderr).unwrap();
         assert!(s.contains("asset download returned HTTP 503"));
     }
@@ -1354,7 +1359,7 @@ mod tests {
             &cwd,
         );
         let code = perform_update(deps, target_dir, "tk", TEST_TRIPLE, "v0.6.0");
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let s = String::from_utf8(stderr).unwrap();
         assert!(s.contains("staged binary smoke check failed: exit 7"));
         assert!(s.contains("tk: corrupt embedded payload"));
@@ -1401,7 +1406,7 @@ mod tests {
             &cwd,
         );
         let code = perform_update(deps, target_dir, "tk", TEST_TRIPLE, "v0.6.0");
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let s = String::from_utf8(stderr).unwrap();
         assert!(s.contains("did not report expected version: v0.6.0"));
         assert!(!target_dir.join("tk").exists());
@@ -1446,7 +1451,7 @@ mod tests {
             &cwd,
         );
         let code = perform_update(deps, target_dir, "tk", TEST_TRIPLE, "v0.6.0");
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let s = String::from_utf8(stderr).unwrap();
         assert!(s.contains("did not report expected triple: x86_64-linux-musl"));
         assert!(!target_dir.join("tk").exists());
@@ -1500,7 +1505,7 @@ mod tests {
             &cwd,
         );
         let code = perform_update(deps, target_dir, "tk", TEST_TRIPLE, "v0.6.0");
-        assert_eq!(code, 1);
+        assert_eq!(code, Exit::Failure);
         let out = String::from_utf8(stdout).unwrap();
         assert!(out.contains("updated to v0.6.0"));
         assert_eq!(fs::read(&target_path).unwrap(), b"new-bytes");

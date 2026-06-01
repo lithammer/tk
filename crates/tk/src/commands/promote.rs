@@ -8,7 +8,7 @@
 
 use clap::Args as ClapArgs;
 
-use crate::cli::Deps;
+use crate::cli::{Deps, Exit};
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
@@ -18,11 +18,11 @@ pub struct Args {
 }
 
 #[must_use]
-pub fn run(deps: Deps<'_>, _args: Args) -> u8 {
+pub fn run(deps: Deps<'_>, _args: Args) -> Exit {
     let _ = writeln!(deps.stderr, "tk promote: not yet implemented");
     let _ = writeln!(
         deps.stderr,
         "Planned: later slice once Remote and sync are in place."
     );
-    1
+    Exit::Failure
 }
