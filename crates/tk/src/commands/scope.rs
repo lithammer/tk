@@ -9,16 +9,56 @@
 //! The command layer owns Scope resolution (per CONTEXT.md); the store-facing
 //! selection accepts an already-resolved Epic id.
 
+use std::io::Write;
+
+use crate::cli::Exit;
+use crate::commands::resolver::{self, ResolveEpicError};
+use crate::store::repository::{ResolvedItemRefWithDisplay, Store};
+
 /// Environment variable carrying a session Scope for orchestrated / AFK runs.
 /// A parent process exports it so every `tk` subprocess inherits the same
 /// Epic without the agent restating it on each call.
 const SCOPE_ENV: &str = "TK_SCOPE";
 
+/// Resolve the active Scope for a command.
+///
+/// Reads the `<epic-id>` `arg` if present, else `TK_SCOPE`, else `None`, then
+/// resolves Epic-only: a miss or a non-Epic is rendered to `stderr` with the
+/// `tk <command>:` prefix and returned as `Err(Exit::Failure)` for the caller
+/// to propagate. `Ok(None)` means no Scope was supplied.
+pub fn resolve<W: Write + ?Sized>(
+    store: &Store,
+    stderr: &mut W,
+    command: &str,
+    arg: Option<&str>,
+) -> Result<Option<ResolvedItemRefWithDisplay>, Exit> {
+    let Some(value) = effective_value(arg, env_value().as_deref()) else {
+        return Ok(None);
+    };
+    match resolver::resolve_epic_with_display(store, &value) {
+        Ok(epic) => Ok(Some(epic)),
+        Err(ResolveEpicError::NotFound) => {
+            let _ = writeln!(
+                stderr,
+                "tk {command}: scope '{value}' is not a known Display ID or Alias"
+            );
+            Err(Exit::Failure)
+        }
+        Err(ResolveEpicError::NotAnEpic) => {
+            let _ = writeln!(stderr, "tk {command}: scope '{value}' is not an Epic");
+            Err(Exit::Failure)
+        }
+        Err(ResolveEpicError::Storage(err)) => {
+            resolver::render_storage_error(stderr, command, &err);
+            Err(Exit::Failure)
+        }
+    }
+}
+
 /// The Scope value in effect for one invocation: the positional `arg` if
 /// present, else a non-empty trimmed `TK_SCOPE`, else `None`. The argument
 /// wins when both are set.
-#[must_use]
-pub fn effective_value(arg: Option<&str>, env: Option<&str>) -> Option<String> {
+fn effective_value(arg: Option<&str>, env: Option<&str>) -> Option<String> {
     if let Some(arg) = arg {
         return Some(arg.to_owned());
     }
@@ -29,8 +69,7 @@ pub fn effective_value(arg: Option<&str>, env: Option<&str>) -> Option<String> {
 
 /// Read `TK_SCOPE` from the process environment. Returns `None` when unset or
 /// not valid UTF-8; emptiness is filtered later by [`effective_value`].
-#[must_use]
-pub fn env_value() -> Option<String> {
+fn env_value() -> Option<String> {
     std::env::var(SCOPE_ENV).ok()
 }
 

@@ -48,27 +48,9 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
         }
     };
 
-    let scope_value = scope::effective_value(args.epic.as_deref(), scope::env_value().as_deref());
-    let scope_epic = match scope_value.as_deref() {
-        None => None,
-        Some(value) => match resolver::resolve_epic_with_display(&store, value) {
-            Ok(epic) => Some(epic),
-            Err(resolver::ResolveEpicError::NotFound) => {
-                let _ = writeln!(
-                    stderr,
-                    "tk next: scope '{value}' is not a known Display ID or Alias"
-                );
-                return Exit::Failure;
-            }
-            Err(resolver::ResolveEpicError::NotAnEpic) => {
-                let _ = writeln!(stderr, "tk next: scope '{value}' is not an Epic");
-                return Exit::Failure;
-            }
-            Err(resolver::ResolveEpicError::Storage(err)) => {
-                resolver::render_storage_error(stderr, COMMAND, &err);
-                return Exit::Failure;
-            }
-        },
+    let scope_epic = match scope::resolve(&store, stderr, COMMAND, args.epic.as_deref()) {
+        Ok(scope) => scope,
+        Err(exit) => return exit,
     };
 
     let next_scope = match &scope_epic {
