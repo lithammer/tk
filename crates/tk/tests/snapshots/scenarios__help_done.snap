@@ -4,10 +4,11 @@ expression: "p.run(&format!(\"{command} --help\"))"
 ---
 Close a Ticket or Epic
 
-Usage: tk done <ID>
+Usage: tk done [OPTIONS] <ID>
 
 Arguments:
   <ID>  
 
 Options:
-  -h, --help  Print help
+  -m, --message <TEXT>  Optional Closing Reason recorded against the closed item
+  -h, --help            Print help

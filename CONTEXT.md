@@ -52,6 +52,10 @@ _Avoid_: Parent Domain Model
 The lifecycle state of a **Ticket** or **Epic**: `open`, `active`, or `done`.
 _Avoid_: Todo, In Progress, Closed, Blocked
 
+**Closing Reason**:
+An optional free-text explanation recorded when a **Ticket** or **Epic** is marked `done`, captured by `tk done -m`. A **Local Field** in v1, distinct from a **Comment**; it is stored current state in the **Repository Store** and is not synced to a **Backend**.
+_Avoid_: Closing Comment, Done Comment, Resolution Note
+
 **Assignee**:
 A person or agent expected to work on a **Ticket**.
 _Avoid_: Owner

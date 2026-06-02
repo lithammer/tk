@@ -43,6 +43,9 @@ pub struct ItemDetail {
     pub priority: Option<Priority>,
     pub title: String,
     pub body: String,
+    /// Optional Closing Reason (ADR-0023). Present only on `done` items; the
+    /// column CHECK keeps it non-null unless `status = 'done'`.
+    pub closing_reason: Option<String>,
     pub status: ItemStatus,
     pub created_at: String,
     pub updated_at: String,
@@ -62,7 +65,7 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
 
     let row = store.conn.query_row(
         "select id, display_value, item_class, ticket_kind, priority, title, body, \
-                status, created_at, updated_at, container_id \
+                closing_reason, status, created_at, updated_at, container_id \
            from items where id = ?1",
         params![&reference.id],
         |r| {
@@ -74,10 +77,11 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
                 r.get::<_, Option<Priority>>(4)?,
                 r.get::<_, String>(5)?,
                 r.get::<_, String>(6)?,
-                r.get::<_, ItemStatus>(7)?,
-                r.get::<_, String>(8)?,
+                r.get::<_, Option<String>>(7)?,
+                r.get::<_, ItemStatus>(8)?,
                 r.get::<_, String>(9)?,
-                r.get::<_, Option<String>>(10)?,
+                r.get::<_, String>(10)?,
+                r.get::<_, Option<String>>(11)?,
             ))
         },
     );
@@ -89,6 +93,7 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
         priority,
         title,
         body,
+        closing_reason,
         status,
         created_at,
         updated_at,
@@ -125,6 +130,7 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
         priority,
         title,
         body,
+        closing_reason,
         status,
         created_at,
         updated_at,

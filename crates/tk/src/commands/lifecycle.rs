@@ -42,6 +42,7 @@ pub fn transition(
     id: &str,
     target: ItemStatus,
     success: SuccessLabel,
+    closing_reason: Option<&str>,
 ) -> Exit {
     let Deps {
         stdout,
@@ -81,6 +82,7 @@ pub fn transition(
         SetStatusRequest {
             id: &resolved.id,
             status: target,
+            closing_reason,
         },
     ) {
         Ok(item) => {
@@ -101,6 +103,15 @@ pub fn transition(
                 stderr,
                 "tk {command}: {label} '{id}' is done and cannot be reopened",
                 label = class.label()
+            );
+            Exit::Failure
+        }
+        Err(SetStatusError::AlreadyClosed(_)) => {
+            // Set-once (ADR-0023): re-closing is not an amend path. Only
+            // `tk done -m` reaches this, so `{command}` is always "done".
+            let _ = writeln!(
+                stderr,
+                "tk {command}: '{id}' is already done; closing reason not changed"
             );
             Exit::Failure
         }
@@ -217,7 +228,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = transition(h.deps(), "start", "tk-1", ItemStatus::Active, STARTED);
+        let code = transition(h.deps(), "start", "tk-1", ItemStatus::Active, STARTED, None);
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(stdout.contains("Started Ticket: tk-1 - Subject"));
@@ -244,7 +255,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = transition(h.deps(), "start", "tk-1", ItemStatus::Active, STARTED);
+        let code = transition(h.deps(), "start", "tk-1", ItemStatus::Active, STARTED, None);
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk start: Ticket 'tk-1' is done and cannot be reopened"));
@@ -257,7 +268,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = transition(h.deps(), "stop", "tk-9999", ItemStatus::Open, STARTED);
+        let code = transition(h.deps(), "stop", "tk-9999", ItemStatus::Open, STARTED, None);
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk stop: 'tk-9999' is not a known Display ID or Alias"));

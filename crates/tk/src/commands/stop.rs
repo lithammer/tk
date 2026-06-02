@@ -19,5 +19,5 @@ const SUCCESS: SuccessLabel = SuccessLabel {
 
 #[must_use]
 pub fn run(deps: Deps<'_>, args: Args) -> Exit {
-    lifecycle::transition(deps, "stop", &args.id, ItemStatus::Open, SUCCESS)
+    lifecycle::transition(deps, "stop", &args.id, ItemStatus::Open, SUCCESS, None)
 }

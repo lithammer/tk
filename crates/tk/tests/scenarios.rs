@@ -164,6 +164,48 @@ fn create_epic_child() {
 }
 
 #[test]
+fn done_records_a_closing_reason_and_refuses_to_amend() {
+    let p = Repo::new("project");
+    p.run("init");
+    p.run("add -m 'Fix the bug'"); // project-1
+
+    // An empty `-m` is rejected before any transition (ADR-0023).
+    tk!(p, "done project-1 -m ''", @r"
+    exit 1
+    -- stdout --
+    -- stderr --
+    tk done: closing reason must not be empty
+    ");
+
+    // A real reason closes the Ticket.
+    tk!(p, "done project-1 -m 'Fixed in PR #12'", @"Done Ticket: project-1 - Fix the bug");
+
+    // Set-once: re-closing with a new reason is refused, not amended.
+    tk!(p, "done project-1 -m 'second thoughts'", @r"
+    exit 1
+    -- stdout --
+    -- stderr --
+    tk done: 'project-1' is already done; closing reason not changed
+    ");
+}
+
+#[test]
+fn done_trims_the_closing_reason_before_storing_it() {
+    let p = Repo::new("project");
+    p.run("init");
+    p.run("add -m 'Trim me'"); // project-1
+    p.run("done project-1 -m '   Fixed in standup   '");
+
+    // `tk show` surfaces a non-deterministic date, so assert on substrings:
+    // the stored reason is trimmed (ADR-0023), not the padded input.
+    let out = p.run("show project-1");
+    assert!(
+        out.contains("CLOSING REASON\nFixed in standup\n"),
+        "out={out}"
+    );
+}
+
+#[test]
 fn init_refuses_outside_git_repository() {
     let p = Repo::bare("scratch");
     let out = p.run("init");

@@ -30,6 +30,12 @@ pub struct SetStatusRequest<'a> {
     pub id: &'a str,
     /// Target Item Status to persist.
     pub status: ItemStatus,
+    /// Optional Closing Reason captured on the `→ done` transition (ADR-0023).
+    /// A Local Field: persisted to `items.closing_reason`, never to the
+    /// Mutation Log. Only `tk done -m` supplies it; `tk start`/`tk stop` pass
+    /// `None`. Set-once — a reason against an already-`done` item is refused
+    /// with [`SetStatusError::AlreadyClosed`].
+    pub closing_reason: Option<&'a str>,
 }
 
 /// Snapshot returned on a successful lifecycle write.
@@ -56,6 +62,11 @@ pub enum SetStatusError {
     /// can render "Ticket" vs "Epic" without a second round-trip.
     #[error("item is already done")]
     LockedDone(ItemClass),
+    /// Refused: a Closing Reason was supplied for an item already `Done`.
+    /// A Closing Reason is set-once at the transition (ADR-0023); re-closing
+    /// is not an amend path. Carries the [`ItemClass`] for diagnostics.
+    #[error("item is already done")]
+    AlreadyClosed(ItemClass),
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
@@ -98,6 +109,13 @@ pub fn set_item_status<C: Clock + ?Sized>(
     }
 
     if current_status == req.status {
+        // Set-once (ADR-0023): a Closing Reason against an already-`done`
+        // item is not an amend path. Re-closing without a reason stays the
+        // idempotent no-op `tk done`/`tk start`/`tk stop` rely on.
+        if req.status == ItemStatus::Done && req.closing_reason.is_some() {
+            tx.commit()?;
+            return Err(SetStatusError::AlreadyClosed(item_class));
+        }
         tx.commit()?;
         return Ok(StatusChangedItem {
             display_id,
@@ -107,9 +125,13 @@ pub fn set_item_status<C: Clock + ?Sized>(
         });
     }
 
+    // `closing_reason` is unconditionally written: only the `→ done`
+    // transition carries a reason, and a non-`done` target always pairs with
+    // `None`, so a `start`/`stop` write simply re-nulls an already-null field.
+    // The column CHECK confines a non-null reason to `done` items.
     tx.execute(
-        "update items set status = ?2, updated_at = ?3 where id = ?1",
-        params![req.id, req.status, now_iso],
+        "update items set status = ?2, closing_reason = ?3, updated_at = ?4 where id = ?1",
+        params![req.id, req.status, req.closing_reason, now_iso],
     )?;
 
     if origin == Origin::Backend {
@@ -210,6 +232,7 @@ mod tests {
             SetStatusRequest {
                 id: "t1",
                 status: ItemStatus::Active,
+                closing_reason: None,
             },
         )
         .unwrap();
@@ -241,6 +264,7 @@ mod tests {
             SetStatusRequest {
                 id: "t1",
                 status: ItemStatus::Active,
+                closing_reason: None,
             },
         )
         .unwrap();
@@ -270,6 +294,7 @@ mod tests {
             SetStatusRequest {
                 id: "t1",
                 status: ItemStatus::Open,
+                closing_reason: None,
             },
         )
         .unwrap();
@@ -297,6 +322,7 @@ mod tests {
             SetStatusRequest {
                 id: "t1",
                 status: ItemStatus::Open,
+                closing_reason: None,
             },
         )
         .unwrap_err();
@@ -320,10 +346,114 @@ mod tests {
             SetStatusRequest {
                 id: "t1",
                 status: ItemStatus::Done,
+                closing_reason: None,
             },
         )
         .unwrap();
         assert_eq!(item.status, ItemStatus::Done);
+    }
+
+    #[test]
+    fn closing_a_local_ticket_with_a_reason_persists_it_without_a_mutation() {
+        let mut store = open_seeded();
+        seed_open_ticket(&store, "t1", "tk-1", 1);
+
+        let item = set_item_status(
+            &mut store,
+            &clock(),
+            SetStatusRequest {
+                id: "t1",
+                status: ItemStatus::Done,
+                closing_reason: Some("Fixed in PR #12"),
+            },
+        )
+        .unwrap();
+        assert_eq!(item.status, ItemStatus::Done);
+
+        let stored: Option<String> = store
+            .conn
+            .query_row(
+                "select closing_reason from items where id = 't1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some("Fixed in PR #12"));
+
+        // Closing Reason is a Local Field (ADR-0023): it never rides the
+        // Mutation Log, not even for the status change on a backend item.
+        let mutation_count: i64 = store
+            .conn
+            .query_row("select count(*) from mutations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mutation_count, 0);
+    }
+
+    #[test]
+    fn backend_close_with_a_reason_keeps_the_status_payload_unchanged() {
+        let mut store = open_seeded();
+        seed_backend_ticket(&store, "t1", "tk-1", 1);
+
+        set_item_status(
+            &mut store,
+            &clock(),
+            SetStatusRequest {
+                id: "t1",
+                status: ItemStatus::Done,
+                closing_reason: Some("Shipped"),
+            },
+        )
+        .unwrap();
+
+        // The set_item_status Mutation still fires for a Backend item, but the
+        // Closing Reason stays out of its payload — sync deferred to tk-109.
+        let payload: String = store
+            .conn
+            .query_row("select payload_json from mutations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(payload, r#"{"status":"done"}"#);
+
+        let stored: Option<String> = store
+            .conn
+            .query_row(
+                "select closing_reason from items where id = 't1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some("Shipped"));
+    }
+
+    #[test]
+    fn closing_an_already_done_item_with_a_reason_is_refused() {
+        let mut store = open_seeded();
+        seed_done_ticket(&store, "t1", "tk-1", 1);
+
+        let err = set_item_status(
+            &mut store,
+            &clock(),
+            SetStatusRequest {
+                id: "t1",
+                status: ItemStatus::Done,
+                closing_reason: Some("too late"),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            SetStatusError::AlreadyClosed(ItemClass::Ticket)
+        ));
+
+        // The refusal must not mutate the row.
+        let stored: Option<String> = store
+            .conn
+            .query_row(
+                "select closing_reason from items where id = 't1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, None);
     }
 
     #[test]
@@ -335,6 +465,7 @@ mod tests {
             SetStatusRequest {
                 id: "missing",
                 status: ItemStatus::Active,
+                closing_reason: None,
             },
         )
         .unwrap_err();

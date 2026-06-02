@@ -32,6 +32,7 @@ pub struct Migration {
 // Windows clone with `core.autocrlf=true` still checks the files out as LF.
 const MIGRATION_1_SQL: &str = include_str!("migrations/001_repository_store.sql");
 const MIGRATION_2_SQL: &str = include_str!("migrations/002_items_no_escape_from_done.sql");
+const MIGRATION_3_SQL: &str = include_str!("migrations/003_closing_reason.sql");
 
 /// V1 Repository Store schema skeleton.
 pub const MIGRATION_1: Migration = Migration {
@@ -46,14 +47,21 @@ pub const MIGRATION_2: Migration = Migration {
     sql: MIGRATION_2_SQL,
 };
 
+/// Adds the nullable `closing_reason` Local Field (ADR-0023). The column
+/// CHECK keeps a Closing Reason non-empty and confined to `done` items.
+pub const MIGRATION_3: Migration = Migration {
+    version: 3,
+    sql: MIGRATION_3_SQL,
+};
+
 /// Ordered migration list applied by [`apply_all`].
-pub const ALL_MIGRATIONS: &[Migration] = &[MIGRATION_1, MIGRATION_2];
+pub const ALL_MIGRATIONS: &[Migration] = &[MIGRATION_1, MIGRATION_2, MIGRATION_3];
 
 /// Highest schema version this binary can apply. Named so future migrations
 /// surface the threshold to `grep` instead of hiding it behind `.last()`.
-/// Adding `MIGRATION_3` is a two-line patch: append to `ALL_MIGRATIONS`, bump
+/// Adding `MIGRATION_4` is a two-line patch: append to `ALL_MIGRATIONS`, bump
 /// this constant, with a debug_assert below catching the drift.
-pub const MAX_KNOWN_VERSION: u32 = MIGRATION_2.version;
+pub const MAX_KNOWN_VERSION: u32 = MIGRATION_3.version;
 
 /// Errors returned while applying migrations.
 ///
@@ -165,7 +173,7 @@ mod tests {
         let mut conn = open_memory();
         apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
 
-        assert_eq!(current_version(&conn).unwrap(), 2);
+        assert_eq!(current_version(&conn).unwrap(), 3);
 
         let app_id: i64 = conn
             .query_row("pragma application_id", [], |r| r.get(0))
@@ -175,7 +183,7 @@ mod tests {
         let user_version: i64 = conn
             .query_row("pragma user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(user_version, 2);
+        assert_eq!(user_version, 3);
     }
 
     #[test]
@@ -187,7 +195,7 @@ mod tests {
         let count: i64 = conn
             .query_row("select count(*) from schema_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(count, 2);
+        assert_eq!(count, 3);
     }
 
     #[test]
@@ -220,6 +228,100 @@ mod tests {
             )
             .unwrap();
         assert_eq!(stamp, fixed);
+    }
+
+    #[test]
+    fn closing_reason_accepts_nonempty_value_on_a_done_item() {
+        use crate::store::testing::{FixtureItem, insert_fixture_item};
+
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Done",
+                status: "done",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+
+        conn.execute(
+            "update items set closing_reason = ?1 where id = 't1'",
+            rusqlite::params!["Fixed in PR #12"],
+        )
+        .unwrap();
+
+        let stored: Option<String> = conn
+            .query_row(
+                "select closing_reason from items where id = 't1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some("Fixed in PR #12"));
+    }
+
+    #[test]
+    fn closing_reason_check_rejects_a_reason_on_a_non_done_item() {
+        use crate::store::testing::{FixtureItem, insert_fixture_item};
+
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Open",
+                status: "open",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+
+        let err = conn
+            .execute(
+                "update items set closing_reason = ?1 where id = 't1'",
+                rusqlite::params!["premature"],
+            )
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("CHECK"),
+            "a Closing Reason on a non-done item must violate the CHECK: {err}"
+        );
+    }
+
+    #[test]
+    fn closing_reason_check_rejects_an_empty_reason() {
+        use crate::store::testing::{FixtureItem, insert_fixture_item};
+
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Done",
+                status: "done",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+
+        let err = conn
+            .execute("update items set closing_reason = '' where id = 't1'", [])
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("CHECK"),
+            "an empty Closing Reason must violate the CHECK: {err}"
+        );
     }
 
     #[test]

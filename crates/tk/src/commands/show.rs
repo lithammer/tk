@@ -155,6 +155,21 @@ fn render<W: Write + ?Sized>(
         has_section = true;
     }
 
+    // Closing Reason (ADR-0023): a Local Field rendered right after the body,
+    // present only on `done` items. Body-like prose, so it mirrors DESCRIPTION
+    // with an unconditional leading blank line rather than the relationship
+    // sections' `if has_section` separator — local Tickets are often
+    // title-only, so the bodyless done item is the common case.
+    if let Some(reason) = detail.closing_reason.as_deref() {
+        stdout.write_all(b"\n")?;
+        write_section_header(stdout, styler, "CLOSING REASON")?;
+        sanitize::write_sanitized_body(stdout, reason.as_bytes())?;
+        if !reason.ends_with('\n') {
+            stdout.write_all(b"\n")?;
+        }
+        has_section = true;
+    }
+
     if let Some(parent) = detail.parent.as_ref() {
         if has_section {
             stdout.write_all(b"\n")?;
@@ -480,6 +495,108 @@ mod tests {
         assert!(stdout.contains("EPIC"), "stdout={stdout:?}");
         assert!(stdout.contains("TICKETS"));
         assert!(stdout.contains("tk-2: Child ticket"));
+    }
+
+    #[test]
+    fn renders_closing_reason_section_after_description_for_a_done_ticket() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Ticket",
+                body: "Some body",
+                status: "done",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "update items set closing_reason = ?1 where id = 't1'",
+            rusqlite::params!["Fixed in PR #12"],
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run(h.deps(), Args { id: "tk-1".into() });
+        assert_eq!(code, Exit::Ok);
+        let stdout = String::from_utf8(h.stdout).unwrap();
+        assert!(stdout.contains("Fixed in PR #12\n"), "stdout={stdout:?}");
+        // The Closing Reason follows the body with one blank line separator.
+        assert!(
+            stdout.contains("Some body\n\nCLOSING REASON"),
+            "stdout={stdout:?}"
+        );
+    }
+
+    #[test]
+    fn renders_closing_reason_with_a_leading_blank_line_for_a_bodyless_ticket() {
+        // Local Tickets are often title-only, so a `done` item with a reason
+        // but no body is the common case; the section still needs a blank line
+        // after the facet bar, mirroring DESCRIPTION (ADR-0023).
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Quick fix",
+                status: "done",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "update items set closing_reason = ?1 where id = 't1'",
+            rusqlite::params!["Done in standup"],
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run(h.deps(), Args { id: "tk-1".into() });
+        assert_eq!(code, Exit::Ok);
+        let stdout = String::from_utf8(h.stdout).unwrap();
+        assert!(
+            stdout.contains("\n\nCLOSING REASON\nDone in standup\n"),
+            "stdout={stdout:?}"
+        );
+    }
+
+    #[test]
+    fn omits_closing_reason_section_when_absent() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Done, no reason",
+                status: "done",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let _ = run(h.deps(), Args { id: "tk-1".into() });
+        let stdout = String::from_utf8(h.stdout).unwrap();
+        assert!(!stdout.contains("CLOSING REASON"), "stdout={stdout:?}");
     }
 
     #[test]
