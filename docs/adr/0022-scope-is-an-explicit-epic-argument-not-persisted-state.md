@@ -25,8 +25,7 @@ outside it, so the same Ticket can rank differently scoped and unscoped. This
 is why the concept is named **Scope** (a boundary of consideration that
 changes `tk next`'s answer) and not **Filter** (a presentational subset that
 would not). "Filter" is the verb `tk list` performs and the word its hint
-uses (`Scope: <epic-id> (filtered to this Epic and its child Tickets)`); it is
-not the concept.
+uses (`Scope: <epic-id> (Epic + child Tickets)`); it is not the concept.
 
 ## Why persisted and inferred scope did not earn their place
 

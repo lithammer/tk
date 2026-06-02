@@ -228,7 +228,7 @@ fn tk_scope_env_filters_list_to_the_epic() {
 
     let out = p.run_env("list", &[("TK_SCOPE", "project-1")]);
     assert!(
-        out.contains("Scope: project-1 (filtered to this Epic and its child Tickets)"),
+        out.contains("Scope: project-1 (Epic + child Tickets)"),
         "out={out}"
     );
     assert!(out.contains("project-2"), "out={out}");

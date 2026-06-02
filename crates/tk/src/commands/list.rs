@@ -103,23 +103,36 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
         }
     };
 
+    let out = styler.for_stdout();
+
     // Hint so a Scope-filtered tree never reads as the full store (ADR-0022).
     if let Some(epic) = scope_epic.as_ref() {
-        if writeln!(
-            stdout,
-            "Scope: {} (filtered to this Epic and its child Tickets)",
-            epic.display_id
-        )
-        .is_err()
-        {
+        if render_scope_hint(stdout, &epic.display_id, out).is_err() {
             return Exit::Failure;
         }
     }
 
-    if render(stdout, &rows, options, styler.for_stdout()).is_err() {
+    if render(stdout, &rows, options, out).is_err() {
         return Exit::Failure;
     }
     Exit::Ok
+}
+
+/// One-line banner above a Scope-filtered List Tree: a bold `Scope:` label,
+/// the Epic Display ID in the Epic colour (matching the tree's `[epic]`
+/// badge), and a dim reminder that child Tickets are included.
+fn render_scope_hint<W: Write + ?Sized>(
+    stdout: &mut W,
+    display_id: &str,
+    styler: SubStyler,
+) -> std::io::Result<()> {
+    writeln!(
+        stdout,
+        "{} {} {}",
+        styler.wrap(palette::HEADER, "Scope:"),
+        styler.wrap(palette::KIND_EPIC, display_id),
+        styler.wrap(palette::SEPARATOR, "(Epic + child Tickets)"),
+    )
 }
 
 fn select_view(args: &Args) -> ListView {
@@ -792,7 +805,7 @@ mod tests {
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(
-            stdout.contains("Scope: tk-1 (filtered to this Epic and its child Tickets)"),
+            stdout.contains("Scope: tk-1 (Epic + child Tickets)"),
             "stdout={stdout:?}"
         );
         assert!(stdout.contains("[epic] Epic"));
