@@ -6,6 +6,16 @@
 //! movement, bell, or line-editing controls — while still making those
 //! bytes visible to developers (lowercase `\xNN` text).
 //!
+//! Sanitising is UTF-8 aware: the input is decoded as UTF-8 and classified
+//! per `char`, so legitimate multibyte characters (arrows, dashes, accented
+//! letters) pass through untouched. Only genuine control characters —
+//! including the C1 block (`U+0080..=U+009F`), which `char::is_control`
+//! covers — are escaped. Bytes that are not valid UTF-8 cannot be characters,
+//! so each is escaped individually. This neutralises 8-bit CSI both as a bare
+//! `0x9B` byte (invalid UTF-8) and as the encoded codepoint `U+009B`
+//! (`0xC2 0x9B`), while no longer mangling the continuation bytes
+//! (`0x80..=0x9F`) of valid multibyte characters.
+//!
 //! Two shapes:
 //!
 //! - [`write_sanitized_line`]: titles, summaries, and blocker reasons
@@ -53,59 +63,86 @@ fn write_sanitized<W: io::Write + ?Sized>(
     text: &[u8],
     shape: TextShape,
 ) -> io::Result<()> {
-    // Chunked emission: defer writing until a non-`Clean` byte forces a
+    // Decode as UTF-8 so continuation bytes (`0x80..=0x9F`) of valid multibyte
+    // characters are not mistaken for C1 controls. Each chunk is a maximal run
+    // of valid UTF-8 followed by an invalid byte sequence; the valid run is
+    // classified per `char`, the invalid bytes are escaped individually. `\r\n`
+    // is pure ASCII, so a CRLF pair always lands within one valid run and the
+    // Body shape's lookahead never straddles a chunk boundary.
+    for chunk in text.utf8_chunks() {
+        write_sanitized_str(writer, chunk.valid(), shape)?;
+        for &byte in chunk.invalid() {
+            write_hex(writer, byte)?;
+        }
+    }
+    Ok(())
+}
+
+fn write_sanitized_str<W: io::Write + ?Sized>(
+    writer: &mut W,
+    text: &str,
+    shape: TextShape,
+) -> io::Result<()> {
+    // Chunked emission: defer writing until a non-`Clean` char forces a
     // substitution so all-clean spans emit as a single `write_all`.
     // `clean_start` marks the start of the pending span; `peekable` supplies
-    // the one-byte lookahead the Body shape needs to fold `\r\n` into `\n`.
+    // the one-char lookahead the Body shape needs to fold `\r\n` into `\n`.
+    let bytes = text.as_bytes();
     let mut clean_start = 0;
-    let mut bytes = text.iter().copied().enumerate().peekable();
-    while let Some((i, byte)) = bytes.next() {
-        let next = bytes.peek().map(|&(_, b)| b);
-        match classify(byte, next, shape) {
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, ch)) = chars.next() {
+        let next = chars.peek().map(|&(_, c)| c);
+        match classify(ch, next, shape) {
             Replacement::Clean => {}
             Replacement::Space => {
-                writer.write_all(&text[clean_start..i])?;
+                writer.write_all(&bytes[clean_start..i])?;
                 writer.write_all(b" ")?;
-                clean_start = i + 1;
+                clean_start = i + ch.len_utf8();
             }
             Replacement::Escape => {
-                writer.write_all(&text[clean_start..i])?;
-                write_hex(writer, byte)?;
-                clean_start = i + 1;
+                writer.write_all(&bytes[clean_start..i])?;
+                write_char_escape(writer, ch)?;
+                clean_start = i + ch.len_utf8();
             }
             Replacement::Skip => {
-                writer.write_all(&text[clean_start..i])?;
-                clean_start = i + 1;
+                writer.write_all(&bytes[clean_start..i])?;
+                clean_start = i + ch.len_utf8();
             }
         }
     }
-    writer.write_all(&text[clean_start..])
+    writer.write_all(&bytes[clean_start..])
 }
 
-/// Classify one byte given the byte that follows it (`None` at end of input).
+/// Classify one char given the char that follows it (`None` at end of input).
 /// The `next` lookahead is what lets the Body shape drop the `\r` of a `\r\n`
 /// pair while still escaping a bare `\r`.
-fn classify(byte: u8, next: Option<u8>, shape: TextShape) -> Replacement {
+///
+/// `char::is_control` covers C0 (`U+0000..=U+001F`), DEL (`U+007F`), and the
+/// C1 block (`U+0080..=U+009F`). C1 includes `U+009B`, the CSI introducer an
+/// xterm or VTE-derivative in 8-bit input mode parses as `ESC [`; escaping it
+/// here keeps a UTF-8-encoded C1 control from reaching the terminal as SGR /
+/// DCS / OSC / PM / APC.
+fn classify(ch: char, next: Option<char>, shape: TextShape) -> Replacement {
     match shape {
         TextShape::Line => {
-            if byte == b'\r' || byte == b'\n' || byte == b'\t' {
+            if ch == '\r' || ch == '\n' || ch == '\t' {
                 Replacement::Space
-            } else if is_control(byte) {
+            } else if ch.is_control() {
                 Replacement::Escape
             } else {
                 Replacement::Clean
             }
         }
         TextShape::Body => {
-            if byte == b'\r' {
-                if next == Some(b'\n') {
+            if ch == '\r' {
+                if next == Some('\n') {
                     Replacement::Skip
                 } else {
                     Replacement::Escape
                 }
-            } else if byte == b'\n' || byte == b'\t' {
+            } else if ch == '\n' || ch == '\t' {
                 Replacement::Clean
-            } else if is_control(byte) {
+            } else if ch.is_control() {
                 Replacement::Escape
             } else {
                 Replacement::Clean
@@ -114,14 +151,11 @@ fn classify(byte: u8, next: Option<u8>, shape: TextShape) -> Replacement {
     }
 }
 
-/// `true` if `byte` is an ASCII (C0) or C1 control. C1 controls
-/// (`0x80..=0x9F`) include `0x9B`, the 8-bit form of CSI that an xterm
-/// or VTE-derivative in 8-bit input mode interprets as the SGR
-/// introducer. `u8::is_ascii_control` only covers C0 (`0x00..=0x1F`)
-/// and DEL (`0x7F`); reaching for it alone would leave 8-bit CSI / DCS
-/// / OSC / PM / APC through unescaped.
-fn is_control(byte: u8) -> bool {
-    byte.is_ascii_control() || (0x80..=0x9F).contains(&byte)
+/// Escape a control char as lowercase `\xNN`. Every char reaching this point is
+/// a C0, DEL, or C1 control, so its codepoint fits in a single byte and shares
+/// the byte-escape spelling.
+fn write_char_escape<W: io::Write + ?Sized>(writer: &mut W, ch: char) -> io::Result<()> {
+    write_hex(writer, ch as u8)
 }
 
 fn write_hex<W: io::Write + ?Sized>(writer: &mut W, byte: u8) -> io::Result<()> {
@@ -187,6 +221,35 @@ mod tests {
     fn body_escapes_c1_control_csi() {
         let mut buf: Vec<u8> = Vec::new();
         write_sanitized_body(&mut buf, b"a\x9b31mb").unwrap();
+        assert_eq!(buf, b"a\\x9b31mb");
+    }
+
+    #[test]
+    fn body_preserves_multibyte_utf8() {
+        // Regression: the continuation bytes of these characters fall in
+        // `0x80..=0x9F` (→ E2 86 92, … E2 80 A6, — E2 80 94, ↔ E2 86 94). A
+        // byte-based C1 escape mangled each into `�\x..\x..`; UTF-8-aware
+        // classification must pass them through verbatim.
+        let mut buf: Vec<u8> = Vec::new();
+        let input = "open_for_command → open_existing — … ↔";
+        write_sanitized_body(&mut buf, input.as_bytes()).unwrap();
+        assert_eq!(buf, input.as_bytes());
+    }
+
+    #[test]
+    fn line_preserves_multibyte_utf8() {
+        let mut buf: Vec<u8> = Vec::new();
+        let input = "café → résumé";
+        write_sanitized_line(&mut buf, input.as_bytes()).unwrap();
+        assert_eq!(buf, input.as_bytes());
+    }
+
+    #[test]
+    fn body_escapes_utf8_encoded_c1_control() {
+        // A genuine C1 control encoded as valid UTF-8 (U+009B = 0xC2 0x9B)
+        // must still be neutralised, not passed through as 8-bit CSI.
+        let mut buf: Vec<u8> = Vec::new();
+        write_sanitized_body(&mut buf, "a\u{9b}31mb".as_bytes()).unwrap();
         assert_eq!(buf, b"a\\x9b31mb");
     }
 }
