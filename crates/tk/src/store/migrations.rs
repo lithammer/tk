@@ -108,7 +108,16 @@ pub fn apply_all(conn: &mut Connection, now_iso: &str) -> Result<(), ApplyError>
 }
 
 fn apply_one(conn: &mut Connection, mig: &Migration, now_iso: &str) -> Result<(), ApplyError> {
-    let tx = conn.transaction()?;
+    // BEGIN IMMEDIATE takes the write lock at transaction start, so a second
+    // migrator (auto-migrate-on-open, tk-110) waits on `busy_timeout` rather
+    // than racing. Re-read the version *inside* the lock: the recorded version
+    // [`apply_all`] sampled before the loop may be stale — the lock winner can
+    // have applied this migration in the window. Skipping a since-applied
+    // version closes the TOCTOU that would otherwise throw `duplicate column`.
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    if i64::from(mig.version) <= current_version(&tx)? {
+        return Ok(());
+    }
     tx.execute_batch(mig.sql)?;
 
     // application_id and user_version pragmas don't accept `?` parameters.
@@ -154,6 +163,27 @@ fn schema_migrations_exists(conn: &Connection) -> Result<bool, rusqlite::Error> 
         )
         .optional()?;
     Ok(present.is_some())
+}
+
+/// Apply migrations only up to and including `max_version`, leaving the store
+/// at an intentionally behind-version state.
+///
+/// Test-only seam for exercising the auto-migrate-on-open path (tk-110): a
+/// store frozen at an older schema is the exact regression an upgraded `tk`
+/// binary must heal at the open chokepoint.
+#[cfg(test)]
+pub(crate) fn apply_through(
+    conn: &mut Connection,
+    max_version: u32,
+    now_iso: &str,
+) -> Result<(), ApplyError> {
+    for mig in ALL_MIGRATIONS {
+        if mig.version > max_version {
+            break;
+        }
+        apply_one(conn, mig, now_iso)?;
+    }
+    Ok(())
 }
 
 // ---- Tests --------------------------------------------------------------
@@ -322,6 +352,31 @@ mod tests {
             format!("{err}").contains("CHECK"),
             "an empty Closing Reason must violate the CHECK: {err}"
         );
+    }
+
+    #[test]
+    fn apply_one_re_reads_version_and_no_ops_when_already_applied() {
+        // The TOCTOU close (tk-110): two tk processes can both read v2, then
+        // race to apply migration 3. The loser must re-read the version under
+        // its write lock and skip — re-running migration 3's SQL would throw
+        // `duplicate column: closing_reason`. Driving apply_one directly on an
+        // already-current store reproduces the loser's stale-snapshot view.
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 3);
+
+        apply_one(&mut conn, &MIGRATION_3, "2026-05-09T00:00:01.000Z")
+            .expect("re-applying an already-applied migration must be a clean no-op");
+
+        // The skip leaves the original row untouched (no duplicate stamp).
+        let count: i64 = conn
+            .query_row(
+                "select count(*) from schema_migrations where version = 3",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]

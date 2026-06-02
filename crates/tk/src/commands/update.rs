@@ -103,7 +103,7 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
         None
     };
 
-    let mut store = match resolver::open_for_command(runner, cwd) {
+    let mut store = match resolver::open_for_command(runner, cwd, clock) {
         Ok(s) => s,
         Err(err) => {
             resolver::render_open_error(stderr, COMMAND, &err);

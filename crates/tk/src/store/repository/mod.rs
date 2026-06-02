@@ -26,6 +26,7 @@ use std::path::Path;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use thiserror::Error;
 
+use crate::clock::Clock;
 use crate::domain::item_class::ItemClass;
 use crate::git::discovery;
 use crate::proc::ProcRunner;
@@ -91,6 +92,12 @@ pub enum OpenError {
     /// The store records a higher schema version than this binary knows.
     #[error("Repository Store was created by a newer tk version")]
     FromFutureVersion,
+    /// A forward migration applied at open failed; the inner SQLite error is
+    /// rendered after this line (see `resolver::render_open_error`) so the
+    /// underlying cause is not lost. Kept distinct from [`Sqlite`] because the
+    /// fault is an upgrade failure, not a plain read.
+    #[error("failed to apply pending migrations to the Repository Store")]
+    MigrationFailed(rusqlite::Error),
     /// Genuine SQLite fault opening or inspecting the store.
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
@@ -102,7 +109,18 @@ pub enum OpenError {
 /// shares the store with its main checkout. `application_id` and
 /// `schema_migrations.version` are inspected before any pragma mutation so
 /// foreign files are refused without rewriting their headers.
-pub fn open_existing<R: ProcRunner + ?Sized>(runner: &R, cwd: &Path) -> Result<Store, OpenError> {
+///
+/// "Schema is current" is an invariant of holding a [`Store`] (tk-110): the
+/// version gate is symmetric here. A future-version store is refused
+/// fail-closed; a behind-version store is healed in place by applying the
+/// pending forward migrations, so no command ever observes a stale schema.
+/// `clock` stamps `schema_migrations.applied_at` for any migration applied;
+/// the current-version fast path takes no write lock.
+pub fn open_existing<R: ProcRunner + ?Sized>(
+    runner: &R,
+    cwd: &Path,
+    clock: &dyn Clock,
+) -> Result<Store, OpenError> {
     // `?` converts a DiscoveryError into OpenError::DiscoveryFailed via #[from].
     let paths = discovery::discover_paths(runner, cwd)?;
     let db_path = paths.git_common_dir.join("tk").join("tk.db");
@@ -111,7 +129,7 @@ pub fn open_existing<R: ProcRunner + ?Sized>(runner: &R, cwd: &Path) -> Result<S
         return Err(OpenError::StoreMissing);
     }
 
-    let conn = Connection::open_with_flags(
+    let mut conn = Connection::open_with_flags(
         &db_path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
@@ -130,8 +148,24 @@ pub fn open_existing<R: ProcRunner + ?Sized>(runner: &R, cwd: &Path) -> Result<S
     if version > i64::from(migrations::MAX_KNOWN_VERSION) {
         return Err(OpenError::FromFutureVersion);
     }
+    if version < i64::from(migrations::MAX_KNOWN_VERSION) {
+        migrations::apply_all(&mut conn, &clock.now_iso()).map_err(OpenError::from)?;
+    }
 
     Ok(Store { conn })
+}
+
+impl From<migrations::ApplyError> for OpenError {
+    /// Map an open-time migration failure onto the open taxonomy. The
+    /// future-version arm is unreachable here — [`open_existing`] guards it
+    /// before calling `apply_all` — but is mapped defensively to the same
+    /// fail-closed refusal rather than a generic fault.
+    fn from(err: migrations::ApplyError) -> Self {
+        match err {
+            migrations::ApplyError::StoreFromFutureVersion => OpenError::FromFutureVersion,
+            migrations::ApplyError::Sqlite(e) => OpenError::MigrationFailed(e),
+        }
+    }
 }
 
 /// A Display ID or Alias resolved to a stable internal item ID and class.
@@ -417,10 +451,21 @@ mod tests {
     }
 
     fn seed_tk_db(store: &TmpStore) {
+        seed_tk_db_at_version(store, migrations::MAX_KNOWN_VERSION);
+    }
+
+    /// Seed a store frozen at `version`, omitting later migrations — the
+    /// behind-version on-disk state an upgraded binary must heal on open.
+    /// `version == MAX_KNOWN_VERSION` yields a fully-migrated current store.
+    fn seed_tk_db_at_version(store: &TmpStore, version: u32) {
         std::fs::create_dir_all(store.tk_dir()).unwrap();
         let mut conn = Connection::open(store.db_path()).unwrap();
         conn.execute_batch("pragma foreign_keys = on").unwrap();
-        migrations::apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        migrations::apply_through(&mut conn, version, "2026-05-09T00:00:00.000Z").unwrap();
+    }
+
+    fn fixed_clock() -> crate::clock::FakeClock {
+        crate::clock::FakeClock::new(1_778_284_800_000)
     }
 
     #[test]
@@ -428,7 +473,7 @@ mod tests {
         let store = TmpStore::new("repo");
         let runner = fake_runner_for(&store);
         assert!(matches!(
-            open_existing(&runner, &cwd()),
+            open_existing(&runner, &cwd(), &fixed_clock()),
             Err(OpenError::StoreMissing)
         ));
     }
@@ -447,7 +492,7 @@ mod tests {
 
         let runner = fake_runner_for(&store);
         assert!(matches!(
-            open_existing(&runner, &cwd()),
+            open_existing(&runner, &cwd(), &fixed_clock()),
             Err(OpenError::NotTicketStore)
         ));
     }
@@ -467,7 +512,7 @@ mod tests {
 
         let runner = fake_runner_for(&store);
         assert!(matches!(
-            open_existing(&runner, &cwd()),
+            open_existing(&runner, &cwd(), &fixed_clock()),
             Err(OpenError::FromFutureVersion)
         ));
     }
@@ -477,7 +522,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_tk_db(&store);
         let runner = fake_runner_for(&store);
-        let opened = match open_existing(&runner, &cwd()) {
+        let opened = match open_existing(&runner, &cwd(), &fixed_clock()) {
             Ok(s) => s,
             Err(e) => panic!("expected Ok, got {e:?}"),
         };
@@ -487,6 +532,47 @@ mod tests {
             .query_row("pragma foreign_keys", [], |r| r.get(0))
             .unwrap();
         assert_eq!(fk, 1);
+    }
+
+    #[test]
+    fn open_existing_migrates_a_behind_version_store_to_max() {
+        // The tk-110 regression: a store frozen at an older schema (here v2,
+        // missing migration 3's `closing_reason` column) must be healed to
+        // MAX_KNOWN_VERSION at the open chokepoint, not left to surface a
+        // later `no such column` fault.
+        let store = TmpStore::new("repo");
+        seed_tk_db_at_version(&store, 2);
+        let runner = fake_runner_for(&store);
+        let clock = fixed_clock();
+
+        let opened = match open_existing(&runner, &cwd(), &clock) {
+            Ok(s) => s,
+            Err(e) => panic!("expected Ok, got {e:?}"),
+        };
+        assert_eq!(
+            migrations::current_version(opened.conn()).unwrap(),
+            i64::from(migrations::MAX_KNOWN_VERSION)
+        );
+    }
+
+    #[test]
+    fn open_existing_maps_a_failed_open_migration_to_migration_failed() {
+        // A forward migration that errors at open must surface as the distinct
+        // MigrationFailed arm (rendered with its SQLite cause), not the generic
+        // Sqlite read arm. Pre-adding migration 3's `closing_reason` column to a
+        // v2 store makes its `ALTER TABLE` fail with `duplicate column`.
+        let store = TmpStore::new("repo");
+        seed_tk_db_at_version(&store, 2);
+        let conn = Connection::open(store.db_path()).unwrap();
+        conn.execute_batch("alter table items add column closing_reason text")
+            .unwrap();
+        drop(conn);
+
+        let runner = fake_runner_for(&store);
+        assert!(matches!(
+            open_existing(&runner, &cwd(), &fixed_clock()),
+            Err(OpenError::MigrationFailed(_))
+        ));
     }
 
     #[test]
@@ -503,7 +589,7 @@ mod tests {
             },
         );
         assert!(matches!(
-            open_existing(&runner, &cwd()),
+            open_existing(&runner, &cwd(), &fixed_clock()),
             Err(OpenError::DiscoveryFailed(_))
         ));
     }

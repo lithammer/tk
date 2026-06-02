@@ -12,6 +12,7 @@ use std::path::Path;
 
 use thiserror::Error;
 
+use crate::clock::Clock;
 use crate::proc::ProcRunner;
 use crate::store::repository::{self, ResolvedItemRef, ResolvedItemRefWithDisplay, Store};
 
@@ -37,8 +38,9 @@ pub enum ResolveError {
 pub fn open_for_command<R: ProcRunner + ?Sized>(
     runner: &R,
     cwd: &Path,
+    clock: &dyn Clock,
 ) -> Result<Store, OpenError> {
-    repository::open_existing(runner, cwd)
+    repository::open_existing(runner, cwd, clock)
 }
 
 /// Resolve a Display ID or Alias against an opened store.
@@ -84,6 +86,12 @@ pub fn render_open_error<W: Write + ?Sized>(stderr: &mut W, command: &str, err: 
         // other variant's `Display` is already the stable user-facing line
         // (including DiscoveryFailed, which forwards git's own message).
         OpenError::Sqlite(e) => render_storage_error(stderr, command, e),
+        // An open-time migration failure surfaces its static line plus the
+        // underlying SQLite cause (matching the storage-error shape), so the
+        // upgrade fault is not reduced to a bare headline.
+        OpenError::MigrationFailed(e) => {
+            let _ = writeln!(stderr, "tk {command}: {err}\n{e}");
+        }
         _ => {
             let _ = writeln!(stderr, "tk {command}: {err}");
         }

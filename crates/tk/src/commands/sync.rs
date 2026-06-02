@@ -83,7 +83,7 @@ fn run_sync(deps: Deps<'_>, skip: Option<i64>) -> Exit {
         ..
     } = deps;
 
-    let mut store = match resolver::open_for_command(runner, cwd) {
+    let mut store = match resolver::open_for_command(runner, cwd, clock) {
         Ok(s) => s,
         Err(err) => {
             resolver::render_open_error(stderr, COMMAND, &err);
@@ -139,11 +139,12 @@ fn run_log(deps: Deps<'_>, args: LogArgs) -> Exit {
         stdout,
         stderr,
         runner,
+        clock,
         cwd,
         ..
     } = deps;
 
-    let store = match resolver::open_for_command(runner, cwd) {
+    let store = match resolver::open_for_command(runner, cwd, clock) {
         Ok(s) => s,
         Err(err) => {
             resolver::render_open_error(stderr, LOG_COMMAND, &err);

@@ -53,7 +53,7 @@ pub fn transition(
         ..
     } = deps;
 
-    let mut store = match resolver::open_for_command(runner, cwd) {
+    let mut store = match resolver::open_for_command(runner, cwd, clock) {
         Ok(s) => s,
         Err(err) => {
             resolver::render_open_error(stderr, command, &err);
@@ -144,16 +144,7 @@ mod tests {
     }
 
     fn seed_store(store: &TmpStore) -> Connection {
-        std::fs::create_dir_all(store.tk_dir()).unwrap();
-        let mut conn = Connection::open(store.db_path()).unwrap();
-        conn.execute_batch("pragma foreign_keys = on").unwrap();
-        migrations::apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        conn.execute(
-            "insert into store_config(key, value) values ('display_prefix', 'tk')",
-            [],
-        )
-        .unwrap();
-        conn
+        seed_store_at_version(store, migrations::MAX_KNOWN_VERSION)
     }
 
     struct Harness<'a> {
@@ -259,6 +250,76 @@ mod tests {
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk start: Ticket 'tk-1' is done and cannot be reopened"));
+    }
+
+    /// Seed a store frozen at `version`, omitting later migrations — stands in
+    /// for an on-disk store written by an older `tk` binary.
+    fn seed_store_at_version(store: &TmpStore, version: u32) -> Connection {
+        std::fs::create_dir_all(store.tk_dir()).unwrap();
+        let mut conn = Connection::open(store.db_path()).unwrap();
+        conn.execute_batch("pragma foreign_keys = on").unwrap();
+        migrations::apply_through(&mut conn, version, "2026-05-09T00:00:00.000Z").unwrap();
+        conn.execute(
+            "insert into store_config(key, value) values ('display_prefix', 'tk')",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    const DONE: SuccessLabel = SuccessLabel {
+        ticket: "Done Ticket: ",
+        epic: "Done Epic: ",
+    };
+
+    #[test]
+    fn done_with_reason_heals_a_behind_version_store_then_writes_closing_reason() {
+        // End-to-end tk-110 regression: an upgraded binary opening a store
+        // written before migration 3 (no `closing_reason` column) must heal
+        // the schema on open so `tk done -m` succeeds rather than failing with
+        // `no such column: closing_reason`.
+        let store = TmpStore::new("repo");
+        let conn = seed_store_at_version(&store, 2);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Subject",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = transition(
+            h.deps(),
+            "done",
+            "tk-1",
+            ItemStatus::Done,
+            DONE,
+            Some("Fixed in PR #12"),
+        );
+        assert_eq!(
+            code,
+            Exit::Ok,
+            "stderr: {}",
+            String::from_utf8_lossy(&h.stderr)
+        );
+
+        let conn = Connection::open(store.db_path()).unwrap();
+        let stored: Option<String> = conn
+            .query_row(
+                "select closing_reason from items where id = 't1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some("Fixed in PR #12"));
     }
 
     #[test]

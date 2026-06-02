@@ -35,13 +35,14 @@ pub fn run(deps: Deps<'_>, _args: Args) -> Exit {
     let Deps {
         stdout,
         runner,
+        clock,
         cwd,
         ..
     } = deps;
     // Prime prints only when a Repository Store is initialized here; with no
     // openable store it exits 0 silently so a global agent hook stays quiet in
     // any directory (ADR-0020).
-    if resolver::open_for_command(runner, cwd).is_ok() {
+    if resolver::open_for_command(runner, cwd, clock).is_ok() {
         let _ = stdout.write_all(briefing().as_bytes());
     }
     Exit::Ok
@@ -62,6 +63,14 @@ mod tests {
     };
 
     use super::*;
+    use crate::clock::FakeClock;
+    use crate::proc::{FakeRunner, RunOutput};
+    use crate::render::Styler;
+    use crate::store::migrations;
+    use crate::store::testing::TmpStore;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+    use rusqlite::Connection;
 
     #[test]
     fn briefing_ends_with_single_trailing_newline() {
@@ -69,5 +78,59 @@ mod tests {
         assert!(body.ends_with('\n'));
         assert!(!body.ends_with("\n\n"));
         assert!(body.starts_with("# tk Workflow Context"));
+    }
+
+    #[test]
+    fn prime_against_a_behind_version_store_migrates_and_prints_the_briefing() {
+        // Accepted side effect (tk-110, tracked further by tk-112): with
+        // auto-migrate-on-open, a passive `tk prime` against a store written by
+        // an older binary upgrades the schema and still prints the briefing —
+        // consistent with "tk owns its format". ADR-0020 keeps prime silent
+        // only when no store can be opened.
+        let store = TmpStore::new("repo");
+        std::fs::create_dir_all(store.tk_dir()).unwrap();
+        let mut conn = Connection::open(store.db_path()).unwrap();
+        conn.execute_batch("pragma foreign_keys = on").unwrap();
+        migrations::apply_through(&mut conn, 2, "2026-05-09T00:00:00.000Z").unwrap();
+        drop(conn);
+
+        let cwd_path = std::env::current_dir().unwrap();
+        let runner = FakeRunner::new();
+        runner.expect(
+            &["git", "rev-parse"],
+            RunOutput {
+                exit_code: 0,
+                stdout: store.git_rev_parse_stdout(),
+                stderr: Vec::new(),
+            },
+        );
+        let clock = FakeClock::new(1_778_284_800_000);
+        let mut rng = StdRng::seed_from_u64(0);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let deps = Deps {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+            stdin: &mut stdin,
+            runner: &runner,
+            clock: &clock,
+            rng: &mut rng,
+            cwd: &cwd_path,
+            styler: Styler::plain(),
+        };
+
+        assert_eq!(run(deps, Args {}), Exit::Ok);
+        assert!(
+            String::from_utf8(stdout)
+                .unwrap()
+                .starts_with("# tk Workflow Context")
+        );
+
+        let conn = Connection::open(store.db_path()).unwrap();
+        assert_eq!(
+            migrations::current_version(&conn).unwrap(),
+            i64::from(migrations::MAX_KNOWN_VERSION)
+        );
     }
 }
