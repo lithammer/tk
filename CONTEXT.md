@@ -104,6 +104,11 @@ _Avoid_: Reopen, Pause
 The **`tk`** command intent for generating scope-aware agent briefing output.
 _Avoid_: Memory Dump
 
+**Search**:
+The **`tk`** command intent for finding **Tickets** and **Epics** by a
+case-insensitive substring of their title.
+_Avoid_: Grep, Full-text search
+
 **Repository Store**:
 The shared SQLite-backed local state for **tk** within one version-control repository.
 _Avoid_: Workspace Store, Global Store
@@ -375,8 +380,10 @@ _Avoid_: ticket, tickets
   code owns **Scope** resolution from argument or environment.
 - **`tk next`** takes only the optional **Scope** argument; it has no other
   flags in v1.
-- Done-item browsing is deferred until there is a concrete workflow for old
-  completed work.
+- Done-item browsing through **`tk next`** / **`tk list`** is deferred; those
+  views do not surface `done` items. **`tk search`** is the sanctioned path for
+  finding a specific `done` **Ticket** or **Epic** by title, since it matches
+  every **Item Status**.
 - **`tk list`** takes an optional positional `<epic-id>` argument; absent it, **`tk list`** reads `TK_SCOPE`, then renders the whole **Repository Store**.
 - When a **Scope** is active, **`tk list`** renders only that **Epic** and its child **Tickets**, and prints a hint that the view is filtered.
 - **List Tree** renders **Epics** as top-level rows, child **Tickets** nested under their **Epic**, and unparented **Tickets** as top-level rows.
@@ -385,6 +392,11 @@ _Avoid_: ticket, tickets
   for `active`, and `✓` for `done`.
 - **`tk next`** does not select **Epics**.
 - **`tk list --ready`** keeps the **List Tree** shape and includes non-empty **Epics** as containers for ready child **Tickets**.
+- **`tk search`** finds **Tickets** and **Epics** whose title contains the query as a case-insensitive literal substring.
+- **`tk search`** covers the whole **Repository Store** and every **Item Status**, including `done`; it ignores **Scope** and is never narrowed by `TK_SCOPE`.
+- **`tk search`** matches title text only. Exact **Display ID** / **Alias** lookup is **`tk show`**; body and content search are deferred to a separate **`tk grep`**.
+- **`tk search`** renders matches reusing **`tk list`** row rendering and chrome, laid out flat without **List Tree** nesting.
+- **`tk search`** takes a single required positional query and has no flags in v1; result limiting, **Origin** / **Ticket Kind** / **Priority** / status filtering, and sorting are deferred.
 
 ## Example dialogue
 
@@ -526,3 +538,6 @@ _Avoid_: ticket, tickets
 - Generic field patches were considered for **Mutations** — resolved: **Mutations** use named domain operations.
 - Comment, label, and assignee mutations were considered for v1 — resolved: they are deferred.
 - Event sourcing was considered for current state — resolved: the **Repository Store** stores current state, and the **Mutation Log** acts as an outbox for backend replay.
+- Searching body text in **`tk search`**, by default or behind a `--body` flag, was considered (tk-79) — resolved: **`tk search`** matches title text only; body/content search is a separate, deferred **`tk grep`** that renders **`tk show`**-style match context. A body-only hit has no provenance slot in a reused **`tk list`** row and would read as a false positive (ADR-0025).
+- Matching **Display IDs** and **Aliases** in **`tk search`** (exact + prefix, the original tk-79 framing) was considered — resolved: dropped. Exact-identifier lookup duplicates **`tk show`** and prefix recall is thin against short sequential **Display IDs**; search's distinct value is fuzzy title recall (ADR-0025).
+- Honouring `TK_SCOPE` in **`tk search`** was considered — resolved: search is a whole-**Repository Store** lookup; silently narrowing it to an ambient Epic would hide the searched-for item, the hidden-state smell ADR-0022 rejected.
