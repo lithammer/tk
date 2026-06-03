@@ -248,4 +248,8 @@ jobs:
       - name: Attach release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # This job has no actions/checkout (it only downloads artifacts), so
+          # gh has no git remote to infer the target repo from. Name it
+          # explicitly or `gh release upload` aborts with "not a git repository".
+          GH_REPO: ${{ github.repository }}
         run: gh release upload "${{ github.event.release.tag_name }}" release-flat/tk-* --clobber
