@@ -1,10 +1,13 @@
 # Agent Notes
 
 - Read [README.md](./README.md) for the project overview.
-- Read [ARCHITECTURE.md](./ARCHITECTURE.md) before changing module boundaries
-  or repository-store invariants.
-- Read [CONTEXT.md](./CONTEXT.md) before changing domain language.
-- Read [docs/adr/](./docs/adr/) before revisiting recorded design decisions.
+- Read [CONTEXT.md](./CONTEXT.md) — domain language and model — before changing
+  domain language.
+- Read [ARCHITECTURE.md](./ARCHITECTURE.md) — module map, boundaries, and
+  Repository Store invariants — before changing module boundaries or those
+  invariants.
+- Read [docs/adr/](./docs/adr/) — recorded design decisions — before revisiting
+  them.
 
 ## Rust Coding Standards
 

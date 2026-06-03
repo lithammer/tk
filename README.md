@@ -57,10 +57,3 @@ tk done tk-1
 
 Use `tk --help`, `tk <command> --help`, or `tk manpage` for the command
 reference.
-
-## Project docs
-
-- [CONTEXT.md](./CONTEXT.md) — domain language and model.
-- [ARCHITECTURE.md](./ARCHITECTURE.md) — module map, boundaries, and
-  Repository Store invariants.
-- [docs/adr/](./docs/adr/) — recorded design decisions.
