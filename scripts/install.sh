@@ -230,12 +230,15 @@ fi
 
 # --- 11. Render success line ----------------------------------------------
 
+# NEW_VERSION / OLD_VERSION are the `tk --version` output, which clap
+# prefixes with the binary name ("tk v0.1.2 (<triple>)"). Don't prepend
+# another literal "tk" here or the line reads "Installed tk tk v...".
 if [ -z "$OLD_VERSION" ]; then
-    echo "Installed tk $NEW_VERSION at $DEST_DIR/tk"
+    echo "Installed $NEW_VERSION at $DEST_DIR/tk"
 elif [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
-    echo "Reinstalled tk $NEW_VERSION at $DEST_DIR/tk"
+    echo "Reinstalled $NEW_VERSION at $DEST_DIR/tk"
 else
-    echo "Upgraded tk: $OLD_VERSION -> $NEW_VERSION at $DEST_DIR/tk"
+    echo "Upgraded $OLD_VERSION -> $NEW_VERSION at $DEST_DIR/tk"
 fi
 
 # --- 12. PATH advice (stderr, informational) ------------------------------

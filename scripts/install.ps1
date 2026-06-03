@@ -114,12 +114,15 @@ function Invoke-Install {
     }
 
     # --- 4. Success line (mirrors install.sh wording) --------------------
+    # $newVersion / $oldVersion are the `tk --version` output, which clap
+    # prefixes with the binary name ("tk v0.1.2 (<triple>)"). Don't prepend
+    # another literal "tk" or the line reads "Installed tk tk v...".
     if (-not $oldVersion) {
-        Write-Host "Installed tk $newVersion at $binary"
+        Write-Host "Installed $newVersion at $binary"
     } elseif ($oldVersion -eq $newVersion) {
-        Write-Host "Reinstalled tk $newVersion at $binary"
+        Write-Host "Reinstalled $newVersion at $binary"
     } else {
-        Write-Host "Upgraded tk: $oldVersion -> $newVersion at $binary"
+        Write-Host "Upgraded $oldVersion -> $newVersion at $binary"
     }
 
     # --- 5. PATH advice / setup (User scope, idempotent) ----------------
