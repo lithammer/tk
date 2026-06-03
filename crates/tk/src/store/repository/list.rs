@@ -202,7 +202,7 @@ pub fn list_rows(store: &Store, options: ListOptions<'_>) -> Result<Vec<ListRow>
     Ok(rows)
 }
 
-fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<ListRow> {
+pub(super) fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<ListRow> {
     let has_unresolved_blocker: i64 = row.get(10)?;
     Ok(ListRow {
         id: row.get(0)?,

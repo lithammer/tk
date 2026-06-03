@@ -1,0 +1,13 @@
+---
+source: crates/tk/tests/scenarios.rs
+expression: "p.run(&format!(\"{command} --help\"))"
+---
+Find Tickets and Epics by a title substring
+
+Usage: tk search <QUERY>
+
+Arguments:
+  <QUERY>  Title substring to search for (case-insensitive, matched literally)
+
+Options:
+  -h, --help  Print help

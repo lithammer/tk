@@ -117,6 +117,8 @@ enum Command {
     Next(commands::next::Args),
     /// Render one Ticket or Epic with current state.
     Show(commands::show::Args),
+    /// Find Tickets and Epics by a title substring.
+    Search(commands::search::Args),
     /// Update the title, body, priority, or parent of a Ticket or Epic.
     Update(commands::update::Args),
     /// Mark a Ticket or Epic active.
@@ -159,6 +161,7 @@ pub fn run_argv(deps: Deps<'_>, argv: &[String]) -> std::io::Result<Exit> {
         Command::List(args) => Ok(commands::list::run(deps, args)),
         Command::Next(args) => Ok(commands::next::run(deps, args)),
         Command::Show(args) => Ok(commands::show::run(deps, args)),
+        Command::Search(args) => Ok(commands::search::run(deps, args)),
         Command::Update(args) => Ok(commands::update::run(deps, args)),
         Command::Start(args) => Ok(commands::start::run(deps, args)),
         Command::Stop(args) => Ok(commands::stop::run(deps, args)),

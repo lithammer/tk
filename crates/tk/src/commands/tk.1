@@ -153,6 +153,53 @@ Total: 1 item (1 open)
 Status: ○ open  ◐ active  ✓ done
 .fi
 .RE
+.SS Searching by title
+.TP
+\fBtk search\fR \fIQUERY\fR
+Find Tickets and Epics whose title contains
+.I QUERY
+as a case-insensitive literal substring.
+.PP
+Search covers the whole Repository Store and every Item Status, including
+done; it ignores Scope and is never narrowed by TK_SCOPE. It matches title
+text only: exact Display ID or Alias lookup is
+.BR tk\ show .
+Matches render flat, without List Tree nesting, reusing the
+.B tk list
+row rendering and summary chrome, ordered by creation.
+.PP
+.I QUERY
+is a single required positional matched literally, so
+.B %
+and
+.B _
+carry no special meaning. Use
+.B \-\-
+to search a query that begins with a dash (\fBtk search \-\- \-v\fR).
+.PP
+When nothing matches,
+.B tk search
+prints a no-match line and exits 0:
+.PP
+.RS 4
+.nf
+No items match "auth".
+.fi
+.RE
+.PP
+On success it prints the matching rows followed by the List Tree summary:
+.PP
+.RS 4
+.nf
+○ project-1 [epic] Auth rework
+◐ project-2 ● P2 Add auth middleware
+✓ project-3 ● P2 Auth token refresh
+--------------------------------------------------------------------------------
+Total: 3 items (1 open, 1 active, 1 done)
+
+Status: ○ open  ◐ active  ✓ done
+.fi
+.RE
 .SS Selecting Ready Work
 .TP
 .B tk next

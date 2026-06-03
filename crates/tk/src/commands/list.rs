@@ -12,17 +12,12 @@
 
 use std::io::Write;
 
-use anstyle::Style;
 use clap::Args as ClapArgs;
 
 use crate::cli::{Deps, Exit};
+use crate::commands::item_row::{render_chrome, render_row};
 use crate::commands::{resolver, scope};
-use crate::domain::item_class::ItemClass;
-use crate::domain::priority::Priority;
-use crate::domain::status::ItemStatus;
-use crate::domain::ticket_kind::TicketKind;
 use crate::render::palette;
-use crate::render::sanitize;
 use crate::render::styler::SubStyler;
 use crate::store::repository::list::{
     self, ListClassFilter, ListOptions, ListOriginFilter, ListRow, ListView,
@@ -177,8 +172,6 @@ fn render<W: Write + ?Sized>(
         return Ok(());
     }
 
-    let counts = StatusCounts::tally(rows);
-
     // Walk roots first; embed children inline so the renderer can lay
     // out a tree without a second pass over the row vector.
     for row in rows {
@@ -189,40 +182,7 @@ fn render<W: Write + ?Sized>(
         render_children(stdout, rows, row, styler)?;
     }
 
-    writeln!(
-        stdout,
-        "{}",
-        styler.wrap(
-            palette::SEPARATOR,
-            "--------------------------------------------------------------------------------"
-        )
-    )?;
-
-    render_total(stdout, rows.len(), counts)?;
-    stdout.write_all(b"\n")?;
-
-    write!(stdout, "Status: ")?;
-    write!(
-        stdout,
-        "{} open  ",
-        styler.wrap(palette::STATUS_OPEN, ItemStatus::Open.glyph())
-    )?;
-    write!(
-        stdout,
-        "{} active  ",
-        styler.wrap(palette::STATUS_ACTIVE, ItemStatus::Active.glyph())
-    )?;
-    writeln!(
-        stdout,
-        "{} done",
-        styler.wrap(palette::STATUS_DONE, ItemStatus::Done.glyph())
-    )?;
-    writeln!(
-        stdout,
-        "Blocked: {} blocked",
-        styler.wrap(palette::BLOCKED, "\u{2298}")
-    )?;
-    Ok(())
+    render_chrome(stdout, rows, styler)
 }
 
 fn render_children<W: Write + ?Sized>(
@@ -280,136 +240,6 @@ fn empty_message(options: ListOptions<'_>) -> &'static str {
         ListView::Ready => "No ready items.",
         ListView::Blocked => "No blocked items.",
         ListView::Active => "No active items.",
-    }
-}
-
-fn render_row<W: Write + ?Sized>(
-    stdout: &mut W,
-    row: &ListRow,
-    tree_prefix: &str,
-    styler: SubStyler,
-) -> std::io::Result<()> {
-    stdout.write_all(tree_prefix.as_bytes())?;
-
-    if row.has_unresolved_blocker {
-        write!(stdout, "{}", styler.open(palette::BLOCKED_ROW))?;
-    }
-
-    write!(
-        stdout,
-        "{} ",
-        styler.wrap(status_style(row.status), row.status.glyph())
-    )?;
-    write!(
-        stdout,
-        "{}",
-        styler.wrap(id_style(row.item_class), &row.display_id)
-    )?;
-
-    if row.has_unresolved_blocker {
-        write!(stdout, " {}", styler.wrap(palette::BLOCKED, "\u{2298}"))?;
-    }
-
-    match row.item_class {
-        ItemClass::Ticket => {
-            let priority = row
-                .priority
-                .expect("schema CHECK guarantees Tickets carry a Priority");
-            let p_style = priority_style(priority);
-            write!(stdout, " {} ", styler.wrap(p_style, "\u{25cf}"))?;
-            write!(stdout, "{}", styler.wrap(p_style, priority.text()))?;
-            if row.ticket_kind == Some(TicketKind::Bug) {
-                write!(stdout, " {}", styler.wrap(palette::KIND_BUG, "[bug]"))?;
-            }
-            stdout.write_all(b" ")?;
-            sanitize::write_sanitized_line(stdout, row.title.as_bytes())?;
-        }
-        ItemClass::Epic => {
-            write!(stdout, " {} ", styler.wrap(palette::KIND_EPIC, "[epic]"))?;
-            sanitize::write_sanitized_line(stdout, row.title.as_bytes())?;
-        }
-    }
-
-    if row.has_unresolved_blocker {
-        write!(stdout, "{}", styler.close(palette::BLOCKED_ROW))?;
-    }
-    stdout.write_all(b"\n")
-}
-
-fn render_total<W: Write + ?Sized>(
-    stdout: &mut W,
-    total: usize,
-    counts: StatusCounts,
-) -> std::io::Result<()> {
-    let noun = if total == 1 { "item" } else { "items" };
-    write!(stdout, "Total: {total} {noun} (")?;
-    let mut wrote = false;
-    write_count(stdout, &mut wrote, counts.open, "open")?;
-    write_count(stdout, &mut wrote, counts.active, "active")?;
-    write_count(stdout, &mut wrote, counts.done, "done")?;
-    writeln!(stdout, ")")
-}
-
-fn write_count<W: Write + ?Sized>(
-    stdout: &mut W,
-    wrote: &mut bool,
-    count: usize,
-    label: &str,
-) -> std::io::Result<()> {
-    if count == 0 {
-        return Ok(());
-    }
-    if *wrote {
-        write!(stdout, ", ")?;
-    }
-    write!(stdout, "{count} {label}")?;
-    *wrote = true;
-    Ok(())
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct StatusCounts {
-    open: usize,
-    active: usize,
-    done: usize,
-}
-
-impl StatusCounts {
-    fn tally(rows: &[ListRow]) -> Self {
-        let mut counts = Self::default();
-        for row in rows {
-            match row.status {
-                ItemStatus::Open => counts.open += 1,
-                ItemStatus::Active => counts.active += 1,
-                ItemStatus::Done => counts.done += 1,
-            }
-        }
-        counts
-    }
-}
-
-fn status_style(status: ItemStatus) -> Style {
-    match status {
-        ItemStatus::Open => palette::STATUS_OPEN,
-        ItemStatus::Active => palette::STATUS_ACTIVE,
-        ItemStatus::Done => palette::STATUS_DONE,
-    }
-}
-
-fn priority_style(p: Priority) -> Style {
-    match p {
-        Priority::P0 => palette::PRIORITY_P0,
-        Priority::P1 => palette::PRIORITY_P1,
-        Priority::P2 => palette::PRIORITY_P2,
-        Priority::P3 => palette::PRIORITY_P3,
-        Priority::P4 => palette::PRIORITY_P4,
-    }
-}
-
-fn id_style(class: ItemClass) -> Style {
-    match class {
-        ItemClass::Epic => palette::ID_EPIC,
-        ItemClass::Ticket => palette::ID_TICKET,
     }
 }
 

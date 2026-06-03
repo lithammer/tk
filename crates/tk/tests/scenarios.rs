@@ -283,10 +283,71 @@ fn tk_scope_env_filters_list_to_the_epic() {
 #[test]
 fn command_help_snapshots() {
     let p = Repo::new("repo");
-    for command in ["block", "done", "list", "next", "show", "unblock", "update"] {
+    for command in [
+        "block", "done", "list", "next", "search", "show", "unblock", "update",
+    ] {
         insta::assert_snapshot!(
             format!("help_{command}"),
             p.run(&format!("{command} --help"))
         );
     }
+}
+
+/// `tk search` is a flat, whole-store title lookup across every Item Status
+/// (ADR-0025). The matched child Ticket renders flat — no List Tree nesting —
+/// even though its parent Epic also matches, and the `done` match shows no
+/// `⊘` despite its unresolved blocker.
+#[test]
+fn search_matches_titles_across_statuses() {
+    let p = Repo::new("project");
+    p.run("init");
+    p.run("add --epic -m 'Auth rework'"); // project-1
+    p.run("add -m 'Add auth middleware'"); // project-2
+    p.run("add -m 'Auth token refresh'"); // project-3
+    p.run("add -m 'Unrelated chore'"); // project-4
+    p.run("add --parent project-1 -m 'Auth login form'"); // project-5
+    p.run("start project-2");
+    p.run("done project-3 -m 'shipped'");
+
+    tk!(p, "search auth", @"
+    ○ project-1 [epic] Auth rework
+    ◐ project-2 ● P2 Add auth middleware
+    ✓ project-3 ● P2 Auth token refresh
+    ○ project-5 ● P2 Auth login form
+    --------------------------------------------------------------------------------
+    Total: 4 items (2 open, 1 active, 1 done)
+
+    Status: ○ open  ◐ active  ✓ done
+    Blocked: ⊘ blocked
+    ");
+    tk!(p, "search nonexistent", @r#"No items match "nonexistent"."#);
+}
+
+/// The query is a single required positional: omitting it is a usage error,
+/// and `--` lets a leading-dash query reach the positional.
+#[test]
+fn search_requires_a_query_and_double_dash_escapes_it() {
+    let p = Repo::new("project");
+    p.run("init");
+    p.run("add -m 'Investigate the -v verbose flag'"); // project-1
+
+    tk!(p, "search", @"
+    exit 2
+    -- stdout --
+    -- stderr --
+    error: the following required arguments were not provided:
+      <QUERY>
+
+    Usage: tk search <QUERY>
+
+    For more information, try '--help'.
+    ");
+    tk!(p, "search -- -v", @"
+    ○ project-1 ● P2 Investigate the -v verbose flag
+    --------------------------------------------------------------------------------
+    Total: 1 item (1 open)
+
+    Status: ○ open  ◐ active  ✓ done
+    Blocked: ⊘ blocked
+    ");
 }

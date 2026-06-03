@@ -36,6 +36,7 @@ pub mod create;
 pub mod dependency;
 pub mod list;
 pub mod next;
+pub mod search;
 pub mod show;
 pub mod status;
 pub mod update;
