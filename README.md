@@ -54,7 +54,7 @@ tk next
 tk done tk-1
 ```
 
-Use `tk --help`, `tk <command> --help`, or `tk manpage` for the command
+Use `tk --help`, `tk <command> --help`, or `man tk` for the command
 reference.
 
 ## License
