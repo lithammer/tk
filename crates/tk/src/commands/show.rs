@@ -4,14 +4,14 @@
 //!
 //! ```text
 //! <status-glyph> <display-id> · <title>
-//!   <P_> · <kind> · Created: <created>[ · Updated: <updated>]    (Tickets)
-//!   EPIC · Created: <created>[ · Updated: <updated>]             (Epics)
+//!   <P_> · <Kind> · Created: <created>[ · Updated: <updated>]    (Tickets)
+//!   Epic · Created: <created>[ · Updated: <updated>]             (Epics)
 //!
 //! DESCRIPTION
 //! <body...>
 //!
 //! PARENT / TICKETS / BLOCKED BY / BLOCKING / EXTERNAL BLOCKERS
-//!   <glyph> <status-glyph> <display-id>: [(EPIC) ]<title>[ ● <priority>]
+//!   <glyph> <status-glyph> <display-id>: [(Epic) ]<title>[ ● <priority>]
 //! ```
 //!
 //! Empty sections are omitted. Output ends with a single trailing newline.
@@ -117,7 +117,13 @@ fn render<W: Write + ?Sized>(
     stdout.write_all(b"  ")?;
     match detail.item_class {
         ItemClass::Epic => {
-            write!(stdout, "{}", styler.wrap(palette::KIND_EPIC, "EPIC"))?;
+            // Capitalized `Epic` reads in the same register as the Ticket
+            // Kind labels below; `text()` stays lowercase for storage.
+            write!(
+                stdout,
+                "{}",
+                styler.wrap(palette::KIND_EPIC, ItemClass::Epic.label())
+            )?;
         }
         ItemClass::Ticket => {
             let priority = detail
@@ -134,9 +140,9 @@ fn render<W: Write + ?Sized>(
                 .expect("Tickets always carry a TicketKind (schema CHECK)");
             match kind {
                 TicketKind::Bug => {
-                    write!(stdout, "{}", styler.wrap(palette::KIND_BUG, kind.text()))?;
+                    write!(stdout, "{}", styler.wrap(palette::KIND_BUG, kind.label()))?;
                 }
-                TicketKind::Task => stdout.write_all(kind.text().as_bytes())?,
+                TicketKind::Task => stdout.write_all(kind.label().as_bytes())?,
             }
         }
     }
@@ -263,7 +269,7 @@ fn render_sub_row<W: Write + ?Sized>(
         styler.wrap(id_style(item.item_class), &item.display_id)
     )?;
     if item.item_class == ItemClass::Epic {
-        write!(stdout, "{} ", styler.wrap(palette::KIND_EPIC, "(EPIC)"))?;
+        write!(stdout, "{} ", styler.wrap(palette::KIND_EPIC, "(Epic)"))?;
     }
     sanitize::write_sanitized_line(stdout, item.title.as_bytes())?;
     if let Some(p) = item.priority {
@@ -461,9 +467,9 @@ mod tests {
             stdout.contains("\u{25cb} tk-1 \u{b7} Plain ticket\n"),
             "stdout={stdout:?}"
         );
-        // Facet bar: P2 · task · Created: 2026-05-09 — the fixture leaves
+        // Facet bar: P2 · Task · Created: 2026-05-09 — the fixture leaves
         // updated_at == created_at, so the Updated facet is omitted.
-        assert!(stdout.contains("  P2 \u{b7} task \u{b7} Created: 2026-05-09\n"));
+        assert!(stdout.contains("  P2 \u{b7} Task \u{b7} Created: 2026-05-09\n"));
         assert!(!stdout.contains("Updated:"), "stdout={stdout:?}");
     }
 
@@ -494,7 +500,7 @@ mod tests {
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(
             stdout
-                .contains("  P2 \u{b7} task \u{b7} Created: 2026-05-16 \u{b7} Updated: 2026-05-29"),
+                .contains("  P2 \u{b7} Task \u{b7} Created: 2026-05-16 \u{b7} Updated: 2026-05-29"),
             "stdout={stdout:?}"
         );
     }
@@ -538,7 +544,12 @@ mod tests {
         let code = run(h.deps(), Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
-        assert!(stdout.contains("EPIC"), "stdout={stdout:?}");
+        // Facet bar carries the capitalized `Epic` token (asserted on the
+        // leading `  Epic \u{b7}` so the Epic title can't satisfy it by chance).
+        assert!(
+            stdout.contains("  Epic \u{b7} Created: 2026-05-09"),
+            "stdout={stdout:?}"
+        );
         assert!(stdout.contains("TICKETS"));
         assert!(stdout.contains("tk-2: Child ticket"));
     }

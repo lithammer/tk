@@ -16,12 +16,25 @@ pub enum TicketKind {
 }
 
 impl TicketKind {
-    /// SQLite storage and CLI rendering string.
+    /// SQLite storage spelling and the value the `items.ticket_kind` CHECK
+    /// constraint accepts; also the lowercase form `tk list` renders.
     #[must_use]
     pub fn text(self) -> &'static str {
         match self {
             Self::Task => "task",
             Self::Bug => "bug",
+        }
+    }
+
+    /// Capitalized noun for the `tk show` facet bar, mirroring
+    /// [`ItemClass::label`](crate::domain::item_class::ItemClass::label) so the
+    /// Ticket Kind and Item Class read in the same register (`Task`/`Bug`
+    /// alongside `Epic`).
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Task => "Task",
+            Self::Bug => "Bug",
         }
     }
 }
@@ -45,5 +58,14 @@ mod tests {
     #[test]
     fn default_is_task() {
         assert_eq!(TicketKind::default(), TicketKind::Task);
+    }
+
+    #[test]
+    fn label_is_capitalized_and_distinct_from_storage_text() {
+        // The facet bar reads `Task`/`Bug`; the SQL CHECK column stays
+        // lowercase. Guards against collapsing the two back together.
+        assert_eq!(TicketKind::Task.label(), "Task");
+        assert_eq!(TicketKind::Bug.label(), "Bug");
+        assert_eq!(TicketKind::Bug.text(), "bug");
     }
 }
