@@ -2,9 +2,11 @@
 //!
 //! Default behavior writes the embedded bytes to stdout (caller can
 //! pipe into `man -l -` or redirect to a file). `--install` copies the
-//! same bytes to `<exe-dir>/../share/man/man1/tk.1` using an atomic
-//! stage-and-rename that never deletes an existing target on failure;
-//! `tk.1` is recreated by the rename step instead.
+//! same bytes to `<prefix>/share/man/man1/tk.1` — where `<prefix>` is
+//! the parent of the executable's directory (e.g. `/usr/local` for a
+//! `/usr/local/bin/tk` install) — using an atomic stage-and-rename that
+//! never deletes an existing target on failure; `tk.1` is recreated by
+//! the rename step instead.
 
 use std::io::Write;
 use std::path::Path;
@@ -73,7 +75,13 @@ fn install(deps: Deps<'_>) -> Exit {
         return Exit::Failure;
     };
 
-    let target_dir = exe_dir.join("..").join("share").join("man").join("man1");
+    // Install prefix is the parent of the executable's directory
+    // (`/usr/local/bin/tk` -> `/usr/local`). Computing the parent
+    // directly, rather than appending a `..` segment, keeps the
+    // displayed path clean (`/usr/local/share/...`). Fall back to the
+    // executable's directory if it has no parent (e.g. a root install).
+    let install_prefix = exe_dir.parent().unwrap_or(exe_dir);
+    let target_dir = install_prefix.join("share").join("man").join("man1");
     let target_path = target_dir.join("tk.1");
 
     if let Err(err) = std::fs::create_dir_all(&target_dir) {
