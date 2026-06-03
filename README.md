@@ -3,10 +3,9 @@
 tk (pronounced "ticket") is an agent-first command-line tool for managing work
 items through a simple local interface and pluggable issue-tracker backends.
 
-The goal is similar in spirit to Beads: make work visible to humans and agents
-from the command line. tk deliberately aims for a simpler architecture,
-local-first capture, and backend adapters for systems like GitHub Issues and
-Jira.
+The goal is to make work visible to humans and agents from the command line.
+tk aims for a simple architecture, local-first capture, and backend adapters
+for systems like GitHub Issues and Jira.
 
 Prebuilt releases are published for Linux, Apple Silicon macOS, and Windows.
 

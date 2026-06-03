@@ -10,7 +10,7 @@ _Avoid_: Ticket Project, ticket, tickets
 
 **Ticket**:
 A backend-agnostic work item managed through **tk**.
-_Avoid_: Issue, Task, Bead
+_Avoid_: Issue, Task
 
 **Display ID**:
 The identifier shown to users and agents for a **Ticket** or **Epic**.
@@ -227,7 +227,7 @@ _Avoid_: ticket, tickets
 ## Relationships
 
 - **`tk`** is the command-line executable for **tk**.
-- A **Ticket** may be backed by a GitHub issue, Jira issue, Beads bead, or another backend-specific work item.
+- A **Ticket** may be backed by a GitHub issue, Jira issue, or another backend-specific work item.
 - An **Epic** contains zero or more **Tickets**.
 - An **Epic** does not contain other **Epics** in v1.
 - A **Ticket** may belong to zero or one **Epic** in v1.
