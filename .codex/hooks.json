@@ -7,7 +7,7 @@
 					{
 						"type": "command",
 						"command": "./target/debug/tk prime",
-						"statusMessage": "Loading session notes"
+						"statusMessage": "Priming `tk`"
 					}
 				]
 			}
