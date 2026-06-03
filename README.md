@@ -19,10 +19,12 @@ curl -fsSL https://raw.githubusercontent.com/lithammer/tk/main/scripts/install.s
 
 ### Windows
 
-Download `tk-x86_64-pc-windows-gnu.exe` from the
-[latest release](https://github.com/lithammer/tk/releases/latest), rename it to
-`tk.exe`, and place it in a directory on `PATH`. `tk self-update` works after
-that.
+```powershell
+irm https://raw.githubusercontent.com/lithammer/tk/main/scripts/install.ps1 | iex
+```
+
+This installs to `%LOCALAPPDATA%\tk\bin` and adds it to your User `PATH`;
+restart your terminal afterwards. `tk self-update` keeps it current.
 
 ### Upgrade
 
@@ -33,7 +35,7 @@ variables below for version pinning or ABI switching.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `TK_INSTALL_DIR` | `/usr/local/bin` as root, `~/.local/bin` otherwise | Install directory. |
+| `TK_INSTALL_DIR` | `~/.local/bin` on Linux and macOS; `%LOCALAPPDATA%\tk\bin` on Windows | Install directory. |
 | `TK_VERSION` | latest release | Release version to install. |
 | `TK_LINUX_ABI` | `musl` | Linux ABI variant: `musl`, or `gnu` on x86_64 Linux. |
 

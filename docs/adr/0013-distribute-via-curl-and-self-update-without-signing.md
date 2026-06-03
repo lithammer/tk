@@ -9,9 +9,12 @@ shipped alongside the binaries shares its trust root with them and
 would only catch corruption, not tampering, so v1 publishes neither
 checksums nor signatures. The `man/tk.1` manpage is embedded into the
 binary at compile time and placed by `tk manpage --install` so the
-release asset stays a bare binary; Homebrew/Scoop manifests, minisign
-signing, and a PowerShell install script for Windows are deferred to
-follow-up tickets.
+release asset stays a bare binary. A PowerShell install script at
+`raw.githubusercontent.com/lithammer/tk/main/scripts/install.ps1`
+mirrors the POSIX installer for Windows: same TLS + GitHub trust root,
+same smoke-`--version` verification, and — for the same trust-root
+reasoning — no checksum or signature. Homebrew/Scoop manifests and
+minisign signing are deferred to follow-up tickets.
 
 ## Considered Options
 
