@@ -4,8 +4,8 @@
 //!
 //! ```text
 //! <status-glyph> <display-id> · <title>
-//!   <P_> · <kind> · <created> → <updated>    (Tickets)
-//!   EPIC · <created> → <updated>             (Epics)
+//!   <P_> · <kind> · Created: <created>[ · Updated: <updated>]    (Tickets)
+//!   EPIC · Created: <created>[ · Updated: <updated>]             (Epics)
 //!
 //! DESCRIPTION
 //! <body...>
@@ -140,9 +140,20 @@ fn render<W: Write + ?Sized>(
             }
         }
     }
+    // Labelled date facets. The bare `<created> → <updated>` arrow form read
+    // as a start→end target window even though tk has no due-date concept;
+    // explicit `Created:` / `Updated:` labels foreclose that misreading. The
+    // Updated facet is omitted when the Item has never been modified
+    // (`updated_at == created_at`, the at-insert default from
+    // store::repository::create), so a fresh Ticket shows only its creation
+    // date and Updated reappears once the Item is actually edited.
     let created_date = first_chars(&detail.created_at, 10);
-    let updated_date = first_chars(&detail.updated_at, 10);
-    writeln!(stdout, " \u{b7} {created_date} \u{2192} {updated_date}")?;
+    write!(stdout, " \u{b7} Created: {created_date}")?;
+    if detail.updated_at != detail.created_at {
+        let updated_date = first_chars(&detail.updated_at, 10);
+        write!(stdout, " \u{b7} Updated: {updated_date}")?;
+    }
+    stdout.write_all(b"\n")?;
 
     let mut has_section = false;
 
@@ -450,8 +461,42 @@ mod tests {
             stdout.contains("\u{25cb} tk-1 \u{b7} Plain ticket\n"),
             "stdout={stdout:?}"
         );
-        // Facet bar: P2 · task · 2026-05-09 → 2026-05-09
-        assert!(stdout.contains("  P2 \u{b7} task \u{b7} 2026-05-09 \u{2192} 2026-05-09"));
+        // Facet bar: P2 · task · Created: 2026-05-09 — the fixture leaves
+        // updated_at == created_at, so the Updated facet is omitted.
+        assert!(stdout.contains("  P2 \u{b7} task \u{b7} Created: 2026-05-09\n"));
+        assert!(!stdout.contains("Updated:"), "stdout={stdout:?}");
+    }
+
+    #[test]
+    fn renders_updated_facet_only_when_item_was_modified() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Edited ticket",
+                created_at: "2026-05-16T00:00:00.000Z",
+                updated_at: "2026-05-29T12:34:56.000Z",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run(h.deps(), Args { id: "tk-1".into() });
+        assert_eq!(code, Exit::Ok);
+        let stdout = String::from_utf8(h.stdout).unwrap();
+        assert!(
+            stdout
+                .contains("  P2 \u{b7} task \u{b7} Created: 2026-05-16 \u{b7} Updated: 2026-05-29"),
+            "stdout={stdout:?}"
+        );
     }
 
     #[test]
