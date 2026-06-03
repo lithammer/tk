@@ -46,7 +46,7 @@ impl Clock for RealClock {
 
 /// Render `unix_ms` as `YYYY-MM-DDTHH:MM:SS.fffZ`.
 ///
-/// Slice-0 scenarios pin this exact 24-byte shape via `schema_migrations.applied_at`.
+/// Scenario tests pin this exact 24-byte shape via `schema_migrations.applied_at`.
 /// Jiff's `Timestamp` Display prints either second or nanosecond precision
 /// depending on the fractional part, so we use an explicit strftime to
 /// guarantee the fixed 24-byte width.

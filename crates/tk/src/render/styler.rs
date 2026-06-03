@@ -163,7 +163,7 @@ impl Styler {
     }
 
     /// Sub-styler bound to the stderr choice. The stderr palette has no
-    /// entries in slice 0; only the plumbing is in place (ADR-0014).
+    /// entries yet; only the plumbing is in place (ADR-0014).
     #[must_use]
     pub const fn for_stderr(self) -> SubStyler {
         SubStyler {

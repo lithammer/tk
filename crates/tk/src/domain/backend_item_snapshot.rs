@@ -36,6 +36,6 @@ pub struct BackendItemSnapshot {
     pub status: ItemStatus,
     /// Reserved field — `backend_updated_at` (ISO-8601 string) is collected by
     /// adapters but ignored by the engine in v1. Kept on the snapshot so
-    /// future change-detection slices can fill in without a contract churn.
+    /// future change-detection work can fill in without a contract churn.
     pub backend_updated_at: String,
 }

@@ -9,7 +9,7 @@
 //! Available to crate tests only — `mod testing` is gated on `#[cfg(test)]`
 //! in `store/mod.rs`. Individual helpers may be unused while only a subset
 //! of the repository surface has landed; the umbrella `#[allow(dead_code)]`
-//! is removed in the slice that completes the surface.
+//! is removed once the surface is complete.
 
 #![allow(dead_code)]
 
@@ -80,7 +80,7 @@ impl TmpStore {
 
 /// Raw Repository Store item fixture used by read-side tests.
 ///
-/// Deliberately bypasses production write APIs so slices can seed Epics,
+/// Deliberately bypasses production write APIs so tests can seed Epics,
 /// backend-origin items, Dependencies, and External Blockers before the
 /// matching write commands exist.
 #[derive(Debug, Clone, Copy)]
@@ -213,7 +213,7 @@ pub fn mutation_count(conn: &Connection) -> rusqlite::Result<i64> {
 
 /// Raw Mutation Log fixture for sync engine and read-side outbox tests.
 ///
-/// Bypasses production `mutations::append` so slices can seed `failed`,
+/// Bypasses production `mutations::append` so tests can seed `failed`,
 /// `skipped`, and `applied` Mutations before the sync command surface
 /// exists. The caller picks `sequence` directly; this helper does NOT
 /// touch the `mutation_seq` counter, so tests that mix fixture inserts

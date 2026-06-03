@@ -5,7 +5,7 @@
 //! can substitute a `FakeRunner` without per-call-site changes.
 //!
 //! `tk init` only spawns `git rev-parse`, but the trait must already be shaped
-//! correctly for downstream slices (see [`crate::git::discovery`]).
+//! correctly for downstream callers (see [`crate::git::discovery`]).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

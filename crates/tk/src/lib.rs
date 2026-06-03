@@ -1,4 +1,4 @@
-//! `tk` Rust port — slice 0 (ADR-0018 / ADR-0019).
+//! `tk` — agent-first, repository-local work tracker.
 //!
 //! Modules:
 //!

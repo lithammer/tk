@@ -87,7 +87,7 @@ pub fn discover_paths<R: ProcRunner + ?Sized>(
     // than silently lossy-decode a non-UTF-8 path. The `--path-format=absolute`
     // flag asks git to emit decoded paths; any non-UTF-8 here means the repo's
     // path uses an encoding we cannot represent as `Path` without OS-specific
-    // handling (deferred to a follow-up slice).
+    // handling (deferred to follow-up work).
     let Ok(stdout) = String::from_utf8(out.stdout) else {
         return Err(DiscoveryError::GitOutputUnparseable);
     };

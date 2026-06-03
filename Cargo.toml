@@ -8,12 +8,10 @@ rust-version = "1.96"
 license = "MIT"
 repository = "https://github.com/lithammer/tk"
 
-# Slice 0 ratifies the lint posture for every downstream slice. `pedantic` is
-# enabled from day one (cheap on greenfield, expensive to retrofit) per
-# ADR-0018. The allow-list below is the slice-0 working draft discovered while
-# porting `tk init`; tk-83 promotes the levels to `deny` so `cargo clippy` (and
-# `cargo build` for `[lints.rust]`) hard-fails locally and in CI without needing
-# a `-D warnings` flag on the command line.
+# Workspace-wide lint posture. `pedantic` is enabled from day one (cheap on
+# greenfield, expensive to retrofit) per ADR-0018. The levels are `deny` so
+# `cargo clippy` (and `cargo build` for `[lints.rust]`) hard-fails locally and
+# in CI without needing a `-D warnings` flag on the command line.
 #
 # `nursery` and `restriction` are excluded as groups: `nursery` ships WIP lints,
 # `restriction` contains mutually-contradictory rules. Pull individual lints
@@ -40,7 +38,7 @@ module_name_repetitions = "allow"
 # Backticking each occurrence would noisy them up without aiding navigation.
 doc_markdown = "allow"
 
-# Typed errors in slice 0 are already `thiserror`-annotated; the function-level
+# Typed errors are already `thiserror`-annotated; the function-level
 # `# Errors` section duplicates the `#[error("…")]` strings. Same for
 # `# Panics`: command-side stderr (ADR-0017) is the user-facing failure
 # contract, and library panics are reserved for truly unreachable invariants
@@ -50,7 +48,7 @@ missing_panics_doc = "allow"
 
 # Style: a nested `if` reads better than `if a && b` when each predicate has
 # its own paragraph of justification or when one of the inner branches grows
-# during a later slice.
+# in later work.
 collapsible_if = "allow"
 collapsible_else_if = "allow"
 
@@ -58,7 +56,7 @@ collapsible_else_if = "allow"
 # straight-line — each top-level step of `tk init` (discovery, classify,
 # pragmas, migrations, seed, render) is one block in one function. Splitting
 # for the 100-line cap forces an arbitrary boundary that hurts readability
-# more than it helps; the slice 0 idiom is to keep command pipelines together.
+# more than it helps; the idiom here is to keep command pipelines together.
 too_many_lines = "allow"
 
 # Domain names occasionally collide with their plural / shortened forms

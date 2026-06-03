@@ -64,7 +64,7 @@ impl Exit {
 /// RngCore: Rng {}`, but `Rng` is the primary surface). The convenience
 /// `RngExt` trait is not object-safe and is auto-derived for any `Rng`
 /// implementor, so commands can call `gen_range` etc. on `*deps.rng` once a
-/// downstream slice imports the extension trait.
+/// caller imports the extension trait.
 pub struct Deps<'a> {
     pub stdout: &'a mut dyn Write,
     pub stderr: &'a mut dyn Write,

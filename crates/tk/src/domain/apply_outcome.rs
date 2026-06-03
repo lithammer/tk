@@ -38,7 +38,7 @@ pub enum ApplyOutcome {
 
 /// Adapter-supplied evidence that a Mutation succeeded.
 ///
-/// Intentionally empty today — the Promote slice grows it with the
+/// Intentionally empty today — Promotion grows it with the
 /// backend-assigned identifiers (issue number, Jira key) a successful
 /// `promote_*` Mutation returns. Kept as a struct rather than a unit variant
 /// so that growth is an additive field change, not a variant-shape churn.

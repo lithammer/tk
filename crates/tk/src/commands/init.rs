@@ -3,10 +3,10 @@
 //! The pipeline runs discovery → classify → pragmas → migrations →
 //! display_prefix, emitting the stable stderr messages fixed by ADR-0017.
 //!
-//! Slice 0 ships a flagless command: argument parsing and `--help` /
-//! `--version` rendering happen upstream in [`crate::cli`] via clap-derive,
-//! so [`run`] takes the parsed [`Args`] (currently empty) and proceeds
-//! directly to the pipeline.
+//! `tk init` is flagless: argument parsing and `--help` / `--version`
+//! rendering happen upstream in [`crate::cli`] via clap-derive, so [`run`]
+//! takes the parsed [`Args`] (currently empty) and proceeds directly to the
+//! pipeline.
 
 use std::fs;
 use std::path::Path;
@@ -19,8 +19,8 @@ use crate::git::discovery::{self, DiscoveredPaths};
 use crate::platform;
 use crate::store::{display_prefix, migrations};
 
-/// Flags for `tk init`. Slice 0 is flagless except for clap's auto-generated
-/// `--help` / `-h`; future slices add knobs here.
+/// Flags for `tk init`. Flagless except for clap's auto-generated
+/// `--help` / `-h`; new flags would be added here.
 #[derive(Debug, ClapArgs)]
 pub struct Args {}
 

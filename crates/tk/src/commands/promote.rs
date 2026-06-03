@@ -1,6 +1,6 @@
 //! `tk promote` — not-yet-implemented stub.
 //!
-//! Promotion (Local → Remote) lands in a later slice, once the Remote and sync
+//! Promotion (Local → Remote) lands in a later release, once the Remote and sync
 //! engine are exercised against a real Backend Adapter (tk-40). The stub keeps
 //! the command surface present — `tk --help` lists it and a fresh agent session
 //! gets a clear "planned" signal — while exiting 1 with empty stdout so no
@@ -23,7 +23,7 @@ pub fn run(deps: Deps<'_>, _args: Args) -> Exit {
     let _ = writeln!(stderr, "tk promote: not yet implemented");
     let _ = writeln!(
         stderr,
-        "Planned: later slice once Remote and sync are in place."
+        "Planned: available once Remote and sync are in place."
     );
     Exit::Failure
 }

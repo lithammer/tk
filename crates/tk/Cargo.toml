@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Repository-local work tracker (Rust port — slice 0)"
+description = "Agent-first, repository-local work tracker with pluggable issue-tracker backends"
 
 [[bin]]
 name = "tk"
@@ -16,7 +16,7 @@ workspace = true
 
 [dependencies]
 # clap (derive API) owns top-level dispatch and per-command help.
-# ADR-0018 pins this as the slice-0 idiom.
+# ADR-0018 pins this as the dispatch idiom.
 clap = { version = "4", features = ["derive"] }
 
 # Styled output: anstyle defines the palette of named `Style` constants
@@ -54,8 +54,8 @@ jiff = { version = "0.2", default-features = false, features = ["std"] }
 
 # RNG. tk init doesn't draw randomness; first consumers are `tk add` (internal
 # IDs), `tk self-update` / `tk manpage` (stage_name suffix), and `tk sync`.
-# Wired in slice 0 so the trait shape every downstream slice inherits is
-# `&mut dyn Rng` (the dyn-compatible low-level trait); production seeds `StdRng`
+# The trait shape callers inherit is `&mut dyn Rng` (the dyn-compatible
+# low-level trait); production seeds `StdRng`
 # from OS entropy (`SysRng`) and tests inject a seeded `StdRng` via `Deps`. The
 # `thread_rng` default feature is dropped — tk dispatch is single-threaded and
 # consumes `StdRng` directly from `Deps`.
