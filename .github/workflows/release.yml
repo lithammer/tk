@@ -47,7 +47,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # Guard the release contract: `tk --version` embeds CARGO_PKG_VERSION, and
       # `tk self-update`'s smoke check (ADR-0013) requires that string to carry
@@ -169,7 +169,7 @@ jobs:
             ext: .exe
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions/download-artifact@v4
         with:
           name: tk-release-binaries
