@@ -57,3 +57,7 @@ tk done tk-1
 
 Use `tk --help`, `tk <command> --help`, or `tk manpage` for the command
 reference.
+
+## License
+
+[MIT](./LICENSE)
