@@ -109,6 +109,13 @@ The **`tk`** command intent for finding **Tickets** and **Epics** by a
 case-insensitive substring of their title.
 _Avoid_: Grep, Full-text search
 
+**Grep**:
+The **`tk`** command intent for finding *where* a pattern appears in the title
+or body text of **Tickets** and **Epics**, rendering each match in context as a
+**`tk show`**-style block rather than as a list of items. Where **Search**
+answers "which item is it?", **Grep** answers "where does this text appear?".
+_Avoid_: Search, Full-text search, Fuzzy search
+
 **Repository Store**:
 The shared SQLite-backed local state for **tk** within one version-control repository.
 _Avoid_: Workspace Store, Global Store
@@ -394,9 +401,14 @@ _Avoid_: ticket, tickets
 - **`tk list --ready`** keeps the **List Tree** shape and includes non-empty **Epics** as containers for ready child **Tickets**.
 - **`tk search`** finds **Tickets** and **Epics** whose title contains the query as a case-insensitive literal substring.
 - **`tk search`** covers the whole **Repository Store** and every **Item Status**, including `done`; it ignores **Scope** and is never narrowed by `TK_SCOPE`.
-- **`tk search`** matches title text only. Exact **Display ID** / **Alias** lookup is **`tk show`**; body and content search are deferred to a separate **`tk grep`**.
+- **`tk search`** matches title text only. Exact **Display ID** / **Alias** lookup is **`tk show`**; title-or-body content search is **`tk grep`**.
 - **`tk search`** renders matches reusing **`tk list`** row rendering and chrome, laid out flat without **List Tree** nesting.
 - **`tk search`** takes a single required positional query and has no flags in v1; result limiting, **Origin** / **Ticket Kind** / **Priority** / status filtering, and sorting are deferred.
+- **`tk grep`** finds **Tickets** and **Epics** whose title or body text matches a regular expression, rendering each match as a **`tk show`**-style block with the body collapsed to the matching lines plus surrounding context.
+- **`tk grep`** covers the whole **Repository Store** and every **Item Status**; like **`tk search`** it ignores **Scope** and is never narrowed by `TK_SCOPE`, because a lookup must not be silently narrowed.
+- **`tk grep`** matches title and body text; it is content search, distinct from **`tk search`** (title-only item lookup) and **`tk show`** (exact identifier lookup).
+- **`tk grep`** is case-sensitive by default, where **`tk search`** is case-insensitive; the divergence is deliberate, matching the `grep` namesake.
+- **`tk grep`** renders matches in creation order and never ranks by relevance; ranked recall — full-text and fuzzy — is reserved for future **`tk search`** modes.
 
 ## Example dialogue
 
@@ -541,3 +553,5 @@ _Avoid_: ticket, tickets
 - Searching body text in **`tk search`**, by default or behind a `--body` flag, was considered (tk-79) — resolved: **`tk search`** matches title text only; body/content search is a separate, deferred **`tk grep`** that renders **`tk show`**-style match context. A body-only hit has no provenance slot in a reused **`tk list`** row and would read as a false positive (ADR-0025).
 - Matching **Display IDs** and **Aliases** in **`tk search`** (exact + prefix, the original tk-79 framing) was considered — resolved: dropped. Exact-identifier lookup duplicates **`tk show`** and prefix recall is thin against short sequential **Display IDs**; search's distinct value is fuzzy title recall (ADR-0025).
 - Honouring `TK_SCOPE` in **`tk search`** was considered — resolved: search is a whole-**Repository Store** lookup; silently narrowing it to an ambient Epic would hide the searched-for item, the hidden-state smell ADR-0022 rejected.
+- The **`tk grep`** matching model — literal substring, regular expression, FTS5 full-text, or Levenshtein/fuzzy — was considered (tk-113) — resolved: **regular expression** by default. Literal is a trap (the default cannot be flipped to regex later without changing the meaning of `.`/`*`/`(`/`|`); regex is a strict superset that degrades to literal for metacharacter-free patterns. FTS5 and fuzzy produce ranked/scored output that cannot inhabit **`tk grep`**'s deterministic line-context block, so both are reserved for future ranked **`tk search`** recall modes (ADR-0026).
+- A relevance/edit-distance ordering for **`tk grep`** was considered — resolved: **`tk grep`** orders matches by creation and never ranks, because ranked output is incompatible with streaming one matched item to stdout at a time and belongs to the **Search** family, not **Grep** (ADR-0026).
