@@ -153,6 +153,16 @@ impl Styler {
         }
     }
 
+    /// All-on styler: both streams emit SGR. The sibling of [`plain`](Self::plain)
+    /// that under-colour tests use to assert the SGR a real terminal would see.
+    #[must_use]
+    pub const fn always() -> Self {
+        Self {
+            stdout: ColorChoice::Always,
+            stderr: ColorChoice::Always,
+        }
+    }
+
     /// Sub-styler bound to the stdout choice. Use when wrapping content
     /// destined for `deps.stdout`.
     #[must_use]
@@ -427,10 +437,7 @@ mod tests {
 
     #[test]
     fn wrap_emits_open_text_close_when_choice_is_always() {
-        let styler = Styler {
-            stdout: ColorChoice::Always,
-            stderr: ColorChoice::Always,
-        };
+        let styler = Styler::always();
         let style = palette::HEADER;
         assert_eq!(
             format!("{}", styler.for_stdout().wrap(style, "TEXT")),
@@ -444,10 +451,7 @@ mod tests {
         // `Style::new()` (placeholders like `STATUS_OPEN`, `PRIORITY_P2`,
         // `BLOCKED`). Both [`Style`]'s [`fmt::Display`] impl and [`Close`] must
         // elide their byte output for these.
-        let styler = Styler {
-            stdout: ColorChoice::Always,
-            stderr: ColorChoice::Always,
-        };
+        let styler = Styler::always();
         for style in [palette::STATUS_OPEN, palette::PRIORITY_P2, palette::BLOCKED] {
             assert_eq!(
                 format!("{}", styler.for_stdout().wrap(style, "TEXT")),

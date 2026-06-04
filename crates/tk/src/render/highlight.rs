@@ -58,7 +58,7 @@ mod tests {
     #[test]
     fn wraps_matches_in_bright_yellow_under_color() {
         // Bright yellow foreground opens `\x1b[93m` and closes `\x1b[39m`.
-        let out = highlight("the auth token", "auth", styler_always());
+        let out = highlight("the auth token", "auth", Styler::always());
         assert_eq!(out, "the \u{1b}[93mauth\u{1b}[39m token");
     }
 
@@ -70,7 +70,7 @@ mod tests {
 
     #[test]
     fn highlights_every_non_overlapping_match() {
-        let out = highlight("auth and auth", "auth", styler_always());
+        let out = highlight("auth and auth", "auth", Styler::always());
         assert_eq!(out, "\u{1b}[93mauth\u{1b}[39m and \u{1b}[93mauth\u{1b}[39m");
     }
 
@@ -78,14 +78,7 @@ mod tests {
     fn zero_width_match_is_not_highlighted() {
         // `x*` matches empty positions; none should emit a MATCH span, and the
         // text passes through plain.
-        let out = highlight("abc", "x*", styler_always());
+        let out = highlight("abc", "x*", Styler::always());
         assert_eq!(out, "abc");
-    }
-
-    fn styler_always() -> Styler {
-        Styler {
-            stdout: crate::render::ColorChoice::Always,
-            stderr: crate::render::ColorChoice::Always,
-        }
     }
 }

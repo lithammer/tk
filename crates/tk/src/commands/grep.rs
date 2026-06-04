@@ -252,13 +252,6 @@ mod tests {
         }
     }
 
-    fn styler_always() -> Styler {
-        Styler {
-            stdout: crate::render::ColorChoice::Always,
-            stderr: crate::render::ColorChoice::Always,
-        }
-    }
-
     fn expect_git(h: &Harness<'_>, store: &TmpStore) {
         h.runner.expect(
             &["git", "rev-parse"],
@@ -539,7 +532,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
         let code = run(
-            h.deps_with(styler_always()),
+            h.deps_with(Styler::always()),
             Args {
                 pattern: "NEEDLE".to_owned(),
             },
@@ -766,7 +759,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let styler = styler_always();
+        let styler = Styler::always();
         let code = run(
             h.deps_with(styler),
             Args {
@@ -831,7 +824,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
         let code = run(
-            h.deps_with(styler_always()),
+            h.deps_with(Styler::always()),
             Args {
                 pattern: "MARKER".to_owned(),
             },
