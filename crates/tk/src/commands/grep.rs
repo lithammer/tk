@@ -81,7 +81,14 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
         Err(ScanError::Write(err)) if err.kind() == std::io::ErrorKind::BrokenPipe => {
             return Exit::Ok;
         }
-        Err(ScanError::Write(_)) => return Exit::Failure,
+        // Any other write failure (e.g. a full disk on `tk grep X > file`) must
+        // write a diagnostic so its exit `1` is distinguishable from a no-match
+        // (which keeps stderr empty) and so it honours `Exit::Failure`'s
+        // "diagnostic already written" contract.
+        Err(ScanError::Write(err)) => {
+            let _ = writeln!(stderr, "tk {COMMAND}: failed to write output\n{err}");
+            return Exit::Failure;
+        }
     }
 
     if matched { Exit::Ok } else { Exit::NoMatch }
@@ -857,15 +864,13 @@ mod tests {
         assert!(out.is_empty(), "out={out:?}");
     }
 
-    /// A stdout that fails every write with `BrokenPipe`, modelling
-    /// `tk grep PATTERN | head` closing the pipe mid-stream.
-    struct BrokenPipe;
-    impl Write for BrokenPipe {
+    /// A stdout that fails every write with a chosen `ErrorKind`, modelling a
+    /// pipe closed by `| head` (`BrokenPipe`) or a full disk on a redirect
+    /// (`StorageFull` / other).
+    struct FailingWriter(std::io::ErrorKind);
+    impl Write for FailingWriter {
         fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "broken pipe",
-            ))
+            Err(std::io::Error::new(self.0, "write failed"))
         }
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
@@ -906,7 +911,7 @@ mod tests {
         );
         let clock = FakeClock::new(1_778_284_800_000);
         let mut rng = StdRng::seed_from_u64(0);
-        let mut stdout = BrokenPipe;
+        let mut stdout = FailingWriter(std::io::ErrorKind::BrokenPipe);
         let mut stderr: Vec<u8> = Vec::new();
         let mut stdin = std::io::Cursor::new(Vec::new());
         let deps = Deps {
@@ -933,6 +938,67 @@ mod tests {
         assert!(
             stderr.is_empty(),
             "a broken pipe writes no diagnostic: {stderr:?}"
+        );
+    }
+
+    #[test]
+    fn non_broken_pipe_write_error_fails_with_a_stderr_diagnostic() {
+        // A stdout write error that is NOT a broken pipe (e.g. a full disk on
+        // `tk grep X > file`) must NOT collapse to the empty-stderr exit 1 of
+        // NoMatch: it writes a diagnostic (so stderr is non-empty, distinct from
+        // a no-match) and returns Failure, honouring Exit::Failure's contract.
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Subject",
+                body: "the PIPEWORD appears here",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let runner = FakeRunner::new();
+        runner.expect(
+            &["git", "rev-parse"],
+            RunOutput {
+                exit_code: 0,
+                stdout: store.git_rev_parse_stdout(),
+                stderr: Vec::new(),
+            },
+        );
+        let clock = FakeClock::new(1_778_284_800_000);
+        let mut rng = StdRng::seed_from_u64(0);
+        let mut stdout = FailingWriter(std::io::ErrorKind::StorageFull);
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let deps = Deps {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+            stdin: &mut stdin,
+            runner: &runner,
+            clock: &clock,
+            rng: &mut rng,
+            cwd: &cwd_path,
+            styler: Styler::plain(),
+        };
+        let code = run(
+            deps,
+            Args {
+                pattern: "PIPEWORD".to_owned(),
+            },
+        );
+        assert_eq!(code, Exit::Failure);
+        let stderr = String::from_utf8(stderr).unwrap();
+        assert!(
+            stderr.contains("tk grep: failed to write output"),
+            "a non-broken-pipe write error must write a diagnostic: {stderr:?}"
         );
     }
 
