@@ -10,7 +10,7 @@ use std::io::Write;
 
 use clap::Args as ClapArgs;
 
-use crate::cli::{Deps, Exit};
+use crate::cli::{self, Deps, Exit};
 use crate::commands::item_row::{render_chrome, render_row};
 use crate::commands::resolver;
 use crate::render::styler::SubStyler;
@@ -64,8 +64,8 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
     };
 
     let out = styler.for_stdout();
-    if render(stdout, &rows, &args.query, out).is_err() {
-        return Exit::Failure;
+    if let Err(err) = render(stdout, &rows, &args.query, out) {
+        return cli::exit_for_write_error(&err, stderr, COMMAND);
     }
     Exit::Ok
 }

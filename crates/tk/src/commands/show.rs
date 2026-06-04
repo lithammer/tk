@@ -22,15 +22,12 @@
 
 use std::io::Write;
 
-use anstyle::Style;
 use clap::Args as ClapArgs;
 
-use crate::cli::{Deps, Exit};
+use crate::cli::{self, Deps, Exit};
+use crate::commands::item_header::{self, Header};
 use crate::commands::resolver;
 use crate::domain::item_class::ItemClass;
-use crate::domain::priority::Priority;
-use crate::domain::status::ItemStatus;
-use crate::domain::ticket_kind::TicketKind;
 use crate::render::palette;
 use crate::render::sanitize;
 use crate::render::styler::SubStyler;
@@ -84,10 +81,10 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
     };
 
     let sub = styler.for_stdout();
-    if render(stdout, &detail, sub).is_err() {
-        // stdout writes that fail are surfaced through the normal io::Error
-        // path; `tk` does not retry a broken pipe.
-        return Exit::Failure;
+    if let Err(err) = render(stdout, &detail, sub) {
+        // A closed pager (`tk show | head`) is success; other write errors are
+        // a diagnosed failure (shared policy).
+        return cli::exit_for_write_error(&err, stderr, COMMAND);
     }
     Exit::Ok
 }
@@ -97,69 +94,26 @@ fn render<W: Write + ?Sized>(
     detail: &ItemDetail,
     styler: SubStyler,
 ) -> std::io::Result<()> {
-    // Label line: <status-glyph> <display-id> · <title>
-    write!(
+    // Label line + facet bar, shared verbatim with `tk grep` (ADR-0026). The
+    // Updated facet is dropped when the Item has never been modified
+    // (`updated_at == created_at`, the at-insert default); the labelled
+    // `Created:` / `Updated:` form forecloses reading a bare `→` as a
+    // start→end due window tk has no concept of.
+    item_header::render_header(
         stdout,
-        "{} ",
-        styler.wrap(status_style(detail.status), detail.status.glyph())
+        &Header {
+            status: detail.status,
+            display_id: &detail.display_id,
+            item_class: detail.item_class,
+            title: &detail.title,
+            priority: detail.priority,
+            ticket_kind: detail.ticket_kind,
+            created_at: &detail.created_at,
+            updated_at: &detail.updated_at,
+        },
+        None,
+        styler,
     )?;
-    write!(
-        stdout,
-        "{} · ",
-        styler.wrap(id_style(detail.item_class), &detail.display_id)
-    )?;
-    write!(stdout, "{}", styler.open(palette::HEADER))?;
-    sanitize::write_sanitized_line(stdout, detail.title.as_bytes())?;
-    write!(stdout, "{}", styler.close(palette::HEADER))?;
-    stdout.write_all(b"\n")?;
-
-    // Facet bar.
-    stdout.write_all(b"  ")?;
-    match detail.item_class {
-        ItemClass::Epic => {
-            // Capitalized `Epic` reads in the same register as the Ticket
-            // Kind labels below; `text()` stays lowercase for storage.
-            write!(
-                stdout,
-                "{}",
-                styler.wrap(palette::KIND_EPIC, ItemClass::Epic.label())
-            )?;
-        }
-        ItemClass::Ticket => {
-            let priority = detail
-                .priority
-                .expect("Tickets always carry a Priority (schema CHECK)");
-            write!(
-                stdout,
-                "{}",
-                styler.wrap(priority_style(priority), priority.text())
-            )?;
-            stdout.write_all(b" \xc2\xb7 ")?; // " · "
-            let kind = detail
-                .ticket_kind
-                .expect("Tickets always carry a TicketKind (schema CHECK)");
-            match kind {
-                TicketKind::Bug => {
-                    write!(stdout, "{}", styler.wrap(palette::KIND_BUG, kind.label()))?;
-                }
-                TicketKind::Task => stdout.write_all(kind.label().as_bytes())?,
-            }
-        }
-    }
-    // Labelled date facets. The bare `<created> → <updated>` arrow form read
-    // as a start→end target window even though tk has no due-date concept;
-    // explicit `Created:` / `Updated:` labels foreclose that misreading. The
-    // Updated facet is omitted when the Item has never been modified
-    // (`updated_at == created_at`, the at-insert default from
-    // store::repository::create), so a fresh Ticket shows only its creation
-    // date and Updated reappears once the Item is actually edited.
-    let created_date = first_chars(&detail.created_at, 10);
-    write!(stdout, " \u{b7} Created: {created_date}")?;
-    if detail.updated_at != detail.created_at {
-        let updated_date = first_chars(&detail.updated_at, 10);
-        write!(stdout, " \u{b7} Updated: {updated_date}")?;
-    }
-    stdout.write_all(b"\n")?;
 
     let mut has_section = false;
 
@@ -261,19 +215,19 @@ fn render_sub_row<W: Write + ?Sized>(
     write!(
         stdout,
         "{} ",
-        styler.wrap(status_style(item.status), item.status.glyph())
+        styler.wrap(palette::status_style(item.status), item.status.glyph())
     )?;
     write!(
         stdout,
         "{}: ",
-        styler.wrap(id_style(item.item_class), &item.display_id)
+        styler.wrap(palette::id_style(item.item_class), &item.display_id)
     )?;
     if item.item_class == ItemClass::Epic {
         write!(stdout, "{} ", styler.wrap(palette::KIND_EPIC, "(Epic)"))?;
     }
     sanitize::write_sanitized_line(stdout, item.title.as_bytes())?;
     if let Some(p) = item.priority {
-        let p_st = priority_style(p);
+        let p_st = palette::priority_style(p);
         write!(
             stdout,
             " {} {}",
@@ -291,42 +245,6 @@ fn render_external_blocker<W: Write + ?Sized>(
     stdout.write_all(b"  \xe2\x80\xa2 ")?; // "  • "
     sanitize::write_sanitized_line(stdout, eb.reason.as_bytes())?;
     stdout.write_all(b"\n")
-}
-
-fn status_style(status: ItemStatus) -> Style {
-    match status {
-        ItemStatus::Open => palette::STATUS_OPEN,
-        ItemStatus::Active => palette::STATUS_ACTIVE,
-        ItemStatus::Done => palette::STATUS_DONE,
-    }
-}
-
-fn priority_style(p: Priority) -> Style {
-    match p {
-        Priority::P0 => palette::PRIORITY_P0,
-        Priority::P1 => palette::PRIORITY_P1,
-        Priority::P2 => palette::PRIORITY_P2,
-        Priority::P3 => palette::PRIORITY_P3,
-        Priority::P4 => palette::PRIORITY_P4,
-    }
-}
-
-fn id_style(class: ItemClass) -> Style {
-    match class {
-        ItemClass::Epic => palette::ID_EPIC,
-        ItemClass::Ticket => palette::ID_TICKET,
-    }
-}
-
-fn first_chars(s: &str, n: usize) -> &str {
-    // Truncate by char count (not bytes); the created_at / updated_at
-    // columns are ASCII ISO-8601 in practice, so this is equivalent to
-    // `&s[..min(n, s.len())]`, but the char_indices form survives a
-    // future stamp that happens to carry multi-byte content.
-    match s.char_indices().nth(n) {
-        Some((idx, _)) => &s[..idx],
-        None => s,
-    }
 }
 
 #[cfg(test)]
@@ -403,6 +321,73 @@ mod tests {
                 stdout: store.git_rev_parse_stdout(),
                 stderr: Vec::new(),
             },
+        );
+    }
+
+    /// A stdout that fails every write with `BrokenPipe`, modelling a closed
+    /// pager (`tk show ID | head`).
+    struct BrokenPipe;
+    impl std::io::Write for BrokenPipe {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "broken pipe",
+            ))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn broken_pipe_to_stdout_is_success() {
+        // `tk show ID | head` (reader quits early) is success, not Failure: the
+        // shared write-error policy maps a broken pipe to Exit::Ok.
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Subject",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let runner = FakeRunner::new();
+        runner.expect(
+            &["git", "rev-parse"],
+            RunOutput {
+                exit_code: 0,
+                stdout: store.git_rev_parse_stdout(),
+                stderr: Vec::new(),
+            },
+        );
+        let clock = FakeClock::new(1_778_284_800_000);
+        let mut rng = StdRng::seed_from_u64(0);
+        let mut stdout = BrokenPipe;
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let deps = Deps {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+            stdin: &mut stdin,
+            runner: &runner,
+            clock: &clock,
+            rng: &mut rng,
+            cwd: &cwd_path,
+            styler: Styler::plain(),
+        };
+        let code = run(deps, Args { id: "tk-1".into() });
+        assert_eq!(code, Exit::Ok, "a broken pipe is success, not failure");
+        assert!(
+            stderr.is_empty(),
+            "broken pipe writes no diagnostic: {stderr:?}"
         );
     }
 

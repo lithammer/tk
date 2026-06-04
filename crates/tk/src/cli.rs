@@ -30,6 +30,11 @@ use crate::render::Styler;
 /// - [`Exit::Ok`] (`0`) — success.
 /// - [`Exit::Failure`] (`1`) — a curated command failure; the handler has
 ///   already written its ADR-0017 diagnostic to stderr.
+/// - [`Exit::NoMatch`] (`1`) — a query subcommand's "no result" verdict, not a
+///   failure: `tk grep` overloads `1` as the negative half of a `grep -q`-style
+///   predicate (ADR-0026, ARCHITECTURE.md). Distinct from [`Exit::Failure`]
+///   because no diagnostic is written — stderr stays empty, which is how a
+///   script tells "no match" from "broken".
 /// - [`Exit::Usage`] (`2`) — a usage error (bad flags / arguments), including
 ///   clap's own parse failures.
 /// - [`Exit::Internal`] (`3`) — an unexpected error bubbled out of a handler as
@@ -39,6 +44,7 @@ use crate::render::Styler;
 pub enum Exit {
     Ok,
     Failure,
+    NoMatch,
     Usage,
     Internal,
 }
@@ -49,7 +55,9 @@ impl Exit {
     pub fn code(self) -> u8 {
         match self {
             Self::Ok => 0,
-            Self::Failure => 1,
+            // `Failure` and `NoMatch` share exit code `1`; they differ only in
+            // whether a stderr diagnostic accompanies it (ADR-0026).
+            Self::Failure | Self::NoMatch => 1,
             Self::Usage => 2,
             Self::Internal => 3,
         }
@@ -119,6 +127,8 @@ enum Command {
     Show(commands::show::Args),
     /// Find Tickets and Epics by a title substring.
     Search(commands::search::Args),
+    /// Search title and body text for a regular expression, with match context.
+    Grep(commands::grep::Args),
     /// Update the title, body, priority, or parent of a Ticket or Epic.
     Update(commands::update::Args),
     /// Mark a Ticket or Epic active.
@@ -162,6 +172,7 @@ pub fn run_argv(deps: Deps<'_>, argv: &[String]) -> std::io::Result<Exit> {
         Command::Next(args) => Ok(commands::next::run(deps, args)),
         Command::Show(args) => Ok(commands::show::run(deps, args)),
         Command::Search(args) => Ok(commands::search::run(deps, args)),
+        Command::Grep(args) => Ok(commands::grep::run(deps, args)),
         Command::Update(args) => Ok(commands::update::run(deps, args)),
         Command::Start(args) => Ok(commands::start::run(deps, args)),
         Command::Stop(args) => Ok(commands::stop::run(deps, args)),
@@ -173,6 +184,25 @@ pub fn run_argv(deps: Deps<'_>, argv: &[String]) -> std::io::Result<Exit> {
         Command::SelfUpdate(args) => Ok(commands::self_update::run(deps, args)),
         Command::Sync(args) => Ok(commands::sync::run(deps, args)),
         Command::Promote(args) => Ok(commands::promote::run(deps, args)),
+    }
+}
+
+/// Map a failed stdout render/write to an [`Exit`].
+///
+/// A **broken pipe** — a downstream reader that closed early (`tk … | head`, a
+/// quit pager) — is success, not failure: the command did its job and the
+/// consumer simply stopped reading. Every other write error (e.g. a full disk
+/// on `tk … > file`) gets a curated diagnostic so its [`Exit::Failure`] carries
+/// a stderr line (the frozen contract) and stays distinguishable from a query
+/// command's empty-stderr "no result" ([`Exit::NoMatch`]). Shared by every
+/// rendering command so the broken-pipe policy cannot drift between them.
+#[must_use]
+pub fn exit_for_write_error(err: &std::io::Error, stderr: &mut dyn Write, command: &str) -> Exit {
+    if err.kind() == std::io::ErrorKind::BrokenPipe {
+        Exit::Ok
+    } else {
+        let _ = writeln!(stderr, "tk {command}: failed to write output\n{err}");
+        Exit::Failure
     }
 }
 
@@ -196,5 +226,39 @@ fn render_clap_error(deps: Deps<'_>, err: &clap::Error) -> Exit {
             let _ = stderr.write_all(bytes.as_bytes());
             Exit::Usage
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn broken_pipe_write_error_is_success_with_empty_stderr() {
+        let mut stderr: Vec<u8> = Vec::new();
+        let exit = exit_for_write_error(
+            &Error::new(ErrorKind::BrokenPipe, "closed"),
+            &mut stderr,
+            "grep",
+        );
+        assert_eq!(exit, Exit::Ok);
+        assert!(stderr.is_empty(), "broken pipe writes no diagnostic");
+    }
+
+    #[test]
+    fn other_write_error_fails_with_a_diagnostic() {
+        let mut stderr: Vec<u8> = Vec::new();
+        let exit = exit_for_write_error(
+            &Error::new(ErrorKind::StorageFull, "disk full"),
+            &mut stderr,
+            "grep",
+        );
+        assert_eq!(exit, Exit::Failure);
+        let stderr = String::from_utf8(stderr).unwrap();
+        assert!(
+            stderr.contains("tk grep: failed to write output"),
+            "stderr={stderr:?}"
+        );
     }
 }

@@ -19,6 +19,7 @@
 //! - [`sanitize`]: write user/Remote-controlled text with terminal
 //!   control bytes rendered inert.
 
+pub mod highlight;
 pub mod palette;
 pub mod sanitize;
 pub mod styler;

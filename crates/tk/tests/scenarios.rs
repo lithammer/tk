@@ -284,7 +284,7 @@ fn tk_scope_env_filters_list_to_the_epic() {
 fn command_help_snapshots() {
     let p = Repo::new("repo");
     for command in [
-        "block", "done", "list", "next", "search", "show", "unblock", "update",
+        "block", "done", "grep", "list", "next", "search", "show", "unblock", "update",
     ] {
         insta::assert_snapshot!(
             format!("help_{command}"),
@@ -349,5 +349,67 @@ fn search_requires_a_query_and_double_dash_escapes_it() {
 
     Status: ○ open  ◐ active  ✓ done
     Blocked: ⊘ blocked
+    ");
+}
+
+/// `tk grep` searches title and body for a regular expression and renders each
+/// match as a `tk show`-style block — label line, facet bar, then the body
+/// collapsed to the matching lines — in creation order (ADR-0026). project-2
+/// matches in the body; project-3 matches in the title and so shows no body
+/// hunk; project-4 does not match. Matching is case-sensitive, so the capital
+/// `Auth` epic title is not hit by the lowercase pattern.
+#[test]
+fn grep_renders_show_style_match_context() {
+    let p = Repo::new("project");
+    p.run("init");
+    p.run("add --epic -m 'Auth rework'"); // project-1 (epic; capital A, no match)
+    p.run("add -m 'Add middleware' -m 'the handler validates the auth token'"); // project-2
+    p.run("add -m 'Refactor auth layer'"); // project-3 (title match, no body)
+    p.run("add -m 'Unrelated chore' -m 'nothing relevant here'"); // project-4
+
+    // The facet bar surfaces the creation date; redact it so the snapshot is
+    // stable across days.
+    insta::with_settings!({filters => vec![(r"Created: \d{4}-\d{2}-\d{2}", "Created: [DATE]")]}, {
+        tk!(p, "grep auth", @"
+        ○ project-2 · Add middleware
+          P2 · Task · Created: [DATE]
+          the handler validates the auth token
+
+        ○ project-3 · Refactor auth layer
+          P2 · Task · Created: [DATE]
+        ");
+    });
+}
+
+/// The pattern is required (clap usage error), an empty pattern is rejected, and
+/// a no-match exits 1 with empty streams — the `grep -q`-style predicate where
+/// empty stderr distinguishes "no match" from "broken" (ADR-0026).
+#[test]
+fn grep_requires_a_pattern_and_signals_no_match_with_exit_one() {
+    let p = Repo::new("project");
+    p.run("init");
+    p.run("add -m 'Unrelated chore'"); // project-1
+
+    tk!(p, "grep", @"
+    exit 2
+    -- stdout --
+    -- stderr --
+    error: the following required arguments were not provided:
+      <PATTERN>
+
+    Usage: tk grep <PATTERN>
+
+    For more information, try '--help'.
+    ");
+    tk!(p, "grep '   '", @"
+    exit 2
+    -- stdout --
+    -- stderr --
+    tk grep: pattern must not be empty
+    ");
+    tk!(p, "grep nonexistent", @"
+    exit 1
+    -- stdout --
+    -- stderr --
     ");
 }

@@ -200,6 +200,50 @@ Total: 3 items (1 open, 1 active, 1 done)
 Status: ○ open  ◐ active  ✓ done
 .fi
 .RE
+.SS Searching content
+.TP
+\fBtk grep\fR \fIPATTERN\fR
+Find Tickets and Epics whose title or body matches the regular expression
+.I PATTERN
+and render each match as a
+.BR "tk show" -style
+block with the body collapsed to the matching lines plus surrounding context.
+.PP
+Grep covers the whole Repository Store and every Item Status, including done;
+like
+.B tk search
+it ignores Scope and is never narrowed by TK_SCOPE. It searches title and body
+text \(em content search, as opposed to the title-only lookup of
+.B tk search
+or the exact Display ID / Alias lookup of
+.BR tk\ show .
+.PP
+.I PATTERN
+is a Rust regular expression (RE2-family, like \fBgrep \-E\fR; no
+backreferences or lookaround) and matching is case-sensitive. Matched text is
+highlighted on a terminal. Matches print in creation order, never ranked, with
+three lines of context each side,
+.B \-\-
+between non-contiguous hunks within one item, and a blank line between items.
+An empty or all-whitespace pattern, or an invalid regular expression, is a
+usage error.
+.PP
+.B tk grep
+overloads its exit status as a \fBgrep \-q\fR\-style predicate: it exits 0 when
+at least one item matches and 1 when none do, leaving stderr empty so a script
+can tell \(lqno match\(rq from a real failure. A usage error exits 2.
+.PP
+On success it prints one
+.B tk show
+\-style block per matching item:
+.PP
+.RS 4
+.nf
+○ project-2 · Add middleware
+  P2 · Task · Created: 2026-06-04
+  the handler validates the auth token
+.fi
+.RE
 .SS Selecting Ready Work
 .TP
 .B tk next

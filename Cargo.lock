@@ -725,6 +725,7 @@ dependencies = [
  "insta",
  "jiff",
  "rand",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",

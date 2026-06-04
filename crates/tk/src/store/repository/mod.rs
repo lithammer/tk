@@ -34,6 +34,7 @@ use crate::store::migrations;
 
 pub mod create;
 pub mod dependency;
+pub mod grep;
 pub mod list;
 pub mod next;
 pub mod search;

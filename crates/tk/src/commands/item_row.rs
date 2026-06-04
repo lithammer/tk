@@ -10,10 +10,7 @@
 
 use std::io::Write;
 
-use anstyle::Style;
-
 use crate::domain::item_class::ItemClass;
-use crate::domain::priority::Priority;
 use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
 use crate::render::palette;
@@ -47,12 +44,12 @@ pub(crate) fn render_row<W: Write + ?Sized>(
     write!(
         stdout,
         "{} ",
-        styler.wrap(status_style(row.status), row.status.glyph())
+        styler.wrap(palette::status_style(row.status), row.status.glyph())
     )?;
     write!(
         stdout,
         "{}",
-        styler.wrap(id_style(row.item_class), &row.display_id)
+        styler.wrap(palette::id_style(row.item_class), &row.display_id)
     )?;
 
     if show_blocked {
@@ -64,7 +61,7 @@ pub(crate) fn render_row<W: Write + ?Sized>(
             let priority = row
                 .priority
                 .expect("schema CHECK guarantees Tickets carry a Priority");
-            let p_style = priority_style(priority);
+            let p_style = palette::priority_style(priority);
             write!(stdout, " {} ", styler.wrap(p_style, "\u{25cf}"))?;
             write!(stdout, "{}", styler.wrap(p_style, priority.text()))?;
             if row.ticket_kind == Some(TicketKind::Bug) {
@@ -178,30 +175,5 @@ impl StatusCounts {
             }
         }
         counts
-    }
-}
-
-fn status_style(status: ItemStatus) -> Style {
-    match status {
-        ItemStatus::Open => palette::STATUS_OPEN,
-        ItemStatus::Active => palette::STATUS_ACTIVE,
-        ItemStatus::Done => palette::STATUS_DONE,
-    }
-}
-
-fn priority_style(p: Priority) -> Style {
-    match p {
-        Priority::P0 => palette::PRIORITY_P0,
-        Priority::P1 => palette::PRIORITY_P1,
-        Priority::P2 => palette::PRIORITY_P2,
-        Priority::P3 => palette::PRIORITY_P3,
-        Priority::P4 => palette::PRIORITY_P4,
-    }
-}
-
-fn id_style(class: ItemClass) -> Style {
-    match class {
-        ItemClass::Epic => palette::ID_EPIC,
-        ItemClass::Ticket => palette::ID_TICKET,
     }
 }
