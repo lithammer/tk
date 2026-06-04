@@ -17,7 +17,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # rust-toolchain.toml pins the channel + components (rustfmt, clippy)
       # for both contributors and CI, so no explicit toolchain action is
       # needed — the first `cargo` invocation installs via rustup.
@@ -29,7 +29,7 @@ jobs:
   shellcheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # install.sh must stay POSIX (runs under /bin/sh on macOS, Alpine,
       # etc.) so it is checked with `-s sh`. smoke.sh is bash and uses the
       # default dialect detected from its shebang.
