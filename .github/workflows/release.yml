@@ -170,7 +170,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: tk-release-binaries
           path: dist
@@ -208,7 +208,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: tk-release-binaries
           path: dist
@@ -216,7 +216,7 @@ jobs:
       # matching artifacts into one directory so the loop can learn which triples
       # passed smoke. A missing marker means that triple's smoke failed and its
       # binary is excluded from this release.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: smoke-pass-*
           path: smoke-markers
