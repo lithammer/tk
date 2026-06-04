@@ -23,6 +23,10 @@
 
 use anstyle::{AnsiColor, Color, Style};
 
+use crate::domain::item_class::ItemClass;
+use crate::domain::priority::Priority;
+use crate::domain::status::ItemStatus;
+
 const fn fg(color: AnsiColor) -> Style {
     Style::new().fg_color(Some(Color::Ansi(color)))
 }
@@ -96,3 +100,38 @@ pub const MATCH: Style = fg(AnsiColor::BrightYellow);
 /// anchor and the red matches; cyan was reassigned to the Display ID because it
 /// pops more and the anchor needs it more than the separator does.
 pub const HUNK_SEPARATOR: Style = fg(AnsiColor::Blue);
+
+// Domain-enum → palette `Style` mappers. The single source of truth for these
+// mappings, shared by every renderer (`item_row` for list/search, `item_header`
+// for show/grep, and show's relationship sub-rows) so a recolour is one edit.
+
+/// Style for an Item's status glyph.
+#[must_use]
+pub fn status_style(status: ItemStatus) -> Style {
+    match status {
+        ItemStatus::Open => STATUS_OPEN,
+        ItemStatus::Active => STATUS_ACTIVE,
+        ItemStatus::Done => STATUS_DONE,
+    }
+}
+
+/// Style for a Ticket's Priority marker.
+#[must_use]
+pub fn priority_style(priority: Priority) -> Style {
+    match priority {
+        Priority::P0 => PRIORITY_P0,
+        Priority::P1 => PRIORITY_P1,
+        Priority::P2 => PRIORITY_P2,
+        Priority::P3 => PRIORITY_P3,
+        Priority::P4 => PRIORITY_P4,
+    }
+}
+
+/// Style for an Item's Display ID, by class.
+#[must_use]
+pub fn id_style(class: ItemClass) -> Style {
+    match class {
+        ItemClass::Epic => ID_EPIC,
+        ItemClass::Ticket => ID_TICKET,
+    }
+}

@@ -10,7 +10,6 @@
 
 use std::io::Write;
 
-use anstyle::Style;
 use regex::Regex;
 
 use crate::domain::item_class::ItemClass;
@@ -55,12 +54,12 @@ pub(crate) fn render_header<W: Write + ?Sized>(
     write!(
         stdout,
         "{} ",
-        styler.wrap(status_style(header.status), header.status.glyph())
+        styler.wrap(palette::status_style(header.status), header.status.glyph())
     )?;
     write!(
         stdout,
         "{} \u{b7} ",
-        styler.wrap(id_style(header.item_class), header.display_id)
+        styler.wrap(palette::id_style(header.item_class), header.display_id)
     )?;
     write!(stdout, "{}", styler.open(palette::HEADER))?;
     match title_highlight {
@@ -87,7 +86,7 @@ pub(crate) fn render_header<W: Write + ?Sized>(
             write!(
                 stdout,
                 "{}",
-                styler.wrap(priority_style(priority), priority.text())
+                styler.wrap(palette::priority_style(priority), priority.text())
             )?;
             stdout.write_all(b" \xc2\xb7 ")?; // " · "
             let kind = header
@@ -108,31 +107,6 @@ pub(crate) fn render_header<W: Write + ?Sized>(
         write!(stdout, " \u{b7} Updated: {updated_date}")?;
     }
     stdout.write_all(b"\n")
-}
-
-fn status_style(status: ItemStatus) -> Style {
-    match status {
-        ItemStatus::Open => palette::STATUS_OPEN,
-        ItemStatus::Active => palette::STATUS_ACTIVE,
-        ItemStatus::Done => palette::STATUS_DONE,
-    }
-}
-
-fn priority_style(p: Priority) -> Style {
-    match p {
-        Priority::P0 => palette::PRIORITY_P0,
-        Priority::P1 => palette::PRIORITY_P1,
-        Priority::P2 => palette::PRIORITY_P2,
-        Priority::P3 => palette::PRIORITY_P3,
-        Priority::P4 => palette::PRIORITY_P4,
-    }
-}
-
-fn id_style(class: ItemClass) -> Style {
-    match class {
-        ItemClass::Epic => palette::ID_EPIC,
-        ItemClass::Ticket => palette::ID_TICKET,
-    }
 }
 
 /// Truncate by char count (created_at / updated_at are ASCII ISO-8601 in

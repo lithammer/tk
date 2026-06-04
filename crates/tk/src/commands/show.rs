@@ -22,15 +22,12 @@
 
 use std::io::Write;
 
-use anstyle::Style;
 use clap::Args as ClapArgs;
 
 use crate::cli::{Deps, Exit};
 use crate::commands::item_header::{self, Header};
 use crate::commands::resolver;
 use crate::domain::item_class::ItemClass;
-use crate::domain::priority::Priority;
-use crate::domain::status::ItemStatus;
 use crate::render::palette;
 use crate::render::sanitize;
 use crate::render::styler::SubStyler;
@@ -218,19 +215,19 @@ fn render_sub_row<W: Write + ?Sized>(
     write!(
         stdout,
         "{} ",
-        styler.wrap(status_style(item.status), item.status.glyph())
+        styler.wrap(palette::status_style(item.status), item.status.glyph())
     )?;
     write!(
         stdout,
         "{}: ",
-        styler.wrap(id_style(item.item_class), &item.display_id)
+        styler.wrap(palette::id_style(item.item_class), &item.display_id)
     )?;
     if item.item_class == ItemClass::Epic {
         write!(stdout, "{} ", styler.wrap(palette::KIND_EPIC, "(Epic)"))?;
     }
     sanitize::write_sanitized_line(stdout, item.title.as_bytes())?;
     if let Some(p) = item.priority {
-        let p_st = priority_style(p);
+        let p_st = palette::priority_style(p);
         write!(
             stdout,
             " {} {}",
@@ -248,31 +245,6 @@ fn render_external_blocker<W: Write + ?Sized>(
     stdout.write_all(b"  \xe2\x80\xa2 ")?; // "  • "
     sanitize::write_sanitized_line(stdout, eb.reason.as_bytes())?;
     stdout.write_all(b"\n")
-}
-
-fn status_style(status: ItemStatus) -> Style {
-    match status {
-        ItemStatus::Open => palette::STATUS_OPEN,
-        ItemStatus::Active => palette::STATUS_ACTIVE,
-        ItemStatus::Done => palette::STATUS_DONE,
-    }
-}
-
-fn priority_style(p: Priority) -> Style {
-    match p {
-        Priority::P0 => palette::PRIORITY_P0,
-        Priority::P1 => palette::PRIORITY_P1,
-        Priority::P2 => palette::PRIORITY_P2,
-        Priority::P3 => palette::PRIORITY_P3,
-        Priority::P4 => palette::PRIORITY_P4,
-    }
-}
-
-fn id_style(class: ItemClass) -> Style {
-    match class {
-        ItemClass::Epic => palette::ID_EPIC,
-        ItemClass::Ticket => palette::ID_TICKET,
-    }
 }
 
 #[cfg(test)]
