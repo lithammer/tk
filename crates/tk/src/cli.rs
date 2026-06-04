@@ -187,6 +187,25 @@ pub fn run_argv(deps: Deps<'_>, argv: &[String]) -> std::io::Result<Exit> {
     }
 }
 
+/// Map a failed stdout render/write to an [`Exit`].
+///
+/// A **broken pipe** — a downstream reader that closed early (`tk … | head`, a
+/// quit pager) — is success, not failure: the command did its job and the
+/// consumer simply stopped reading. Every other write error (e.g. a full disk
+/// on `tk … > file`) gets a curated diagnostic so its [`Exit::Failure`] carries
+/// a stderr line (the frozen contract) and stays distinguishable from a query
+/// command's empty-stderr "no result" ([`Exit::NoMatch`]). Shared by every
+/// rendering command so the broken-pipe policy cannot drift between them.
+#[must_use]
+pub fn exit_for_write_error(err: &std::io::Error, stderr: &mut dyn Write, command: &str) -> Exit {
+    if err.kind() == std::io::ErrorKind::BrokenPipe {
+        Exit::Ok
+    } else {
+        let _ = writeln!(stderr, "tk {command}: failed to write output\n{err}");
+        Exit::Failure
+    }
+}
+
 /// Route `clap::Error` through `Deps` writers so command-handler tests can
 /// capture --help / --version output, then map clap's exit code into our
 /// process exit:
@@ -207,5 +226,39 @@ fn render_clap_error(deps: Deps<'_>, err: &clap::Error) -> Exit {
             let _ = stderr.write_all(bytes.as_bytes());
             Exit::Usage
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn broken_pipe_write_error_is_success_with_empty_stderr() {
+        let mut stderr: Vec<u8> = Vec::new();
+        let exit = exit_for_write_error(
+            &Error::new(ErrorKind::BrokenPipe, "closed"),
+            &mut stderr,
+            "grep",
+        );
+        assert_eq!(exit, Exit::Ok);
+        assert!(stderr.is_empty(), "broken pipe writes no diagnostic");
+    }
+
+    #[test]
+    fn other_write_error_fails_with_a_diagnostic() {
+        let mut stderr: Vec<u8> = Vec::new();
+        let exit = exit_for_write_error(
+            &Error::new(ErrorKind::StorageFull, "disk full"),
+            &mut stderr,
+            "grep",
+        );
+        assert_eq!(exit, Exit::Failure);
+        let stderr = String::from_utf8(stderr).unwrap();
+        assert!(
+            stderr.contains("tk grep: failed to write output"),
+            "stderr={stderr:?}"
+        );
     }
 }

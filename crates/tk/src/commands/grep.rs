@@ -6,7 +6,7 @@ use std::io::Write;
 use clap::Args as ClapArgs;
 use regex::Regex;
 
-use crate::cli::{Deps, Exit};
+use crate::cli::{self, Deps, Exit};
 use crate::commands::item_header::{self, Header};
 use crate::commands::resolver;
 use crate::render::highlight;
@@ -76,19 +76,10 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
             return Exit::Failure;
         }
         // A write only happens after a block has started, so a broken pipe
-        // (`tk grep … | head`) means matches WERE found and piped: report Ok,
-        // never the no-match `1` a script would misread (stderr is empty).
-        Err(ScanError::Write(err)) if err.kind() == std::io::ErrorKind::BrokenPipe => {
-            return Exit::Ok;
-        }
-        // Any other write failure (e.g. a full disk on `tk grep X > file`) must
-        // write a diagnostic so its exit `1` is distinguishable from a no-match
-        // (which keeps stderr empty) and so it honours `Exit::Failure`'s
-        // "diagnostic already written" contract.
-        Err(ScanError::Write(err)) => {
-            let _ = writeln!(stderr, "tk {COMMAND}: failed to write output\n{err}");
-            return Exit::Failure;
-        }
+        // (`tk grep … | head`) means matches WERE found and piped: the shared
+        // policy reports Ok for that and a diagnosed Failure for any other write
+        // error (so its exit `1` is never misread as a no-match).
+        Err(ScanError::Write(err)) => return cli::exit_for_write_error(&err, stderr, COMMAND),
     }
 
     if matched { Exit::Ok } else { Exit::NoMatch }

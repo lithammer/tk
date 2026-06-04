@@ -24,7 +24,7 @@ use std::io::Write;
 
 use clap::Args as ClapArgs;
 
-use crate::cli::{Deps, Exit};
+use crate::cli::{self, Deps, Exit};
 use crate::commands::item_header::{self, Header};
 use crate::commands::resolver;
 use crate::domain::item_class::ItemClass;
@@ -81,10 +81,10 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
     };
 
     let sub = styler.for_stdout();
-    if render(stdout, &detail, sub).is_err() {
-        // stdout writes that fail are surfaced through the normal io::Error
-        // path; `tk` does not retry a broken pipe.
-        return Exit::Failure;
+    if let Err(err) = render(stdout, &detail, sub) {
+        // A closed pager (`tk show | head`) is success; other write errors are
+        // a diagnosed failure (shared policy).
+        return cli::exit_for_write_error(&err, stderr, COMMAND);
     }
     Exit::Ok
 }
@@ -321,6 +321,73 @@ mod tests {
                 stdout: store.git_rev_parse_stdout(),
                 stderr: Vec::new(),
             },
+        );
+    }
+
+    /// A stdout that fails every write with `BrokenPipe`, modelling a closed
+    /// pager (`tk show ID | head`).
+    struct BrokenPipe;
+    impl std::io::Write for BrokenPipe {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "broken pipe",
+            ))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn broken_pipe_to_stdout_is_success() {
+        // `tk show ID | head` (reader quits early) is success, not Failure: the
+        // shared write-error policy maps a broken pipe to Exit::Ok.
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Subject",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let runner = FakeRunner::new();
+        runner.expect(
+            &["git", "rev-parse"],
+            RunOutput {
+                exit_code: 0,
+                stdout: store.git_rev_parse_stdout(),
+                stderr: Vec::new(),
+            },
+        );
+        let clock = FakeClock::new(1_778_284_800_000);
+        let mut rng = StdRng::seed_from_u64(0);
+        let mut stdout = BrokenPipe;
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let deps = Deps {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+            stdin: &mut stdin,
+            runner: &runner,
+            clock: &clock,
+            rng: &mut rng,
+            cwd: &cwd_path,
+            styler: Styler::plain(),
+        };
+        let code = run(deps, Args { id: "tk-1".into() });
+        assert_eq!(code, Exit::Ok, "a broken pipe is success, not failure");
+        assert!(
+            stderr.is_empty(),
+            "broken pipe writes no diagnostic: {stderr:?}"
         );
     }
 
