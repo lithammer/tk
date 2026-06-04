@@ -26,11 +26,11 @@ use anstyle::Style;
 use clap::Args as ClapArgs;
 
 use crate::cli::{Deps, Exit};
+use crate::commands::item_header::{self, Header};
 use crate::commands::resolver;
 use crate::domain::item_class::ItemClass;
 use crate::domain::priority::Priority;
 use crate::domain::status::ItemStatus;
-use crate::domain::ticket_kind::TicketKind;
 use crate::render::palette;
 use crate::render::sanitize;
 use crate::render::styler::SubStyler;
@@ -97,69 +97,26 @@ fn render<W: Write + ?Sized>(
     detail: &ItemDetail,
     styler: SubStyler,
 ) -> std::io::Result<()> {
-    // Label line: <status-glyph> <display-id> · <title>
-    write!(
+    // Label line + facet bar, shared verbatim with `tk grep` (ADR-0026). The
+    // Updated facet is dropped when the Item has never been modified
+    // (`updated_at == created_at`, the at-insert default); the labelled
+    // `Created:` / `Updated:` form forecloses reading a bare `→` as a
+    // start→end due window tk has no concept of.
+    item_header::render_header(
         stdout,
-        "{} ",
-        styler.wrap(status_style(detail.status), detail.status.glyph())
+        &Header {
+            status: detail.status,
+            display_id: &detail.display_id,
+            item_class: detail.item_class,
+            title: &detail.title,
+            priority: detail.priority,
+            ticket_kind: detail.ticket_kind,
+            created_at: &detail.created_at,
+            updated_at: &detail.updated_at,
+        },
+        None,
+        styler,
     )?;
-    write!(
-        stdout,
-        "{} · ",
-        styler.wrap(id_style(detail.item_class), &detail.display_id)
-    )?;
-    write!(stdout, "{}", styler.open(palette::HEADER))?;
-    sanitize::write_sanitized_line(stdout, detail.title.as_bytes())?;
-    write!(stdout, "{}", styler.close(palette::HEADER))?;
-    stdout.write_all(b"\n")?;
-
-    // Facet bar.
-    stdout.write_all(b"  ")?;
-    match detail.item_class {
-        ItemClass::Epic => {
-            // Capitalized `Epic` reads in the same register as the Ticket
-            // Kind labels below; `text()` stays lowercase for storage.
-            write!(
-                stdout,
-                "{}",
-                styler.wrap(palette::KIND_EPIC, ItemClass::Epic.label())
-            )?;
-        }
-        ItemClass::Ticket => {
-            let priority = detail
-                .priority
-                .expect("Tickets always carry a Priority (schema CHECK)");
-            write!(
-                stdout,
-                "{}",
-                styler.wrap(priority_style(priority), priority.text())
-            )?;
-            stdout.write_all(b" \xc2\xb7 ")?; // " · "
-            let kind = detail
-                .ticket_kind
-                .expect("Tickets always carry a TicketKind (schema CHECK)");
-            match kind {
-                TicketKind::Bug => {
-                    write!(stdout, "{}", styler.wrap(palette::KIND_BUG, kind.label()))?;
-                }
-                TicketKind::Task => stdout.write_all(kind.label().as_bytes())?,
-            }
-        }
-    }
-    // Labelled date facets. The bare `<created> → <updated>` arrow form read
-    // as a start→end target window even though tk has no due-date concept;
-    // explicit `Created:` / `Updated:` labels foreclose that misreading. The
-    // Updated facet is omitted when the Item has never been modified
-    // (`updated_at == created_at`, the at-insert default from
-    // store::repository::create), so a fresh Ticket shows only its creation
-    // date and Updated reappears once the Item is actually edited.
-    let created_date = first_chars(&detail.created_at, 10);
-    write!(stdout, " \u{b7} Created: {created_date}")?;
-    if detail.updated_at != detail.created_at {
-        let updated_date = first_chars(&detail.updated_at, 10);
-        write!(stdout, " \u{b7} Updated: {updated_date}")?;
-    }
-    stdout.write_all(b"\n")?;
 
     let mut has_section = false;
 
@@ -315,17 +272,6 @@ fn id_style(class: ItemClass) -> Style {
     match class {
         ItemClass::Epic => palette::ID_EPIC,
         ItemClass::Ticket => palette::ID_TICKET,
-    }
-}
-
-fn first_chars(s: &str, n: usize) -> &str {
-    // Truncate by char count (not bytes); the created_at / updated_at
-    // columns are ASCII ISO-8601 in practice, so this is equivalent to
-    // `&s[..min(n, s.len())]`, but the char_indices form survives a
-    // future stamp that happens to carry multi-byte content.
-    match s.char_indices().nth(n) {
-        Some((idx, _)) => &s[..idx],
-        None => s,
     }
 }
 

@@ -105,8 +105,18 @@ Implementation and additive follow-ups:
   policy-gated: highlighted on a TTY, plain bytes when piped or under
   `NO_COLOR`, preserving the byte-stable scriptable output. The highlight span
   is still sanitised — rendering interleaves `sanitize` with the SGR open/close
-  rather than emitting them sequentially. This is cosmetic and additive, not a
-  frozen contract.
+  rather than emitting them sequentially. The match style is **bright yellow**:
+  a foreground colour pops against body prose where an underline did not, and
+  bright yellow is the one vivid colour the palette does not otherwise spend, so
+  a highlighted word is never confused with a red `Bug`/`P0` badge, a
+  normal-yellow `P1`/active marker, a magenta Epic, or a cyan Display ID
+  (reverse video and underline were tried and dropped — selection-like and too
+  faint respectively). The per-item **Display ID is cyan** (the anchor that lets
+  a reader pick one match out of a wall) and the `--` hunk separator is **blue**;
+  each is a disjoint SGR family so it nests inside the bold title. Because
+  matching is per line and the span closes before every newline, with the indent
+  written plain before the span opens, the colour never bleeds across lines or
+  tints the indent. Colours are cosmetic and additive, not a frozen contract.
 - **Deferred, addable without a contract change:** `-C`/`--context N`,
   `-F`/`--fixed-strings`, `--limit`, status/Origin filters, a `-c` count mode,
   and `-q`/`--quiet` — mirroring ADR-0025's no-flags-first discipline. `-q` is

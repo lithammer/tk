@@ -30,12 +30,14 @@ const fn fg(color: AnsiColor) -> Style {
 /// Bold heading text used for section labels in `tk show` and `tk list`.
 pub const HEADER: Style = Style::new().bold();
 
-/// Display ID column for Epics. Currently unstyled — the colour choice
-/// for Epics in lists has been deferred until the list rendering lands.
-pub const ID_EPIC: Style = Style::new();
+/// Display ID for Epics. Cyan — the Display ID is the per-item anchor that
+/// lets a reader pick one item out of a wall of text (`tk grep`, ADR-0026);
+/// cyan is the palette's most eye-catching free colour. Shared with the
+/// `item_header` (show/grep) and the list rows.
+pub const ID_EPIC: Style = fg(AnsiColor::Cyan);
 
-/// Display ID column for Tickets. Currently unstyled; see [`ID_EPIC`].
-pub const ID_TICKET: Style = Style::new();
+/// Display ID for Tickets. Cyan anchor; see [`ID_EPIC`].
+pub const ID_TICKET: Style = fg(AnsiColor::Cyan);
 
 /// Bug-Ticket-kind badge in lists / detail views.
 pub const KIND_BUG: Style = fg(AnsiColor::Red);
@@ -77,3 +79,20 @@ pub const PRIORITY_P3: Style = Style::new();
 
 /// Priority P4 — lowest (placeholder — uncoloured).
 pub const PRIORITY_P4: Style = Style::new();
+
+/// `tk grep` matched-text highlight (ADR-0026). Bright yellow — the one vivid
+/// colour the palette does not otherwise spend, so a highlighted word can never
+/// be mistaken for a `KIND_BUG` / `PRIORITY_P0` badge (red), a `PRIORITY_P1` /
+/// `STATUS_ACTIVE` marker (normal yellow), an Epic (magenta), or a Display ID
+/// (cyan). It is a disjoint SGR family from the bold title, so a match inside
+/// the title closes (`39`) without disturbing the outer bold (ADR-0014).
+/// Because grep matches per line and closes the span before every newline, with
+/// the indent written plain before it opens, the colour never bleeds across
+/// lines or tints the indent.
+pub const MATCH: Style = fg(AnsiColor::BrightYellow);
+
+/// `tk grep` `--` separator between non-contiguous hunks (ADR-0026). Blue —
+/// structural chrome that should read as secondary to the cyan Display ID
+/// anchor and the red matches; cyan was reassigned to the Display ID because it
+/// pops more and the anchor needs it more than the separator does.
+pub const HUNK_SEPARATOR: Style = fg(AnsiColor::Blue);

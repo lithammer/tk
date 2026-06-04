@@ -441,14 +441,14 @@ mod tests {
     #[test]
     fn wrap_plain_palette_entry_under_always_emits_only_text() {
         // Pin the no-escape contract for palette entries that resolve to
-        // `Style::new()` (placeholders like `ID_EPIC`, `STATUS_OPEN`,
-        // `PRIORITY_P2`). Both [`Style`]'s [`fmt::Display`] impl and
-        // [`Close`] must elide their byte output for these.
+        // `Style::new()` (placeholders like `STATUS_OPEN`, `PRIORITY_P2`,
+        // `BLOCKED`). Both [`Style`]'s [`fmt::Display`] impl and [`Close`] must
+        // elide their byte output for these.
         let styler = Styler {
             stdout: ColorChoice::Always,
             stderr: ColorChoice::Always,
         };
-        for style in [palette::ID_EPIC, palette::STATUS_OPEN, palette::PRIORITY_P2] {
+        for style in [palette::STATUS_OPEN, palette::PRIORITY_P2, palette::BLOCKED] {
             assert_eq!(
                 format!("{}", styler.for_stdout().wrap(style, "TEXT")),
                 "TEXT",
@@ -510,14 +510,14 @@ mod tests {
             Case {
                 name: "id_epic",
                 style: palette::ID_EPIC,
-                on_open: "",
-                on_close: "",
+                on_open: "\x1b[36m",
+                on_close: "\x1b[39m",
             },
             Case {
                 name: "id_ticket",
                 style: palette::ID_TICKET,
-                on_open: "",
-                on_close: "",
+                on_open: "\x1b[36m",
+                on_close: "\x1b[39m",
             },
             Case {
                 name: "kind_bug",

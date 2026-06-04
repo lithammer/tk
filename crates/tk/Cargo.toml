@@ -71,6 +71,14 @@ rand = { version = "0.10", default-features = false, features = ["std", "std_rng
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# `tk grep` matches a user-supplied regular expression per line in Rust
+# (ADR-0026). Default features are trimmed the jiff/rand way (ADR-0011 wants a
+# slim static binary): keep `unicode-case` so a future `-i` / `(?i)` does full
+# Unicode case folding, `unicode-perl` so `\b` / `\w` stay Unicode-aware, and
+# `perf-literal` for the aho-corasick/memchr literal prefilter; drop the large
+# `unicode-age` / `gencat` / `script` / `segment` tables tk never queries.
+regex = { version = "1", default-features = false, features = ["std", "perf-literal", "unicode-case", "unicode-perl"] }
+
 [dev-dependencies]
 tempfile = "3"
 # CLI scenario harness: assert_cmd runs the built `tk` binary, insta captures

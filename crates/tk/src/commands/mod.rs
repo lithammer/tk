@@ -13,7 +13,9 @@
 pub mod add;
 pub mod block;
 pub mod done;
+pub mod grep;
 pub mod init;
+pub mod item_header;
 pub mod item_row;
 pub mod lifecycle;
 pub mod list;

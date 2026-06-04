@@ -1,0 +1,13 @@
+---
+source: crates/tk/tests/scenarios.rs
+expression: "p.run(&format!(\"{command} --help\"))"
+---
+Search title and body text for a regular expression, with match context
+
+Usage: tk grep <PATTERN>
+
+Arguments:
+  <PATTERN>  Regular expression to search for in title and body text
+
+Options:
+  -h, --help  Print help
