@@ -202,7 +202,7 @@ Status: ○ open  ◐ active  ✓ done
 .RE
 .SS Searching content
 .TP
-\fBtk grep\fR \fIPATTERN\fR
+\fBtk grep\fR [\fB\-i\fR] [\fB\-F\fR] [\fB\-C\fR \fIN\fR] [\fB\-A\fR \fIN\fR] [\fB\-B\fR \fIN\fR] [\fB\-q\fR | \fB\-c\fR] \fIPATTERN\fR
 Find Tickets and Epics whose title or body matches the regular expression
 .I PATTERN
 and render each match as a
@@ -220,13 +220,37 @@ or the exact Display ID / Alias lookup of
 .PP
 .I PATTERN
 is a Rust regular expression (RE2-family, like \fBgrep \-E\fR; no
-backreferences or lookaround) and matching is case-sensitive. Matched text is
-highlighted on a terminal. Matches print in creation order, never ranked, with
-three lines of context each side,
+backreferences or lookaround) and matching is case-sensitive by default. Matched
+text is highlighted on a terminal. Matches print in creation order, never ranked,
+with three lines of context each side by default,
 .B \-\-
 between non-contiguous hunks within one item, and a blank line between items.
 An empty or all-whitespace pattern, or an invalid regular expression, is a
 usage error.
+.PP
+.B \-i
+matches case-insensitively (full Unicode case folding), and
+.B \-F
+matches
+.I PATTERN
+as a literal string instead of a regular expression.
+.PP
+.B \-C
+sets the context window to
+.I N
+lines each side (default 3);
+.B \-A
+and
+.B \-B
+override the trailing and leading side independently, and
+.B "\-C 0"
+shows only the matching lines.
+.PP
+.B \-q
+suppresses all output and exits on the first match;
+.B \-c
+prints the count of matching items instead of the blocks. Both keep the
+exit-status predicate described below.
 .PP
 .B tk grep
 overloads its exit status as a \fBgrep \-q\fR\-style predicate: it exits 0 when

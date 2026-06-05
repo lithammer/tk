@@ -31,44 +31,31 @@ pub struct Args {
     #[arg(value_name = "PATTERN")]
     pub pattern: String,
 
-    /// Match case-insensitively. Folds case via the regex engine's full
-    /// Unicode case folding, diverging from the case-sensitive default
-    /// (ADR-0026) for a single invocation.
+    /// Match case-insensitively (full Unicode case folding).
     #[arg(short = 'i', long = "ignore-case")]
     pub ignore_case: bool,
 
-    /// Match the pattern as a literal string, not a regex. The escape hatch
-    /// for "I mean these characters literally" (ADR-0026) — e.g. `a(b` or
-    /// `.*` match verbatim instead of as metacharacters.
+    /// Match the pattern as a literal string, not a regular expression.
     #[arg(short = 'F', long = "fixed-strings")]
     pub fixed: bool,
 
-    /// Show N lines of context on each side of a match. Defaults to 3
-    /// (matching `git diff -U3`, ADR-0026); `-C 0` shows only the matching
-    /// lines. Overridden per side by `-A` / `-B`.
+    /// Show N lines of context on each side of a match (default 3).
     #[arg(short = 'C', long = "context", value_name = "N")]
     pub context: Option<usize>,
 
-    /// Show N lines of context after a match, overriding `-C` for the
-    /// trailing side.
+    /// Show N lines of context after each match (overrides -C).
     #[arg(short = 'A', long = "after-context", value_name = "N")]
     pub after_context: Option<usize>,
 
-    /// Show N lines of context before a match, overriding `-C` for the
-    /// leading side.
+    /// Show N lines of context before each match (overrides -C).
     #[arg(short = 'B', long = "before-context", value_name = "N")]
     pub before_context: Option<usize>,
 
-    /// Suppress all output and exit on the first match. The 0/1 exit overload
-    /// already delivers the predicate (ADR-0026); `-q` adds output suppression
-    /// plus a first-match early-exit that stops the scan at the first hit.
+    /// Suppress all output and exit on the first match.
     #[arg(short = 'q', long = "quiet")]
     pub quiet: bool,
 
-    /// Print the number of matching items instead of the match blocks, like
-    /// `grep -c`. The unit is the item (grep's block unit), not the line: an
-    /// item that matches on several lines counts once. Keeps the 0/1 exit
-    /// overload, so a no-match prints `0` and exits 1.
+    /// Print the count of matching items instead of the match blocks.
     #[arg(short = 'c', long = "count", conflicts_with = "quiet")]
     pub count: bool,
 }
