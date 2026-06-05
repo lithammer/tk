@@ -416,6 +416,25 @@ fn grep_fixed_strings_matches_a_literal() {
     });
 }
 
+/// `-C 0` collapses each hunk to the matching line, overriding the default-3
+/// window (ADR-0026, tk-118): only the body paragraph carrying the needle shows,
+/// not the one before it.
+#[test]
+fn grep_context_zero_shows_only_the_matching_line() {
+    let p = Repo::new("project");
+    p.run("init");
+    // Two body paragraphs (blank-line separated); the needle is in the second.
+    p.run("add -m 'Subject' -m 'first paragraph here' -m 'second needle paragraph'"); // project-1
+
+    insta::with_settings!({filters => vec![(r"Created: \d{4}-\d{2}-\d{2}", "Created: [DATE]")]}, {
+        tk!(p, "grep needle -C 0", @"
+        ○ project-1 · Subject
+          P2 · Task · Created: [DATE]
+          second needle paragraph
+        ");
+    });
+}
+
 /// The pattern is required (clap usage error), an empty pattern is rejected, and
 /// a no-match exits 1 with empty streams — the `grep -q`-style predicate where
 /// empty stderr distinguishes "no match" from "broken" (ADR-0026).

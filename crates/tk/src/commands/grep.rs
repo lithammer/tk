@@ -35,6 +35,22 @@ pub struct Args {
     /// `.*` match verbatim instead of as metacharacters.
     #[arg(short = 'F', long = "fixed-strings")]
     pub fixed: bool,
+
+    /// Show N lines of context on each side of a match. Defaults to 3
+    /// (matching `git diff -U3`, ADR-0026); `-C 0` shows only the matching
+    /// lines. Overridden per side by `-A` / `-B`.
+    #[arg(short = 'C', long = "context", value_name = "N")]
+    pub context: Option<usize>,
+
+    /// Show N lines of context after a match, overriding `-C` for the
+    /// trailing side.
+    #[arg(short = 'A', long = "after-context", value_name = "N")]
+    pub after_context: Option<usize>,
+
+    /// Show N lines of context before a match, overriding `-C` for the
+    /// leading side.
+    #[arg(short = 'B', long = "before-context", value_name = "N")]
+    pub before_context: Option<usize>,
 }
 
 /// Compile the search pattern into a matcher, applying the literal-match and
@@ -91,12 +107,23 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
         }
     };
 
+    // Resolve the per-side context window: `-A`/`-B` override their side of
+    // `-C`, which in turn overrides the default-3 (ADR-0026).
+    let before = args
+        .before_context
+        .or(args.context)
+        .unwrap_or(DEFAULT_CONTEXT);
+    let after = args
+        .after_context
+        .or(args.context)
+        .unwrap_or(DEFAULT_CONTEXT);
+
     // Stream Items in creation order, rendering each match straight to stdout
     // (one Item in memory). `matched` drives the grep-style 0/1 exit overload.
     let out = styler.for_stdout();
     let mut matched = false;
     let scan = grep::scan(&store, |item| {
-        render_match(stdout, &item, &re, &mut matched, out)
+        render_match(stdout, &item, &re, &mut matched, before, after, out)
     });
     match scan {
         Ok(()) => {}
@@ -114,9 +141,9 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
     if matched { Exit::Ok } else { Exit::NoMatch }
 }
 
-/// Default `grep -C` context window, in lines each side of a match. Fixed at 3
-/// (matching `git diff -U3`); a `-C`/`--context` override is deferred (ADR-0026).
-const CONTEXT: usize = 3;
+/// Default `grep -C` context window, in lines each side of a match (matching
+/// `git diff -U3`, ADR-0026), used when neither `-C` nor `-A`/`-B` is given.
+const DEFAULT_CONTEXT: usize = 3;
 
 /// Render one Item's matches as a `tk show`-style block, or nothing when the
 /// pattern hits neither title nor body.
@@ -129,6 +156,8 @@ fn render_match<W: Write + ?Sized>(
     item: &GrepItem,
     re: &Regex,
     matched: &mut bool,
+    before: usize,
+    after: usize,
     styler: SubStyler,
 ) -> std::io::Result<()> {
     let title_hit = re.is_match(&item.title);
@@ -175,7 +204,7 @@ fn render_match<W: Write + ?Sized>(
         styler,
     )?;
 
-    for (idx, hunk) in context_hunks(&body_hits, body_lines.len())
+    for (idx, hunk) in context_hunks(&body_hits, body_lines.len(), before, after)
         .into_iter()
         .enumerate()
     {
@@ -193,14 +222,20 @@ fn render_match<W: Write + ?Sized>(
     Ok(())
 }
 
-/// Expand each body-line hit to a ±[`CONTEXT`] window (clamped to the body) and
-/// merge windows that overlap or touch, yielding inclusive line ranges in
-/// document order. Touching windows merge so adjacent matches read as one hunk.
-fn context_hunks(hits: &[usize], len: usize) -> Vec<std::ops::RangeInclusive<usize>> {
+/// Expand each body-line hit to a `[hit - before, hit + after]` window (clamped
+/// to the body) and merge windows that overlap or touch, yielding inclusive line
+/// ranges in document order. Touching windows merge so adjacent matches read as
+/// one hunk. `before == after == 0` collapses each hunk to its matching line.
+fn context_hunks(
+    hits: &[usize],
+    len: usize,
+    before: usize,
+    after: usize,
+) -> Vec<std::ops::RangeInclusive<usize>> {
     let mut hunks: Vec<std::ops::RangeInclusive<usize>> = Vec::new();
     for &hit in hits {
-        let start = hit.saturating_sub(CONTEXT);
-        let end = (hit + CONTEXT).min(len.saturating_sub(1));
+        let start = hit.saturating_sub(before);
+        let end = (hit + after).min(len.saturating_sub(1));
         match hunks.last_mut() {
             // `start <= prev_end + 1` covers both overlap and adjacency.
             Some(last) if start <= *last.end() + 1 => {
@@ -454,6 +489,84 @@ mod tests {
             "stdout={stdout:?}"
         );
         assert!(!stdout.contains("DESCRIPTION"), "stdout={stdout:?}");
+    }
+
+    /// A 10-line body with the needle on index 5, shared by the context-window
+    /// tests so each can name exactly which lines a window includes or omits.
+    const CONTEXT_BODY: &str =
+        "alpha\nbravo\ncharlie\ndelta\necho\nMATCHHERE\nfoxtrot\ngolf\nhotel\nindia";
+
+    #[test]
+    fn context_flag_narrows_the_window_each_side() {
+        // tk-118: `-C 1` overrides the default 3, so only one line each side of
+        // the index-5 hit shows.
+        let (code, out) = grep_one_args(
+            "Subject",
+            CONTEXT_BODY,
+            Args {
+                pattern: "MATCHHERE".to_owned(),
+                context: Some(1),
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        for shown in ["echo", "MATCHHERE", "foxtrot"] {
+            assert!(out.contains(shown), "expected {shown:?} in {out:?}");
+        }
+        for hidden in ["delta", "golf"] {
+            assert!(
+                !out.contains(hidden),
+                "did not expect {hidden:?} in {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn context_zero_shows_only_the_matching_line() {
+        // tk-118: `-C 0` collapses the hunk to the matching line — no context.
+        let (code, out) = grep_one_args(
+            "Subject",
+            CONTEXT_BODY,
+            Args {
+                pattern: "MATCHHERE".to_owned(),
+                context: Some(0),
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        assert!(out.contains("MATCHHERE"), "out={out:?}");
+        for hidden in ["echo", "foxtrot"] {
+            assert!(
+                !out.contains(hidden),
+                "did not expect {hidden:?} in {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn after_and_before_context_override_each_side() {
+        // tk-118: `-B 1 -A 2` is asymmetric — one line before, two after the
+        // index-5 hit — proving the two sides resolve independently.
+        let (code, out) = grep_one_args(
+            "Subject",
+            CONTEXT_BODY,
+            Args {
+                pattern: "MATCHHERE".to_owned(),
+                before_context: Some(1),
+                after_context: Some(2),
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        for shown in ["echo", "MATCHHERE", "foxtrot", "golf"] {
+            assert!(out.contains(shown), "expected {shown:?} in {out:?}");
+        }
+        for hidden in ["delta", "hotel"] {
+            assert!(
+                !out.contains(hidden),
+                "did not expect {hidden:?} in {out:?}"
+            );
+        }
     }
 
     /// Run `tk grep PATTERN` against a single seeded Ticket, returning
