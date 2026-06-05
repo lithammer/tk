@@ -279,7 +279,9 @@ fn context_hunks(
     let mut hunks: Vec<std::ops::RangeInclusive<usize>> = Vec::new();
     for &hit in hits {
         let start = hit.saturating_sub(before);
-        let end = (hit + after).min(len.saturating_sub(1));
+        // Saturating, mirroring `start`: a huge `-A`/`-C` (clap accepts up to
+        // usize::MAX) must clamp to the last line, not overflow `hit + after`.
+        let end = hit.saturating_add(after).min(len.saturating_sub(1));
         match hunks.last_mut() {
             // `start <= prev_end + 1` covers both overlap and adjacency.
             Some(last) if start <= *last.end() + 1 => {
@@ -585,6 +587,54 @@ mod tests {
                 "did not expect {hidden:?} in {out:?}"
             );
         }
+    }
+
+    #[test]
+    fn after_and_before_context_override_the_context_flag() {
+        // tk-118: `-A`/`-B` win over `-C` on their own side. With `-C 5 -A 1`,
+        // before takes 5 (from -C) but after takes 1 (from -A), not 5 — so the
+        // window is [0, 6]: `alpha` shows (before=5) while `golf` does not
+        // (after=1, not 5). A reversed precedence would fail this.
+        let (code, out) = grep_one_args(
+            "Subject",
+            CONTEXT_BODY,
+            Args {
+                pattern: "MATCHHERE".to_owned(),
+                context: Some(5),
+                after_context: Some(1),
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        for shown in ["alpha", "echo", "MATCHHERE", "foxtrot"] {
+            assert!(out.contains(shown), "expected {shown:?} in {out:?}");
+        }
+        assert!(
+            !out.contains("golf"),
+            "-A 1 must override -C 5 on the after side: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_huge_after_context_clamps_instead_of_overflowing() {
+        // tk-118 regression: `-A usize::MAX` on a match past line 0 must clamp to
+        // the last line, not overflow `hit + after` (a debug-build panic / release
+        // silent-wrong window). The match is on index 5, so the window runs to the
+        // body end and the last line shows.
+        let (code, out) = grep_one_args(
+            "Subject",
+            CONTEXT_BODY,
+            Args {
+                pattern: "MATCHHERE".to_owned(),
+                after_context: Some(usize::MAX),
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        assert!(
+            out.contains("india"),
+            "window should reach the last line: {out:?}"
+        );
     }
 
     #[test]
