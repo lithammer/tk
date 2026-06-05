@@ -8,6 +8,8 @@
 //! of store size. Matching in SQL would buy nothing and require the rusqlite
 //! `functions` feature; streaming keeps `tk grep PATTERN | head` cheap.
 
+use std::ops::ControlFlow;
+
 use crate::domain::item_class::ItemClass;
 use crate::domain::priority::Priority;
 use crate::domain::status::ItemStatus;
@@ -43,9 +45,13 @@ pub enum ScanError {
 /// is called once per row as it streams from SQLite (`rows.next()` steps
 /// lazily), so only one [`GrepItem`] is live at a time. A visitor write error
 /// stops the scan and surfaces as [`ScanError::Write`].
+///
+/// The visitor returns [`ControlFlow`] so a caller can stop the scan early —
+/// `tk grep -q` breaks on the first match (the streaming design supports the
+/// early-exit directly, ADR-0026). [`ControlFlow::Continue`] reads the next row.
 pub fn scan<F>(store: &Store, mut visit: F) -> Result<(), ScanError>
 where
-    F: FnMut(GrepItem) -> std::io::Result<()>,
+    F: FnMut(GrepItem) -> std::io::Result<ControlFlow<()>>,
 {
     const SCAN_SQL: &str = "\
 select display_value, item_class, ticket_kind, priority, title, body, status, \
@@ -57,7 +63,9 @@ select display_value, item_class, ticket_kind, priority, title, body, status, \
     let mut rows = stmt.query([]).map_err(ScanError::Sql)?;
     while let Some(row) = rows.next().map_err(ScanError::Sql)? {
         let item = item_from_row(row).map_err(ScanError::Sql)?;
-        visit(item).map_err(ScanError::Write)?;
+        if visit(item).map_err(ScanError::Write)?.is_break() {
+            break;
+        }
     }
     Ok(())
 }
@@ -74,4 +82,65 @@ fn item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GrepItem> {
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::migrations;
+    use crate::store::testing::{FixtureItem, insert_fixture_item};
+    use rusqlite::Connection;
+
+    fn open_seeded() -> Store {
+        let mut conn = Connection::open_in_memory().expect("open :memory:");
+        conn.execute_batch("pragma foreign_keys = on").unwrap();
+        migrations::apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        Store { conn }
+    }
+
+    fn seed(store: &Store, id: &str, display: &str, seq: i64) {
+        insert_fixture_item(
+            &store.conn,
+            FixtureItem {
+                id,
+                display,
+                title: "Subject",
+                created_seq: seq,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn visits_every_item_in_creation_order() {
+        let store = open_seeded();
+        seed(&store, "t2", "tk-2", 2);
+        seed(&store, "t1", "tk-1", 1);
+        seed(&store, "t3", "tk-3", 3);
+        let mut seen = Vec::new();
+        scan(&store, |item| {
+            seen.push(item.display_id);
+            Ok(ControlFlow::Continue(()))
+        })
+        .unwrap();
+        assert_eq!(seen, ["tk-1", "tk-2", "tk-3"]);
+    }
+
+    #[test]
+    fn a_visitor_break_stops_the_scan() {
+        // The early-stop channel `tk grep -q` relies on: a Break after the
+        // first row ends the scan, so later rows are never read.
+        let store = open_seeded();
+        seed(&store, "t1", "tk-1", 1);
+        seed(&store, "t2", "tk-2", 2);
+        seed(&store, "t3", "tk-3", 3);
+        let mut seen = Vec::new();
+        scan(&store, |item| {
+            seen.push(item.display_id);
+            Ok(ControlFlow::Break(()))
+        })
+        .unwrap();
+        assert_eq!(seen, ["tk-1"]);
+    }
 }

@@ -1,10 +1,12 @@
 //! `tk grep` — regex content search over title and body, rendered as
 //! `tk show`-style match context (ADR-0026).
 
+use std::borrow::Cow;
 use std::io::Write;
+use std::ops::ControlFlow;
 
 use clap::Args as ClapArgs;
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 
 use crate::cli::{self, Deps, Exit};
 use crate::commands::item_header::{self, Header};
@@ -17,11 +19,61 @@ use crate::store::repository::grep::{self, GrepItem, ScanError};
 const COMMAND: &str = "grep";
 
 /// Flags for `tk grep`.
-#[derive(Debug, ClapArgs)]
+///
+/// Four `bool`s exceed pedantic's `struct_excessive_bools` cap, but each is an
+/// independent grep flag clap's derive must own as its own field; only `-c` and
+/// `-q` conflict, leaving the rest freely composable. The allow mirrors
+/// `tk list`'s Args for the same parser-layer reason.
+#[derive(Debug, Default, ClapArgs)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Args {
     /// Regular expression to search for in title and body text.
     #[arg(value_name = "PATTERN")]
     pub pattern: String,
+
+    /// Match case-insensitively (full Unicode case folding).
+    #[arg(short = 'i', long = "ignore-case")]
+    pub ignore_case: bool,
+
+    /// Match the pattern as a literal string, not a regular expression.
+    #[arg(short = 'F', long = "fixed-strings")]
+    pub fixed: bool,
+
+    /// Show N lines of context on each side of a match (default 3).
+    #[arg(short = 'C', long = "context", value_name = "N")]
+    pub context: Option<usize>,
+
+    /// Show N lines of context after each match (overrides -C).
+    #[arg(short = 'A', long = "after-context", value_name = "N")]
+    pub after_context: Option<usize>,
+
+    /// Show N lines of context before each match (overrides -C).
+    #[arg(short = 'B', long = "before-context", value_name = "N")]
+    pub before_context: Option<usize>,
+
+    /// Suppress all output and exit on the first match.
+    #[arg(short = 'q', long = "quiet")]
+    pub quiet: bool,
+
+    /// Print the count of matching items instead of the match blocks.
+    #[arg(short = 'c', long = "count", conflicts_with = "quiet")]
+    pub count: bool,
+}
+
+/// Compile the search pattern into a matcher, applying the literal-match and
+/// case-folding policies. The pattern is a regular expression by default
+/// (ADR-0026); `-F` escapes its metacharacters so it matches verbatim, and
+/// `-i` compiles case-insensitively (full Unicode case folding) rather than
+/// lowercasing. The two compose: `-F` escapes, then `-i` folds.
+fn build_matcher(pattern: &str, ignore_case: bool, fixed: bool) -> Result<Regex, regex::Error> {
+    let pattern: Cow<'_, str> = if fixed {
+        Cow::Owned(regex::escape(pattern))
+    } else {
+        Cow::Borrowed(pattern)
+    };
+    RegexBuilder::new(&pattern)
+        .case_insensitive(ignore_case)
+        .build()
 }
 
 #[must_use]
@@ -36,17 +88,18 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
         ..
     } = deps;
 
-    // Reject an empty / all-whitespace pattern before any store work, mirroring
-    // `tk search` (ADR-0026): an empty regex matches every line and would dump
-    // the whole store, almost always a mistake.
-    if args.pattern.trim().is_empty() {
+    // Reject only a truly empty pattern before any store work, mirroring
+    // `tk search` (ADR-0026, amended): an empty regex matches every line and
+    // would dump the whole store. A whitespace pattern is a valid (if unusual)
+    // needle — `grep`/`ripgrep` match it — so it is not rejected.
+    if args.pattern.is_empty() {
         let _ = writeln!(stderr, "tk {COMMAND}: pattern must not be empty");
         return Exit::Usage;
     }
 
     // Compile (and so validate) the pattern before opening the store: a
     // malformed regex is a usage error, surfaced fail-fast (ADR-0026).
-    let re = match Regex::new(&args.pattern) {
+    let re = match build_matcher(&args.pattern, args.ignore_case, args.fixed) {
         Ok(re) => re,
         Err(err) => {
             let _ = writeln!(stderr, "tk {COMMAND}: invalid pattern: {err}");
@@ -62,12 +115,44 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
         }
     };
 
+    // Resolve the per-side context window: `-A`/`-B` override their side of
+    // `-C`, which in turn overrides the default-3 (ADR-0026).
+    let before = args
+        .before_context
+        .or(args.context)
+        .unwrap_or(DEFAULT_CONTEXT);
+    let after = args
+        .after_context
+        .or(args.context)
+        .unwrap_or(DEFAULT_CONTEXT);
+
     // Stream Items in creation order, rendering each match straight to stdout
-    // (one Item in memory). `matched` drives the grep-style 0/1 exit overload.
+    // (one Item in memory). `matched` drives the grep-style 0/1 exit overload;
+    // `count` accumulates the matching-item total for `-c`.
     let out = styler.for_stdout();
     let mut matched = false;
+    let mut count: usize = 0;
     let scan = grep::scan(&store, |item| {
-        render_match(stdout, &item, &re, &mut matched, out)
+        // `-q` suppresses output and stops at the first match: the 0/1 exit
+        // overload still carries the answer, so no block is rendered (ADR-0026).
+        if args.quiet {
+            if item_matches(&item, &re) {
+                matched = true;
+                return Ok(ControlFlow::Break(()));
+            }
+            return Ok(ControlFlow::Continue(()));
+        }
+        // `-c` tallies matching items rather than rendering them; an item that
+        // matches on several lines still counts once (the unit is the item).
+        if args.count {
+            if item_matches(&item, &re) {
+                matched = true;
+                count += 1;
+            }
+            return Ok(ControlFlow::Continue(()));
+        }
+        render_match(stdout, &item, &re, &mut matched, before, after, out)?;
+        Ok(ControlFlow::Continue(()))
     });
     match scan {
         Ok(()) => {}
@@ -82,12 +167,28 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
         Err(ScanError::Write(err)) => return cli::exit_for_write_error(&err, stderr, COMMAND),
     }
 
+    // `-c` always prints a number (even `0`, like `grep -c`); the 0/1 exit
+    // overload below still reports whether anything matched.
+    if args.count {
+        if let Err(err) = writeln!(stdout, "{count}") {
+            return cli::exit_for_write_error(&err, stderr, COMMAND);
+        }
+    }
+
     if matched { Exit::Ok } else { Exit::NoMatch }
 }
 
-/// Default `grep -C` context window, in lines each side of a match. Fixed at 3
-/// (matching `git diff -U3`); a `-C`/`--context` override is deferred (ADR-0026).
-const CONTEXT: usize = 3;
+/// Default `grep -C` context window, in lines each side of a match (matching
+/// `git diff -U3`, ADR-0026), used when neither `-C` nor `-A`/`-B` is given.
+const DEFAULT_CONTEXT: usize = 3;
+
+/// Whether the pattern hits an Item at all — the title or any (non-empty) body
+/// line. Mirrors [`render_match`]'s "title or body line" rule but yields only a
+/// predicate, so `-q` can answer yes/no without materialising any hunk.
+fn item_matches(item: &GrepItem, re: &Regex) -> bool {
+    re.is_match(&item.title)
+        || (!item.body.is_empty() && item.body.split('\n').any(|line| re.is_match(line)))
+}
 
 /// Render one Item's matches as a `tk show`-style block, or nothing when the
 /// pattern hits neither title nor body.
@@ -100,6 +201,8 @@ fn render_match<W: Write + ?Sized>(
     item: &GrepItem,
     re: &Regex,
     matched: &mut bool,
+    before: usize,
+    after: usize,
     styler: SubStyler,
 ) -> std::io::Result<()> {
     let title_hit = re.is_match(&item.title);
@@ -146,7 +249,7 @@ fn render_match<W: Write + ?Sized>(
         styler,
     )?;
 
-    for (idx, hunk) in context_hunks(&body_hits, body_lines.len())
+    for (idx, hunk) in context_hunks(&body_hits, body_lines.len(), before, after)
         .into_iter()
         .enumerate()
     {
@@ -164,14 +267,22 @@ fn render_match<W: Write + ?Sized>(
     Ok(())
 }
 
-/// Expand each body-line hit to a ±[`CONTEXT`] window (clamped to the body) and
-/// merge windows that overlap or touch, yielding inclusive line ranges in
-/// document order. Touching windows merge so adjacent matches read as one hunk.
-fn context_hunks(hits: &[usize], len: usize) -> Vec<std::ops::RangeInclusive<usize>> {
+/// Expand each body-line hit to a `[hit - before, hit + after]` window (clamped
+/// to the body) and merge windows that overlap or touch, yielding inclusive line
+/// ranges in document order. Touching windows merge so adjacent matches read as
+/// one hunk. `before == after == 0` collapses each hunk to its matching line.
+fn context_hunks(
+    hits: &[usize],
+    len: usize,
+    before: usize,
+    after: usize,
+) -> Vec<std::ops::RangeInclusive<usize>> {
     let mut hunks: Vec<std::ops::RangeInclusive<usize>> = Vec::new();
     for &hit in hits {
-        let start = hit.saturating_sub(CONTEXT);
-        let end = (hit + CONTEXT).min(len.saturating_sub(1));
+        let start = hit.saturating_sub(before);
+        // Saturating, mirroring `start`: a huge `-A`/`-C` (clap accepts up to
+        // usize::MAX) must clamp to the last line, not overflow `hit + after`.
+        let end = hit.saturating_add(after).min(len.saturating_sub(1));
         match hunks.last_mut() {
             // `start <= prev_end + 1` covers both overlap and adjacency.
             Some(last) if start <= *last.end() + 1 => {
@@ -288,6 +399,7 @@ mod tests {
             h.deps(),
             Args {
                 pattern: "auth".to_owned(),
+                ..Args::default()
             },
         );
         assert_eq!(code, Exit::Ok);
@@ -325,6 +437,7 @@ mod tests {
             h.deps(),
             Args {
                 pattern: "nonexistent".to_owned(),
+                ..Args::default()
             },
         );
         assert_eq!(code, Exit::NoMatch);
@@ -361,6 +474,7 @@ mod tests {
             h.deps(),
             Args {
                 pattern: "MATCHHERE".to_owned(),
+                ..Args::default()
             },
         );
         assert_eq!(code, Exit::Ok);
@@ -411,6 +525,7 @@ mod tests {
             h.deps(),
             Args {
                 pattern: "match".to_owned(),
+                ..Args::default()
             },
         );
         assert_eq!(code, Exit::Ok);
@@ -423,9 +538,148 @@ mod tests {
         assert!(!stdout.contains("DESCRIPTION"), "stdout={stdout:?}");
     }
 
+    /// A 10-line body with the needle on index 5, shared by the context-window
+    /// tests so each can name exactly which lines a window includes or omits.
+    const CONTEXT_BODY: &str =
+        "alpha\nbravo\ncharlie\ndelta\necho\nMATCHHERE\nfoxtrot\ngolf\nhotel\nindia";
+
+    #[test]
+    fn context_flag_narrows_the_window_each_side() {
+        // tk-118: `-C 1` overrides the default 3, so only one line each side of
+        // the index-5 hit shows.
+        let (code, out) = grep_one_args(
+            "Subject",
+            CONTEXT_BODY,
+            Args {
+                pattern: "MATCHHERE".to_owned(),
+                context: Some(1),
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        for shown in ["echo", "MATCHHERE", "foxtrot"] {
+            assert!(out.contains(shown), "expected {shown:?} in {out:?}");
+        }
+        for hidden in ["delta", "golf"] {
+            assert!(
+                !out.contains(hidden),
+                "did not expect {hidden:?} in {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn context_zero_shows_only_the_matching_line() {
+        // tk-118: `-C 0` collapses the hunk to the matching line — no context.
+        let (code, out) = grep_one_args(
+            "Subject",
+            CONTEXT_BODY,
+            Args {
+                pattern: "MATCHHERE".to_owned(),
+                context: Some(0),
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        assert!(out.contains("MATCHHERE"), "out={out:?}");
+        for hidden in ["echo", "foxtrot"] {
+            assert!(
+                !out.contains(hidden),
+                "did not expect {hidden:?} in {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn after_and_before_context_override_the_context_flag() {
+        // tk-118: `-A`/`-B` win over `-C` on their own side. With `-C 5 -A 1`,
+        // before takes 5 (from -C) but after takes 1 (from -A), not 5 — so the
+        // window is [0, 6]: `alpha` shows (before=5) while `golf` does not
+        // (after=1, not 5). A reversed precedence would fail this.
+        let (code, out) = grep_one_args(
+            "Subject",
+            CONTEXT_BODY,
+            Args {
+                pattern: "MATCHHERE".to_owned(),
+                context: Some(5),
+                after_context: Some(1),
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        for shown in ["alpha", "echo", "MATCHHERE", "foxtrot"] {
+            assert!(out.contains(shown), "expected {shown:?} in {out:?}");
+        }
+        assert!(
+            !out.contains("golf"),
+            "-A 1 must override -C 5 on the after side: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_huge_after_context_clamps_instead_of_overflowing() {
+        // tk-118 regression: `-A usize::MAX` on a match past line 0 must clamp to
+        // the last line, not overflow `hit + after` (a debug-build panic / release
+        // silent-wrong window). The match is on index 5, so the window runs to the
+        // body end and the last line shows.
+        let (code, out) = grep_one_args(
+            "Subject",
+            CONTEXT_BODY,
+            Args {
+                pattern: "MATCHHERE".to_owned(),
+                after_context: Some(usize::MAX),
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        assert!(
+            out.contains("india"),
+            "window should reach the last line: {out:?}"
+        );
+    }
+
+    #[test]
+    fn after_and_before_context_override_each_side() {
+        // tk-118: `-B 1 -A 2` is asymmetric — one line before, two after the
+        // index-5 hit — proving the two sides resolve independently.
+        let (code, out) = grep_one_args(
+            "Subject",
+            CONTEXT_BODY,
+            Args {
+                pattern: "MATCHHERE".to_owned(),
+                before_context: Some(1),
+                after_context: Some(2),
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        for shown in ["echo", "MATCHHERE", "foxtrot", "golf"] {
+            assert!(out.contains(shown), "expected {shown:?} in {out:?}");
+        }
+        for hidden in ["delta", "hotel"] {
+            assert!(
+                !out.contains(hidden),
+                "did not expect {hidden:?} in {out:?}"
+            );
+        }
+    }
+
     /// Run `tk grep PATTERN` against a single seeded Ticket, returning
     /// `(exit, stdout)`. Keeps the matching-semantics tests focused on behavior.
     fn grep_one(title: &str, body: &str, pattern: &str) -> (Exit, String) {
+        grep_one_args(
+            title,
+            body,
+            Args {
+                pattern: pattern.to_owned(),
+                ..Args::default()
+            },
+        )
+    }
+
+    /// Like [`grep_one`] but takes the full [`Args`], so a test can exercise a
+    /// flag (e.g. `-i`) without restating the single-item seeding.
+    fn grep_one_args(title: &str, body: &str, args: Args) -> (Exit, String) {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_item(
@@ -445,12 +699,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
-            Args {
-                pattern: pattern.to_owned(),
-            },
-        );
+        let code = run(h.deps(), args);
         (code, String::from_utf8(h.stdout).unwrap())
     }
 
@@ -470,10 +719,203 @@ mod tests {
     #[test]
     fn matching_is_case_sensitive_by_default() {
         // ADR-0026: case-sensitive by default (deliberate divergence from
-        // `tk search`); `-i` is deferred. `Auth` must not match `auth`.
+        // `tk search`); `-i` flips it. `Auth` must not match `auth`.
         let (code, out) = grep_one("Subject", "the auth token", "Auth");
         assert_eq!(code, Exit::NoMatch);
         assert!(out.is_empty(), "out={out:?}");
+    }
+
+    #[test]
+    fn ignore_case_matches_across_case() {
+        // tk-117: `-i` flips the case-sensitive default for one invocation, so
+        // the capitalised pattern hits the lowercase body.
+        let (code, out) = grep_one_args(
+            "Subject",
+            "the auth token",
+            Args {
+                pattern: "Auth".to_owned(),
+                ignore_case: true,
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        assert!(out.contains("the auth token"), "out={out:?}");
+    }
+
+    #[test]
+    fn ignore_case_folds_beyond_ascii() {
+        // ADR-0026: `-i` compiles case-insensitively rather than lowercasing,
+        // so it inherits the regex engine's full Unicode case folding — strictly
+        // stronger than `tk search`'s ASCII-only `lower()`. `é` folds to `É`.
+        let (code, out) = grep_one_args(
+            "Subject",
+            "the CAFÉ menu",
+            Args {
+                pattern: "café".to_owned(),
+                ignore_case: true,
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        assert!(out.contains("the CAFÉ menu"), "out={out:?}");
+    }
+
+    #[test]
+    fn fixed_strings_matches_regex_metacharacters_verbatim() {
+        // tk-120: `-F` escapes the pattern, so metacharacters match literally.
+        // `a(b` is an unbalanced group as a regex (a usage error without `-F`),
+        // but a valid literal needle with it.
+        let (code, out) = grep_one_args(
+            "Subject",
+            "the call site is a(b) here",
+            Args {
+                pattern: "a(b".to_owned(),
+                fixed: true,
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        assert!(out.contains("a(b)"), "out={out:?}");
+    }
+
+    #[test]
+    fn fixed_strings_does_not_treat_pattern_as_regex() {
+        // `.*` under `-F` is the literal two characters, not "any run": it hits
+        // a body that contains `.*` and misses one that does not — the opposite
+        // of the regex default, where `.*` matches every non-empty line.
+        let (code, out) = grep_one_args(
+            "Subject",
+            "the glob .* expands",
+            Args {
+                pattern: ".*".to_owned(),
+                fixed: true,
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        assert!(out.contains("glob .* expands"), "out={out:?}");
+
+        let (code, out) = grep_one_args(
+            "Subject",
+            "no metacharacters present",
+            Args {
+                pattern: ".*".to_owned(),
+                fixed: true,
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::NoMatch);
+        assert!(out.is_empty(), "out={out:?}");
+    }
+
+    #[test]
+    fn fixed_strings_composes_with_ignore_case() {
+        // `-F` escapes first, then `-i` folds: the literal `A(B` matches the
+        // lowercase occurrence in the body.
+        let (code, out) = grep_one_args(
+            "Subject",
+            "the x a(b y site",
+            Args {
+                pattern: "A(B".to_owned(),
+                ignore_case: true,
+                fixed: true,
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        assert!(out.contains("a(b"), "out={out:?}");
+    }
+
+    #[test]
+    fn quiet_suppresses_output_on_a_match() {
+        // tk-119: `-q` writes nothing; the match is carried by the exit code
+        // alone (exit 0), so a script reads the predicate without parsing output.
+        let (code, out) = grep_one_args(
+            "Subject",
+            "the auth token",
+            Args {
+                pattern: "auth".to_owned(),
+                quiet: true,
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        assert!(out.is_empty(), "quiet must suppress stdout: {out:?}");
+    }
+
+    #[test]
+    fn quiet_no_match_is_exit_one_with_no_output() {
+        // tk-119: a quiet no-match keeps the 0/1 overload — exit 1, empty
+        // stdout (and empty stderr, distinguishing it from a failure).
+        let (code, out) = grep_one_args(
+            "Subject",
+            "the auth token",
+            Args {
+                pattern: "nonexistent".to_owned(),
+                quiet: true,
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::NoMatch);
+        assert!(out.is_empty(), "out={out:?}");
+    }
+
+    #[test]
+    fn count_prints_the_number_of_matching_items_not_lines() {
+        // tk-121: `-c` counts items, not lines. tk-1 matches on two body lines
+        // but counts once; tk-2 does not match; tk-3 matches — total 2, not 3.
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        for (id, display, title, body, seq) in [
+            ("a", "tk-1", "First", "SHARED alpha\nSHARED gamma", 1),
+            ("b", "tk-2", "Second", "no hit here", 2),
+            ("c", "tk-3", "Third", "SHARED beta", 3),
+        ] {
+            insert_fixture_item(
+                &conn,
+                FixtureItem {
+                    id,
+                    display,
+                    title,
+                    body,
+                    created_seq: seq,
+                    ..FixtureItem::default()
+                },
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run(
+            h.deps(),
+            Args {
+                pattern: "SHARED".to_owned(),
+                count: true,
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        assert_eq!(String::from_utf8(h.stdout).unwrap(), "2\n");
+    }
+
+    #[test]
+    fn count_prints_zero_and_exits_one_on_no_match() {
+        // tk-121: like `grep -c`, a no-match still prints `0`, and the 0/1 exit
+        // overload reports exit 1.
+        let (code, out) = grep_one_args(
+            "Subject",
+            "nothing relevant",
+            Args {
+                pattern: "absent".to_owned(),
+                count: true,
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::NoMatch);
+        assert_eq!(out, "0\n");
     }
 
     #[test]
@@ -535,6 +977,7 @@ mod tests {
             h.deps_with(Styler::always()),
             Args {
                 pattern: "NEEDLE".to_owned(),
+                ..Args::default()
             },
         );
         assert_eq!(code, Exit::Ok);
@@ -579,6 +1022,7 @@ mod tests {
             h.deps(),
             Args {
                 pattern: "SHARED".to_owned(),
+                ..Args::default()
             },
         );
         assert_eq!(code, Exit::Ok);
@@ -607,6 +1051,7 @@ mod tests {
             h.deps(),
             Args {
                 pattern: "a(".to_owned(),
+                ..Args::default()
             },
         );
         assert_eq!(code, Exit::Usage);
@@ -619,16 +1064,17 @@ mod tests {
     }
 
     #[test]
-    fn empty_or_whitespace_pattern_is_a_usage_error() {
-        // ADR-0026: an empty / all-whitespace pattern is rejected (mirrors
-        // `tk search`) rather than dumping the whole store; usage error, exit 2,
-        // before the store is opened.
+    fn empty_pattern_is_a_usage_error() {
+        // ADR-0026 (amended): only a truly-empty pattern is rejected — it would
+        // match every line and dump the whole store. Usage error, exit 2, before
+        // the store is opened (no expect_git: an unexpected run would panic).
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         let code = run(
             h.deps(),
             Args {
-                pattern: "   ".to_owned(),
+                pattern: String::new(),
+                ..Args::default()
             },
         );
         assert_eq!(code, Exit::Usage);
@@ -638,6 +1084,16 @@ mod tests {
             "stderr={stderr:?}"
         );
         assert!(h.stdout.is_empty(), "stdout={:?}", h.stdout);
+    }
+
+    #[test]
+    fn whitespace_pattern_is_a_valid_needle() {
+        // ADR-0026 (amended): a whitespace pattern is a normal needle (matched
+        // like grep/ripgrep), not rejected as empty. The two-space pattern hits
+        // the double space in the body.
+        let (code, out) = grep_one("Subject", "the  gap here", "  ");
+        assert_eq!(code, Exit::Ok);
+        assert!(out.contains("the  gap here"), "out={out:?}");
     }
 
     #[test]
@@ -680,6 +1136,7 @@ mod tests {
             h.deps(),
             Args {
                 pattern: "UNIQUEWORD".to_owned(),
+                ..Args::default()
             },
         );
         assert_eq!(code, Exit::Ok);
@@ -725,6 +1182,7 @@ mod tests {
                 h.deps(),
                 Args {
                     pattern: "DONEMARKER".to_owned(),
+                    ..Args::default()
                 },
             );
             (code, String::from_utf8(h.stdout).unwrap())
@@ -764,6 +1222,7 @@ mod tests {
             h.deps_with(styler),
             Args {
                 pattern: "auth".to_owned(),
+                ..Args::default()
             },
         );
         assert_eq!(code, Exit::Ok);
@@ -827,6 +1286,7 @@ mod tests {
             h.deps_with(Styler::always()),
             Args {
                 pattern: "MARKER".to_owned(),
+                ..Args::default()
             },
         );
         assert_eq!(code, Exit::Ok);
@@ -912,6 +1372,7 @@ mod tests {
             deps,
             Args {
                 pattern: "PIPEWORD".to_owned(),
+                ..Args::default()
             },
         );
         assert_eq!(
@@ -976,6 +1437,7 @@ mod tests {
             deps,
             Args {
                 pattern: "PIPEWORD".to_owned(),
+                ..Args::default()
             },
         );
         assert_eq!(code, Exit::Failure);
@@ -1017,6 +1479,7 @@ mod tests {
             h.deps(),
             Args {
                 pattern: "EPICWORD".to_owned(),
+                ..Args::default()
             },
         );
         assert_eq!(code, Exit::Ok);

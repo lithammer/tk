@@ -4,10 +4,17 @@ expression: "p.run(&format!(\"{command} --help\"))"
 ---
 Search title and body text for a regular expression, with match context
 
-Usage: tk grep <PATTERN>
+Usage: tk grep [OPTIONS] <PATTERN>
 
 Arguments:
   <PATTERN>  Regular expression to search for in title and body text
 
 Options:
-  -h, --help  Print help
+  -i, --ignore-case         Match case-insensitively (full Unicode case folding)
+  -F, --fixed-strings       Match the pattern as a literal string, not a regular expression
+  -C, --context <N>         Show N lines of context on each side of a match (default 3)
+  -A, --after-context <N>   Show N lines of context after each match (overrides -C)
+  -B, --before-context <N>  Show N lines of context before each match (overrides -C)
+  -q, --quiet               Suppress all output and exit on the first match
+  -c, --count               Print the count of matching items instead of the match blocks
+  -h, --help                Print help

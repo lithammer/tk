@@ -381,6 +381,114 @@ fn grep_renders_show_style_match_context() {
     });
 }
 
+/// `-i` flips grep's case-sensitive default (ADR-0026) for one invocation, so
+/// the lowercase pattern now hits the capitalised `Auth` epic title (tk-117).
+#[test]
+fn grep_ignore_case_matches_across_case() {
+    let p = Repo::new("project");
+    p.run("init");
+    p.run("add --epic -m 'Auth rework'"); // project-1 (capital A)
+    p.run("add -m 'Unrelated chore'"); // project-2 (no match)
+
+    insta::with_settings!({filters => vec![(r"Created: \d{4}-\d{2}-\d{2}", "Created: [DATE]")]}, {
+        tk!(p, "grep auth -i", @"
+        ○ project-1 · Auth rework
+          Epic · Created: [DATE]
+        ");
+    });
+}
+
+/// `-F` matches the pattern as a literal (ADR-0026, tk-120): `a(b` is an invalid
+/// regex (unbalanced group) but a valid literal needle, so `-F` finds it where
+/// the bare pattern would be a usage error.
+#[test]
+fn grep_fixed_strings_matches_a_literal() {
+    let p = Repo::new("project");
+    p.run("init");
+    p.run("add -m 'Fix parser' -m 'the token a(b breaks the lexer'"); // project-1
+
+    insta::with_settings!({filters => vec![(r"Created: \d{4}-\d{2}-\d{2}", "Created: [DATE]")]}, {
+        tk!(p, "grep 'a(b' -F", @"
+        ○ project-1 · Fix parser
+          P2 · Task · Created: [DATE]
+          the token a(b breaks the lexer
+        ");
+    });
+}
+
+/// `-C 0` collapses each hunk to the matching line, overriding the default-3
+/// window (ADR-0026, tk-118): only the body paragraph carrying the needle shows,
+/// not the one before it.
+#[test]
+fn grep_context_zero_shows_only_the_matching_line() {
+    let p = Repo::new("project");
+    p.run("init");
+    // Two body paragraphs (blank-line separated); the needle is in the second.
+    p.run("add -m 'Subject' -m 'first paragraph here' -m 'second needle paragraph'"); // project-1
+
+    insta::with_settings!({filters => vec![(r"Created: \d{4}-\d{2}-\d{2}", "Created: [DATE]")]}, {
+        tk!(p, "grep needle -C 0", @"
+        ○ project-1 · Subject
+          P2 · Task · Created: [DATE]
+          second needle paragraph
+        ");
+    });
+}
+
+/// `-q` suppresses all output and carries the answer in the exit code alone
+/// (ADR-0026, tk-119): a match is a silent exit 0, a no-match a silent exit 1.
+#[test]
+fn grep_quiet_is_silent_and_signals_via_exit_code() {
+    let p = Repo::new("project");
+    p.run("init");
+    p.run("add -m 'Add middleware' -m 'the auth token'"); // project-1
+
+    // Match: silent, exit 0 (bare empty stdout).
+    tk!(p, "grep auth -q", @"");
+    // No match: silent, exit 1.
+    tk!(p, "grep nonexistent -q", @"
+    exit 1
+    -- stdout --
+    -- stderr --
+    ");
+}
+
+/// `-c` prints the count of matching items, not the match blocks (ADR-0026,
+/// tk-121). The unit is the item: project-1 matches on two body lines but counts
+/// once, project-3 matches in its title — total 2.
+#[test]
+fn grep_count_prints_matching_item_total() {
+    let p = Repo::new("project");
+    p.run("init");
+    p.run("add -m 'Add middleware' -m 'the auth token' -m 'more auth here'"); // project-1 (two matching lines)
+    p.run("add -m 'Unrelated chore'"); // project-2 (no match)
+    p.run("add -m 'Refactor auth layer'"); // project-3 (title match)
+
+    tk!(p, "grep auth -c", @"2");
+}
+
+/// `-c` and `-q` are mutually exclusive (tk-121): one prints a count, the other
+/// suppresses all output, so clap rejects the combination as a usage error
+/// before any store work. This guard is load-bearing — without it, `-q -c` would
+/// break on the first match without counting, then print a bogus `0`.
+#[test]
+fn grep_count_and_quiet_conflict() {
+    let p = Repo::new("project");
+    p.run("init");
+    p.run("add -m 'Add middleware' -m 'the auth token'"); // project-1
+
+    tk!(p, "grep auth -c -q", @"
+    exit 2
+    -- stdout --
+    -- stderr --
+    error: the argument '--count' cannot be used with '--quiet'
+
+    Usage: tk grep --count <PATTERN>
+
+    For more information, try '--help'.
+    ");
+}
+
 /// The pattern is required (clap usage error), an empty pattern is rejected, and
 /// a no-match exits 1 with empty streams — the `grep -q`-style predicate where
 /// empty stderr distinguishes "no match" from "broken" (ADR-0026).
@@ -401,7 +509,9 @@ fn grep_requires_a_pattern_and_signals_no_match_with_exit_one() {
 
     For more information, try '--help'.
     ");
-    tk!(p, "grep '   '", @"
+    // A truly-empty pattern is still rejected (it would match every line);
+    // a whitespace pattern is not (ADR-0026, amended) — covered below.
+    tk!(p, "grep ''", @"
     exit 2
     -- stdout --
     -- stderr --
@@ -412,4 +522,23 @@ fn grep_requires_a_pattern_and_signals_no_match_with_exit_one() {
     -- stdout --
     -- stderr --
     ");
+}
+
+/// A whitespace pattern is a valid needle, matched like grep/ripgrep rather than
+/// rejected as empty (ADR-0026, amended): `tk grep '  '` finds the body line with
+/// a double space, and `-F` makes a whitespace literal explicit.
+#[test]
+fn grep_whitespace_pattern_matches_a_double_space() {
+    let p = Repo::new("project");
+    p.run("init");
+    p.run("add -m 'Format output' -m 'aligns the  columns by padding'"); // project-1 (double space)
+    p.run("add -m 'Unrelated chore'"); // project-2 (no double space)
+
+    insta::with_settings!({filters => vec![(r"Created: \d{4}-\d{2}-\d{2}", "Created: [DATE]")]}, {
+        tk!(p, "grep '  ' -F", @"
+        ○ project-1 · Format output
+          P2 · Task · Created: [DATE]
+          aligns the  columns by padding
+        ");
+    });
 }

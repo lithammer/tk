@@ -39,10 +39,11 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
         ..
     } = deps;
 
-    // An all-whitespace query is rejected before any store work: a literal
-    // substring of only spaces matches nothing meaningful, and `instr` against
-    // the empty string would otherwise match every row.
-    if args.query.trim().is_empty() {
+    // Reject only a truly empty query before any store work: `instr` against the
+    // empty string matches every row and would dump the whole store. A
+    // whitespace query is a valid (if unusual) literal substring — `grep`/
+    // `ripgrep` match it — so it is not rejected (ADR-0026, amended).
+    if args.query.is_empty() {
         let _ = writeln!(stderr, "tk search: query must not be empty");
         return Exit::Failure;
     }
@@ -330,11 +331,12 @@ mod tests {
         seed_store(&store);
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        // No git expectation: an all-whitespace query is rejected before discovery.
+        // No git expectation: a truly-empty query is rejected before discovery
+        // (ADR-0026, amended) — an empty `instr` substring matches every row.
         let code = run(
             h.deps(),
             Args {
-                query: "   ".to_owned(),
+                query: String::new(),
             },
         );
         assert_eq!(code, Exit::Failure);
@@ -344,6 +346,52 @@ mod tests {
             "stderr={stderr:?}"
         );
         assert!(h.stdout.is_empty(), "stdout should be empty");
+    }
+
+    #[test]
+    fn whitespace_query_is_a_valid_substring() {
+        // ADR-0026 (amended): a whitespace query is a normal literal substring,
+        // not rejected as empty. The two-space query hits the double space in
+        // the title and skips the single-spaced one.
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Fix  the flaky test",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t2",
+                display: "tk-2",
+                title: "Unrelated chore",
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run(
+            h.deps(),
+            Args {
+                query: "  ".to_owned(),
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        let stdout = String::from_utf8(h.stdout).unwrap();
+        assert!(stdout.contains("tk-1"), "stdout={stdout:?}");
+        assert!(!stdout.contains("tk-2"), "stdout={stdout:?}");
     }
 
     #[test]
