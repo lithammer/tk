@@ -811,15 +811,17 @@ mod tests {
     #[test]
     fn fixed_strings_composes_with_ignore_case() {
         // `-F` escapes first, then `-i` folds: the literal `A(B` matches the
-        // lowercase occurrence in the body. Built from the default and mutated
-        // so the literal never specifies every field (which `..` would flag).
-        let mut args = Args {
-            pattern: "A(B".to_owned(),
-            ..Args::default()
-        };
-        args.ignore_case = true;
-        args.fixed = true;
-        let (code, out) = grep_one_args("Subject", "the x a(b y site", args);
+        // lowercase occurrence in the body.
+        let (code, out) = grep_one_args(
+            "Subject",
+            "the x a(b y site",
+            Args {
+                pattern: "A(B".to_owned(),
+                ignore_case: true,
+                fixed: true,
+                ..Args::default()
+            },
+        );
         assert_eq!(code, Exit::Ok);
         assert!(out.contains("a(b"), "out={out:?}");
     }
