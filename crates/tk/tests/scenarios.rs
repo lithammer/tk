@@ -453,6 +453,20 @@ fn grep_quiet_is_silent_and_signals_via_exit_code() {
     ");
 }
 
+/// `-c` prints the count of matching items, not the match blocks (ADR-0026,
+/// tk-121). The unit is the item: project-1 matches on two body lines but counts
+/// once, project-3 matches in its title — total 2.
+#[test]
+fn grep_count_prints_matching_item_total() {
+    let p = Repo::new("project");
+    p.run("init");
+    p.run("add -m 'Add middleware' -m 'the auth token' -m 'more auth here'"); // project-1 (two matching lines)
+    p.run("add -m 'Unrelated chore'"); // project-2 (no match)
+    p.run("add -m 'Refactor auth layer'"); // project-3 (title match)
+
+    tk!(p, "grep auth -c", @"2");
+}
+
 /// The pattern is required (clap usage error), an empty pattern is rejected, and
 /// a no-match exits 1 with empty streams — the `grep -q`-style predicate where
 /// empty stderr distinguishes "no match" from "broken" (ADR-0026).

@@ -19,7 +19,13 @@ use crate::store::repository::grep::{self, GrepItem, ScanError};
 const COMMAND: &str = "grep";
 
 /// Flags for `tk grep`.
+///
+/// Four `bool`s exceed pedantic's `struct_excessive_bools` cap, but each is an
+/// independent grep flag clap's derive must own as its own field; only `-c` and
+/// `-q` conflict, leaving the rest freely composable. The allow mirrors
+/// `tk list`'s Args for the same parser-layer reason.
 #[derive(Debug, Default, ClapArgs)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Args {
     /// Regular expression to search for in title and body text.
     #[arg(value_name = "PATTERN")]
@@ -58,6 +64,13 @@ pub struct Args {
     /// plus a first-match early-exit that stops the scan at the first hit.
     #[arg(short = 'q', long = "quiet")]
     pub quiet: bool,
+
+    /// Print the number of matching items instead of the match blocks, like
+    /// `grep -c`. The unit is the item (grep's block unit), not the line: an
+    /// item that matches on several lines counts once. Keeps the 0/1 exit
+    /// overload, so a no-match prints `0` and exits 1.
+    #[arg(short = 'c', long = "count", conflicts_with = "quiet")]
+    pub count: bool,
 }
 
 /// Compile the search pattern into a matcher, applying the literal-match and
@@ -126,9 +139,11 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
         .unwrap_or(DEFAULT_CONTEXT);
 
     // Stream Items in creation order, rendering each match straight to stdout
-    // (one Item in memory). `matched` drives the grep-style 0/1 exit overload.
+    // (one Item in memory). `matched` drives the grep-style 0/1 exit overload;
+    // `count` accumulates the matching-item total for `-c`.
     let out = styler.for_stdout();
     let mut matched = false;
+    let mut count: usize = 0;
     let scan = grep::scan(&store, |item| {
         // `-q` suppresses output and stops at the first match: the 0/1 exit
         // overload still carries the answer, so no block is rendered (ADR-0026).
@@ -136,6 +151,15 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
             if item_matches(&item, &re) {
                 matched = true;
                 return Ok(ControlFlow::Break(()));
+            }
+            return Ok(ControlFlow::Continue(()));
+        }
+        // `-c` tallies matching items rather than rendering them; an item that
+        // matches on several lines still counts once (the unit is the item).
+        if args.count {
+            if item_matches(&item, &re) {
+                matched = true;
+                count += 1;
             }
             return Ok(ControlFlow::Continue(()));
         }
@@ -153,6 +177,14 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
         // policy reports Ok for that and a diagnosed Failure for any other write
         // error (so its exit `1` is never misread as a no-match).
         Err(ScanError::Write(err)) => return cli::exit_for_write_error(&err, stderr, COMMAND),
+    }
+
+    // `-c` always prints a number (even `0`, like `grep -c`); the 0/1 exit
+    // overload below still reports whether anything matched.
+    if args.count {
+        if let Err(err) = writeln!(stdout, "{count}") {
+            return cli::exit_for_write_error(&err, stderr, COMMAND);
+        }
     }
 
     if matched { Exit::Ok } else { Exit::NoMatch }
@@ -786,6 +818,64 @@ mod tests {
         );
         assert_eq!(code, Exit::NoMatch);
         assert!(out.is_empty(), "out={out:?}");
+    }
+
+    #[test]
+    fn count_prints_the_number_of_matching_items_not_lines() {
+        // tk-121: `-c` counts items, not lines. tk-1 matches on two body lines
+        // but counts once; tk-2 does not match; tk-3 matches — total 2, not 3.
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        for (id, display, title, body, seq) in [
+            ("a", "tk-1", "First", "SHARED alpha\nSHARED gamma", 1),
+            ("b", "tk-2", "Second", "no hit here", 2),
+            ("c", "tk-3", "Third", "SHARED beta", 3),
+        ] {
+            insert_fixture_item(
+                &conn,
+                FixtureItem {
+                    id,
+                    display,
+                    title,
+                    body,
+                    created_seq: seq,
+                    ..FixtureItem::default()
+                },
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run(
+            h.deps(),
+            Args {
+                pattern: "SHARED".to_owned(),
+                count: true,
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        assert_eq!(String::from_utf8(h.stdout).unwrap(), "2\n");
+    }
+
+    #[test]
+    fn count_prints_zero_and_exits_one_on_no_match() {
+        // tk-121: like `grep -c`, a no-match still prints `0`, and the 0/1 exit
+        // overload reports exit 1.
+        let (code, out) = grep_one_args(
+            "Subject",
+            "nothing relevant",
+            Args {
+                pattern: "absent".to_owned(),
+                count: true,
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::NoMatch);
+        assert_eq!(out, "0\n");
     }
 
     #[test]
