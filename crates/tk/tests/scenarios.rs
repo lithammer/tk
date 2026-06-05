@@ -435,6 +435,24 @@ fn grep_context_zero_shows_only_the_matching_line() {
     });
 }
 
+/// `-q` suppresses all output and carries the answer in the exit code alone
+/// (ADR-0026, tk-119): a match is a silent exit 0, a no-match a silent exit 1.
+#[test]
+fn grep_quiet_is_silent_and_signals_via_exit_code() {
+    let p = Repo::new("project");
+    p.run("init");
+    p.run("add -m 'Add middleware' -m 'the auth token'"); // project-1
+
+    // Match: silent, exit 0 (bare empty stdout).
+    tk!(p, "grep auth -q", @"");
+    // No match: silent, exit 1.
+    tk!(p, "grep nonexistent -q", @"
+    exit 1
+    -- stdout --
+    -- stderr --
+    ");
+}
+
 /// The pattern is required (clap usage error), an empty pattern is rejected, and
 /// a no-match exits 1 with empty streams — the `grep -q`-style predicate where
 /// empty stderr distinguishes "no match" from "broken" (ADR-0026).

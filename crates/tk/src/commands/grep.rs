@@ -3,6 +3,7 @@
 
 use std::borrow::Cow;
 use std::io::Write;
+use std::ops::ControlFlow;
 
 use clap::Args as ClapArgs;
 use regex::{Regex, RegexBuilder};
@@ -51,6 +52,12 @@ pub struct Args {
     /// leading side.
     #[arg(short = 'B', long = "before-context", value_name = "N")]
     pub before_context: Option<usize>,
+
+    /// Suppress all output and exit on the first match. The 0/1 exit overload
+    /// already delivers the predicate (ADR-0026); `-q` adds output suppression
+    /// plus a first-match early-exit that stops the scan at the first hit.
+    #[arg(short = 'q', long = "quiet")]
+    pub quiet: bool,
 }
 
 /// Compile the search pattern into a matcher, applying the literal-match and
@@ -123,7 +130,17 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
     let out = styler.for_stdout();
     let mut matched = false;
     let scan = grep::scan(&store, |item| {
-        render_match(stdout, &item, &re, &mut matched, before, after, out)
+        // `-q` suppresses output and stops at the first match: the 0/1 exit
+        // overload still carries the answer, so no block is rendered (ADR-0026).
+        if args.quiet {
+            if item_matches(&item, &re) {
+                matched = true;
+                return Ok(ControlFlow::Break(()));
+            }
+            return Ok(ControlFlow::Continue(()));
+        }
+        render_match(stdout, &item, &re, &mut matched, before, after, out)?;
+        Ok(ControlFlow::Continue(()))
     });
     match scan {
         Ok(()) => {}
@@ -144,6 +161,14 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
 /// Default `grep -C` context window, in lines each side of a match (matching
 /// `git diff -U3`, ADR-0026), used when neither `-C` nor `-A`/`-B` is given.
 const DEFAULT_CONTEXT: usize = 3;
+
+/// Whether the pattern hits an Item at all — the title or any (non-empty) body
+/// line. Mirrors [`render_match`]'s "title or body line" rule but yields only a
+/// predicate, so `-q` can answer yes/no without materialising any hunk.
+fn item_matches(item: &GrepItem, re: &Regex) -> bool {
+    re.is_match(&item.title)
+        || (!item.body.is_empty() && item.body.split('\n').any(|line| re.is_match(line)))
+}
 
 /// Render one Item's matches as a `tk show`-style block, or nothing when the
 /// pattern hits neither title nor body.
@@ -727,6 +752,40 @@ mod tests {
         let (code, out) = grep_one_args("Subject", "the x a(b y site", args);
         assert_eq!(code, Exit::Ok);
         assert!(out.contains("a(b"), "out={out:?}");
+    }
+
+    #[test]
+    fn quiet_suppresses_output_on_a_match() {
+        // tk-119: `-q` writes nothing; the match is carried by the exit code
+        // alone (exit 0), so a script reads the predicate without parsing output.
+        let (code, out) = grep_one_args(
+            "Subject",
+            "the auth token",
+            Args {
+                pattern: "auth".to_owned(),
+                quiet: true,
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        assert!(out.is_empty(), "quiet must suppress stdout: {out:?}");
+    }
+
+    #[test]
+    fn quiet_no_match_is_exit_one_with_no_output() {
+        // tk-119: a quiet no-match keeps the 0/1 overload — exit 1, empty
+        // stdout (and empty stderr, distinguishing it from a failure).
+        let (code, out) = grep_one_args(
+            "Subject",
+            "the auth token",
+            Args {
+                pattern: "nonexistent".to_owned(),
+                quiet: true,
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::NoMatch);
+        assert!(out.is_empty(), "out={out:?}");
     }
 
     #[test]
