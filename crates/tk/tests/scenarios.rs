@@ -381,6 +381,23 @@ fn grep_renders_show_style_match_context() {
     });
 }
 
+/// `-i` flips grep's case-sensitive default (ADR-0026) for one invocation, so
+/// the lowercase pattern now hits the capitalised `Auth` epic title (tk-117).
+#[test]
+fn grep_ignore_case_matches_across_case() {
+    let p = Repo::new("project");
+    p.run("init");
+    p.run("add --epic -m 'Auth rework'"); // project-1 (capital A)
+    p.run("add -m 'Unrelated chore'"); // project-2 (no match)
+
+    insta::with_settings!({filters => vec![(r"Created: \d{4}-\d{2}-\d{2}", "Created: [DATE]")]}, {
+        tk!(p, "grep auth -i", @"
+        ○ project-1 · Auth rework
+          Epic · Created: [DATE]
+        ");
+    });
+}
+
 /// The pattern is required (clap usage error), an empty pattern is rejected, and
 /// a no-match exits 1 with empty streams — the `grep -q`-style predicate where
 /// empty stderr distinguishes "no match" from "broken" (ADR-0026).

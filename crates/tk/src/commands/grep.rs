@@ -4,7 +4,7 @@
 use std::io::Write;
 
 use clap::Args as ClapArgs;
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 
 use crate::cli::{self, Deps, Exit};
 use crate::commands::item_header::{self, Header};
@@ -17,11 +17,27 @@ use crate::store::repository::grep::{self, GrepItem, ScanError};
 const COMMAND: &str = "grep";
 
 /// Flags for `tk grep`.
-#[derive(Debug, ClapArgs)]
+#[derive(Debug, Default, ClapArgs)]
 pub struct Args {
     /// Regular expression to search for in title and body text.
     #[arg(value_name = "PATTERN")]
     pub pattern: String,
+
+    /// Match case-insensitively. Folds case via the regex engine's full
+    /// Unicode case folding, diverging from the case-sensitive default
+    /// (ADR-0026) for a single invocation.
+    #[arg(short = 'i', long = "ignore-case")]
+    pub ignore_case: bool,
+}
+
+/// Compile the search pattern into a matcher, applying the case-folding
+/// policy. The pattern is a regular expression by default (ADR-0026); `-i`
+/// is honoured by compiling case-insensitively rather than by lowercasing,
+/// so it inherits the regex engine's full Unicode case folding.
+fn build_matcher(pattern: &str, ignore_case: bool) -> Result<Regex, regex::Error> {
+    RegexBuilder::new(pattern)
+        .case_insensitive(ignore_case)
+        .build()
 }
 
 #[must_use]
@@ -46,7 +62,7 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
 
     // Compile (and so validate) the pattern before opening the store: a
     // malformed regex is a usage error, surfaced fail-fast (ADR-0026).
-    let re = match Regex::new(&args.pattern) {
+    let re = match build_matcher(&args.pattern, args.ignore_case) {
         Ok(re) => re,
         Err(err) => {
             let _ = writeln!(stderr, "tk {COMMAND}: invalid pattern: {err}");
@@ -288,6 +304,7 @@ mod tests {
             h.deps(),
             Args {
                 pattern: "auth".to_owned(),
+                ..Args::default()
             },
         );
         assert_eq!(code, Exit::Ok);
@@ -325,6 +342,7 @@ mod tests {
             h.deps(),
             Args {
                 pattern: "nonexistent".to_owned(),
+                ..Args::default()
             },
         );
         assert_eq!(code, Exit::NoMatch);
@@ -361,6 +379,7 @@ mod tests {
             h.deps(),
             Args {
                 pattern: "MATCHHERE".to_owned(),
+                ..Args::default()
             },
         );
         assert_eq!(code, Exit::Ok);
@@ -411,6 +430,7 @@ mod tests {
             h.deps(),
             Args {
                 pattern: "match".to_owned(),
+                ..Args::default()
             },
         );
         assert_eq!(code, Exit::Ok);
@@ -426,6 +446,19 @@ mod tests {
     /// Run `tk grep PATTERN` against a single seeded Ticket, returning
     /// `(exit, stdout)`. Keeps the matching-semantics tests focused on behavior.
     fn grep_one(title: &str, body: &str, pattern: &str) -> (Exit, String) {
+        grep_one_args(
+            title,
+            body,
+            Args {
+                pattern: pattern.to_owned(),
+                ..Args::default()
+            },
+        )
+    }
+
+    /// Like [`grep_one`] but takes the full [`Args`], so a test can exercise a
+    /// flag (e.g. `-i`) without restating the single-item seeding.
+    fn grep_one_args(title: &str, body: &str, args: Args) -> (Exit, String) {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_item(
@@ -445,12 +478,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
-            Args {
-                pattern: pattern.to_owned(),
-            },
-        );
+        let code = run(h.deps(), args);
         (code, String::from_utf8(h.stdout).unwrap())
     }
 
@@ -470,10 +498,43 @@ mod tests {
     #[test]
     fn matching_is_case_sensitive_by_default() {
         // ADR-0026: case-sensitive by default (deliberate divergence from
-        // `tk search`); `-i` is deferred. `Auth` must not match `auth`.
+        // `tk search`); `-i` flips it. `Auth` must not match `auth`.
         let (code, out) = grep_one("Subject", "the auth token", "Auth");
         assert_eq!(code, Exit::NoMatch);
         assert!(out.is_empty(), "out={out:?}");
+    }
+
+    #[test]
+    fn ignore_case_matches_across_case() {
+        // tk-117: `-i` flips the case-sensitive default for one invocation, so
+        // the capitalised pattern hits the lowercase body.
+        let (code, out) = grep_one_args(
+            "Subject",
+            "the auth token",
+            Args {
+                pattern: "Auth".to_owned(),
+                ignore_case: true,
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        assert!(out.contains("the auth token"), "out={out:?}");
+    }
+
+    #[test]
+    fn ignore_case_folds_beyond_ascii() {
+        // ADR-0026: `-i` compiles case-insensitively rather than lowercasing,
+        // so it inherits the regex engine's full Unicode case folding — strictly
+        // stronger than `tk search`'s ASCII-only `lower()`. `é` folds to `É`.
+        let (code, out) = grep_one_args(
+            "Subject",
+            "the CAFÉ menu",
+            Args {
+                pattern: "café".to_owned(),
+                ignore_case: true,
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        assert!(out.contains("the CAFÉ menu"), "out={out:?}");
     }
 
     #[test]
@@ -535,6 +596,7 @@ mod tests {
             h.deps_with(Styler::always()),
             Args {
                 pattern: "NEEDLE".to_owned(),
+                ..Args::default()
             },
         );
         assert_eq!(code, Exit::Ok);
@@ -579,6 +641,7 @@ mod tests {
             h.deps(),
             Args {
                 pattern: "SHARED".to_owned(),
+                ..Args::default()
             },
         );
         assert_eq!(code, Exit::Ok);
@@ -607,6 +670,7 @@ mod tests {
             h.deps(),
             Args {
                 pattern: "a(".to_owned(),
+                ..Args::default()
             },
         );
         assert_eq!(code, Exit::Usage);
@@ -629,6 +693,7 @@ mod tests {
             h.deps(),
             Args {
                 pattern: "   ".to_owned(),
+                ..Args::default()
             },
         );
         assert_eq!(code, Exit::Usage);
@@ -680,6 +745,7 @@ mod tests {
             h.deps(),
             Args {
                 pattern: "UNIQUEWORD".to_owned(),
+                ..Args::default()
             },
         );
         assert_eq!(code, Exit::Ok);
@@ -725,6 +791,7 @@ mod tests {
                 h.deps(),
                 Args {
                     pattern: "DONEMARKER".to_owned(),
+                    ..Args::default()
                 },
             );
             (code, String::from_utf8(h.stdout).unwrap())
@@ -764,6 +831,7 @@ mod tests {
             h.deps_with(styler),
             Args {
                 pattern: "auth".to_owned(),
+                ..Args::default()
             },
         );
         assert_eq!(code, Exit::Ok);
@@ -827,6 +895,7 @@ mod tests {
             h.deps_with(Styler::always()),
             Args {
                 pattern: "MARKER".to_owned(),
+                ..Args::default()
             },
         );
         assert_eq!(code, Exit::Ok);
@@ -912,6 +981,7 @@ mod tests {
             deps,
             Args {
                 pattern: "PIPEWORD".to_owned(),
+                ..Args::default()
             },
         );
         assert_eq!(
@@ -976,6 +1046,7 @@ mod tests {
             deps,
             Args {
                 pattern: "PIPEWORD".to_owned(),
+                ..Args::default()
             },
         );
         assert_eq!(code, Exit::Failure);
@@ -1017,6 +1088,7 @@ mod tests {
             h.deps(),
             Args {
                 pattern: "EPICWORD".to_owned(),
+                ..Args::default()
             },
         );
         assert_eq!(code, Exit::Ok);
