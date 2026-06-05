@@ -398,6 +398,24 @@ fn grep_ignore_case_matches_across_case() {
     });
 }
 
+/// `-F` matches the pattern as a literal (ADR-0026, tk-120): `a(b` is an invalid
+/// regex (unbalanced group) but a valid literal needle, so `-F` finds it where
+/// the bare pattern would be a usage error.
+#[test]
+fn grep_fixed_strings_matches_a_literal() {
+    let p = Repo::new("project");
+    p.run("init");
+    p.run("add -m 'Fix parser' -m 'the token a(b breaks the lexer'"); // project-1
+
+    insta::with_settings!({filters => vec![(r"Created: \d{4}-\d{2}-\d{2}", "Created: [DATE]")]}, {
+        tk!(p, "grep 'a(b' -F", @"
+        ○ project-1 · Fix parser
+          P2 · Task · Created: [DATE]
+          the token a(b breaks the lexer
+        ");
+    });
+}
+
 /// The pattern is required (clap usage error), an empty pattern is rejected, and
 /// a no-match exits 1 with empty streams — the `grep -q`-style predicate where
 /// empty stderr distinguishes "no match" from "broken" (ADR-0026).

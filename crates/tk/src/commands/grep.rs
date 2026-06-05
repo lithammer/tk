@@ -1,6 +1,7 @@
 //! `tk grep` — regex content search over title and body, rendered as
 //! `tk show`-style match context (ADR-0026).
 
+use std::borrow::Cow;
 use std::io::Write;
 
 use clap::Args as ClapArgs;
@@ -28,14 +29,26 @@ pub struct Args {
     /// (ADR-0026) for a single invocation.
     #[arg(short = 'i', long = "ignore-case")]
     pub ignore_case: bool,
+
+    /// Match the pattern as a literal string, not a regex. The escape hatch
+    /// for "I mean these characters literally" (ADR-0026) — e.g. `a(b` or
+    /// `.*` match verbatim instead of as metacharacters.
+    #[arg(short = 'F', long = "fixed-strings")]
+    pub fixed: bool,
 }
 
-/// Compile the search pattern into a matcher, applying the case-folding
-/// policy. The pattern is a regular expression by default (ADR-0026); `-i`
-/// is honoured by compiling case-insensitively rather than by lowercasing,
-/// so it inherits the regex engine's full Unicode case folding.
-fn build_matcher(pattern: &str, ignore_case: bool) -> Result<Regex, regex::Error> {
-    RegexBuilder::new(pattern)
+/// Compile the search pattern into a matcher, applying the literal-match and
+/// case-folding policies. The pattern is a regular expression by default
+/// (ADR-0026); `-F` escapes its metacharacters so it matches verbatim, and
+/// `-i` compiles case-insensitively (full Unicode case folding) rather than
+/// lowercasing. The two compose: `-F` escapes, then `-i` folds.
+fn build_matcher(pattern: &str, ignore_case: bool, fixed: bool) -> Result<Regex, regex::Error> {
+    let pattern: Cow<'_, str> = if fixed {
+        Cow::Owned(regex::escape(pattern))
+    } else {
+        Cow::Borrowed(pattern)
+    };
+    RegexBuilder::new(&pattern)
         .case_insensitive(ignore_case)
         .build()
 }
@@ -62,7 +75,7 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
 
     // Compile (and so validate) the pattern before opening the store: a
     // malformed regex is a usage error, surfaced fail-fast (ADR-0026).
-    let re = match build_matcher(&args.pattern, args.ignore_case) {
+    let re = match build_matcher(&args.pattern, args.ignore_case, args.fixed) {
         Ok(re) => re,
         Err(err) => {
             let _ = writeln!(stderr, "tk {COMMAND}: invalid pattern: {err}");
@@ -514,6 +527,7 @@ mod tests {
             Args {
                 pattern: "Auth".to_owned(),
                 ignore_case: true,
+                ..Args::default()
             },
         );
         assert_eq!(code, Exit::Ok);
@@ -531,10 +545,75 @@ mod tests {
             Args {
                 pattern: "café".to_owned(),
                 ignore_case: true,
+                ..Args::default()
             },
         );
         assert_eq!(code, Exit::Ok);
         assert!(out.contains("the CAFÉ menu"), "out={out:?}");
+    }
+
+    #[test]
+    fn fixed_strings_matches_regex_metacharacters_verbatim() {
+        // tk-120: `-F` escapes the pattern, so metacharacters match literally.
+        // `a(b` is an unbalanced group as a regex (a usage error without `-F`),
+        // but a valid literal needle with it.
+        let (code, out) = grep_one_args(
+            "Subject",
+            "the call site is a(b) here",
+            Args {
+                pattern: "a(b".to_owned(),
+                fixed: true,
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        assert!(out.contains("a(b)"), "out={out:?}");
+    }
+
+    #[test]
+    fn fixed_strings_does_not_treat_pattern_as_regex() {
+        // `.*` under `-F` is the literal two characters, not "any run": it hits
+        // a body that contains `.*` and misses one that does not — the opposite
+        // of the regex default, where `.*` matches every non-empty line.
+        let (code, out) = grep_one_args(
+            "Subject",
+            "the glob .* expands",
+            Args {
+                pattern: ".*".to_owned(),
+                fixed: true,
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        assert!(out.contains("glob .* expands"), "out={out:?}");
+
+        let (code, out) = grep_one_args(
+            "Subject",
+            "no metacharacters present",
+            Args {
+                pattern: ".*".to_owned(),
+                fixed: true,
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::NoMatch);
+        assert!(out.is_empty(), "out={out:?}");
+    }
+
+    #[test]
+    fn fixed_strings_composes_with_ignore_case() {
+        // `-F` escapes first, then `-i` folds: the literal `A(B` matches the
+        // lowercase occurrence in the body. Built from the default and mutated
+        // so the literal never specifies every field (which `..` would flag).
+        let mut args = Args {
+            pattern: "A(B".to_owned(),
+            ..Args::default()
+        };
+        args.ignore_case = true;
+        args.fixed = true;
+        let (code, out) = grep_one_args("Subject", "the x a(b y site", args);
+        assert_eq!(code, Exit::Ok);
+        assert!(out.contains("a(b"), "out={out:?}");
     }
 
     #[test]
