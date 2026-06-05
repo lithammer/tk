@@ -467,6 +467,28 @@ fn grep_count_prints_matching_item_total() {
     tk!(p, "grep auth -c", @"2");
 }
 
+/// `-c` and `-q` are mutually exclusive (tk-121): one prints a count, the other
+/// suppresses all output, so clap rejects the combination as a usage error
+/// before any store work. This guard is load-bearing — without it, `-q -c` would
+/// break on the first match without counting, then print a bogus `0`.
+#[test]
+fn grep_count_and_quiet_conflict() {
+    let p = Repo::new("project");
+    p.run("init");
+    p.run("add -m 'Add middleware' -m 'the auth token'"); // project-1
+
+    tk!(p, "grep auth -c -q", @"
+    exit 2
+    -- stdout --
+    -- stderr --
+    error: the argument '--count' cannot be used with '--quiet'
+
+    Usage: tk grep --count <PATTERN>
+
+    For more information, try '--help'.
+    ");
+}
+
 /// The pattern is required (clap usage error), an empty pattern is rejected, and
 /// a no-match exits 1 with empty streams — the `grep -q`-style predicate where
 /// empty stderr distinguishes "no match" from "broken" (ADR-0026).
