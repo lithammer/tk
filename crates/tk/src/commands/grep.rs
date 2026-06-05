@@ -88,10 +88,11 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
         ..
     } = deps;
 
-    // Reject an empty / all-whitespace pattern before any store work, mirroring
-    // `tk search` (ADR-0026): an empty regex matches every line and would dump
-    // the whole store, almost always a mistake.
-    if args.pattern.trim().is_empty() {
+    // Reject only a truly empty pattern before any store work, mirroring
+    // `tk search` (ADR-0026, amended): an empty regex matches every line and
+    // would dump the whole store. A whitespace pattern is a valid (if unusual)
+    // needle — `grep`/`ripgrep` match it — so it is not rejected.
+    if args.pattern.is_empty() {
         let _ = writeln!(stderr, "tk {COMMAND}: pattern must not be empty");
         return Exit::Usage;
     }
@@ -1061,16 +1062,16 @@ mod tests {
     }
 
     #[test]
-    fn empty_or_whitespace_pattern_is_a_usage_error() {
-        // ADR-0026: an empty / all-whitespace pattern is rejected (mirrors
-        // `tk search`) rather than dumping the whole store; usage error, exit 2,
-        // before the store is opened.
+    fn empty_pattern_is_a_usage_error() {
+        // ADR-0026 (amended): only a truly-empty pattern is rejected — it would
+        // match every line and dump the whole store. Usage error, exit 2, before
+        // the store is opened (no expect_git: an unexpected run would panic).
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         let code = run(
             h.deps(),
             Args {
-                pattern: "   ".to_owned(),
+                pattern: String::new(),
                 ..Args::default()
             },
         );
@@ -1081,6 +1082,16 @@ mod tests {
             "stderr={stderr:?}"
         );
         assert!(h.stdout.is_empty(), "stdout={:?}", h.stdout);
+    }
+
+    #[test]
+    fn whitespace_pattern_is_a_valid_needle() {
+        // ADR-0026 (amended): a whitespace pattern is a normal needle (matched
+        // like grep/ripgrep), not rejected as empty. The two-space pattern hits
+        // the double space in the body.
+        let (code, out) = grep_one("Subject", "the  gap here", "  ");
+        assert_eq!(code, Exit::Ok);
+        assert!(out.contains("the  gap here"), "out={out:?}");
     }
 
     #[test]

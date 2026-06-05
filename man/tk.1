@@ -225,8 +225,8 @@ text is highlighted on a terminal. Matches print in creation order, never ranked
 with three lines of context each side by default,
 .B \-\-
 between non-contiguous hunks within one item, and a blank line between items.
-An empty or all-whitespace pattern, or an invalid regular expression, is a
-usage error.
+An empty pattern, or an invalid regular expression, is a usage error
+(a whitespace pattern is a valid needle, matched like \fBgrep\fR).
 .PP
 .B \-i
 matches case-insensitively (full Unicode case folding), and

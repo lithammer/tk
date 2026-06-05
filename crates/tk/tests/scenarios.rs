@@ -509,7 +509,9 @@ fn grep_requires_a_pattern_and_signals_no_match_with_exit_one() {
 
     For more information, try '--help'.
     ");
-    tk!(p, "grep '   '", @"
+    // A truly-empty pattern is still rejected (it would match every line);
+    // a whitespace pattern is not (ADR-0026, amended) — covered below.
+    tk!(p, "grep ''", @"
     exit 2
     -- stdout --
     -- stderr --
@@ -520,4 +522,23 @@ fn grep_requires_a_pattern_and_signals_no_match_with_exit_one() {
     -- stdout --
     -- stderr --
     ");
+}
+
+/// A whitespace pattern is a valid needle, matched like grep/ripgrep rather than
+/// rejected as empty (ADR-0026, amended): `tk grep '  '` finds the body line with
+/// a double space, and `-F` makes a whitespace literal explicit.
+#[test]
+fn grep_whitespace_pattern_matches_a_double_space() {
+    let p = Repo::new("project");
+    p.run("init");
+    p.run("add -m 'Format output' -m 'aligns the  columns by padding'"); // project-1 (double space)
+    p.run("add -m 'Unrelated chore'"); // project-2 (no double space)
+
+    insta::with_settings!({filters => vec![(r"Created: \d{4}-\d{2}-\d{2}", "Created: [DATE]")]}, {
+        tk!(p, "grep '  ' -F", @"
+        ○ project-1 · Format output
+          P2 · Task · Created: [DATE]
+          aligns the  columns by padding
+        ");
+    });
 }

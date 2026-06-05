@@ -81,8 +81,9 @@ These user-facing contracts are frozen because none can change additively later:
   an agent or script asks "does any item mention X?" with `tk grep X >/dev/null`
   and a `-q` flag is not required to get yes/no behaviour. A no-match keeps
   stderr empty so a script distinguishes "no match" from "broken" by checking
-  stderr, as with `tk self-update --check`. A malformed or empty/all-whitespace
-  pattern is a usage error (`2`), validated before the store is opened. (The
+  stderr, as with `tk self-update --check`. A malformed or empty
+  pattern is a usage error (`2`), validated before the store is opened (a
+  whitespace pattern is a valid needle — see the Amendment). (The
   no-match `1` carries no stderr diagnostic, unlike the existing `Exit::Failure`
   definition; the command owns reconciling that with the `Exit` taxonomy.)
 - **Output is `tk show`-style blocks only, no `tk list` chrome:** label line +
@@ -128,3 +129,21 @@ Implementation and additive follow-ups:
 - **FTS5 ranked full-text and fuzzy/Levenshtein recall** are spun out as future
   **`tk search`** enhancements (separate Tickets and ADRs), where ranked output
   is the feature rather than an obstacle.
+
+## Amendment (tk-123): only a truly-empty pattern is rejected, not whitespace
+
+The original Consequences rejected an "empty/all-whitespace" pattern as a usage
+error. That conflated two cases. Only the **empty** pattern is dangerous: an
+empty regex (and an empty `instr` substring in **`tk search`**) matches every
+row and would dump the whole store. A **whitespace** pattern is an ordinary, if
+unusual, needle — `grep '  '`, `grep -F '  '`, and `rg -F '  '` all match a line
+containing those spaces and exit `0`. There is no name-honest reason for the
+`grep` namesake to refuse what `grep` accepts.
+
+So the guard narrows from `pattern.trim().is_empty()` to `pattern.is_empty()` in
+both **`tk grep`** and **`tk search`**: a whitespace pattern now searches
+normally, and only a truly-empty pattern is rejected. The verbatim "pattern must
+not be empty" / "query must not be empty" messages (ADR-0017) are unchanged and
+become accurate, since they now fire only on the empty case. Each command keeps
+its existing exit code for the empty case (**`tk grep`** `2`, **`tk search`**
+`1`).
