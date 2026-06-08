@@ -104,6 +104,10 @@ _Avoid_: Claim
 The **`tk`** command intent for moving an active **Ticket** or **Epic** back to `open`.
 _Avoid_: Reopen, Pause
 
+**Accept**:
+The **`tk`** command intent for moving a **Ticket** from `triage` **Selection State** to `accepted`, assigning a **Priority** in the same step.
+_Avoid_: Approve, Triage, Promote
+
 **Prime**:
 The **`tk`** command intent for generating scope-aware agent briefing output.
 _Avoid_: Memory Dump
@@ -267,6 +271,8 @@ _Avoid_: ticket, tickets
 - **Selection State** is a **Local Field** in v1.
 - The default **Selection State** is `accepted`; newly imported **Backend Tickets** also default to `accepted`.
 - A `triage` **Ticket** carries no **Priority**; `accepted` and `parked` **Tickets** carry a **Priority**.
+- **Accept** moves a `triage` **Ticket** to `accepted` and assigns its **Priority**; accepting an already `accepted` **Ticket** is a harmless no-op.
+- **Accept** preserves a **Ticket**'s **Dependencies** and **External Blockers**, so an accepted **Ticket** may be immediately blocked.
 - **`tk next`** and **`tk list --ready`** select only `accepted` **Tickets**; `triage` and `parked` **Tickets** are excluded both as candidates and as **Effective Priority** contributors.
 - **Selection State** changes are not **Mutations** and are not synced to a **Backend**; **Backend Pull** preserves a local **Selection State**.
 - **Assignee** support is deferred from v1 and may be omitted entirely.

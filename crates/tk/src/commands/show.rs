@@ -474,6 +474,43 @@ mod tests {
     }
 
     #[test]
+    fn renders_triage_ticket_without_a_priority_token() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Investigate flake",
+                priority: None,
+                selection_state: Some("triage"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run(h.deps(), Args { id: "tk-1".into() });
+        assert_eq!(code, Exit::Ok);
+        let stdout = String::from_utf8(h.stdout).unwrap();
+        // The facet bar opens at the Kind — no Priority token — and the
+        // Selection line carries the triage cue (ADR-0027).
+        assert!(
+            stdout.contains("  Task \u{b7} Created: 2026-05-09\n  Selection: triage\n"),
+            "stdout={stdout:?}"
+        );
+        assert!(
+            !stdout.contains('\u{25cf}'),
+            "no priority bullet: {stdout:?}"
+        );
+    }
+
+    #[test]
     fn renders_updated_facet_only_when_item_was_modified() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);

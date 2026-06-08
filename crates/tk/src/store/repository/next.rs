@@ -82,7 +82,7 @@ const NEXT_READY_TICKET_SQL: &str = "\
 with recursive \
   annotated as ( \
       select i.id, i.display_value, i.item_class, i.priority, i.status, \
-             i.container_id, i.created_seq, \
+             i.selection_state, i.container_id, i.created_seq, \
              exists ( \
                  select 1 \
                    from dependencies d \
@@ -160,6 +160,7 @@ select ann.display_value, ann.priority, eff.ep, \
   join eff on eff.start_id = ann.id \
  where ann.item_class = 'ticket' \
    and ann.status = 'open' \
+   and ann.selection_state = 'accepted' \
    and not ann.has_unresolved_dependency \
    and not ann.has_unresolved_external_blocker \
    and ( \
@@ -424,6 +425,65 @@ mod tests {
             .expect("a ready ticket");
         assert_eq!(ticket.display_id, "tk-1");
         let rationale = ticket.rationale.expect("multi-hop rationale required");
+        assert_eq!(rationale.effective_priority, "P0");
+        assert_eq!(rationale.blocked_display_id, "tk-3");
+    }
+
+    fn seed_triage(store: &Store, id: &str, display: &str, created_seq: i64) {
+        insert_fixture_item(
+            &store.conn,
+            FixtureItem {
+                id,
+                display,
+                title: id,
+                priority: None,
+                selection_state: Some("triage"),
+                created_seq,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn triage_ticket_is_never_selected_even_when_it_blocks_accepted_work() {
+        // `triage` blocks `high` (P0): without the accepted-only candidate
+        // filter, `triage` would inherit P0 via Effective Priority and win. It
+        // must be excluded; `high` is blocked, so the ready P2 `ready` wins.
+        let store = open_seeded();
+        seed_triage(&store, "triage", "tk-1", 1);
+        seed(&store, "high", "tk-2", "P0", 2);
+        insert_dependency(&store.conn, "triage", "high").unwrap();
+        seed(&store, "ready", "tk-3", "P2", 3);
+
+        let ticket = next_ready_ticket(&store, NextOptions::default())
+            .unwrap()
+            .expect("a ready ticket");
+        assert_eq!(ticket.display_id, "tk-3");
+    }
+
+    #[test]
+    fn effective_priority_passes_through_a_triage_ticket() {
+        // accepted `blocker` (P3) -> triage `mid` -> accepted `tail` (P0). The
+        // triage `mid` contributes no Priority of its own (NULL), but the real
+        // dependency edges still conduct `tail`'s P0 back to `blocker`, which is
+        // the ready work whose completion advances toward `tail` (grilled
+        // decision: pass-through is kept, not severed).
+        let store = open_seeded();
+        seed(&store, "blocker", "tk-1", "P3", 1);
+        seed_triage(&store, "mid", "tk-2", 2);
+        seed(&store, "tail", "tk-3", "P0", 3);
+        insert_dependency(&store.conn, "blocker", "mid").unwrap();
+        insert_dependency(&store.conn, "mid", "tail").unwrap();
+        seed(&store, "other-ready", "tk-4", "P1", 4);
+
+        let ticket = next_ready_ticket(&store, NextOptions::default())
+            .unwrap()
+            .expect("a ready ticket");
+        // `blocker` inherits P0 through the triage node, outranking the P1
+        // `other-ready`.
+        assert_eq!(ticket.display_id, "tk-1");
+        let rationale = ticket.rationale.expect("inherited-priority rationale");
         assert_eq!(rationale.effective_priority, "P0");
         assert_eq!(rationale.blocked_display_id, "tk-3");
     }

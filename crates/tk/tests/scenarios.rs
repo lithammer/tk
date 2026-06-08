@@ -230,6 +230,92 @@ fn show_renders_selection_state_for_tickets_only() {
 }
 
 #[test]
+fn triage_capture_and_acceptance_flow() {
+    let p = Repo::new("project");
+    p.run("init");
+
+    // Capture a triage bug — no Priority, surfaces its Selection State.
+    tk!(p, "add --triage --bug -m 'Investigate flaky test'", @r"
+    Created Ticket: project-1 - Investigate flaky test
+    Kind: bug
+    Selection: triage
+    Status: open
+    ");
+
+    // Both AC2 rejections, asserted independently of the help doc-comment
+    // (clap renders that prose verbatim and would not catch a dropped
+    // conflict): `--triage --priority` and `--epic --triage` are exit 2.
+    let conflict = p.run("add --triage --priority P1 -m 'nope'");
+    assert!(conflict.contains("exit 2"), "conflict={conflict}");
+    let epic_conflict = p.run("add --epic --triage -m 'nope'");
+    assert!(
+        epic_conflict.contains("exit 2"),
+        "epic_conflict={epic_conflict}"
+    );
+
+    // tk next ignores triage; list --triage surfaces it.
+    let next_empty = p.run("next");
+    assert!(
+        !next_empty.contains("project-1"),
+        "triage is not selectable: {next_empty}"
+    );
+    let triage_view = p.run("list --triage");
+    assert!(
+        triage_view.contains("project-1"),
+        "triage_view={triage_view}"
+    );
+
+    // Reprioritizing via update is refused with a pointer to accept.
+    let upd = p.run("update project-1 --priority P1");
+    assert!(
+        upd.contains("tk update: 'project-1' is in triage; set a Priority by accepting it with 'tk accept project-1 --priority Pn'"),
+        "upd={upd}"
+    );
+
+    // Accept ranks it and makes it selectable.
+    tk!(p, "accept project-1 --priority P1", @r"
+    Accepted Ticket: project-1 - Investigate flaky test
+    Priority: P1
+    ");
+    assert_eq!(p.run("next").trim(), "project-1");
+
+    // Re-accepting is an idempotent success.
+    let again = p.run("accept project-1");
+    assert!(
+        again.contains("project-1 is already accepted"),
+        "again={again}"
+    );
+}
+
+#[test]
+fn accepting_a_blocked_triage_ticket_preserves_the_blocker() {
+    let p = Repo::new("project");
+    p.run("init");
+    p.run("add --triage -m 'Maybe later'"); // project-1 (triage)
+    p.run("add -m 'Prerequisite'"); // project-2 (accepted)
+    p.run("block project-1 project-2"); // project-2 blocks project-1
+
+    // A blocked triage Ticket is excluded from the blocked view.
+    let before = p.run("list --blocked");
+    assert!(
+        !before.contains("project-1"),
+        "triage hidden from blocked: {before}"
+    );
+
+    p.run("accept project-1 --priority P1");
+
+    // Acceptance preserves the blocker, so the now-accepted Ticket appears in
+    // the blocked view rather than as ready work.
+    let blocked = p.run("list --blocked");
+    assert!(blocked.contains("project-1"), "blocked={blocked}");
+    assert_ne!(
+        p.run("next").trim(),
+        "project-1",
+        "still blocked, not selectable"
+    );
+}
+
+#[test]
 fn init_refuses_outside_git_repository() {
     let p = Repo::bare("scratch");
     let out = p.run("init");
@@ -308,7 +394,8 @@ fn tk_scope_env_filters_list_to_the_epic() {
 fn command_help_snapshots() {
     let p = Repo::new("repo");
     for command in [
-        "block", "done", "grep", "list", "next", "search", "show", "unblock", "update",
+        "accept", "add", "block", "done", "grep", "list", "next", "search", "show", "unblock",
+        "update",
     ] {
         insta::assert_snapshot!(
             format!("help_{command}"),

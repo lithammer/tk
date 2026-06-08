@@ -39,7 +39,7 @@ pub struct Args {
     #[arg(short = 'F', long = "file", value_name = "PATH")]
     pub file: Option<String>,
     /// Set Priority (P0..P4). Tickets only.
-    #[arg(short = 'p', long, value_name = "PRIORITY", value_parser = parse_priority)]
+    #[arg(short = 'p', long, value_name = "PRIORITY")]
     pub priority: Option<Priority>,
     /// Set the containing Epic by Display ID or Alias. Tickets only.
     #[arg(short = 'P', long, value_name = "EPIC", conflicts_with = "no_parent")]
@@ -47,19 +47,6 @@ pub struct Args {
     /// Remove the Ticket from its current Epic. Tickets only.
     #[arg(long = "no-parent")]
     pub no_parent: bool,
-}
-
-fn parse_priority(s: &str) -> Result<Priority, String> {
-    match s {
-        "P0" => Ok(Priority::P0),
-        "P1" => Ok(Priority::P1),
-        "P2" => Ok(Priority::P2),
-        "P3" => Ok(Priority::P3),
-        "P4" => Ok(Priority::P4),
-        other => Err(format!(
-            "invalid priority `{other}` (expected P0, P1, P2, P3, or P4)"
-        )),
-    }
 }
 
 #[must_use]
@@ -200,6 +187,15 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
             );
             Exit::Failure
         }
+        Err(update::UpdateError::PriorityOnTriage) => {
+            let _ = writeln!(
+                stderr,
+                "tk update: '{id}' is in triage; set a Priority by accepting it with \
+                 'tk accept {id} --priority Pn'",
+                id = args.id
+            );
+            Exit::Failure
+        }
         Err(update::UpdateError::Sqlite(err)) => {
             resolver::render_storage_error(stderr, COMMAND, &err);
             Exit::Failure
@@ -329,6 +325,42 @@ mod tests {
         assert_eq!(code, Exit::Usage);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk update: no changes requested"));
+    }
+
+    #[test]
+    fn priority_on_a_triage_ticket_points_at_accept() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Captured",
+                priority: None,
+                selection_state: Some("triage"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let mut a = args("tk-1");
+        a.priority = Some(crate::domain::priority::Priority::P1);
+        let code = run(h.deps(), a);
+        assert_eq!(code, Exit::Failure);
+        let stderr = String::from_utf8(h.stderr).unwrap();
+        assert!(
+            stderr.contains(
+                "tk update: 'tk-1' is in triage; set a Priority by accepting it with \
+                 'tk accept tk-1 --priority Pn'"
+            ),
+            "stderr={stderr:?}"
+        );
     }
 
     #[test]

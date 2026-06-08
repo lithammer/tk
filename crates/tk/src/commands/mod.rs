@@ -10,6 +10,7 @@
 // crate-wide to catch genuine owned-by-value (`String`/`Vec`) params elsewhere.
 #![allow(clippy::needless_pass_by_value)]
 
+pub mod accept;
 pub mod add;
 pub mod block;
 pub mod done;

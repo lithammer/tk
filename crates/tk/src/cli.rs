@@ -117,6 +117,8 @@ struct Cli {
 enum Command {
     /// Create a local Ticket or Epic.
     Add(commands::add::Args),
+    /// Accept a triage Ticket into ranked, selectable work.
+    Accept(commands::accept::Args),
     /// Initialize the Repository Store in the current Git repository.
     Init(commands::init::Args),
     /// Render the Repository Store List Tree.
@@ -167,6 +169,7 @@ pub fn run_argv(deps: Deps<'_>, argv: &[String]) -> std::io::Result<Exit> {
     };
     match cli.command {
         Command::Add(args) => Ok(commands::add::run(deps, args)),
+        Command::Accept(args) => Ok(commands::accept::run(deps, args)),
         Command::Init(args) => Ok(commands::init::run(deps, args)),
         Command::List(args) => Ok(commands::list::run(deps, args)),
         Command::Next(args) => Ok(commands::next::run(deps, args)),

@@ -1,0 +1,14 @@
+---
+source: crates/tk/tests/scenarios.rs
+expression: "p.run(&format!(\"{command} --help\"))"
+---
+Accept a triage Ticket into ranked, selectable work
+
+Usage: tk accept [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Display ID or Alias of the Ticket to accept
+
+Options:
+  -p, --priority <PRIORITY>  Priority to assign while accepting (P0..P4); required for a triage Ticket
+  -h, --help                 Print help

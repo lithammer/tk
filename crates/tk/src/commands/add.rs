@@ -19,7 +19,7 @@ use crate::commands::resolver;
 use crate::domain::priority::Priority;
 use crate::domain::ticket_kind::TicketKind;
 use crate::store::repository::create::{
-    self, CreateError, CreateLocalEpicInput, CreateLocalTicketInput,
+    self, CreateError, CreateLocalEpicInput, CreateLocalTicketInput, NewTicketSelection,
 };
 
 const COMMAND: &str = "add";
@@ -48,21 +48,12 @@ pub struct Args {
     #[arg(short = 'P', long, value_name = "EPIC")]
     pub parent: Option<String>,
     /// Set Priority (P0..P4). Tickets only.
-    #[arg(short = 'p', long, value_name = "PRIORITY", value_parser = parse_priority)]
+    #[arg(short = 'p', long, value_name = "PRIORITY")]
     pub priority: Option<Priority>,
-}
-
-fn parse_priority(s: &str) -> Result<Priority, String> {
-    match s {
-        "P0" => Ok(Priority::P0),
-        "P1" => Ok(Priority::P1),
-        "P2" => Ok(Priority::P2),
-        "P3" => Ok(Priority::P3),
-        "P4" => Ok(Priority::P4),
-        other => Err(format!(
-            "invalid priority `{other}` (expected one of P0, P1, P2, P3, P4)"
-        )),
-    }
+    /// Capture the Ticket in triage with no Priority, pending a decision
+    /// (conflicts with --priority and --epic).
+    #[arg(long, conflicts_with_all = ["priority", "epic"])]
+    pub triage: bool,
 }
 
 #[must_use]
@@ -152,7 +143,14 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
     } else {
         TicketKind::Task
     };
-    let priority = args.priority.unwrap_or_default();
+    // `--triage` captures unranked work (no Priority); otherwise the Ticket is
+    // accepted at the requested or default Priority (ADR-0027). clap's
+    // conflicts_with rules out `--triage --priority`, so the two never collide.
+    let selection = if args.triage {
+        NewTicketSelection::Triage
+    } else {
+        NewTicketSelection::Accepted(args.priority.unwrap_or_default())
+    };
     let parent_id = parent_ref.as_ref().map(|r| r.id.as_str());
 
     let ticket = match create::create_local_ticket(
@@ -161,7 +159,7 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
         rng,
         CreateLocalTicketInput {
             kind,
-            priority,
+            selection,
             parent_id,
             title: &parsed.title,
             body: &parsed.body,
@@ -180,7 +178,16 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
         ticket.display_id, ticket.title
     );
     let _ = writeln!(stdout, "Kind: {}", ticket.kind);
-    let _ = writeln!(stdout, "Priority: {}", ticket.priority);
+    // A triage Ticket has no Priority, so it surfaces its Selection State
+    // instead; accepted Tickets stay the quiet default and show only Priority.
+    match ticket.priority {
+        Some(priority) => {
+            let _ = writeln!(stdout, "Priority: {priority}");
+        }
+        None => {
+            let _ = writeln!(stdout, "Selection: {}", ticket.selection_state);
+        }
+    }
     let _ = writeln!(stdout, "Status: {}", ticket.status);
     if let Some(parent) = parent_ref.as_ref() {
         let _ = writeln!(stdout, "Parent: {}", parent.display_id);
@@ -320,6 +327,7 @@ mod tests {
             epic: false,
             parent: None,
             priority: None,
+            triage: false,
         }
     }
 
@@ -352,6 +360,25 @@ mod tests {
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(stdout.contains("Kind: bug"));
+    }
+
+    #[test]
+    fn triage_flag_creates_an_unranked_triage_ticket() {
+        let store = TmpStore::new("repo");
+        seed_store(&store);
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let mut a = args_with(vec!["Investigate flaky test".into()]);
+        a.triage = true;
+        a.bug = true; // a triage bug is valid (ADR-0027)
+        let code = run(h.deps(), a);
+        assert_eq!(code, Exit::Ok, "stderr={:?}", String::from_utf8(h.stderr));
+        let stdout = String::from_utf8(h.stdout).unwrap();
+        assert!(stdout.contains("Kind: bug"));
+        // A triage Ticket surfaces its Selection State, not a Priority line.
+        assert!(stdout.contains("Selection: triage"), "stdout={stdout:?}");
+        assert!(!stdout.contains("Priority:"), "stdout={stdout:?}");
     }
 
     #[test]

@@ -38,6 +38,7 @@ pub mod grep;
 pub mod list;
 pub mod next;
 pub mod search;
+pub mod selection;
 pub mod show;
 pub mod status;
 pub mod update;
@@ -100,6 +101,11 @@ pub enum OpenError {
     /// fault is an upgrade failure, not a plain read.
     #[error("failed to apply pending migrations to the Repository Store")]
     MigrationFailed(rusqlite::Error),
+    /// A forward migration that rebuilds a table (ADR-0028) left a dangling
+    /// foreign key and rolled back. A backstop for a migration-SQL bug, not a
+    /// state a healthy store reaches.
+    #[error("a forward migration left a dangling foreign key in table `{0}`")]
+    MigrationForeignKeyCheck(String),
     /// Genuine SQLite fault opening or inspecting the store.
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
@@ -165,6 +171,9 @@ impl From<migrations::ApplyError> for OpenError {
     fn from(err: migrations::ApplyError) -> Self {
         match err {
             migrations::ApplyError::StoreFromFutureVersion => OpenError::FromFutureVersion,
+            migrations::ApplyError::ForeignKeyCheck(table) => {
+                OpenError::MigrationForeignKeyCheck(table)
+            }
             migrations::ApplyError::Sqlite(e) => OpenError::MigrationFailed(e),
         }
     }

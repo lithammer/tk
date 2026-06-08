@@ -19,6 +19,7 @@ use crate::domain::mutation_payload::{EpicRef, MutationPayload, TitleBody};
 use crate::domain::mutation_type::MutationType;
 use crate::domain::origin::Origin;
 use crate::domain::priority::Priority;
+use crate::domain::selection_state::SelectionState;
 use crate::store::mutations;
 
 use super::Store;
@@ -74,6 +75,11 @@ pub enum UpdateError {
     /// `id` does not resolve to a live row.
     #[error("item not found")]
     NotFound,
+    /// `--priority` was requested for a triage Ticket; Priority is assigned by
+    /// accepting (ADR-0027), not by `tk update`. The command points the user
+    /// at `tk accept`.
+    #[error("triage Ticket cannot be reprioritized via update")]
+    PriorityOnTriage,
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
@@ -94,6 +100,7 @@ struct Current {
     title: String,
     body: String,
     priority: Option<String>,
+    selection_state: Option<SelectionState>,
     container_id: Option<String>,
 }
 
@@ -133,7 +140,7 @@ pub fn update_item<C: Clock + ?Sized>(
 
     let current = tx
         .query_row(
-            "select origin, title, body, priority, container_id \
+            "select origin, title, body, priority, selection_state, container_id \
                from items where id = ?1",
             params![req.id],
             |r| {
@@ -142,7 +149,8 @@ pub fn update_item<C: Clock + ?Sized>(
                     title: r.get(1)?,
                     body: r.get(2)?,
                     priority: r.get(3)?,
-                    container_id: r.get(4)?,
+                    selection_state: r.get(4)?,
+                    container_id: r.get(5)?,
                 })
             },
         )
@@ -150,6 +158,14 @@ pub fn update_item<C: Clock + ?Sized>(
     let Some(current) = current else {
         return Err(UpdateError::NotFound);
     };
+
+    // Priority is the acceptance boundary (ADR-0027): a triage Ticket has no
+    // Priority and cannot be reprioritized directly — it must be accepted.
+    // Rejecting before any write keeps a mixed `--priority --title` update
+    // atomic (nothing is applied).
+    if req.priority.is_some() && current.selection_state == Some(SelectionState::Triage) {
+        return Err(UpdateError::PriorityOnTriage);
+    }
 
     let new_title: Option<&str> = req
         .title

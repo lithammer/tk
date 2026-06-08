@@ -46,9 +46,9 @@ is idempotent. If the store already exists and is current, it reports the
 existing path instead of recreating it.
 .SS Creating Tickets and Epics
 .TP
-\fBtk add\fR [\fB\-\-bug\fR | \fB\-\-epic\fR] [\fB\-\-parent\fR \fIepic-id\fR] [\fB\-\-priority\fR \fIP0..P4\fR] (\fB\-m\fR \fIparagraph\fR... | \fB\-F\fR \fIfile\fR)
+\fBtk add\fR [\fB\-\-bug\fR | \fB\-\-epic\fR] [\fB\-\-parent\fR \fIepic-id\fR] [\fB\-\-priority\fR \fIP0..P4\fR | \fB\-\-triage\fR] (\fB\-m\fR \fIparagraph\fR... | \fB\-F\fR \fIfile\fR)
 .TQ
-\fBtk add\fR [\fB\-\-bug\fR | \fB\-\-epic\fR] [\fB\-\-parent\fR \fIepic-id\fR] [\fB\-\-priority\fR \fIP0..P4\fR] \fB\-F\fR \fB\-\fR
+\fBtk add\fR [\fB\-\-bug\fR | \fB\-\-epic\fR] [\fB\-\-parent\fR \fIepic-id\fR] [\fB\-\-priority\fR \fIP0..P4\fR | \fB\-\-triage\fR] \fB\-F\fR \fB\-\fR
 Create a local task Ticket by default.
 .PP
 .B \-\-bug
@@ -65,6 +65,16 @@ places a new Ticket under an Epic; it is invalid with
 .B \-\-priority
 sets local-only Priority for Tickets. The default is
 .BR P2 .
+.B \-\-triage
+captures the Ticket in triage with no Priority, pending a decision; it is
+invalid with
+.B \-\-priority
+or
+.BR \-\-epic .
+A triage Ticket is excluded from
+.B tk next
+until accepted with
+.BR "tk accept \fIid\fR \-\-priority \fIPn\fR" .
 .PP
 .B \-m
 and
@@ -96,6 +106,10 @@ Parent: <epic-display-id>
 .fi
 .RE
 .PP
+A triage Ticket has no Priority, so it replaces the
+.B Priority:
+line with
+.BR "Selection: triage" .
 The
 .B Parent:
 line is printed only when
@@ -115,7 +129,7 @@ Status: open
 .RE
 .SS Reading the List Tree
 .TP
-\fBtk list\fR [\fB\-\-ready\fR | \fB\-\-blocked\fR | \fB\-\-active\fR] [\fB\-\-local\fR | \fB\-\-remote\fR] [\fB\-\-epic\fR]
+\fBtk list\fR [\fB\-\-ready\fR | \fB\-\-blocked\fR | \fB\-\-active\fR | \fB\-\-triage\fR] [\fB\-\-local\fR | \fB\-\-remote\fR] [\fB\-\-epic\fR]
 Render the Repository Store List Tree.
 .PP
 The default view shows open and active Tickets and Epics. Epics render as
@@ -129,6 +143,9 @@ shows open or active Tickets with unresolved Dependencies or External Blockers.
 .B \-\-active
 shows active Tickets and Epics, retaining inactive Epics as containers for
 active child Tickets.
+.B \-\-triage
+shows open Tickets in triage \(em captured work not yet accepted. The view
+flags are mutually exclusive.
 .PP
 .B \-\-local
 shows only local items.
