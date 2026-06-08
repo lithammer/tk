@@ -280,17 +280,29 @@ mod tests {
         // `no such column: closing_reason`.
         let store = TmpStore::new("repo");
         let conn = seed_store_at_version(&store, 2);
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "t1",
-                display: "tk-1",
-                title: "Subject",
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
+        // Seed a v2-shaped Ticket directly: at migration 2 the items table has
+        // neither `closing_reason` (v3) nor `selection_state` (v4), so
+        // `insert_fixture_item` — which now writes `selection_state` — cannot
+        // be used. The heal on open backfills `selection_state` to `accepted`.
+        // The items + display-resolver rows go in one transaction so the
+        // deferred composite foreign key holds at COMMIT.
+        let tx = conn.unchecked_transaction().unwrap();
+        tx.execute(
+            "insert into items(\
+                id, display_value, item_class, ticket_kind, priority, title, body, \
+                origin, status, created_seq, created_at, updated_at\
+             ) values ('t1', 'tk-1', 'ticket', 'task', 'P2', 'Subject', '', 'local', 'open', 1, \
+                       '2026-05-09T00:00:00.000Z', '2026-05-09T00:00:00.000Z')",
+            [],
         )
         .unwrap();
+        tx.execute(
+            "insert into item_ids(value, source, item_id, created_at) \
+             values ('tk-1', 'display', 't1', '2026-05-09T00:00:00.000Z')",
+            [],
+        )
+        .unwrap();
+        tx.commit().unwrap();
         drop(conn);
 
         let cwd_path = cwd();

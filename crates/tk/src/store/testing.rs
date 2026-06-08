@@ -134,13 +134,19 @@ pub fn insert_fixture_item(conn: &Connection, item: FixtureItem<'_>) -> rusqlite
     let container_class = item
         .container_id
         .map(|_| item.container_class.unwrap_or("epic"));
+    // Selection State (ADR-0027) is Ticket-only and defaults to accepted;
+    // Epics store NULL. Derived from item_class rather than carried on
+    // FixtureItem so every existing call site stays correct unchanged — the
+    // explicit triage/parked fixture field lands with those workflows in
+    // tk-74 / tk-75.
+    let selection_state = (item.item_class == "ticket").then_some("accepted");
     let tx = conn.unchecked_transaction()?;
     tx.execute(
         "insert into items(\
             id, display_value, item_class, ticket_kind, priority, title, body, \
             container_id, container_class, origin, backend_kind, backend_key, \
-            status, created_seq, created_at, updated_at\
-         ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            status, selection_state, created_seq, created_at, updated_at\
+         ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             item.id,
             item.display,
@@ -155,6 +161,7 @@ pub fn insert_fixture_item(conn: &Connection, item: FixtureItem<'_>) -> rusqlite
             item.backend_kind,
             item.backend_key,
             item.status,
+            selection_state,
             item.created_seq,
             item.created_at,
             item.updated_at,

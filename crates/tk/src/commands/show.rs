@@ -6,6 +6,7 @@
 //! <status-glyph> <display-id> · <title>
 //!   <P_> · <Kind> · Created: <created>[ · Updated: <updated>]    (Tickets)
 //!   Epic · Created: <created>[ · Updated: <updated>]             (Epics)
+//!   Selection: <triage|accepted|parked>                          (Tickets)
 //!
 //! DESCRIPTION
 //! <body...>
@@ -114,6 +115,14 @@ fn render<W: Write + ?Sized>(
         None,
         styler,
     )?;
+
+    // Selection State (ADR-0027) renders as its own line under the facet bar,
+    // not in the shared `item_header` facet bar — that header is the verbatim
+    // show/grep single-source, and `tk grep` is content search where Selection
+    // State is noise. `None` (Epics) omits the line.
+    if let Some(selection) = detail.selection_state {
+        writeln!(stdout, "  Selection: {}", selection.text())?;
+    }
 
     let mut has_section = false;
 
@@ -456,6 +465,12 @@ mod tests {
         // updated_at == created_at, so the Updated facet is omitted.
         assert!(stdout.contains("  P2 \u{b7} Task \u{b7} Created: 2026-05-09\n"));
         assert!(!stdout.contains("Updated:"), "stdout={stdout:?}");
+        // Selection State (ADR-0027) renders on its own line directly under the
+        // facet bar; a normal ticket is accepted.
+        assert!(
+            stdout.contains("\u{b7} Created: 2026-05-09\n  Selection: accepted\n"),
+            "stdout={stdout:?}"
+        );
     }
 
     #[test]
@@ -534,6 +549,11 @@ mod tests {
         assert!(
             stdout.contains("  Epic \u{b7} Created: 2026-05-09"),
             "stdout={stdout:?}"
+        );
+        // Epics stay outside Selection State (ADR-0027): no Selection line.
+        assert!(
+            !stdout.contains("Selection:"),
+            "Epics omit Selection State: stdout={stdout:?}"
         );
         assert!(stdout.contains("TICKETS"));
         assert!(stdout.contains("tk-2: Child ticket"));

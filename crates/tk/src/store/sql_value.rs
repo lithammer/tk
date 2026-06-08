@@ -19,6 +19,7 @@ use crate::domain::mutation_state::MutationState;
 use crate::domain::mutation_type::MutationType;
 use crate::domain::origin::Origin;
 use crate::domain::priority::Priority;
+use crate::domain::selection_state::SelectionState;
 use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
 
@@ -85,6 +86,26 @@ impl FromSql for ItemStatus {
 }
 
 impl ToSql for ItemStatus {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        self.text().to_sql()
+    }
+}
+
+impl FromSql for SelectionState {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        // Tickets always carry a value; Epics store NULL, which rusqlite maps
+        // to `None` for an `Option<SelectionState>` column before this is
+        // reached — so a NULL never lands here.
+        match value.as_str()? {
+            "triage" => Ok(Self::Triage),
+            "accepted" => Ok(Self::Accepted),
+            "parked" => Ok(Self::Parked),
+            other => Err(corrupt("selection_state", other)),
+        }
+    }
+}
+
+impl ToSql for SelectionState {
     fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
         self.text().to_sql()
     }
@@ -166,6 +187,10 @@ mod tests {
         assert_eq!(
             Priority::column_result(ValueRef::Text(b"P3")).unwrap(),
             Priority::P3
+        );
+        assert_eq!(
+            SelectionState::column_result(ValueRef::Text(b"parked")).unwrap(),
+            SelectionState::Parked
         );
         assert_eq!(
             ItemStatus::column_result(ValueRef::Text(b"active")).unwrap(),

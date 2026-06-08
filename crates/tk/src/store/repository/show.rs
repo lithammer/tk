@@ -12,6 +12,7 @@ use rusqlite::params;
 
 use crate::domain::item_class::ItemClass;
 use crate::domain::priority::Priority;
+use crate::domain::selection_state::SelectionState;
 use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
 
@@ -41,6 +42,9 @@ pub struct ItemDetail {
     pub item_class: ItemClass,
     pub ticket_kind: Option<TicketKind>,
     pub priority: Option<Priority>,
+    /// Selection State (ADR-0027). `Some` for Tickets, `None` for Epics — the
+    /// column CHECK keeps Selection State Ticket-only.
+    pub selection_state: Option<SelectionState>,
     pub title: String,
     pub body: String,
     /// Optional Closing Reason (ADR-0023). Present only on `done` items; the
@@ -64,7 +68,7 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
     };
 
     let row = store.conn.query_row(
-        "select id, display_value, item_class, ticket_kind, priority, title, body, \
+        "select id, display_value, item_class, ticket_kind, priority, selection_state, title, body, \
                 closing_reason, status, created_at, updated_at, container_id \
            from items where id = ?1",
         params![&reference.id],
@@ -75,13 +79,14 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
                 r.get::<_, ItemClass>(2)?,
                 r.get::<_, Option<TicketKind>>(3)?,
                 r.get::<_, Option<Priority>>(4)?,
-                r.get::<_, String>(5)?,
+                r.get::<_, Option<SelectionState>>(5)?,
                 r.get::<_, String>(6)?,
-                r.get::<_, Option<String>>(7)?,
-                r.get::<_, ItemStatus>(8)?,
-                r.get::<_, String>(9)?,
+                r.get::<_, String>(7)?,
+                r.get::<_, Option<String>>(8)?,
+                r.get::<_, ItemStatus>(9)?,
                 r.get::<_, String>(10)?,
-                r.get::<_, Option<String>>(11)?,
+                r.get::<_, String>(11)?,
+                r.get::<_, Option<String>>(12)?,
             ))
         },
     );
@@ -91,6 +96,7 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
         item_class,
         ticket_kind,
         priority,
+        selection_state,
         title,
         body,
         closing_reason,
@@ -128,6 +134,7 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
         item_class,
         ticket_kind,
         priority,
+        selection_state,
         title,
         body,
         closing_reason,
@@ -296,6 +303,7 @@ mod tests {
         assert_eq!(item.item_class, ItemClass::Ticket);
         assert_eq!(item.ticket_kind, Some(TicketKind::Task));
         assert_eq!(item.priority, Some(Priority::P2));
+        assert_eq!(item.selection_state, Some(SelectionState::Accepted));
         assert_eq!(item.status, ItemStatus::Open);
         assert!(item.parent.is_none());
         assert!(item.children.is_empty());
@@ -337,6 +345,8 @@ mod tests {
 
         let epic = show_item(&store, "tk-1").unwrap().unwrap();
         assert_eq!(epic.item_class, ItemClass::Epic);
+        // Epics stay outside Selection State (ADR-0027).
+        assert!(epic.selection_state.is_none());
         assert_eq!(
             epic.children
                 .iter()
