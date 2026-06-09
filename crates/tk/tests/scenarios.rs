@@ -316,6 +316,72 @@ fn accepting_a_blocked_triage_ticket_preserves_the_blocker() {
 }
 
 #[test]
+fn parking_and_unparking_flow() {
+    let p = Repo::new("project");
+    p.run("init");
+
+    // An accepted Ticket is selectable by default.
+    p.run("add -m 'Build the thing'"); // project-1 (accepted, P2)
+    assert_eq!(p.run("next").trim(), "project-1");
+
+    // Park it: the Priority is preserved and echoed (the held work stays ranked).
+    tk!(p, "park project-1", @r"
+    Parked Ticket: project-1 - Build the thing
+    Priority: P2
+    ");
+
+    // Parked work drops out of automatic selection but stays visible: the
+    // focused view lists it and plain list marks it with a dim [parked] badge.
+    let next_after_park = p.run("next");
+    assert!(
+        !next_after_park.contains("project-1"),
+        "parked is not selectable: {next_after_park}"
+    );
+    let parked_view = p.run("list --parked");
+    assert!(
+        parked_view.contains("project-1"),
+        "parked_view={parked_view}"
+    );
+    let plain = p.run("list");
+    assert!(plain.contains("[parked]"), "plain={plain}");
+
+    // Re-parking is an idempotent success.
+    let again = p.run("park project-1");
+    assert!(
+        again.contains("project-1 is already parked"),
+        "again={again}"
+    );
+
+    // Parked work remains reprioritizable (AC: tk update --priority stays valid).
+    p.run("update project-1 --priority P0");
+
+    // Unpark restores it to selectable work at the (updated) held Priority,
+    // without requiring a flag.
+    tk!(p, "unpark project-1", @r"
+    Unparked Ticket: project-1 - Build the thing
+    Priority: P0
+    ");
+    assert_eq!(p.run("next").trim(), "project-1");
+
+    // Re-unparking is an idempotent success.
+    let reunpark = p.run("unpark project-1");
+    assert!(
+        reunpark.contains("project-1 is already accepted"),
+        "reunpark={reunpark}"
+    );
+
+    // Triage work must be accepted before it can be parked.
+    p.run("add --triage -m 'Maybe later'"); // project-2 (triage)
+    let park_triage = p.run("park project-2");
+    assert!(
+        park_triage.contains(
+            "tk park: 'project-2' is in triage; accept it first with 'tk accept project-2 --priority P0..P4'"
+        ),
+        "park_triage={park_triage}"
+    );
+}
+
+#[test]
 fn init_refuses_outside_git_repository() {
     let p = Repo::bare("scratch");
     let out = p.run("init");
@@ -394,8 +460,8 @@ fn tk_scope_env_filters_list_to_the_epic() {
 fn command_help_snapshots() {
     let p = Repo::new("repo");
     for command in [
-        "accept", "add", "block", "done", "grep", "list", "next", "search", "show", "unblock",
-        "update",
+        "accept", "add", "block", "done", "grep", "list", "next", "park", "search", "show",
+        "unblock", "unpark", "update",
     ] {
         insta::assert_snapshot!(
             format!("help_{command}"),

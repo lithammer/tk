@@ -601,6 +601,15 @@ mod tests {
                 on_open: "",
                 on_close: "",
             },
+            Case {
+                // Bright-black foreground, NOT dim: its close must be `39`
+                // (reset foreground), not `22`, so nesting inside the dimmed
+                // BLOCKED_ROW span leaves the row dim intact (ADR-0014).
+                name: "selection_badge",
+                style: palette::SELECTION_BADGE,
+                on_open: "\x1b[90m",
+                on_close: "\x1b[39m",
+            },
         ];
         let on = SubStyler {
             choice: ColorChoice::Always,

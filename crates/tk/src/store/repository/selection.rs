@@ -1,11 +1,12 @@
-//! Selection State transitions (`tk accept`; `tk park` / `tk unpark` join in
-//! tk-75).
+//! Selection State transitions: `tk accept`, `tk park`, and `tk unpark`.
 //!
 //! Selection State is a Local Field (ADR-0027): these transitions update
 //! current state only and never append a Mutation, even for a Backend Ticket.
 //! They are status-agnostic — a transition touches `selection_state` /
 //! `priority`, never `status` — and leave Dependencies and External Blockers
-//! untouched, so accepting a blocked triage Ticket keeps it blocked.
+//! untouched, so accepting a blocked triage Ticket keeps it blocked. The active
+//! guard that rejects `tk park` on an active Ticket is tk-76's lifecycle work,
+//! not these transitions'.
 
 use rusqlite::{OptionalExtension, params};
 
@@ -114,6 +115,227 @@ pub fn accept_ticket<C: Clock + ?Sized>(
         }
         Some(SelectionState::Parked) => Err(AcceptError::Parked),
         None => Err(AcceptError::NotATicket),
+    }
+}
+
+/// Current-state columns the park/unpark transitions inspect before deciding
+/// whether a Selection State change is allowed. Both read the same row shape,
+/// so a single typed reader keeps the two transitions in lockstep.
+struct SelectionRow {
+    display_id: String,
+    title: String,
+    item_class: ItemClass,
+    selection_state: Option<SelectionState>,
+    priority: Option<Priority>,
+}
+
+/// Read the [`SelectionRow`] for `id` within an open write transaction, or
+/// `None` when the row vanished between command-layer resolution and the lock.
+fn read_selection_row(
+    tx: &rusqlite::Transaction<'_>,
+    id: &str,
+) -> rusqlite::Result<Option<SelectionRow>> {
+    tx.query_row(
+        "select display_value, title, item_class, selection_state, priority \
+         from items where id = ?1",
+        params![id],
+        |r| {
+            Ok(SelectionRow {
+                display_id: r.get(0)?,
+                title: r.get(1)?,
+                item_class: r.get(2)?,
+                selection_state: r.get(3)?,
+                priority: r.get(4)?,
+            })
+        },
+    )
+    .optional()
+}
+
+/// Outcome of a successful [`park_ticket`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParkOutcome {
+    /// An accepted Ticket moved to parked; its Priority is preserved and echoed
+    /// so the caller can confirm the held work stays ranked.
+    Parked {
+        display_id: String,
+        title: String,
+        priority: Priority,
+    },
+    /// The Ticket was already parked — an idempotent no-op that does not touch
+    /// `updated_at`.
+    AlreadyParked { display_id: String },
+}
+
+/// Why [`park_ticket`] could not park the item. Each arm renders a curated
+/// `tk park` diagnostic; the command interpolates the user's id.
+#[derive(Debug, thiserror::Error)]
+pub enum ParkError {
+    /// The id resolved at the command layer but the row was gone by the time
+    /// the write transaction opened (a race), or never existed.
+    #[error("item not found")]
+    NotFound,
+    /// The target is an Epic; Selection State applies to Tickets only.
+    #[error("item is an Epic")]
+    NotATicket,
+    /// The Ticket is in triage; it must be accepted (which assigns a Priority)
+    /// before it can be parked.
+    #[error("triage Ticket must be accepted first")]
+    Triage,
+    #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
+}
+
+/// Park a Ticket: move it from accepted to parked, preserving Priority, or
+/// confirm an already-parked Ticket as an idempotent no-op.
+///
+/// Status-agnostic by design (ADR-0027): this touches `selection_state` only,
+/// never `status`. Rejecting `tk park` on an active Ticket is tk-76's lifecycle
+/// guard, not this transition's job. `id` is the resolved internal `items.id`.
+pub fn park_ticket<C: Clock + ?Sized>(
+    store: &mut Store,
+    clock: &C,
+    id: &str,
+) -> Result<ParkOutcome, ParkError> {
+    let tx = store
+        .conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+    let Some(SelectionRow {
+        display_id,
+        title,
+        item_class,
+        selection_state,
+        priority,
+    }) = read_selection_row(&tx, id)?
+    else {
+        return Err(ParkError::NotFound);
+    };
+
+    if item_class == ItemClass::Epic {
+        return Err(ParkError::NotATicket);
+    }
+
+    // A Ticket always carries a Selection State post-rebuild (ADR-0028); a NULL
+    // would be store corruption, treated like the Epic case rather than a panic.
+    match selection_state {
+        Some(SelectionState::Accepted) => {
+            // Accepted Tickets carry a Priority by the schema invariant
+            // (ADR-0028); it is preserved across the hold so unparking returns
+            // the work at the same rank. A NULL here would be store corruption,
+            // mapped to NotATicket like the None arm below rather than a panic.
+            let priority = priority.ok_or(ParkError::NotATicket)?;
+            tx.execute(
+                "update items set selection_state = 'parked', updated_at = ?2 where id = ?1",
+                params![id, clock.now_iso()],
+            )?;
+            tx.commit()?;
+            Ok(ParkOutcome::Parked {
+                display_id,
+                title,
+                priority,
+            })
+        }
+        Some(SelectionState::Parked) => {
+            // Idempotent: no write, so `updated_at` is left untouched.
+            Ok(ParkOutcome::AlreadyParked { display_id })
+        }
+        Some(SelectionState::Triage) => Err(ParkError::Triage),
+        None => Err(ParkError::NotATicket),
+    }
+}
+
+/// Outcome of a successful [`unpark_ticket`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnparkOutcome {
+    /// A parked Ticket moved back to accepted; its Priority is unchanged and
+    /// echoed so the caller can confirm the rank it returns to the queue at.
+    Unparked {
+        display_id: String,
+        title: String,
+        priority: Priority,
+    },
+    /// The Ticket was already accepted — an idempotent no-op that does not touch
+    /// `updated_at`.
+    AlreadyAccepted { display_id: String },
+}
+
+/// Why [`unpark_ticket`] could not unpark the item. Each arm renders a curated
+/// `tk unpark` diagnostic; the command interpolates the user's id.
+#[derive(Debug, thiserror::Error)]
+pub enum UnparkError {
+    /// The id resolved at the command layer but the row was gone by the time
+    /// the write transaction opened (a race), or never existed.
+    #[error("item not found")]
+    NotFound,
+    /// The target is an Epic; Selection State applies to Tickets only.
+    #[error("item is an Epic")]
+    NotATicket,
+    /// The Ticket is in triage; it must be accepted (which assigns a Priority)
+    /// before it makes sense to talk about unparking.
+    #[error("triage Ticket must be accepted first")]
+    Triage,
+    #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
+}
+
+/// Unpark a Ticket: move it from parked back to accepted, returning it to
+/// automatic selection without changing its Priority, or confirm an
+/// already-accepted Ticket as an idempotent no-op.
+///
+/// Mirrors [`park_ticket`]: status-agnostic, touches `selection_state` only,
+/// never appends a Mutation (ADR-0027). `id` is the resolved internal
+/// `items.id`.
+pub fn unpark_ticket<C: Clock + ?Sized>(
+    store: &mut Store,
+    clock: &C,
+    id: &str,
+) -> Result<UnparkOutcome, UnparkError> {
+    let tx = store
+        .conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+    let Some(SelectionRow {
+        display_id,
+        title,
+        item_class,
+        selection_state,
+        priority,
+    }) = read_selection_row(&tx, id)?
+    else {
+        return Err(UnparkError::NotFound);
+    };
+
+    if item_class == ItemClass::Epic {
+        return Err(UnparkError::NotATicket);
+    }
+
+    // A Ticket always carries a Selection State post-rebuild (ADR-0028); a NULL
+    // would be store corruption, treated like the Epic case rather than a panic.
+    match selection_state {
+        Some(SelectionState::Parked) => {
+            // Parked Tickets carry a Priority by the schema invariant
+            // (ADR-0028); it rides through unchanged so the work re-enters
+            // selection at the same rank. A NULL here would be store corruption,
+            // mapped to NotATicket like the None arm below rather than a panic.
+            let priority = priority.ok_or(UnparkError::NotATicket)?;
+            tx.execute(
+                "update items set selection_state = 'accepted', updated_at = ?2 where id = ?1",
+                params![id, clock.now_iso()],
+            )?;
+            tx.commit()?;
+            Ok(UnparkOutcome::Unparked {
+                display_id,
+                title,
+                priority,
+            })
+        }
+        Some(SelectionState::Accepted) => {
+            // Idempotent: no write, so `updated_at` is left untouched.
+            Ok(UnparkOutcome::AlreadyAccepted { display_id })
+        }
+        Some(SelectionState::Triage) => Err(UnparkError::Triage),
+        None => Err(UnparkError::NotATicket),
     }
 }
 
@@ -254,6 +476,156 @@ mod tests {
             accept_ticket(&mut store, &clock, "e", Some(Priority::P1)),
             Err(AcceptError::NotATicket)
         ));
+    }
+
+    #[test]
+    fn accepted_becomes_parked_preserving_priority() {
+        let mut store = open_seeded();
+        seed(&store, "t", "accepted", Some("P1"));
+        let clock = FakeClock::new(1_900_000_000_000);
+        let out = park_ticket(&mut store, &clock, "t").unwrap();
+        assert_eq!(
+            out,
+            ParkOutcome::Parked {
+                display_id: "t".into(),
+                title: "t".into(),
+                priority: Priority::P1
+            }
+        );
+        let (priority, selection, _) = selection_of(&store, "t");
+        assert_eq!(priority.as_deref(), Some("P1"));
+        assert_eq!(selection, "parked");
+    }
+
+    #[test]
+    fn already_parked_is_idempotent_and_keeps_updated_at() {
+        let mut store = open_seeded();
+        seed(&store, "t", "parked", Some("P2"));
+        let before = selection_of(&store, "t").2;
+        let clock = FakeClock::new(1_900_000_000_000);
+        let out = park_ticket(&mut store, &clock, "t").unwrap();
+        assert_eq!(
+            out,
+            ParkOutcome::AlreadyParked {
+                display_id: "t".into()
+            }
+        );
+        assert_eq!(
+            selection_of(&store, "t").2,
+            before,
+            "no-op must not bump updated_at"
+        );
+    }
+
+    #[test]
+    fn parking_triage_is_rejected() {
+        let mut store = open_seeded();
+        seed(&store, "t", "triage", None);
+        let clock = FakeClock::new(1_778_284_800_000);
+        assert!(matches!(
+            park_ticket(&mut store, &clock, "t"),
+            Err(ParkError::Triage)
+        ));
+    }
+
+    #[test]
+    fn parking_an_epic_is_rejected() {
+        let mut store = open_seeded();
+        insert_fixture_item(
+            &store.conn,
+            FixtureItem {
+                id: "e",
+                display: "e",
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                title: "Epic",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        let clock = FakeClock::new(1_778_284_800_000);
+        assert!(matches!(
+            park_ticket(&mut store, &clock, "e"),
+            Err(ParkError::NotATicket)
+        ));
+    }
+
+    #[test]
+    fn parked_becomes_accepted_preserving_priority() {
+        let mut store = open_seeded();
+        seed(&store, "t", "parked", Some("P1"));
+        let clock = FakeClock::new(1_900_000_000_000);
+        let out = unpark_ticket(&mut store, &clock, "t").unwrap();
+        assert_eq!(
+            out,
+            UnparkOutcome::Unparked {
+                display_id: "t".into(),
+                title: "t".into(),
+                priority: Priority::P1
+            }
+        );
+        let (priority, selection, _) = selection_of(&store, "t");
+        assert_eq!(priority.as_deref(), Some("P1"));
+        assert_eq!(selection, "accepted");
+    }
+
+    #[test]
+    fn already_accepted_unpark_is_idempotent_and_keeps_updated_at() {
+        let mut store = open_seeded();
+        seed(&store, "t", "accepted", Some("P2"));
+        let before = selection_of(&store, "t").2;
+        let clock = FakeClock::new(1_900_000_000_000);
+        let out = unpark_ticket(&mut store, &clock, "t").unwrap();
+        assert_eq!(
+            out,
+            UnparkOutcome::AlreadyAccepted {
+                display_id: "t".into()
+            }
+        );
+        assert_eq!(
+            selection_of(&store, "t").2,
+            before,
+            "no-op must not bump updated_at"
+        );
+    }
+
+    #[test]
+    fn unparking_triage_is_rejected() {
+        let mut store = open_seeded();
+        seed(&store, "t", "triage", None);
+        let clock = FakeClock::new(1_778_284_800_000);
+        assert!(matches!(
+            unpark_ticket(&mut store, &clock, "t"),
+            Err(UnparkError::Triage)
+        ));
+    }
+
+    #[test]
+    fn unpark_emits_no_mutation() {
+        let mut store = open_seeded();
+        seed(&store, "t", "parked", Some("P2"));
+        let clock = FakeClock::new(1_778_284_800_000);
+        unpark_ticket(&mut store, &clock, "t").unwrap();
+        let mutations: i64 = store
+            .conn
+            .query_row("select count(*) from mutations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mutations, 0, "Selection State changes never emit Mutations");
+    }
+
+    #[test]
+    fn park_emits_no_mutation() {
+        let mut store = open_seeded();
+        seed(&store, "t", "accepted", Some("P2"));
+        let clock = FakeClock::new(1_778_284_800_000);
+        park_ticket(&mut store, &clock, "t").unwrap();
+        let mutations: i64 = store
+            .conn
+            .query_row("select count(*) from mutations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mutations, 0, "Selection State changes never emit Mutations");
     }
 
     #[test]

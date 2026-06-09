@@ -551,6 +551,50 @@ mod tests {
     }
 
     #[test]
+    fn priority_update_is_allowed_for_a_parked_ticket() {
+        // tk-75 AC: `tk update --priority` stays valid for parked Tickets. The
+        // PriorityOnTriage guard keys on `triage` only, so parked passes
+        // through; the hold (selection_state) is untouched by the reprioritize.
+        let mut store = open_seeded();
+        insert_fixture_item(
+            &store.conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Held",
+                priority: Some("P2"),
+                selection_state: Some("parked"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+
+        update_item(
+            &mut store,
+            &clock(),
+            UpdateRequest {
+                id: "t1",
+                item_class: ItemClass::Ticket,
+                priority: Some(Priority::P0),
+                ..UpdateRequest::default()
+            },
+        )
+        .expect("parked Ticket is reprioritizable");
+
+        let (priority, selection): (String, String) = store
+            .conn
+            .query_row(
+                "select priority, selection_state from items where id = 't1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(priority, "P0");
+        assert_eq!(selection, "parked", "reprioritizing must not unpark");
+    }
+
+    #[test]
     fn parent_move_emits_remove_then_add_for_backend_ticket() {
         let mut store = open_seeded();
         seed_epic(&store, "e-old", "tk-1", 1);

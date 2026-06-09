@@ -1,0 +1,13 @@
+---
+source: crates/tk/tests/scenarios.rs
+expression: "p.run(&format!(\"{command} --help\"))"
+---
+Return a parked Ticket to accepted, selectable work
+
+Usage: tk unpark <ID>
+
+Arguments:
+  <ID>  Display ID or Alias of the Ticket to unpark
+
+Options:
+  -h, --help  Print help

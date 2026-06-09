@@ -129,7 +129,7 @@ Status: open
 .RE
 .SS Reading the List Tree
 .TP
-\fBtk list\fR [\fB\-\-ready\fR | \fB\-\-blocked\fR | \fB\-\-active\fR | \fB\-\-triage\fR] [\fB\-\-local\fR | \fB\-\-remote\fR] [\fB\-\-epic\fR]
+\fBtk list\fR [\fB\-\-ready\fR | \fB\-\-blocked\fR | \fB\-\-active\fR | \fB\-\-triage\fR | \fB\-\-parked\fR] [\fB\-\-local\fR | \fB\-\-remote\fR] [\fB\-\-epic\fR]
 Render the Repository Store List Tree.
 .PP
 The default view shows open and active Tickets and Epics. Epics render as
@@ -144,8 +144,10 @@ shows open or active Tickets with unresolved Dependencies or External Blockers.
 shows active Tickets and Epics, retaining inactive Epics as containers for
 active child Tickets.
 .B \-\-triage
-shows open Tickets in triage \(em captured work not yet accepted. The view
-flags are mutually exclusive.
+shows open Tickets in triage \(em captured work not yet accepted.
+.B \-\-parked
+shows open Tickets parked out of automatic selection \(em accepted work
+intentionally held. The view flags are mutually exclusive.
 .PP
 .B \-\-local
 shows only local items.

@@ -49,6 +49,13 @@ pub const KIND_BUG: Style = fg(AnsiColor::Red);
 /// Epic-Ticket-kind badge in lists / detail views.
 pub const KIND_EPIC: Style = fg(AnsiColor::Magenta);
 
+/// Muted badge for a non-default Selection State (`[parked]`; `[triage]` joins
+/// in tk-78). Held/unaccepted work is marked without drawing the eye (ADR-0027).
+/// A bright-black foreground, not `dimmed()`: the badge renders inside the
+/// dimmed `BLOCKED_ROW` span on a blocked row, so it must touch a disjoint SGR
+/// family — its close (`39`) must not reset the outer dim (ADR-0014 nesting).
+pub const SELECTION_BADGE: Style = fg(AnsiColor::BrightBlack);
+
 /// Open Item status (placeholder — uncoloured).
 pub const STATUS_OPEN: Style = Style::new();
 

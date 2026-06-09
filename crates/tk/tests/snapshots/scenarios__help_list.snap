@@ -14,6 +14,7 @@ Options:
       --blocked  Show blocked Tickets (open/active with unresolved blockers)
       --active   Show active Tickets and Epics
       --triage   Show triage Tickets (captured, not yet accepted)
+      --parked   Show parked Tickets (accepted, held out of automatic selection)
       --local    Restrict to locally-authored items
       --remote   Restrict to Remote-backed items
       --epic     Show only Epics

@@ -1,9 +1,9 @@
 //! `tk list` — render the Repository Store List Tree.
 //!
-//! View selection (`--ready` / `--blocked` / `--active`) and origin
-//! filtering (`--local` / `--remote`) are mutually exclusive within
-//! their group; clap's `conflicts_with` enforces the policy so the
-//! handler doesn't repeat it. The `--epic` class filter is orthogonal
+//! View selection (`--ready` / `--blocked` / `--active` / `--triage` /
+//! `--parked`) and origin filtering (`--local` / `--remote`) are mutually
+//! exclusive within their group; clap's `conflicts_with` enforces the policy so
+//! the handler doesn't repeat it. The `--epic` class filter is orthogonal
 //! to both groups — it composes with any view and Origin (e.g.
 //! `--ready --epic` lists Epics that contain ready child Tickets), so it
 //! carries no conflicts. Rendering keeps ADR-0014 styling — status
@@ -27,7 +27,7 @@ const COMMAND: &str = "list";
 
 /// Flags for `tk list`.
 ///
-/// Six `bool`s exceed pedantic's `struct_excessive_bools` cap, but clap's
+/// Seven `bool`s exceed pedantic's `struct_excessive_bools` cap, but clap's
 /// derive API needs one field per `--flag`; collapsing into an enum would
 /// fight clap's help generation. The `conflicts_with*` attrs make the
 /// invalid combinations unrepresentable at the parser layer; `--epic` is
@@ -47,6 +47,9 @@ pub struct Args {
     /// Show triage Tickets (captured, not yet accepted).
     #[arg(long, conflicts_with_all = ["ready", "blocked", "active"])]
     pub triage: bool,
+    /// Show parked Tickets (accepted, held out of automatic selection).
+    #[arg(long, conflicts_with_all = ["ready", "blocked", "active", "triage"])]
+    pub parked: bool,
     /// Restrict to locally-authored items.
     #[arg(long, conflicts_with = "remote")]
     pub local: bool,
@@ -143,6 +146,8 @@ fn select_view(args: &Args) -> ListView {
         ListView::Active
     } else if args.triage {
         ListView::Triage
+    } else if args.parked {
+        ListView::Parked
     } else {
         ListView::Default
     }
@@ -246,6 +251,7 @@ fn empty_message(options: ListOptions<'_>) -> &'static str {
         ListView::Blocked => "No blocked items.",
         ListView::Active => "No active items.",
         ListView::Triage => "No triage items.",
+        ListView::Parked => "No parked items.",
     }
 }
 
@@ -332,6 +338,7 @@ mod tests {
             blocked: false,
             active: false,
             triage: false,
+            parked: false,
             local: false,
             remote: false,
             epic: false,
@@ -350,6 +357,34 @@ mod tests {
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert_eq!(stdout, "No open or active items.\n");
+    }
+
+    #[test]
+    fn plain_list_marks_parked_tickets_with_a_badge() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "p1",
+                display: "tk-1",
+                title: "Held work",
+                selection_state: Some("parked"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run(h.deps(), default_args());
+        assert_eq!(code, Exit::Ok);
+        let stdout = String::from_utf8(h.stdout).unwrap();
+        assert!(stdout.contains("[parked]"), "stdout={stdout:?}");
+        assert!(stdout.contains("Held work"), "stdout={stdout:?}");
     }
 
     #[test]

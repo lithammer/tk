@@ -1,4 +1,5 @@
-//! `tk list` List Tree read (`default` / `ready` / `blocked` / `active`).
+//! `tk list` List Tree read (`default` / `ready` / `blocked` / `active` /
+//! `triage` / `parked`).
 //!
 //! The Repository Store owns filtering, ordering, and the readiness
 //! derivation (an Item is *blocked* when it has any unresolved Dependency
@@ -11,6 +12,7 @@ use rusqlite::params;
 use crate::domain::item_class::ItemClass;
 use crate::domain::origin::Origin;
 use crate::domain::priority::Priority;
+use crate::domain::selection_state::SelectionState;
 use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
 
@@ -29,6 +31,9 @@ pub struct ListRow {
     pub origin: Origin,
     /// Internal stable ID of the parent Epic, if any.
     pub container_id: Option<String>,
+    /// Local-only Selection State; `None` for Epics (ADR-0027). Drives the dim
+    /// `[parked]` list badge.
+    pub selection_state: Option<SelectionState>,
     pub created_seq: i64,
     pub has_unresolved_blocker: bool,
 }
@@ -47,6 +52,8 @@ pub enum ListView {
     Active,
     /// Open Tickets in triage (captured, not yet accepted).
     Triage,
+    /// Open Tickets parked out of automatic selection.
+    Parked,
 }
 
 impl ListView {
@@ -57,6 +64,7 @@ impl ListView {
             Self::Blocked => "blocked",
             Self::Active => "active",
             Self::Triage => "triage",
+            Self::Parked => "parked",
         }
     }
 }
@@ -166,11 +174,14 @@ matching as ( \
              when 'triage' then item_class = 'ticket' \
                                 and status = 'open' \
                                 and selection_state = 'triage' \
+             when 'parked' then item_class = 'ticket' \
+                                and status = 'open' \
+                                and selection_state = 'parked' \
            end as self_matches \
       from annotated \
 ) \
 select id, display_value, item_class, ticket_kind, priority, title, \
-       status, origin, container_id, created_seq, \
+       status, origin, container_id, selection_state, created_seq, \
        (has_unresolved_dependency or has_unresolved_external_blocker) as has_unresolved_blocker \
   from matching parent \
  where (?2 = 'any' or parent.origin = ?2) \
@@ -179,7 +190,7 @@ select id, display_value, item_class, ticket_kind, priority, title, \
    and ( \
        parent.self_matches \
        or ( \
-           ?1 in ('ready', 'blocked', 'active', 'triage') \
+           ?1 in ('ready', 'blocked', 'active', 'triage', 'parked') \
            and \
            parent.item_class = 'epic' \
            and exists ( \
@@ -211,7 +222,7 @@ pub fn list_rows(store: &Store, options: ListOptions<'_>) -> Result<Vec<ListRow>
 }
 
 pub(super) fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<ListRow> {
-    let has_unresolved_blocker: i64 = row.get(10)?;
+    let has_unresolved_blocker: i64 = row.get(11)?;
     Ok(ListRow {
         id: row.get(0)?,
         display_id: row.get(1)?,
@@ -222,7 +233,8 @@ pub(super) fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<ListRow>
         status: row.get(6)?,
         origin: row.get(7)?,
         container_id: row.get(8)?,
-        created_seq: row.get(9)?,
+        selection_state: row.get(9)?,
+        created_seq: row.get(10)?,
         has_unresolved_blocker: has_unresolved_blocker != 0,
     })
 }
@@ -607,6 +619,77 @@ mod tests {
         assert_eq!(display_ids(&rows), vec!["tk-2"]);
     }
 
+    fn seed_parked(store: &Store, id: &str, display: &str, created_seq: i64) {
+        insert_fixture_item(
+            &store.conn,
+            FixtureItem {
+                id,
+                display,
+                title: id,
+                selection_state: Some("parked"),
+                created_seq,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ready_excludes_parked_tickets() {
+        // Mirror of `ready_excludes_triage_tickets`: the ready arm keys on
+        // `selection_state = 'accepted'`, so parked (held) work is no more
+        // selectable than triage (tk-75 AC).
+        let store = open_seeded();
+        seed_ticket(&store, "accepted", "tk-1", "open", 1);
+        seed_parked(&store, "parked", "tk-2", 2);
+        let rows = list_rows(
+            &store,
+            ListOptions {
+                view: ListView::Ready,
+                ..ListOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(display_ids(&rows), vec!["tk-1"]);
+    }
+
+    #[test]
+    fn parked_view_shows_only_parked_tickets() {
+        let store = open_seeded();
+        seed_ticket(&store, "accepted", "tk-1", "open", 1);
+        seed_triage(&store, "triage", "tk-2", 2);
+        seed_parked(&store, "parked", "tk-3", 3);
+        let rows = list_rows(
+            &store,
+            ListOptions {
+                view: ListView::Parked,
+                ..ListOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(display_ids(&rows), vec!["tk-3"]);
+    }
+
+    #[test]
+    fn blocked_includes_parked_with_unresolved_blocker() {
+        // tk-75 AC: `tk list --blocked` surfaces parked Tickets that carry an
+        // unresolved blocker, alongside accepted ones (the blocked arm matches
+        // `selection_state <> 'triage'`).
+        let store = open_seeded();
+        seed_parked(&store, "parked", "tk-1", 1);
+        seed_epic(&store, "blocker", "tk-2", "open", 2);
+        insert_dependency(&store.conn, "blocker", "parked").unwrap();
+        let rows = list_rows(
+            &store,
+            ListOptions {
+                view: ListView::Blocked,
+                ..ListOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(display_ids(&rows), vec!["tk-1"]);
+    }
+
     #[test]
     fn blocked_excludes_triage_but_keeps_accepted() {
         let store = open_seeded();
@@ -656,6 +739,7 @@ mod tests {
             ListView::Blocked,
             ListView::Active,
             ListView::Triage,
+            ListView::Parked,
         ] {
             list_rows(
                 &store,

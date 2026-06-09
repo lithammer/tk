@@ -108,6 +108,14 @@ _Avoid_: Reopen, Pause
 The **`tk`** command intent for moving a **Ticket** from `triage` **Selection State** to `accepted`, assigning a **Priority** in the same step.
 _Avoid_: Approve, Triage, Promote
 
+**Park**:
+The **`tk`** command intent for moving a **Ticket** from `accepted` **Selection State** to `parked`, holding it out of automatic selection while preserving its **Priority**.
+_Avoid_: Hold, Snooze, Defer, Shelve
+
+**Unpark**:
+The **`tk`** command intent for moving a **Ticket** from `parked` **Selection State** back to `accepted`, returning it to automatic selection without changing its **Priority**.
+_Avoid_: Resume, Unhold, Restore
+
 **Prime**:
 The **`tk`** command intent for generating scope-aware agent briefing output.
 _Avoid_: Memory Dump
@@ -273,6 +281,9 @@ _Avoid_: ticket, tickets
 - A `triage` **Ticket** carries no **Priority**; `accepted` and `parked` **Tickets** carry a **Priority**.
 - **Accept** moves a `triage` **Ticket** to `accepted` and assigns its **Priority**; accepting an already `accepted` **Ticket** is a harmless no-op.
 - **Accept** preserves a **Ticket**'s **Dependencies** and **External Blockers**, so an accepted **Ticket** may be immediately blocked.
+- **Park** moves an `accepted` **Ticket** to `parked` and preserves its **Priority**; parking an already `parked` **Ticket** is a harmless no-op.
+- **Unpark** moves a `parked` **Ticket** to `accepted` and preserves its **Priority**; unparking an already `accepted` **Ticket** is a harmless no-op.
+- **Park** and **Unpark** reject a `triage` **Ticket**, which must be **Accepted** first.
 - **`tk next`** and **`tk list --ready`** select only `accepted` **Tickets**; `triage` and `parked` **Tickets** are excluded both as candidates and as **Effective Priority** contributors.
 - **Selection State** changes are not **Mutations** and are not synced to a **Backend**; **Backend Pull** preserves a local **Selection State**.
 - **Assignee** support is deferred from v1 and may be omitted entirely.
