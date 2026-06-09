@@ -1,8 +1,8 @@
 name: Release
 
 on:
-  release:
-    types: [created]
+  push:
+    tags: ["v*"]
   workflow_dispatch:
 
 # Per ADR-0011, release builds cross-compile every supported triple on a single
@@ -11,23 +11,28 @@ on:
 # ADR-0012 fixes the per-triple linkage. The five-triple matrix is the supported
 # install surface; ARM64 Windows is deferred (ADR-0011 Consequences).
 #
-# Releases are authored by a human as drafts with a hand-crafted changelog; this
-# workflow attaches smoke-passing binaries to whichever Release fired the
-# `release: created` event. Per ADR-0013 the install script and `tk self-update`
-# resolve assets via the flat name pattern tk-<triple>[.exe], where <triple> is
-# the Rust target triple the binary reports in `tk --version`.
+# Per ADR-0029 the annotated tag is the whole release spec: the tag name drives
+# the injected TK_VERSION (so `tk --version` reports the tag, no Cargo.toml
+# bump) and the tag message carries the plain-text changelog the `draft` job
+# renders to markdown. Pushing a `v*` tag fires this workflow, which builds and
+# smokes every triple and then assembles a *draft* Release — binaries plus the
+# install scripts plus the rendered notes — for a human to review and publish.
+# Publishing is what locks immutability; this workflow never publishes.
+# Per ADR-0013 the install script and `tk self-update` resolve assets via the
+# flat name pattern tk-<triple>[.exe], where <triple> is the Rust target triple
+# the binary reports in `tk --version`. workflow_dispatch exercises build and
+# smoke for manual verification but skips the draft assembly.
 
-# Serialize publishes for the same tag so a force-update or rapid retry does not
-# race two `gh release upload` jobs against the same Release object.
-# cancel-in-progress is false so the in-flight publish finishes before the
-# second starts.
+# Serialize runs for the same tag so a rapid retry does not race two `draft`
+# jobs against the same Release object. cancel-in-progress is false so an
+# in-flight draft assembly finishes before the next starts.
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-# Default to read-only GITHUB_TOKEN at the workflow level. The `publish` job
-# re-grants `contents: write` on its own scope so only the asset-upload step has
-# the elevated privilege.
+# Default to read-only GITHUB_TOKEN at the workflow level. The `draft` job
+# re-grants `contents: write` on its own scope so only the Release-assembly step
+# has the elevated privilege.
 permissions:
   contents: read
 
@@ -47,24 +52,38 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      # fetch-tags pulls the annotated tag *object* (not just the commit) so the
+      # changelog in its message is available to the notes step below.
       - uses: actions/checkout@v6
+        with:
+          fetch-tags: true
 
-      # Guard the release contract: `tk --version` embeds CARGO_PKG_VERSION, and
-      # `tk self-update`'s smoke check (ADR-0013) requires that string to carry
-      # the release tag. Fail early if the tag and the crate version disagree
-      # rather than shipping binaries whose --version mismatches the Release.
-      - name: Verify crate version matches release tag
-        if: github.event_name == 'release'
+      # Per ADR-0029 the tag is the release spec. On a tag push the version
+      # rides the tag name — injected as TK_VERSION so `tk --version` reports it
+      # without a Cargo.toml bump — and the tag *message* carries the plain-text
+      # changelog. workflow_dispatch has no tag: TK_VERSION stays unset and the
+      # build falls back to the Cargo.toml placeholder for a throwaway dry run.
+      - name: Resolve release version and notes from the tag
+        if: github.ref_type == 'tag'
         run: |
           set -euo pipefail
-          crate_version="$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "tk") | .version')"
-          tag="${{ github.event.release.tag_name }}"
-          if [ "v${crate_version}" != "${tag}" ]; then
-            echo "release tag ${tag} does not match crate version v${crate_version}" >&2
-            echo "bump crates/tk/Cargo.toml to ${tag#v} before tagging" >&2
-            exit 1
-          fi
+          tag="${GITHUB_REF_NAME}"
+          # Exported via GITHUB_ENV so build.rs sees TK_VERSION in every later
+          # cargo invocation in this job.
+          echo "TK_VERSION=${tag#v}" >> "${GITHUB_ENV}"
+          mkdir -p dist
+          # %(contents:body) is the tag message minus its subject line and any
+          # signature: exactly the NEW/IMPROVED/FIXED block tk-changelog emits.
+          # Promote the three known section labels (a closed vocabulary) to
+          # markdown headings; bullets are already valid markdown and pass
+          # through. ADR-0029 fixes the tag-text -> release-body contract.
+          git for-each-ref --format='%(contents:body)' "refs/tags/${tag}" \
+            | awk '
+                $0 == "NEW"      { print "#### New";      next }
+                $0 == "IMPROVED" { print "#### Improved"; next }
+                $0 == "FIXED"    { print "#### Fixed";    next }
+                                 { print }
+              ' > dist/release-notes.md
 
       - name: Install Rust release targets
         run: rustup target add
@@ -141,6 +160,10 @@ jobs:
           build aarch64-unknown-linux-musl aarch64-unknown-linux-musl
           build aarch64-apple-darwin       aarch64-apple-darwin
           build x86_64-pc-windows-gnu      x86_64-pc-windows-gnu
+          # Per ADR-0029/ADR-0013 the install scripts ship as release assets so
+          # the install command resolves them from the immutable latest release
+          # rather than a mutable `main` path. They ride the same artifact.
+          cp scripts/install.sh scripts/install.ps1 dist/
           ls -l dist
 
       - uses: actions/upload-artifact@v7
@@ -198,12 +221,12 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  publish:
+  draft:
     needs: smoke
-    # Only attach assets when triggered by a Release event. workflow_dispatch
-    # still exercises build and smoke for manual verification but does not touch
-    # an existing Release.
-    if: github.event_name == 'release'
+    # Assemble the draft Release only on a tag push. workflow_dispatch still
+    # exercises build and smoke for manual verification but never touches a
+    # Release. Per ADR-0029 a human publishes the draft; this job never does.
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -234,22 +257,47 @@ jobs:
               *)           asset="tk-${triple}" ;;
             esac
             mv "dist/${asset}" "release-flat/${asset}"
-            echo "publish: staged ${asset}"
+            echo "draft: staged ${asset}"
           done
-          # needs:smoke short-circuits publish when any required triple fails, so
-          # this guard is for the residual case where a future refactor lets
-          # publish run with no markers. Without it, `gh release upload` on an
-          # empty file list would succeed silently and the Release would stay
-          # asset-less.
+          # needs:smoke short-circuits this job when any required triple fails,
+          # so this guard is for the residual case where a future refactor lets
+          # it run with no markers. Without it the draft would carry no binaries.
           if [ -z "$(ls -A release-flat)" ]; then
-            echo "publish: no smoke-passing binaries; refusing to attach to release" >&2
+            echo "draft: no smoke-passing binaries; refusing to assemble release" >&2
             exit 1
           fi
-      - name: Attach release assets
+          # Install scripts ship on every release (ADR-0029/ADR-0013) regardless
+          # of the smoke matrix — they are not platform binaries.
+          mv dist/install.sh dist/install.ps1 release-flat/
+      - name: Assemble draft Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # This job has no actions/checkout (it only downloads artifacts), so
           # gh has no git remote to infer the target repo from. Name it
-          # explicitly or `gh release upload` aborts with "not a git repository".
+          # explicitly or `gh release` aborts with "not a git repository".
           GH_REPO: ${{ github.repository }}
-        run: gh release upload "${{ github.event.release.tag_name }}" release-flat/tk-* --clobber
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Idempotent re-run handling. `gh release create` fails if a Release
+          # for the tag already exists, so a retry must clear a prior *draft*
+          # first. A prior *published* Release is immutable (ADR-0029) — refuse
+          # to touch it rather than attempt a clobber that cannot succeed.
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            if [ "$(gh release view "${TAG}" --json isDraft -q .isDraft)" = "true" ]; then
+              echo "draft: clearing existing draft for ${TAG} before re-assembling"
+              gh release delete "${TAG}" --yes  # leaves the git tag in place
+            else
+              echo "draft: ${TAG} is already published and immutable; refusing to recreate" >&2
+              exit 1
+            fi
+          fi
+          # --target pins the Release to the exact tagged commit so the tag the
+          # human eventually publishes points where the binaries were built,
+          # independent of any commits that land on main in the meantime.
+          gh release create "${TAG}" \
+            --draft \
+            --target "${GITHUB_SHA}" \
+            --title "${TAG}" \
+            --notes-file dist/release-notes.md \
+            release-flat/*
