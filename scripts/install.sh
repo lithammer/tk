@@ -2,7 +2,7 @@
 # Install tk via curl|sh, per ADR 0013.
 #
 # Usage:
-#     curl -fsSL https://raw.githubusercontent.com/lithammer/tk/main/scripts/install.sh | sh
+#     curl -fsSL https://github.com/lithammer/tk/releases/latest/download/install.sh | sh
 #
 # Environment variables:
 #     TK_VERSION       Release tag to install (e.g. v0.0.1). Defaults to latest.
