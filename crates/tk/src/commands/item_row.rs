@@ -58,12 +58,14 @@ pub(crate) fn render_row<W: Write + ?Sized>(
 
     match row.item_class {
         ItemClass::Ticket => {
-            let priority = row
-                .priority
-                .expect("schema CHECK guarantees Tickets carry a Priority");
-            let p_style = palette::priority_style(priority);
-            write!(stdout, " {} ", styler.wrap(p_style, "\u{25cf}"))?;
-            write!(stdout, "{}", styler.wrap(p_style, priority.text()))?;
+            // A triage Ticket carries no Priority (ADR-0027); omit the `● P_`
+            // marker. The `[bug]` marker and title still render. tk-78 adds the
+            // dim `[triage]` badge.
+            if let Some(priority) = row.priority {
+                let p_style = palette::priority_style(priority);
+                write!(stdout, " {} ", styler.wrap(p_style, "\u{25cf}"))?;
+                write!(stdout, "{}", styler.wrap(p_style, priority.text()))?;
+            }
             if row.ticket_kind == Some(TicketKind::Bug) {
                 write!(stdout, " {}", styler.wrap(palette::KIND_BUG, "[bug]"))?;
             }

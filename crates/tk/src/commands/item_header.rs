@@ -80,15 +80,17 @@ pub(crate) fn render_header<W: Write + ?Sized>(
             )?;
         }
         ItemClass::Ticket => {
-            let priority = header
-                .priority
-                .expect("Tickets always carry a Priority (schema CHECK)");
-            write!(
-                stdout,
-                "{}",
-                styler.wrap(palette::priority_style(priority), priority.text())
-            )?;
-            stdout.write_all(b" \xc2\xb7 ")?; // " · "
+            // A triage Ticket carries no Priority (ADR-0027); drop the Priority
+            // token and its separator so the facet bar opens at the Kind. The
+            // `Selection:` line in `tk show` carries the triage cue.
+            if let Some(priority) = header.priority {
+                write!(
+                    stdout,
+                    "{}",
+                    styler.wrap(palette::priority_style(priority), priority.text())
+                )?;
+                stdout.write_all(b" \xc2\xb7 ")?; // " · "
+            }
             let kind = header
                 .ticket_kind
                 .expect("Tickets always carry a TicketKind (schema CHECK)");

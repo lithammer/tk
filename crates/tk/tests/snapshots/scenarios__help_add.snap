@@ -1,0 +1,17 @@
+---
+source: crates/tk/tests/scenarios.rs
+expression: "p.run(&format!(\"{command} --help\"))"
+---
+Create a local Ticket or Epic
+
+Usage: tk add [OPTIONS]
+
+Options:
+  -m, --message <MESSAGE>    Message paragraph; repeatable (-m title -m body ...). Conflicts with -F
+  -F, --file <PATH>          Read the message from a file, or '-' for stdin
+      --bug                  Create a bug Ticket (conflicts with --epic)
+      --epic                 Create an Epic (conflicts with --bug, --priority, --parent)
+  -P, --parent <EPIC>        Place the new Ticket under an Epic by Display ID or Alias
+  -p, --priority <PRIORITY>  Set Priority (P0..P4). Tickets only
+      --triage               Capture the Ticket in triage with no Priority, pending a decision (conflicts with --priority and --epic)
+  -h, --help                 Print help

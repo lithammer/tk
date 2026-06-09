@@ -16,6 +16,17 @@ use thiserror::Error;
 /// big-endian ASCII (`0x54 0x4B 0x44 0x42`).
 pub const APPLICATION_ID: i32 = 0x544B_4442;
 
+/// Whether a migration needs foreign-key enforcement disabled while it runs
+/// (ADR-0028). A SQLite table rebuild drops the table, whose implicit DELETE
+/// would trip the on-delete-restrict child foreign keys; the rebuild must run
+/// with `foreign_keys = off`, which is a no-op inside a transaction and so is
+/// toggled by the runner around `BEGIN`. Every non-rebuild migration is `On`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForeignKeys {
+    On,
+    Off,
+}
+
 /// One schema migration in the ordered Repository Store migration list.
 pub struct Migration {
     /// Monotonic schema version recorded in `schema_migrations` and mirrored
@@ -23,6 +34,9 @@ pub struct Migration {
     pub version: u32,
     /// SQL batch executed inside the migration transaction.
     pub sql: &'static str,
+    /// Foreign-key enforcement mode for this migration's transaction
+    /// (ADR-0028). `Off` only for table rebuilds.
+    pub foreign_keys: ForeignKeys,
 }
 
 // `include_str!` resolves paths relative to this source file; the SQL lives in
@@ -34,11 +48,13 @@ const MIGRATION_1_SQL: &str = include_str!("migrations/001_repository_store.sql"
 const MIGRATION_2_SQL: &str = include_str!("migrations/002_items_no_escape_from_done.sql");
 const MIGRATION_3_SQL: &str = include_str!("migrations/003_closing_reason.sql");
 const MIGRATION_4_SQL: &str = include_str!("migrations/004_selection_state.sql");
+const MIGRATION_5_SQL: &str = include_str!("migrations/005_relax_priority_for_triage.sql");
 
 /// V1 Repository Store schema skeleton.
 pub const MIGRATION_1: Migration = Migration {
     version: 1,
     sql: MIGRATION_1_SQL,
+    foreign_keys: ForeignKeys::On,
 };
 
 /// Adds the `items_no_escape_from_done` trigger that enforces "Done is
@@ -46,6 +62,7 @@ pub const MIGRATION_1: Migration = Migration {
 pub const MIGRATION_2: Migration = Migration {
     version: 2,
     sql: MIGRATION_2_SQL,
+    foreign_keys: ForeignKeys::On,
 };
 
 /// Adds the nullable `closing_reason` Local Field (ADR-0023). The column
@@ -53,6 +70,7 @@ pub const MIGRATION_2: Migration = Migration {
 pub const MIGRATION_3: Migration = Migration {
     version: 3,
     sql: MIGRATION_3_SQL,
+    foreign_keys: ForeignKeys::On,
 };
 
 /// Adds the nullable `selection_state` Local Field (ADR-0027): a Ticket-only
@@ -63,16 +81,35 @@ pub const MIGRATION_3: Migration = Migration {
 pub const MIGRATION_4: Migration = Migration {
     version: 4,
     sql: MIGRATION_4_SQL,
+    foreign_keys: ForeignKeys::On,
+};
+
+/// Rebuilds `items` to admit triage Tickets with no Priority (ADR-0028),
+/// folding the priority and selection_state CHECKs into one combined
+/// Priority × Selection State invariant and promoting tk-73's
+/// writer-guaranteed `ticket ⟹ non-null selection_state` to a schema
+/// guarantee. Runs `ForeignKeys::Off`: the table rebuild's DROP would
+/// otherwise trip the on-delete-restrict child foreign keys.
+pub const MIGRATION_5: Migration = Migration {
+    version: 5,
+    sql: MIGRATION_5_SQL,
+    foreign_keys: ForeignKeys::Off,
 };
 
 /// Ordered migration list applied by [`apply_all`].
-pub const ALL_MIGRATIONS: &[Migration] = &[MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4];
+pub const ALL_MIGRATIONS: &[Migration] = &[
+    MIGRATION_1,
+    MIGRATION_2,
+    MIGRATION_3,
+    MIGRATION_4,
+    MIGRATION_5,
+];
 
 /// Highest schema version this binary can apply. Named so future migrations
 /// surface the threshold to `grep` instead of hiding it behind `.last()`.
-/// Adding `MIGRATION_5` is a two-line patch: append to `ALL_MIGRATIONS`, bump
+/// Adding `MIGRATION_6` is a two-line patch: append to `ALL_MIGRATIONS`, bump
 /// this constant, with a debug_assert below catching the drift.
-pub const MAX_KNOWN_VERSION: u32 = MIGRATION_4.version;
+pub const MAX_KNOWN_VERSION: u32 = MIGRATION_5.version;
 
 /// Errors returned while applying migrations.
 ///
@@ -84,6 +121,11 @@ pub enum ApplyError {
     /// Store records a higher schema version than this binary knows.
     #[error("store was created by a newer tk version")]
     StoreFromFutureVersion,
+    /// A foreign-keys-off migration (a table rebuild, ADR-0028) left a dangling
+    /// reference; `pragma foreign_key_check` named this child table. The
+    /// migration transaction rolls back so the rebuild is all-or-nothing.
+    #[error("migration left a dangling foreign key in table `{0}`")]
+    ForeignKeyCheck(String),
     /// Underlying SQLite or driver error from the migration transaction.
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
@@ -119,6 +161,28 @@ pub fn apply_all(conn: &mut Connection, now_iso: &str) -> Result<(), ApplyError>
 }
 
 fn apply_one(conn: &mut Connection, mig: &Migration, now_iso: &str) -> Result<(), ApplyError> {
+    let fk_off = mig.foreign_keys == ForeignKeys::Off;
+    if fk_off {
+        // foreign_keys is a no-op inside a transaction, so a rebuild's FK-off
+        // window must be opened here, before BEGIN (ADR-0028).
+        conn.execute_batch("pragma foreign_keys = off")?;
+    }
+    let result = apply_one_txn(conn, mig, now_iso, fk_off);
+    if fk_off {
+        // Restore enforcement on *every* path — a failed rebuild must never
+        // leave the connection with foreign keys disabled for the rest of the
+        // session. Best-effort: the migration result is what the caller sees.
+        let _ = conn.execute_batch("pragma foreign_keys = on");
+    }
+    result
+}
+
+fn apply_one_txn(
+    conn: &mut Connection,
+    mig: &Migration,
+    now_iso: &str,
+    fk_off: bool,
+) -> Result<(), ApplyError> {
     // BEGIN IMMEDIATE takes the write lock at transaction start, so a second
     // migrator (auto-migrate-on-open, tk-110) waits on `busy_timeout` rather
     // than racing. Re-read the version *inside* the lock: the recorded version
@@ -130,6 +194,15 @@ fn apply_one(conn: &mut Connection, mig: &Migration, now_iso: &str) -> Result<()
         return Ok(());
     }
     tx.execute_batch(mig.sql)?;
+
+    if fk_off {
+        // Validate the rebuild's foreign keys *inside* the transaction so a
+        // dangling reference rolls back atomically with the migration rather
+        // than committing a store whose child rows dangle (ADR-0028).
+        if let Some(table) = first_foreign_key_violation(&tx)? {
+            return Err(ApplyError::ForeignKeyCheck(table));
+        }
+    }
 
     // application_id and user_version pragmas don't accept `?` parameters.
     // Inline the values: APPLICATION_ID is a const i32, mig.version is u32.
@@ -146,6 +219,19 @@ fn apply_one(conn: &mut Connection, mig: &Migration, now_iso: &str) -> Result<()
 
     tx.commit()?;
     Ok(())
+}
+
+/// Return the child table named by the first `pragma foreign_key_check` row,
+/// or `None` when every foreign key resolves. Used to gate a foreign-keys-off
+/// rebuild's commit (ADR-0028).
+fn first_foreign_key_violation(conn: &Connection) -> Result<Option<String>, rusqlite::Error> {
+    let mut stmt = conn.prepare("pragma foreign_key_check")?;
+    let mut rows = stmt.query([])?;
+    match rows.next()? {
+        // Column 0 of `foreign_key_check` is the table with the dangling row.
+        Some(row) => Ok(Some(row.get::<_, String>(0)?)),
+        None => Ok(None),
+    }
 }
 
 /// Return the highest applied schema migration version as `i64`, or `0` when
@@ -214,7 +300,7 @@ mod tests {
         let mut conn = open_memory();
         apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
 
-        assert_eq!(current_version(&conn).unwrap(), 4);
+        assert_eq!(current_version(&conn).unwrap(), 5);
 
         let app_id: i64 = conn
             .query_row("pragma application_id", [], |r| r.get(0))
@@ -224,7 +310,7 @@ mod tests {
         let user_version: i64 = conn
             .query_row("pragma user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(user_version, 4);
+        assert_eq!(user_version, 5);
     }
 
     #[test]
@@ -236,7 +322,7 @@ mod tests {
         let count: i64 = conn
             .query_row("select count(*) from schema_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(count, 4);
+        assert_eq!(count, 5);
     }
 
     #[test]
@@ -503,19 +589,12 @@ mod tests {
     }
 
     #[test]
-    fn selection_state_null_on_a_ticket_is_writer_guaranteed_not_check_enforced() {
-        // The v4 column is added via ALTER ADD COLUMN, whose CHECK is validated
-        // against existing rows at ALTER time. A `ticket ⟹ selection_state is
-        // not null` CHECK would be definite-FALSE for the transient NULL that
-        // existing rows hold before the backfill, aborting the migration — so
-        // the cross-column CHECK can only reject an *invalid* value or a value
-        // on an *Epic*, not a NULL on a Ticket (SQLite passes a NULL CHECK
-        // result). Tickets stay total over Selection State via the writers plus
-        // the backfill; tk-74's table rebuild bakes in the strict
-        // `ticket ⟹ non-null` invariant (ADR-0027). Pinning the gap here keeps
-        // it from reading as a missing constraint, and turns into a tripwire:
-        // when tk-74 closes it, this UPDATE starts failing and the test is
-        // rewritten to assert rejection.
+    fn selection_state_null_on_a_ticket_is_rejected_after_rebuild() {
+        // tk-73's tripwire, flipped: the v4 ADD COLUMN CHECK could not reject a
+        // NULL `selection_state` on a Ticket (SQLite passes a NULL CHECK
+        // result), so Ticket-totality rode on the writers. The v5 table rebuild
+        // (ADR-0028) folds in `selection_state is not null` for the Ticket
+        // branch, promoting that to a hard schema guarantee.
         use crate::store::testing::{FixtureItem, insert_fixture_item};
 
         let mut conn = open_memory();
@@ -532,11 +611,16 @@ mod tests {
         )
         .unwrap();
 
-        conn.execute(
-            "update items set selection_state = null where id = 't1'",
-            [],
-        )
-        .expect("the v4 ADD COLUMN CHECK cannot reject NULL on a Ticket; tk-74's rebuild does");
+        let err = conn
+            .execute(
+                "update items set selection_state = null where id = 't1'",
+                [],
+            )
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("CHECK"),
+            "a NULL Selection State on a Ticket must violate the rebuilt CHECK: {err}"
+        );
     }
 
     #[test]
@@ -571,6 +655,179 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_admits_a_triage_ticket_with_null_priority() {
+        // The point of the v5 rebuild (ADR-0028): a triage Ticket carries no
+        // Priority, which the migration-001 CHECK forbade.
+        use crate::store::testing::{FixtureItem, insert_fixture_item};
+
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Captured",
+                priority: None,
+                selection_state: Some("triage"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .expect("a triage Ticket with NULL Priority is valid after the rebuild");
+
+        let (priority, selection): (Option<String>, String) = conn
+            .query_row(
+                "select priority, selection_state from items where id = 't1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(priority.is_none());
+        assert_eq!(selection, "triage");
+    }
+
+    #[test]
+    fn rebuild_rejects_a_parked_ticket_without_priority() {
+        // The other half of the combined invariant: accepted/parked require a
+        // Priority. (Parked is reachable only via tk-75, but the schema rule
+        // baked in here is total.)
+        use crate::store::testing::{FixtureItem, insert_fixture_item};
+
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Parked",
+                selection_state: Some("parked"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+
+        let err = conn
+            .execute("update items set priority = null where id = 't1'", [])
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("CHECK"),
+            "a parked Ticket without a Priority must violate the CHECK: {err}"
+        );
+    }
+
+    #[test]
+    fn rebuild_preserves_existing_priority_and_selection_state() {
+        // Heal a v4 store with real rows through the v5 rebuild and confirm the
+        // copy is lossless for the columns the rebuild reshapes.
+        use crate::store::testing::{FixtureItem, insert_fixture_item};
+
+        let mut conn = open_memory();
+        apply_through(&mut conn, 4, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "e1",
+                display: "tk-1",
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                title: "Epic",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-2",
+                priority: Some("P1"),
+                title: "Child",
+                container_id: Some("e1"),
+                container_class: Some("epic"),
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+
+        apply_all(&mut conn, "2026-05-09T00:00:01.000Z").unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 5);
+
+        let (priority, selection, container): (Option<String>, String, Option<String>) = conn
+            .query_row(
+                "select priority, selection_state, container_id from items where id = 't1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(priority.as_deref(), Some("P1"));
+        assert_eq!(selection, "accepted");
+        assert_eq!(container.as_deref(), Some("e1"));
+
+        let epic_selection: Option<String> = conn
+            .query_row(
+                "select selection_state from items where id = 'e1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            epic_selection.is_none(),
+            "Epic stays outside Selection State"
+        );
+    }
+
+    #[test]
+    fn fk_off_rebuild_restores_foreign_keys_after_a_failed_check() {
+        // ADR-0028's load-bearing contract: a foreign-keys-off migration whose
+        // rebuild leaves a dangling reference must roll back AND re-enable
+        // foreign keys, or the connection would run the rest of the session
+        // with enforcement silently off. This drives a hand-built FK-off
+        // migration whose copy violates a foreign key.
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+
+        let bad = Migration {
+            version: 99,
+            // With foreign keys off, the dangling child row inserts cleanly; the
+            // runner's `foreign_key_check` inside the transaction then catches it.
+            sql: "create table fk_probe(id text, parent_id text references items(id)); \
+                  insert into fk_probe(id, parent_id) values ('c', 'nonexistent');",
+            foreign_keys: ForeignKeys::Off,
+        };
+        let result = apply_one(&mut conn, &bad, "2026-05-09T00:00:02.000Z");
+        assert!(
+            matches!(result, Err(ApplyError::ForeignKeyCheck(_))),
+            "a dangling reference must surface as ForeignKeyCheck: {result:?}"
+        );
+
+        let fk_on: i64 = conn
+            .query_row("pragma foreign_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            fk_on, 1,
+            "foreign keys must be re-enabled after a failed rebuild"
+        );
+
+        // The failed migration rolled back: no probe table, store still at v5.
+        let probe: Option<i64> = conn
+            .query_row(
+                "select 1 from sqlite_master where type='table' and name='fk_probe'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert!(probe.is_none(), "the failed rebuild must leave no trace");
+        assert_eq!(current_version(&conn).unwrap(), 5);
+    }
+
+    #[test]
     fn apply_one_re_reads_version_and_no_ops_when_already_applied() {
         // The TOCTOU close (tk-110): two tk processes can both read v2, then
         // race to apply migration 3. The loser must re-read the version under
@@ -579,7 +836,7 @@ mod tests {
         // already-current store reproduces the loser's stale-snapshot view.
         let mut conn = open_memory();
         apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 4);
+        assert_eq!(current_version(&conn).unwrap(), 5);
 
         apply_one(&mut conn, &MIGRATION_3, "2026-05-09T00:00:01.000Z")
             .expect("re-applying an already-applied migration must be a clean no-op");

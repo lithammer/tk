@@ -45,6 +45,8 @@ pub enum ListView {
     Blocked,
     /// Items with status = active.
     Active,
+    /// Open Tickets in triage (captured, not yet accepted).
+    Triage,
 }
 
 impl ListView {
@@ -54,6 +56,7 @@ impl ListView {
             Self::Ready => "ready",
             Self::Blocked => "blocked",
             Self::Active => "active",
+            Self::Triage => "triage",
         }
     }
 }
@@ -127,7 +130,7 @@ const LIST_ROWS_SQL: &str = "\
 with annotated as ( \
     select i.id, i.display_value, i.item_class, i.ticket_kind, \
            i.priority, i.title, i.status, i.origin, i.container_id, \
-           i.created_seq, \
+           i.selection_state, i.created_seq, \
            exists ( \
                select 1 \
                  from dependencies d \
@@ -149,15 +152,20 @@ matching as ( \
              when 'default' then status in ('open', 'active') \
              when 'ready' then item_class = 'ticket' \
                                and status = 'open' \
+                               and selection_state = 'accepted' \
                                and not has_unresolved_dependency \
                                and not has_unresolved_external_blocker \
              when 'blocked' then item_class = 'ticket' \
                                  and status in ('open', 'active') \
+                                 and selection_state <> 'triage' \
                                  and ( \
                                      has_unresolved_dependency \
                                      or has_unresolved_external_blocker \
                                  ) \
              when 'active' then status = 'active' \
+             when 'triage' then item_class = 'ticket' \
+                                and status = 'open' \
+                                and selection_state = 'triage' \
            end as self_matches \
       from annotated \
 ) \
@@ -171,7 +179,7 @@ select id, display_value, item_class, ticket_kind, priority, title, \
    and ( \
        parent.self_matches \
        or ( \
-           ?1 in ('ready', 'blocked', 'active') \
+           ?1 in ('ready', 'blocked', 'active', 'triage') \
            and \
            parent.item_class = 'epic' \
            and exists ( \
@@ -551,6 +559,75 @@ mod tests {
         assert_eq!(display_ids(&rows), vec!["tk-1", "tk-2"]);
     }
 
+    fn seed_triage(store: &Store, id: &str, display: &str, created_seq: i64) {
+        insert_fixture_item(
+            &store.conn,
+            FixtureItem {
+                id,
+                display,
+                title: id,
+                priority: None,
+                selection_state: Some("triage"),
+                created_seq,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ready_excludes_triage_tickets() {
+        let store = open_seeded();
+        seed_ticket(&store, "accepted", "tk-1", "open", 1);
+        seed_triage(&store, "triage", "tk-2", 2);
+        let rows = list_rows(
+            &store,
+            ListOptions {
+                view: ListView::Ready,
+                ..ListOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(display_ids(&rows), vec!["tk-1"]);
+    }
+
+    #[test]
+    fn triage_view_shows_only_triage_tickets() {
+        let store = open_seeded();
+        seed_ticket(&store, "accepted", "tk-1", "open", 1);
+        seed_triage(&store, "triage", "tk-2", 2);
+        let rows = list_rows(
+            &store,
+            ListOptions {
+                view: ListView::Triage,
+                ..ListOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(display_ids(&rows), vec!["tk-2"]);
+    }
+
+    #[test]
+    fn blocked_excludes_triage_but_keeps_accepted() {
+        let store = open_seeded();
+        // A blocked accepted Ticket and a blocked triage Ticket; only the
+        // accepted one belongs in the blocked view (ADR-0027).
+        seed_ticket(&store, "accepted", "tk-1", "open", 1);
+        seed_triage(&store, "triage", "tk-2", 2);
+        seed_epic(&store, "blocker", "tk-3", "open", 3);
+        insert_dependency(&store.conn, "blocker", "accepted").unwrap();
+        insert_dependency(&store.conn, "blocker", "triage").unwrap();
+        let rows = list_rows(
+            &store,
+            ListOptions {
+                view: ListView::Blocked,
+                ..ListOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(display_ids(&rows), vec!["tk-1"]);
+    }
+
     #[test]
     fn active_view_surfaces_only_active_status_rows() {
         let store = open_seeded();
@@ -578,6 +655,7 @@ mod tests {
             ListView::Ready,
             ListView::Blocked,
             ListView::Active,
+            ListView::Triage,
         ] {
             list_rows(
                 &store,

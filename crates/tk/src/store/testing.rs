@@ -98,6 +98,11 @@ pub struct FixtureItem<'a> {
     pub backend_key: Option<&'a str>,
     pub container_id: Option<&'a str>,
     pub container_class: Option<&'a str>,
+    /// Selection State override for Ticket fixtures (ADR-0027). `None` derives
+    /// the default `accepted`; set `Some("triage")` (with `priority: None`) or
+    /// `Some("parked")` to fixture those states. Ignored for Epics, which
+    /// always store `NULL`.
+    pub selection_state: Option<&'a str>,
     pub created_seq: i64,
     pub created_at: &'a str,
     pub updated_at: &'a str,
@@ -122,6 +127,7 @@ impl Default for FixtureItem<'_> {
             backend_key: None,
             container_id: None,
             container_class: None,
+            selection_state: None,
             created_seq: 0,
             created_at: "2026-05-09T00:00:00.000Z",
             updated_at: "2026-05-09T00:00:00.000Z",
@@ -130,16 +136,23 @@ impl Default for FixtureItem<'_> {
 }
 
 /// Insert one current-state item plus its `display`-source resolver row.
+// A by-value `FixtureItem` is the ergonomic call shape — every caller passes a
+// fresh inline literal with `..FixtureItem::default()`. The struct crossed the
+// pedantic 256-byte threshold when `selection_state` was added (tk-74); a
+// by-reference signature would add `&` to ~30 fixture call sites for no real
+// gain in a test-only builder.
+#[allow(clippy::large_types_passed_by_value)]
 pub fn insert_fixture_item(conn: &Connection, item: FixtureItem<'_>) -> rusqlite::Result<()> {
     let container_class = item
         .container_id
         .map(|_| item.container_class.unwrap_or("epic"));
-    // Selection State (ADR-0027) is Ticket-only and defaults to accepted;
-    // Epics store NULL. Derived from item_class rather than carried on
-    // FixtureItem so every existing call site stays correct unchanged — the
-    // explicit triage/parked fixture field lands with those workflows in
-    // tk-74 / tk-75.
-    let selection_state = (item.item_class == "ticket").then_some("accepted");
+    // Selection State (ADR-0027) is Ticket-only: a Ticket takes the explicit
+    // `selection_state` override or defaults to `accepted`; an Epic always
+    // stores NULL. Deriving from item_class keeps every Epic call site correct
+    // without an override, while triage/parked Ticket fixtures opt in via the
+    // field (paired with `priority: None` for triage, per the combined CHECK).
+    let selection_state =
+        (item.item_class == "ticket").then(|| item.selection_state.unwrap_or("accepted"));
     let tx = conn.unchecked_transaction()?;
     tx.execute(
         "insert into items(\

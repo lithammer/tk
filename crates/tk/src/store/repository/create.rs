@@ -20,11 +20,22 @@ use crate::store::sequences;
 
 use super::Store;
 
+/// The Selection State a `tk add` can create, with its Priority where one
+/// applies (ADR-0027). The two creatable combinations — triage carries no
+/// Priority, accepted carries one — are modelled as a sum type so the illegal
+/// `(triage, Priority)` pair is unconstructable; the schema CHECK is the
+/// backstop. `parked` is not creatable via `tk add` and so has no variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewTicketSelection {
+    Triage,
+    Accepted(Priority),
+}
+
 /// Input shape for creating a local Ticket.
 #[derive(Debug, Clone)]
 pub struct CreateLocalTicketInput<'a> {
     pub kind: TicketKind,
-    pub priority: Priority,
+    pub selection: NewTicketSelection,
     /// Internal stable `items.id` of the parent Epic, if any.
     pub parent_id: Option<&'a str>,
     pub title: &'a str,
@@ -44,7 +55,9 @@ pub struct CreatedTicket {
     pub id: String,
     pub display_id: String,
     pub kind: TicketKind,
-    pub priority: Priority,
+    /// `None` for a triage Ticket, which carries no Priority (ADR-0027).
+    pub priority: Option<Priority>,
+    pub selection_state: SelectionState,
     pub status: ItemStatus,
     pub origin: Origin,
     pub title: String,
@@ -97,6 +110,13 @@ where
     let display_id = next_display_id(&tx)?;
     let created_seq = sequences::next(&tx, "item_created_seq")?;
 
+    // Triage carries no Priority; accepted carries one (ADR-0027). The sum
+    // type makes the pair consistent by construction; the combined schema
+    // CHECK (ADR-0028) is the backstop.
+    let (selection_state, priority) = match input.selection {
+        NewTicketSelection::Triage => (SelectionState::Triage, None),
+        NewTicketSelection::Accepted(priority) => (SelectionState::Accepted, Some(priority)),
+    };
     let container_class: Option<&str> = input.parent_id.map(|_| ItemClass::Epic.text());
     tx.execute(
         "insert into items(\
@@ -109,17 +129,14 @@ where
             display_id,
             ItemClass::Ticket.text(),
             input.kind.text(),
-            input.priority.text(),
+            priority.map(Priority::text),
             input.title,
             input.body,
             input.parent_id,
             container_class,
             Origin::Local.text(),
             ItemStatus::default().text(),
-            // Normal `tk add` creates accepted work (ADR-0027); `tk add
-            // --triage` lands in tk-74. Defaulting here mirrors how status
-            // takes `ItemStatus::default()`.
-            SelectionState::default().text(),
+            selection_state.text(),
             created_seq,
             now_iso,
         ],
@@ -131,7 +148,8 @@ where
         id,
         display_id,
         kind: input.kind,
-        priority: input.priority,
+        priority,
+        selection_state,
         status: ItemStatus::default(),
         origin: Origin::Local,
         title: input.title.to_owned(),
@@ -266,7 +284,7 @@ mod tests {
             &mut rng,
             CreateLocalTicketInput {
                 kind: TicketKind::Task,
-                priority: Priority::P1,
+                selection: NewTicketSelection::Accepted(Priority::P1),
                 parent_id: None,
                 title: "Ship it",
                 body: "Body text",
@@ -276,7 +294,8 @@ mod tests {
 
         assert_eq!(created.display_id, "tk-1");
         assert_eq!(created.kind, TicketKind::Task);
-        assert_eq!(created.priority, Priority::P1);
+        assert_eq!(created.priority, Some(Priority::P1));
+        assert_eq!(created.selection_state, SelectionState::Accepted);
         assert_eq!(created.status, ItemStatus::Open);
         assert_eq!(created.origin, Origin::Local);
         assert_eq!(created.title, "Ship it");
@@ -340,6 +359,42 @@ mod tests {
     }
 
     #[test]
+    fn create_local_triage_ticket_has_no_priority() {
+        let mut store = open_seeded();
+        let clock = FakeClock::new(1_778_284_800_000);
+        let mut rng = fixed_rng();
+
+        let created = create_local_ticket(
+            &mut store,
+            &clock,
+            &mut rng,
+            CreateLocalTicketInput {
+                kind: TicketKind::Bug,
+                selection: NewTicketSelection::Triage,
+                parent_id: None,
+                title: "Maybe a bug",
+                body: "",
+            },
+        )
+        .unwrap();
+
+        assert_eq!(created.priority, None);
+        assert_eq!(created.selection_state, SelectionState::Triage);
+        assert_eq!(created.kind, TicketKind::Bug);
+
+        let (priority, selection): (Option<String>, String) = store
+            .conn
+            .query_row(
+                "select priority, selection_state from items where id = ?1",
+                params![&created.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(priority.is_none());
+        assert_eq!(selection, "triage");
+    }
+
+    #[test]
     fn create_local_ticket_with_parent_writes_container_columns() {
         let mut store = open_seeded();
         let clock = FakeClock::new(1_778_284_800_000);
@@ -362,7 +417,7 @@ mod tests {
             &mut rng,
             CreateLocalTicketInput {
                 kind: TicketKind::Task,
-                priority: Priority::P2,
+                selection: NewTicketSelection::Accepted(Priority::P2),
                 parent_id: Some(&epic.id),
                 title: "Child",
                 body: "",
@@ -395,7 +450,7 @@ mod tests {
             &mut rng,
             CreateLocalTicketInput {
                 kind: TicketKind::Task,
-                priority: Priority::P2,
+                selection: NewTicketSelection::Accepted(Priority::P2),
                 parent_id: None,
                 title: "A",
                 body: "",
@@ -408,7 +463,7 @@ mod tests {
             &mut rng,
             CreateLocalTicketInput {
                 kind: TicketKind::Task,
-                priority: Priority::P2,
+                selection: NewTicketSelection::Accepted(Priority::P2),
                 parent_id: None,
                 title: "B",
                 body: "",
@@ -469,7 +524,7 @@ mod tests {
             &mut rng,
             CreateLocalTicketInput {
                 kind: TicketKind::Task,
-                priority: Priority::P2,
+                selection: NewTicketSelection::Accepted(Priority::P2),
                 parent_id: None,
                 title: "Local",
                 body: "",

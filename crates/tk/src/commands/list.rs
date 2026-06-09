@@ -44,6 +44,9 @@ pub struct Args {
     /// Show active Tickets and Epics.
     #[arg(long, conflicts_with_all = ["ready", "blocked"])]
     pub active: bool,
+    /// Show triage Tickets (captured, not yet accepted).
+    #[arg(long, conflicts_with_all = ["ready", "blocked", "active"])]
+    pub triage: bool,
     /// Restrict to locally-authored items.
     #[arg(long, conflicts_with = "remote")]
     pub local: bool,
@@ -138,6 +141,8 @@ fn select_view(args: &Args) -> ListView {
         ListView::Blocked
     } else if args.active {
         ListView::Active
+    } else if args.triage {
+        ListView::Triage
     } else {
         ListView::Default
     }
@@ -240,6 +245,7 @@ fn empty_message(options: ListOptions<'_>) -> &'static str {
         ListView::Ready => "No ready items.",
         ListView::Blocked => "No blocked items.",
         ListView::Active => "No active items.",
+        ListView::Triage => "No triage items.",
     }
 }
 
@@ -325,6 +331,7 @@ mod tests {
             ready: false,
             blocked: false,
             active: false,
+            triage: false,
             local: false,
             remote: false,
             epic: false,

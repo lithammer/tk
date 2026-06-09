@@ -146,6 +146,12 @@ pub fn run(deps: Deps<'_>, _args: Args) -> Exit {
                     db_path.display(),
                 );
             }
+            migrations::ApplyError::ForeignKeyCheck(table) => {
+                let _ = writeln!(
+                    stderr,
+                    "tk init: migration left a dangling foreign key in table '{table}'"
+                );
+            }
             migrations::ApplyError::Sqlite(sqlite_err) => {
                 let _ = writeln!(stderr, "tk init: migration failed: {sqlite_err}");
             }
