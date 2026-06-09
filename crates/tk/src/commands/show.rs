@@ -698,6 +698,102 @@ mod tests {
         assert!(!stdout.contains("CLOSING REASON"), "stdout={stdout:?}");
     }
 
+    /// A deliberately maximal `ItemDetail` — one Item carrying every section at
+    /// once — rendered through `render()` so a single inline snapshot pins each
+    /// section header, its sub-row glyph, and the section ordering. The
+    /// directional glyphs are the contract: PARENT `↑`, TICKETS `↓`, BLOCKED BY
+    /// `→`, BLOCKING `←` (the two blocker relationships read as opposite
+    /// directions, mirroring the `↑`/`↓` parent/child pair). EXTERNAL BLOCKERS is
+    /// Backend-Adapter-sourced and unreachable from the CLI, so this direct
+    /// `render()` call is the only path that covers it. Realism is not the point
+    /// — a real Ticket would not carry both a parent and children — coverage of
+    /// every layout branch is.
+    #[test]
+    fn render_pins_every_section_header_glyph_and_order() {
+        let summary = |display_id: &str, title: &str, class, status, priority| ItemSummary {
+            display_id: display_id.into(),
+            title: title.into(),
+            item_class: class,
+            status,
+            priority,
+        };
+        let detail = ItemDetail {
+            id: "t1".into(),
+            display_id: "tk-1".into(),
+            item_class: ItemClass::Ticket,
+            ticket_kind: Some(crate::domain::ticket_kind::TicketKind::Task),
+            priority: Some(crate::domain::priority::Priority::P1),
+            selection_state: Some(crate::domain::selection_state::SelectionState::Accepted),
+            title: "Wire the thing".into(),
+            body: "First line.\nSecond line.".into(),
+            closing_reason: Some("Shipped in PR #42".into()),
+            status: crate::domain::status::ItemStatus::Done,
+            created_at: "2026-05-09T00:00:00.000Z".into(),
+            updated_at: "2026-05-29T12:00:00.000Z".into(),
+            parent: Some(summary(
+                "tk-9",
+                "Parent epic",
+                ItemClass::Epic,
+                crate::domain::status::ItemStatus::Open,
+                None,
+            )),
+            children: vec![summary(
+                "tk-2",
+                "Child ticket",
+                ItemClass::Ticket,
+                crate::domain::status::ItemStatus::Open,
+                Some(crate::domain::priority::Priority::P2),
+            )],
+            blocked_by: vec![summary(
+                "tk-3",
+                "Prerequisite",
+                ItemClass::Ticket,
+                crate::domain::status::ItemStatus::Done,
+                Some(crate::domain::priority::Priority::P0),
+            )],
+            blocking: vec![summary(
+                "tk-4",
+                "Downstream work",
+                ItemClass::Ticket,
+                crate::domain::status::ItemStatus::Active,
+                Some(crate::domain::priority::Priority::P3),
+            )],
+            external_blockers: vec![ExternalBlockerSummary {
+                reason: "WAITING-ON-123: upstream fix".into(),
+            }],
+        };
+
+        let mut out = Vec::new();
+        render(&mut out, &detail, Styler::plain().for_stdout()).unwrap();
+        insta::assert_snapshot!(String::from_utf8(out).unwrap(), @"
+        ✓ tk-1 · Wire the thing
+          P1 · Task · Created: 2026-05-09 · Updated: 2026-05-29
+          Selection: accepted
+
+        DESCRIPTION
+        First line.
+        Second line.
+
+        CLOSING REASON
+        Shipped in PR #42
+
+        PARENT
+          ↑ ○ tk-9: (Epic) Parent epic
+
+        TICKETS
+          ↓ ○ tk-2: Child ticket ● P2
+
+        BLOCKED BY
+          → ✓ tk-3: Prerequisite ● P0
+
+        BLOCKING
+          ← ◐ tk-4: Downstream work ● P3
+
+        EXTERNAL BLOCKERS
+          • WAITING-ON-123: upstream fix
+        ");
+    }
+
     #[test]
     fn renders_description_body_when_present() {
         let store = TmpStore::new("repo");
