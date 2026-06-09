@@ -1,36 +1,28 @@
 ---
 name: tk-version-bump
 description: >-
-  Bump the tk crate version in Cargo.toml. Analyzes commits since the last
-  release tag, recommends a semver bump level, and asks the user to confirm
-  before editing and committing.
+  Recommend the next tk release version. Analyzes commits since the last
+  release tag, recommends a semver bump level, and asks the user to confirm the
+  version to tag.
 model: sonnet
 metadata:
-  short-description: Analyze commits and bump the tk crate version.
+  short-description: Analyze commits and recommend the next tk version.
 ---
 
 # tk Version Bump
 
 ## Overview
 
-Analyze commits since the last release tag, recommend a semantic version bump
-(major, minor, or patch), and execute the bump after user confirmation.
-
-The version lives in `crates/tk/Cargo.toml`. `build.rs` embeds it into the
-binary as `tk v<version> (<triple>)`, and the Release workflow guards that
-`v<crate-version>` equals the release tag (`.github/workflows/release.yml`).
-This bump is therefore the source of truth for the released version.
-
-This skill bumps the version and commits — it does **not** create a git tag or
-push. The GitHub Release (see `tk-release`) creates the `v<version>` tag and
-triggers the binary build.
+Analyze commits since the last release tag and recommend a semantic version
+bump (major, minor, or patch). This skill is a **pure advisor**: it outputs the
+agreed version string for the caller to use. It does not edit files, commit, or
+tag — `tk-release` turns the version into the `vNEXT` tag.
 
 ## Prerequisites
 
-- `cargo` on PATH (reads crate metadata and syncs `Cargo.lock`).
-- `jq` on PATH (parses `cargo metadata`).
-- Working tree must be clean.
-- Must be on the `main` branch.
+- `git` on PATH.
+- Run from a tk checkout (no clean-tree or branch requirement — this skill only
+  reads history).
 
 ## Workflow
 
@@ -41,18 +33,10 @@ triggers the binary build.
 # which marks the end of the Zig implementation (the Rust-rewrite boundary).
 git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --merged HEAD --sort=-v:refname | head -n 1
 
-# Current crate version (same query the Release workflow uses for its guard)
-cargo metadata --no-deps --format-version 1 \
-  | jq -r '.packages[] | select(.name == "tk") | .version'
-
 # Commits since the last release tag (replace TAG with the result above). For
 # the inaugural release, use the Rust-rewrite boundary instead: zig-final..HEAD
 git log TAG..HEAD --oneline
 ```
-
-If a `v*` release tag exists, verify its version matches the crate version. If
-they differ, stop and tell the user to resolve the drift first — the Release
-workflow will reject a mismatched tag.
 
 If there are no commits in the range, stop and tell the user there is nothing
 to release.
@@ -68,11 +52,10 @@ to release.
 The highest-impact commit sets the floor. If any commit warrants a minor bump,
 recommend at least minor even if the rest are patches.
 
-**Pre-1.0 note:** tk is below 1.0 (it currently reports `v0.0.0`). While below
-1.0, minor bumps are the primary vehicle for new features and major is reserved
-for the 1.0 milestone. The first release establishes the inaugural version
-rather than bumping from `0.0.0` — agree the starting version with the user
-(`0.1.0` is the natural first cut).
+**Pre-1.0 note:** tk is below 1.0. While below 1.0, minor bumps are the primary
+vehicle for new features and major is reserved for the 1.0 milestone. Before the
+first `v*` tag exists, establish the inaugural version with the user (`0.1.0` is
+the natural first cut) rather than computing a bump from a previous tag.
 
 ### 3. Present Recommendation
 
@@ -83,43 +66,13 @@ Use `AskUserQuestion` to present:
 - All three options (major, minor, patch) with the calculated next version for
   each.
 
-### 4. Execute the Bump
+### 4. Report the Agreed Version
 
-After the user confirms a version:
-
-```bash
-# Guard: clean tree, on main
-git diff --quiet && git diff --cached --quiet
-test "$(git rev-parse --abbrev-ref HEAD)" = "main"
-```
-
-Then set the version (replace NEXT with the calculated version):
-
-- Edit the `version = "..."` line under `[package]` in `crates/tk/Cargo.toml`
-  to `NEXT`.
-- Run `cargo build`. The workspace `Cargo.lock` pins tk's own version, so the
-  build rewrites the lock; `cargo build` also confirms the crate still compiles
-  at the new version.
-
-```bash
-# Commit Cargo.toml and the refreshed lock together. No tag — tk-release / the
-# GitHub Release creates the v-tag.
-git add crates/tk/Cargo.toml Cargo.lock
-git commit -m "Bump version to NEXT"
-```
-
-### 5. Report
-
-After committing, display:
-
-- The version change (e.g. 0.0.0 -> 0.1.0).
-- That no tag was created: the GitHub Release (`tk-release`) tags `vNEXT` on
-  `main`, and that tag-creation event triggers the cross-compile, smoke, and
-  binary-attach pipeline.
+Output the confirmed version string (e.g. `0.1.0`) for the caller. Do not edit
+`Cargo.toml`, commit, or tag — `tk-release` turns this version into the
+annotated `vNEXT` tag.
 
 ## Boundaries
 
-- Commit messages follow the repo convention: imperative mood, under 72
-  characters, no trailing period (see AGENTS.md / CLAUDE.md).
-- This skill does not push or create a release. For the full flow, use
-  `tk-release`.
+- This skill is read-only and produces a version recommendation. It does not
+  bump files, push, or create a release. For the full flow, use `tk-release`.

@@ -81,18 +81,36 @@ Rewrite each remaining commit as a user-facing note:
 
 ### 4. Categorize
 
-Group notes under these headings (omit empty sections):
+Group notes under these three section labels (omit empty sections):
 
-- **New** — new commands, flags, or behaviour
-- **Improved** — enhancements to existing behaviour
-- **Fixed** — bug fixes
+- **NEW** — new commands, flags, or behaviour
+- **IMPROVED** — enhancements to existing behaviour
+- **FIXED** — bug fixes
+
+Emit the labels as **plain text**, uppercase, each on its own line, followed by
+a blank line and `-` bullets. Do not write markdown headings (`#`/`##`)
+yourself — the release pipeline turns these labels into headings.
+
+```
+NEW
+
+- ...
+- ...
+
+IMPROVED
+
+- ...
+
+FIXED
+
+- ...
+```
 
 ### 5. Present Draft
 
 Show the draft release notes to the user via `AskUserQuestion`. The user may
-edit, reorder, add, or remove entries before confirming. These confirmed notes
-are the hand-crafted changelog the Release workflow expects
-(`.github/workflows/release.yml`).
+edit, reorder, add, or remove entries before confirming. The confirmed block
+becomes the body of the annotated release tag that `tk-release` creates.
 
 ## Standalone Usage
 
