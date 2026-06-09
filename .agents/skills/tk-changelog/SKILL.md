@@ -66,7 +66,10 @@ Rewrite each remaining commit as a user-facing note:
 - Use tk's domain vocabulary where it is the user-facing term (e.g. Scope,
   Display ID, Remote), not internal type names.
 - Consolidate related commits into a single note when they describe
-  incremental steps toward one visible change.
+  incremental steps toward one visible change. When a release adds a new
+  command and later commits add flags or options to that same command, they
+  are all one note about the new command — fold the flags in, do not list
+  them as separate entries.
 - Keep each note to one sentence.
 
 **Examples:**
@@ -79,6 +82,11 @@ Rewrite each remaining commit as a user-facing note:
 | Consolidate Scope resolution into a single scope::resolve helper | *(filtered out — internal refactor)* |
 | Sanitise terminal output per UTF-8 char, not per byte | *(filtered out unless user-visible — judge from the body)* |
 
+**Consolidation example.** A release that adds `tk grep` along with `Add tk
+grep regex content search`, `Add -F flag to tk grep`, and `Add -q flag to tk
+grep` is one NEW note — e.g. "New `tk grep` command for regex content search,
+with `-F` and `-q` flags" — not a NEW command plus two IMPROVED flag entries.
+
 ### 4. Categorize
 
 Group notes under these three section labels (omit empty sections):
@@ -86,6 +94,12 @@ Group notes under these three section labels (omit empty sections):
 - **NEW** — new commands, flags, or behaviour
 - **IMPROVED** — enhancements to existing behaviour
 - **FIXED** — bug fixes
+
+Judge NEW vs IMPROVED against the **last release**, not against earlier commits
+in this range. A command or flag that did not exist in the last release is NEW
+even if it was built up over several commits here; reserve IMPROVED for changes
+to behaviour that already shipped in a prior release. So flags added to a
+command that is itself new in this release belong to its NEW note, not IMPROVED.
 
 Emit the labels as **plain text**, uppercase, each on its own line, followed by
 a blank line and `-` bullets. Do not write markdown headings (`#`/`##`)
