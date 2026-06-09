@@ -141,6 +141,7 @@ with recursive \
        where i.item_class = 'ticket' \
          and i.status <> 'done' \
          and i.priority is not null \
+         and i.selection_state = 'accepted' \
        group by r.start_id \
   ) \
 select ann.display_value, ann.priority, eff.ep, \
@@ -151,6 +152,7 @@ select ann.display_value, ann.priority, eff.ep, \
             where r2.start_id = ann.id \
               and contributor.item_class = 'ticket' \
               and contributor.status <> 'done' \
+              and contributor.selection_state = 'accepted' \
               and contributor.priority = eff.ep \
               and r2.node_id <> ann.id \
             order by contributor.created_seq asc \
@@ -462,6 +464,79 @@ mod tests {
         assert_eq!(ticket.display_id, "tk-3");
     }
 
+    fn seed_parked(store: &Store, id: &str, display: &str, priority: &str, created_seq: i64) {
+        insert_fixture_item(
+            &store.conn,
+            FixtureItem {
+                id,
+                display,
+                title: id,
+                priority: Some(priority),
+                selection_state: Some("parked"),
+                created_seq,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn parked_ticket_is_never_selected_as_a_direct_candidate() {
+        // A parked P0 outranks an accepted P2 on raw Priority, but the final
+        // candidate filter (`ann.selection_state = 'accepted'`) excludes it, so
+        // the accepted P2 is selected. Guards the candidate-side filter, distinct
+        // from the `eff` contributor filter the sibling tests exercise.
+        let store = open_seeded();
+        seed_parked(&store, "held", "tk-1", "P0", 1);
+        seed(&store, "ready", "tk-2", "P2", 2);
+
+        let ticket = next_ready_ticket(&store, NextOptions::default())
+            .unwrap()
+            .expect("a ready ticket");
+        assert_eq!(ticket.display_id, "tk-2");
+    }
+
+    #[test]
+    fn parked_ticket_does_not_contribute_effective_priority() {
+        // accepted `blocker` (P3) blocks parked `held` (P0): the parked node
+        // carries a real Priority, so unlike a triage NULL it would inherit P0
+        // to `blocker` unless the `eff` CTE filters to accepted contributors.
+        // With the filter `blocker` stays at its own P3, so the ready P2 wins.
+        let store = open_seeded();
+        seed(&store, "blocker", "tk-1", "P3", 1);
+        seed_parked(&store, "held", "tk-2", "P0", 2);
+        insert_dependency(&store.conn, "blocker", "held").unwrap();
+        seed(&store, "ready", "tk-3", "P2", 3);
+
+        let ticket = next_ready_ticket(&store, NextOptions::default())
+            .unwrap()
+            .expect("a ready ticket");
+        assert_eq!(ticket.display_id, "tk-3");
+    }
+
+    #[test]
+    fn parked_ticket_is_not_named_as_the_rationale_contributor() {
+        // accepted `blocker` (P3) blocks both parked `held` (P0, earlier) and
+        // accepted `goal` (P0, later). The P0 Effective Priority must be
+        // attributed to the accepted `goal`, not the parked `held`, even though
+        // `held` shares the Priority and has the lower created_seq the
+        // contributor SELECT would otherwise prefer.
+        let store = open_seeded();
+        seed(&store, "blocker", "tk-1", "P3", 1);
+        seed_parked(&store, "held", "tk-2", "P0", 2);
+        seed(&store, "goal", "tk-3", "P0", 3);
+        insert_dependency(&store.conn, "blocker", "held").unwrap();
+        insert_dependency(&store.conn, "blocker", "goal").unwrap();
+
+        let ticket = next_ready_ticket(&store, NextOptions::default())
+            .unwrap()
+            .expect("a ready ticket");
+        assert_eq!(ticket.display_id, "tk-1");
+        let rationale = ticket.rationale.expect("inherited-priority rationale");
+        assert_eq!(rationale.effective_priority, "P0");
+        assert_eq!(rationale.blocked_display_id, "tk-3");
+    }
+
     #[test]
     fn effective_priority_passes_through_a_triage_ticket() {
         // accepted `blocker` (P3) -> triage `mid` -> accepted `tail` (P0). The
@@ -482,6 +557,31 @@ mod tests {
             .expect("a ready ticket");
         // `blocker` inherits P0 through the triage node, outranking the P1
         // `other-ready`.
+        assert_eq!(ticket.display_id, "tk-1");
+        let rationale = ticket.rationale.expect("inherited-priority rationale");
+        assert_eq!(rationale.effective_priority, "P0");
+        assert_eq!(rationale.blocked_display_id, "tk-3");
+    }
+
+    #[test]
+    fn effective_priority_passes_through_a_parked_ticket() {
+        // accepted `blocker` (P3) -> parked `mid` (P1) -> accepted `tail` (P0).
+        // `mid` contributes no Priority of its own (excluded as parked), yet the
+        // real dependency edges still conduct `tail`'s P0 back to `blocker`
+        // (grilled decision: exclude the contribution, never sever the edge).
+        let store = open_seeded();
+        seed(&store, "blocker", "tk-1", "P3", 1);
+        seed_parked(&store, "mid", "tk-2", "P1", 2);
+        seed(&store, "tail", "tk-3", "P0", 3);
+        insert_dependency(&store.conn, "blocker", "mid").unwrap();
+        insert_dependency(&store.conn, "mid", "tail").unwrap();
+        seed(&store, "other-ready", "tk-4", "P1", 4);
+
+        let ticket = next_ready_ticket(&store, NextOptions::default())
+            .unwrap()
+            .expect("a ready ticket");
+        // `blocker` inherits P0 through the parked node, outranking the P1
+        // `other-ready`; the parked `mid`'s own P1 never enters the min.
         assert_eq!(ticket.display_id, "tk-1");
         let rationale = ticket.rationale.expect("inherited-priority rationale");
         assert_eq!(rationale.effective_priority, "P0");

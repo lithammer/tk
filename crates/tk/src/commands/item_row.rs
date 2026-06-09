@@ -11,12 +11,24 @@
 use std::io::Write;
 
 use crate::domain::item_class::ItemClass;
+use crate::domain::selection_state::SelectionState;
 use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
 use crate::render::palette;
 use crate::render::sanitize;
 use crate::render::styler::SubStyler;
 use crate::store::repository::list::ListRow;
+
+/// The muted list badge for a non-default Selection State, or `None` for a row
+/// that carries none. Rendering owns the badge token (ADR-0027); the domain
+/// enum owns only the storage spelling. tk-75 renders `[parked]` only — the
+/// `[triage]` arm is tk-78's one-line follow-up.
+fn selection_badge(selection_state: Option<SelectionState>) -> Option<&'static str> {
+    match selection_state {
+        Some(SelectionState::Parked) => Some("[parked]"),
+        Some(SelectionState::Triage | SelectionState::Accepted) | None => None,
+    }
+}
 
 /// Render one row, prefixed by `tree_prefix` (empty for a flat layout, a
 /// tree glyph for a nested List Tree child).
@@ -59,8 +71,7 @@ pub(crate) fn render_row<W: Write + ?Sized>(
     match row.item_class {
         ItemClass::Ticket => {
             // A triage Ticket carries no Priority (ADR-0027); omit the `● P_`
-            // marker. The `[bug]` marker and title still render. tk-78 adds the
-            // dim `[triage]` badge.
+            // marker. The `[bug]` marker and title still render.
             if let Some(priority) = row.priority {
                 let p_style = palette::priority_style(priority);
                 write!(stdout, " {} ", styler.wrap(p_style, "\u{25cf}"))?;
@@ -68,6 +79,9 @@ pub(crate) fn render_row<W: Write + ?Sized>(
             }
             if row.ticket_kind == Some(TicketKind::Bug) {
                 write!(stdout, " {}", styler.wrap(palette::KIND_BUG, "[bug]"))?;
+            }
+            if let Some(badge) = selection_badge(row.selection_state) {
+                write!(stdout, " {}", styler.wrap(palette::SELECTION_BADGE, badge))?;
             }
             stdout.write_all(b" ")?;
             sanitize::write_sanitized_line(stdout, row.title.as_bytes())?;
