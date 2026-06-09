@@ -13,6 +13,7 @@ use crate::clock::Clock;
 use crate::domain::item_class::ItemClass;
 use crate::domain::origin::Origin;
 use crate::domain::priority::Priority;
+use crate::domain::selection_state::SelectionState;
 use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
 use crate::store::sequences;
@@ -100,9 +101,9 @@ where
     tx.execute(
         "insert into items(\
             id, display_value, item_class, ticket_kind, priority, title, body, \
-            container_id, container_class, origin, status, created_seq, \
+            container_id, container_class, origin, status, selection_state, created_seq, \
             created_at, updated_at\
-         ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
+         ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)",
         params![
             id,
             display_id,
@@ -115,6 +116,10 @@ where
             container_class,
             Origin::Local.text(),
             ItemStatus::default().text(),
+            // Normal `tk add` creates accepted work (ADR-0027); `tk add
+            // --triage` lands in tk-74. Defaulting here mirrors how status
+            // takes `ItemStatus::default()`.
+            SelectionState::default().text(),
             created_seq,
             now_iso,
         ],
@@ -321,6 +326,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!(alias_count, 1);
+
+        // Normal `tk add` creates accepted work (ADR-0027).
+        let selection: Option<String> = store
+            .conn
+            .query_row(
+                "select selection_state from items where id = ?1",
+                params![&created.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(selection.as_deref(), Some("accepted"));
     }
 
     #[test]
@@ -421,17 +437,24 @@ mod tests {
         .unwrap();
 
         assert_eq!(epic.display_id, "tk-1");
-        let (class, ticket_kind, priority): (String, Option<String>, Option<String>) = store
+        let (class, ticket_kind, priority, selection): (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = store
             .conn
             .query_row(
-                "select item_class, ticket_kind, priority from items where id = ?1",
+                "select item_class, ticket_kind, priority, selection_state from items where id = ?1",
                 params![&epic.id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .unwrap();
         assert_eq!(class, "epic");
         assert!(ticket_kind.is_none());
         assert!(priority.is_none());
+        // Epics stay outside Selection State (ADR-0027).
+        assert!(selection.is_none());
     }
 
     #[test]

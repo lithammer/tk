@@ -206,6 +206,30 @@ fn done_trims_the_closing_reason_before_storing_it() {
 }
 
 #[test]
+fn show_renders_selection_state_for_tickets_only() {
+    let p = Repo::new("project");
+    p.run("init");
+    p.run("add -m 'Capture me'"); // project-1
+    p.run("add --epic -m 'Big work'"); // project-2
+
+    // `tk show` surfaces a non-deterministic date, so assert on substrings: a
+    // normal `tk add` Ticket is accepted (ADR-0027), rendered on its own line
+    // directly under the facet bar.
+    let ticket = p.run("show project-1");
+    assert!(
+        ticket.contains("\n  Selection: accepted\n"),
+        "ticket={ticket}"
+    );
+
+    // Epics stay outside Selection State: no Selection line.
+    let epic = p.run("show project-2");
+    assert!(
+        !epic.contains("Selection:"),
+        "Epics omit Selection State: epic={epic}"
+    );
+}
+
+#[test]
 fn init_refuses_outside_git_repository() {
     let p = Repo::bare("scratch");
     let out = p.run("init");

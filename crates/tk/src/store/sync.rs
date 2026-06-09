@@ -25,6 +25,7 @@ use crate::domain::mutation_payload::{
 use crate::domain::mutation_state::MutationState;
 use crate::domain::mutation_type::MutationType;
 use crate::domain::mutation_view::MutationView;
+use crate::domain::selection_state::SelectionState;
 use crate::store::repository::create::generate_internal_id;
 use crate::store::sequences::{self, SequenceError};
 
@@ -119,13 +120,25 @@ pub fn merge_backend_snapshots(
         } else {
             None
         };
+        // Newly imported Backend Tickets are accepted; Epics stay outside
+        // Selection State (ADR-0027). This is its own decision — imported work
+        // is accepted — not an inheritance of the `tk add` default, so it names
+        // `Accepted` explicitly rather than `SelectionState::default()`.
+        // Selection State is a Local Field; Backend Pull seeds it rather than
+        // reading it back, and the import vs. local-preservation contract is
+        // finished in tk-77.
+        let selection_state_text = if snap.item_class == ItemClass::Ticket {
+            Some(SelectionState::Accepted.text())
+        } else {
+            None
+        };
 
         tx.execute(
             "insert into items(\
                 id, display_value, item_class, ticket_kind, priority, title, body, \
-                origin, backend_kind, backend_key, status, \
+                origin, backend_kind, backend_key, status, selection_state, \
                 created_seq, created_at, updated_at\
-             ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'backend', ?8, ?9, ?10, ?11, ?12, ?12)",
+             ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'backend', ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
             params![
                 id,
                 snap.display_id,
@@ -137,6 +150,7 @@ pub fn merge_backend_snapshots(
                 snap.backend_kind,
                 snap.backend_key,
                 snap.status.text(),
+                selection_state_text,
                 created_seq,
                 now,
             ],
@@ -680,19 +694,29 @@ mod tests {
         )
         .unwrap();
 
-        let (title, origin, kind, source): (String, String, String, String) = conn
+        let (title, origin, kind, source, selection): (
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+        ) = conn
             .query_row(
                 "select i.title, i.origin, i.backend_kind, \
-                        (select source from item_ids where value = i.display_value) \
+                        (select source from item_ids where value = i.display_value), \
+                        i.selection_state \
                    from items i where i.display_value = 'gh-1'",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .unwrap();
         assert_eq!(title, "First");
         assert_eq!(origin, "backend");
         assert_eq!(kind, "github");
         assert_eq!(source, "display");
+        // Imported Backend Tickets are seeded accepted (ADR-0027); tripwire on
+        // the seed literal so a wrong value cannot pass silently.
+        assert_eq!(selection.as_deref(), Some("accepted"));
     }
 
     #[test]

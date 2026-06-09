@@ -33,6 +33,7 @@ pub struct Migration {
 const MIGRATION_1_SQL: &str = include_str!("migrations/001_repository_store.sql");
 const MIGRATION_2_SQL: &str = include_str!("migrations/002_items_no_escape_from_done.sql");
 const MIGRATION_3_SQL: &str = include_str!("migrations/003_closing_reason.sql");
+const MIGRATION_4_SQL: &str = include_str!("migrations/004_selection_state.sql");
 
 /// V1 Repository Store schema skeleton.
 pub const MIGRATION_1: Migration = Migration {
@@ -54,14 +55,24 @@ pub const MIGRATION_3: Migration = Migration {
     sql: MIGRATION_3_SQL,
 };
 
+/// Adds the nullable `selection_state` Local Field (ADR-0027): a Ticket-only
+/// intake/selection policy. The column CHECK keeps it confined to Tickets
+/// (`NULL` for Epics) and pins the legal spellings; the backfill lands every
+/// existing Ticket on `accepted` so the field is total over Tickets from the
+/// moment it exists.
+pub const MIGRATION_4: Migration = Migration {
+    version: 4,
+    sql: MIGRATION_4_SQL,
+};
+
 /// Ordered migration list applied by [`apply_all`].
-pub const ALL_MIGRATIONS: &[Migration] = &[MIGRATION_1, MIGRATION_2, MIGRATION_3];
+pub const ALL_MIGRATIONS: &[Migration] = &[MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4];
 
 /// Highest schema version this binary can apply. Named so future migrations
 /// surface the threshold to `grep` instead of hiding it behind `.last()`.
-/// Adding `MIGRATION_4` is a two-line patch: append to `ALL_MIGRATIONS`, bump
+/// Adding `MIGRATION_5` is a two-line patch: append to `ALL_MIGRATIONS`, bump
 /// this constant, with a debug_assert below catching the drift.
-pub const MAX_KNOWN_VERSION: u32 = MIGRATION_3.version;
+pub const MAX_KNOWN_VERSION: u32 = MIGRATION_4.version;
 
 /// Errors returned while applying migrations.
 ///
@@ -203,7 +214,7 @@ mod tests {
         let mut conn = open_memory();
         apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
 
-        assert_eq!(current_version(&conn).unwrap(), 3);
+        assert_eq!(current_version(&conn).unwrap(), 4);
 
         let app_id: i64 = conn
             .query_row("pragma application_id", [], |r| r.get(0))
@@ -213,7 +224,7 @@ mod tests {
         let user_version: i64 = conn
             .query_row("pragma user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(user_version, 3);
+        assert_eq!(user_version, 4);
     }
 
     #[test]
@@ -225,7 +236,7 @@ mod tests {
         let count: i64 = conn
             .query_row("select count(*) from schema_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(count, 3);
+        assert_eq!(count, 4);
     }
 
     #[test]
@@ -354,6 +365,211 @@ mod tests {
         );
     }
 
+    /// Insert a Ticket (or Epic) directly at the v3 schema — before
+    /// `selection_state` exists — so the v4 backfill has a pre-existing row to
+    /// migrate. Mirrors the items + display-resolver lockstep the production
+    /// writer keeps, so the deferred composite FK holds at COMMIT.
+    fn insert_v3_item(conn: &Connection, id: &str, display: &str, class: &str, created_seq: i64) {
+        let (kind, priority): (Option<&str>, Option<&str>) = if class == "ticket" {
+            (Some("task"), Some("P2"))
+        } else {
+            (None, None)
+        };
+        let tx = conn.unchecked_transaction().unwrap();
+        tx.execute(
+            "insert into items(\
+                id, display_value, item_class, ticket_kind, priority, title, body, \
+                origin, status, created_seq, created_at, updated_at\
+             ) values (?1, ?2, ?3, ?4, ?5, 'T', '', 'local', 'open', ?6, \
+                       '2026-05-09T00:00:00.000Z', '2026-05-09T00:00:00.000Z')",
+            rusqlite::params![id, display, class, kind, priority, created_seq],
+        )
+        .unwrap();
+        tx.execute(
+            "insert into item_ids(value, source, item_id, created_at) \
+             values (?1, 'display', ?2, '2026-05-09T00:00:00.000Z')",
+            rusqlite::params![display, id],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+
+    #[test]
+    fn selection_state_backfills_existing_tickets_to_accepted() {
+        // An older tk binary leaves a store at v3 with bare Tickets. Upgrading
+        // to v4 must land every existing Ticket on `accepted` — leaving them
+        // NULL would violate the new Ticket-only CHECK on the next write.
+        let mut conn = open_memory();
+        apply_through(&mut conn, 3, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_v3_item(&conn, "t1", "tk-1", "ticket", 1);
+
+        apply_all(&mut conn, "2026-05-09T00:00:01.000Z").unwrap();
+
+        let (selection, updated_at): (Option<String>, String) = conn
+            .query_row(
+                "select selection_state, updated_at from items where id = 't1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(selection.as_deref(), Some("accepted"));
+        // The backfill is a schema migration, not a user edit: it must not bump
+        // updated_at, or every migrated Ticket would read as freshly modified.
+        assert_eq!(updated_at, "2026-05-09T00:00:00.000Z");
+    }
+
+    #[test]
+    fn selection_state_backfill_leaves_epics_null() {
+        let mut conn = open_memory();
+        apply_through(&mut conn, 3, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_v3_item(&conn, "e1", "tk-1", "epic", 1);
+
+        apply_all(&mut conn, "2026-05-09T00:00:01.000Z").unwrap();
+
+        let selection: Option<String> = conn
+            .query_row(
+                "select selection_state from items where id = 'e1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            selection.is_none(),
+            "Epics stay outside Selection State (ADR-0027): {selection:?}"
+        );
+    }
+
+    #[test]
+    fn selection_state_check_rejects_a_value_on_an_epic() {
+        use crate::store::testing::{FixtureItem, insert_fixture_item};
+
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "e1",
+                display: "tk-1",
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                title: "Epic",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+
+        let err = conn
+            .execute(
+                "update items set selection_state = 'accepted' where id = 'e1'",
+                [],
+            )
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("CHECK"),
+            "a Selection State on an Epic must violate the CHECK: {err}"
+        );
+    }
+
+    #[test]
+    fn selection_state_check_rejects_an_unknown_value() {
+        use crate::store::testing::{FixtureItem, insert_fixture_item};
+
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Ticket",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+
+        let err = conn
+            .execute(
+                "update items set selection_state = 'archived' where id = 't1'",
+                [],
+            )
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("CHECK"),
+            "an unknown Selection State must violate the CHECK: {err}"
+        );
+    }
+
+    #[test]
+    fn selection_state_null_on_a_ticket_is_writer_guaranteed_not_check_enforced() {
+        // The v4 column is added via ALTER ADD COLUMN, whose CHECK is validated
+        // against existing rows at ALTER time. A `ticket ⟹ selection_state is
+        // not null` CHECK would be definite-FALSE for the transient NULL that
+        // existing rows hold before the backfill, aborting the migration — so
+        // the cross-column CHECK can only reject an *invalid* value or a value
+        // on an *Epic*, not a NULL on a Ticket (SQLite passes a NULL CHECK
+        // result). Tickets stay total over Selection State via the writers plus
+        // the backfill; tk-74's table rebuild bakes in the strict
+        // `ticket ⟹ non-null` invariant (ADR-0027). Pinning the gap here keeps
+        // it from reading as a missing constraint, and turns into a tripwire:
+        // when tk-74 closes it, this UPDATE starts failing and the test is
+        // rewritten to assert rejection.
+        use crate::store::testing::{FixtureItem, insert_fixture_item};
+
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Ticket",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+
+        conn.execute(
+            "update items set selection_state = null where id = 't1'",
+            [],
+        )
+        .expect("the v4 ADD COLUMN CHECK cannot reject NULL on a Ticket; tk-74's rebuild does");
+    }
+
+    #[test]
+    fn accepted_ticket_with_null_priority_is_rejected() {
+        // AC traceability (tk-73): "accepted Tickets require Priority". In v1
+        // the standing Ticket-requires-priority CHECK already enforces this;
+        // the dedicated combined invariant lands with triage in tk-74. Pinning
+        // it here documents the invariant the acceptance criterion names.
+        use crate::store::testing::{FixtureItem, insert_fixture_item};
+
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Ticket",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+
+        let err = conn
+            .execute("update items set priority = null where id = 't1'", [])
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("CHECK"),
+            "an accepted Ticket without a Priority must violate the CHECK: {err}"
+        );
+    }
+
     #[test]
     fn apply_one_re_reads_version_and_no_ops_when_already_applied() {
         // The TOCTOU close (tk-110): two tk processes can both read v2, then
@@ -363,7 +579,7 @@ mod tests {
         // already-current store reproduces the loser's stale-snapshot view.
         let mut conn = open_memory();
         apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 3);
+        assert_eq!(current_version(&conn).unwrap(), 4);
 
         apply_one(&mut conn, &MIGRATION_3, "2026-05-09T00:00:01.000Z")
             .expect("re-applying an already-applied migration must be a clean no-op");

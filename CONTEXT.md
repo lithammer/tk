@@ -52,6 +52,10 @@ _Avoid_: Parent Domain Model
 The lifecycle state of a **Ticket** or **Epic**: `open`, `active`, or `done`.
 _Avoid_: Todo, In Progress, Closed, Blocked
 
+**Selection State**:
+A local-only, **Ticket**-only intake and selection policy: `triage`, `accepted`, or `parked`. `accepted` is the default and the only state **`tk next`** selects; `triage` is captured work awaiting a human decision; `parked` is accepted work intentionally held out of automatic selection. A **Local Field**, distinct from **Item Status** lifecycle and from **Priority** ranking; not synced to a **Backend** and never recorded as a **Mutation**.
+_Avoid_: Status, Triage Status, Queue State, Workflow State
+
 **Closing Reason**:
 An optional free-text explanation recorded when a **Ticket** or **Epic** is marked `done`, captured by `tk done -m`. A **Local Field** in v1, distinct from a **Comment**; it is stored current state in the **Repository Store** and is not synced to a **Backend**.
 _Avoid_: Closing Comment, Done Comment, Resolution Note
@@ -258,6 +262,13 @@ _Avoid_: ticket, tickets
 - **Labels** are descriptive facets and do not replace **Priority**, **Ticket Kind**, **Epic** membership, **Item Status**, **Dependencies**, or **External Blockers**.
 - **Labels** are deferred from v1.
 - A **Ticket** has exactly one **Item Status**.
+- A **Ticket** has exactly one **Selection State**.
+- An **Epic** has no **Selection State**.
+- **Selection State** is a **Local Field** in v1.
+- The default **Selection State** is `accepted`; newly imported **Backend Tickets** also default to `accepted`.
+- A `triage` **Ticket** carries no **Priority**; `accepted` and `parked` **Tickets** carry a **Priority**.
+- **`tk next`** and **`tk list --ready`** select only `accepted` **Tickets**; `triage` and `parked` **Tickets** are excluded both as candidates and as **Effective Priority** contributors.
+- **Selection State** changes are not **Mutations** and are not synced to a **Backend**; **Backend Pull** preserves a local **Selection State**.
 - **Assignee** support is deferred from v1 and may be omitted entirely.
 - If **Assignees** are introduced, a **Ticket** may have zero or more
   **Assignees**.
@@ -517,6 +528,7 @@ _Avoid_: ticket, tickets
 - "issue" and "task" were considered for the core work-item object — resolved: **Ticket** is the canonical backend-agnostic object.
 - "type" was considered for ticket category — resolved: **Ticket Kind** is the canonical term, and `task` is a kind rather than the work-item object.
 - Backend priority mapping was considered for v1 — resolved: **Priority** is a local-only **Local Field**.
+- Modelling captured-but-unaccepted and accepted-but-held work as a low **Priority** or a fourth **Item Status** was considered (tk-72) — resolved: **Selection State** is a separate local-only, **Ticket**-only field, because lifecycle, ranking, and selection policy each answer a different question; it is not synced and never recorded as a **Mutation** (ADR-0027).
 - Sorting **`tk next`** by own **Priority** only was considered — resolved: **`tk next`** uses **Effective Priority** so a ready blocker can bubble above lower-priority direct work when it gates a higher-priority **Blocked Item**.
 - Propagating **Effective Priority** across **Scope** boundaries was considered — resolved: propagation stops at the **Scope** boundary so an **Epic**-scoped run stays ordered by what is internal to that **Epic**.
 - "group", "batch", and "umbrella" were considered for related work — resolved: **Epic** is the canonical backend-agnostic grouping term.
