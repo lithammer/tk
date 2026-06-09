@@ -188,7 +188,7 @@ fn render<W: Write + ?Sized>(
         }
         write_section_header(stdout, styler, "BLOCKING")?;
         for item in &detail.blocking {
-            render_sub_row(stdout, "\u{2192}", item, styler)?;
+            render_sub_row(stdout, "\u{2190}", item, styler)?;
         }
         has_section = true;
     }
