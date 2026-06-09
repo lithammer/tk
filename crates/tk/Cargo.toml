@@ -1,6 +1,9 @@
 [package]
 name = "tk"
-version = "0.2.0"
+# Placeholder only. The shipped version rides the git tag and is injected as
+# TK_VERSION at build time (ADR-0029); this field is the local-build fallback
+# and is intentionally never bumped per release.
+version = "0.0.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
