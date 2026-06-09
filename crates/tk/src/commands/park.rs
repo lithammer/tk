@@ -98,6 +98,14 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
             );
             Exit::Failure
         }
+        Err(ParkError::Active) => {
+            let _ = writeln!(
+                stderr,
+                "tk {COMMAND}: '{id}' is active; stop it first with 'tk stop {id}'",
+                id = args.id
+            );
+            Exit::Failure
+        }
         Err(ParkError::Sqlite(err)) => {
             resolver::render_storage_error(stderr, COMMAND, &err);
             Exit::Failure
@@ -255,6 +263,37 @@ mod tests {
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(
             stderr.contains("tk park: 'tk-1' is in triage; accept it first with 'tk accept tk-1 --priority P0..P4'"),
+            "stderr={stderr:?}"
+        );
+    }
+
+    #[test]
+    fn parking_an_active_ticket_points_at_stop() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Subject",
+                status: "active",
+                priority: Some("P2"),
+                selection_state: Some("accepted"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run(h.deps(), Args { id: "tk-1".into() });
+        assert_eq!(code, Exit::Failure);
+        let stderr = String::from_utf8(h.stderr).unwrap();
+        assert!(
+            stderr.contains("tk park: 'tk-1' is active; stop it first with 'tk stop tk-1'"),
             "stderr={stderr:?}"
         );
     }

@@ -18,6 +18,7 @@ use crate::domain::item_class::ItemClass;
 use crate::domain::mutation_payload::{MutationPayload, StatusChange};
 use crate::domain::mutation_type::MutationType;
 use crate::domain::origin::Origin;
+use crate::domain::selection_state::SelectionState;
 use crate::domain::status::ItemStatus;
 use crate::store::mutations;
 
@@ -50,8 +51,8 @@ pub struct StatusChangedItem {
 /// Why [`set_item_status`] did not commit a transition. Success is
 /// `Ok(StatusChangedItem)` — a real transition or a no-op for an
 /// already-current state. The miss variants render at exit 1; the `#[error]`
-/// strings are internal — `tk start/stop/done` interpolate the id into their
-/// own lines, and `tk worktree start` treats a miss as a best-effort no-op.
+/// strings are internal — `tk start` / `tk stop` / `tk done` interpolate the id
+/// into their own lines.
 #[derive(Debug, thiserror::Error)]
 pub enum SetStatusError {
     /// The requested `id` does not resolve to a live row.
@@ -67,6 +68,16 @@ pub enum SetStatusError {
     /// is not an amend path. Carries the [`ItemClass`] for diagnostics.
     #[error("item is already done")]
     AlreadyClosed(ItemClass),
+    /// Refused: cannot start a `triage` Ticket — only `accepted` work becomes
+    /// `active` (ADR-0029). The Ticket must be accepted first. Produced only by
+    /// the `Active` target.
+    #[error("triage Ticket cannot be started")]
+    TriageNotStartable,
+    /// Refused: cannot start a `parked` Ticket — only `accepted` work becomes
+    /// `active` (ADR-0029). The Ticket must be unparked first. Produced only by
+    /// the `Active` target.
+    #[error("parked Ticket cannot be started")]
+    ParkedNotStartable,
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
@@ -84,7 +95,7 @@ pub fn set_item_status<C: Clock + ?Sized>(
 
     let current = tx
         .query_row(
-            "select origin, status, item_class, display_value, title \
+            "select origin, status, item_class, display_value, title, selection_state \
                from items where id = ?1",
             params![req.id],
             |row| {
@@ -94,11 +105,13 @@ pub fn set_item_status<C: Clock + ?Sized>(
                     row.get::<_, ItemClass>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
+                    row.get::<_, Option<SelectionState>>(5)?,
                 ))
             },
         )
         .optional()?;
-    let Some((origin, current_status, item_class, display_id, title)) = current else {
+    let Some((origin, current_status, item_class, display_id, title, selection_state)) = current
+    else {
         // No write happened — drop the transaction implicitly.
         return Err(SetStatusError::NotFound);
     };
@@ -106,6 +119,17 @@ pub fn set_item_status<C: Clock + ?Sized>(
     if current_status == ItemStatus::Done && req.status != ItemStatus::Done {
         tx.commit()?;
         return Err(SetStatusError::LockedDone(item_class));
+    }
+
+    // Only `accepted` work becomes `active` (ADR-0029): a `triage` or `parked`
+    // Ticket cannot be started. No write happened, so the transaction drops.
+    // The CHECK added in migration 006 backstops any path that skips this guard.
+    if req.status == ItemStatus::Active {
+        match selection_state {
+            Some(SelectionState::Triage) => return Err(SetStatusError::TriageNotStartable),
+            Some(SelectionState::Parked) => return Err(SetStatusError::ParkedNotStartable),
+            Some(SelectionState::Accepted) | None => {}
+        }
     }
 
     if current_status == req.status {
@@ -454,6 +478,155 @@ mod tests {
             )
             .unwrap();
         assert_eq!(stored, None);
+    }
+
+    fn seed_ticket_with_selection(
+        store: &Store,
+        id: &str,
+        display: &str,
+        status: &str,
+        selection: &str,
+        priority: Option<&str>,
+    ) {
+        insert_fixture_item(
+            &store.conn,
+            FixtureItem {
+                id,
+                display,
+                title: "Subject",
+                status,
+                priority,
+                selection_state: Some(selection),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn starting_a_triage_ticket_is_rejected() {
+        let mut store = open_seeded();
+        seed_ticket_with_selection(&store, "t1", "tk-1", "open", "triage", None);
+
+        let err = set_item_status(
+            &mut store,
+            &clock(),
+            SetStatusRequest {
+                id: "t1",
+                status: ItemStatus::Active,
+                closing_reason: None,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, SetStatusError::TriageNotStartable));
+
+        let stored: String = store
+            .conn
+            .query_row("select status from items where id = 't1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored, "open", "rejected start must not transition");
+    }
+
+    #[test]
+    fn starting_a_parked_ticket_is_rejected() {
+        let mut store = open_seeded();
+        seed_ticket_with_selection(&store, "t1", "tk-1", "open", "parked", Some("P2"));
+
+        let err = set_item_status(
+            &mut store,
+            &clock(),
+            SetStatusRequest {
+                id: "t1",
+                status: ItemStatus::Active,
+                closing_reason: None,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, SetStatusError::ParkedNotStartable));
+    }
+
+    #[test]
+    fn starting_an_accepted_ticket_still_succeeds() {
+        // The start-guard must reject only non-accepted work; accepted Tickets
+        // start as before.
+        let mut store = open_seeded();
+        seed_ticket_with_selection(&store, "t1", "tk-1", "open", "accepted", Some("P2"));
+
+        let item = set_item_status(
+            &mut store,
+            &clock(),
+            SetStatusRequest {
+                id: "t1",
+                status: ItemStatus::Active,
+                closing_reason: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(item.status, ItemStatus::Active);
+    }
+
+    #[test]
+    fn done_is_allowed_from_triage_and_stays_terminal() {
+        // tk-76 AC: `done` closes captured work from any Selection State, and
+        // the v1 terminal rule still holds afterward.
+        let mut store = open_seeded();
+        seed_ticket_with_selection(&store, "t1", "tk-1", "open", "triage", None);
+
+        let item = set_item_status(
+            &mut store,
+            &clock(),
+            SetStatusRequest {
+                id: "t1",
+                status: ItemStatus::Done,
+                closing_reason: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(item.status, ItemStatus::Done);
+
+        // Terminal: a subsequent start is refused as done, not as triage.
+        let err = set_item_status(
+            &mut store,
+            &clock(),
+            SetStatusRequest {
+                id: "t1",
+                status: ItemStatus::Active,
+                closing_reason: None,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, SetStatusError::LockedDone(_)));
+    }
+
+    #[test]
+    fn done_is_allowed_from_parked_and_stays_terminal() {
+        let mut store = open_seeded();
+        seed_ticket_with_selection(&store, "t1", "tk-1", "open", "parked", Some("P2"));
+
+        let item = set_item_status(
+            &mut store,
+            &clock(),
+            SetStatusRequest {
+                id: "t1",
+                status: ItemStatus::Done,
+                closing_reason: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(item.status, ItemStatus::Done);
+
+        let err = set_item_status(
+            &mut store,
+            &clock(),
+            SetStatusRequest {
+                id: "t1",
+                status: ItemStatus::Open,
+                closing_reason: None,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, SetStatusError::LockedDone(_)));
     }
 
     #[test]

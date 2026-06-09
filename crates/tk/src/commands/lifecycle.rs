@@ -115,6 +115,21 @@ pub fn transition(
             );
             Exit::Failure
         }
+        Err(SetStatusError::TriageNotStartable) => {
+            let _ = writeln!(
+                stderr,
+                "tk {command}: '{id}' is in triage; accept it first with \
+                 'tk accept {id} --priority P0..P4'"
+            );
+            Exit::Failure
+        }
+        Err(SetStatusError::ParkedNotStartable) => {
+            let _ = writeln!(
+                stderr,
+                "tk {command}: '{id}' is parked; unpark it first with 'tk unpark {id}'"
+            );
+            Exit::Failure
+        }
         Err(SetStatusError::Sqlite(err)) => {
             resolver::render_storage_error(stderr, command, &err);
             Exit::Failure
@@ -332,6 +347,70 @@ mod tests {
             )
             .unwrap();
         assert_eq!(stored.as_deref(), Some("Fixed in PR #12"));
+    }
+
+    fn seed_ticket_with_selection(
+        conn: &Connection,
+        id: &str,
+        display: &str,
+        status: &str,
+        selection: &str,
+        priority: Option<&str>,
+    ) {
+        insert_fixture_item(
+            conn,
+            FixtureItem {
+                id,
+                display,
+                title: "Subject",
+                status,
+                priority,
+                selection_state: Some(selection),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn start_refuses_a_triage_ticket_pointing_at_accept() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        seed_ticket_with_selection(&conn, "t1", "tk-1", "open", "triage", None);
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = transition(h.deps(), "start", "tk-1", ItemStatus::Active, STARTED, None);
+        assert_eq!(code, Exit::Failure);
+        let stderr = String::from_utf8(h.stderr).unwrap();
+        assert!(
+            stderr.contains(
+                "tk start: 'tk-1' is in triage; accept it first with 'tk accept tk-1 --priority P0..P4'"
+            ),
+            "stderr={stderr:?}"
+        );
+    }
+
+    #[test]
+    fn start_refuses_a_parked_ticket_pointing_at_unpark() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        seed_ticket_with_selection(&conn, "t1", "tk-1", "open", "parked", Some("P2"));
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = transition(h.deps(), "start", "tk-1", ItemStatus::Active, STARTED, None);
+        assert_eq!(code, Exit::Failure);
+        let stderr = String::from_utf8(h.stderr).unwrap();
+        assert!(
+            stderr.contains("tk start: 'tk-1' is parked; unpark it first with 'tk unpark tk-1'"),
+            "stderr={stderr:?}"
+        );
     }
 
     #[test]
