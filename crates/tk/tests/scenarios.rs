@@ -382,6 +382,51 @@ fn parking_and_unparking_flow() {
 }
 
 #[test]
+fn lifecycle_guards_respect_selection_state() {
+    let p = Repo::new("project");
+    p.run("init");
+
+    // Triage work cannot be started — it must be accepted first.
+    p.run("add --triage -m 'Maybe later'"); // project-1 (triage)
+    let start_triage = p.run("start project-1");
+    assert!(
+        start_triage.contains(
+            "tk start: 'project-1' is in triage; accept it first with 'tk accept project-1 --priority P0..P4'"
+        ),
+        "start_triage={start_triage}"
+    );
+
+    // Parked work cannot be started — it must be unparked first.
+    p.run("add -m 'Held work'"); // project-2 (accepted)
+    p.run("park project-2");
+    let start_parked = p.run("start project-2");
+    assert!(
+        start_parked.contains(
+            "tk start: 'project-2' is parked; unpark it first with 'tk unpark project-2'"
+        ),
+        "start_parked={start_parked}"
+    );
+
+    // Active work cannot be parked directly — stop it first, then park.
+    p.run("add -m 'Active work'"); // project-3 (accepted)
+    p.run("start project-3");
+    let park_active = p.run("park project-3");
+    assert!(
+        park_active
+            .contains("tk park: 'project-3' is active; stop it first with 'tk stop project-3'"),
+        "park_active={park_active}"
+    );
+    p.run("stop project-3");
+    tk!(p, "park project-3", @r"
+    Parked Ticket: project-3 - Active work
+    Priority: P2
+    ");
+
+    // done closes captured work from any Selection State without accepting it.
+    tk!(p, "done project-1 -m 'Not doing it'", @"Done Ticket: project-1 - Maybe later");
+}
+
+#[test]
 fn init_refuses_outside_git_repository() {
     let p = Repo::bare("scratch");
     let out = p.run("init");

@@ -1,12 +1,11 @@
 //! Selection State transitions: `tk accept`, `tk park`, and `tk unpark`.
 //!
 //! Selection State is a Local Field (ADR-0027): these transitions update
-//! current state only and never append a Mutation, even for a Backend Ticket.
-//! They are status-agnostic — a transition touches `selection_state` /
-//! `priority`, never `status` — and leave Dependencies and External Blockers
-//! untouched, so accepting a blocked triage Ticket keeps it blocked. The active
-//! guard that rejects `tk park` on an active Ticket is tk-76's lifecycle work,
-//! not these transitions'.
+//! current state only and never append a Mutation, even for a Backend Ticket,
+//! and they leave Dependencies and External Blockers untouched, so accepting a
+//! blocked triage Ticket keeps it blocked. `accept` and `unpark` touch only
+//! `selection_state` / `priority`; `park` additionally reads `status` to refuse
+//! an `active` Ticket, upholding the `active ⟹ accepted` invariant (ADR-0029).
 
 use rusqlite::{OptionalExtension, params};
 
@@ -14,6 +13,7 @@ use crate::clock::Clock;
 use crate::domain::item_class::ItemClass;
 use crate::domain::priority::Priority;
 use crate::domain::selection_state::SelectionState;
+use crate::domain::status::ItemStatus;
 
 use super::Store;
 
@@ -127,6 +127,10 @@ struct SelectionRow {
     item_class: ItemClass,
     selection_state: Option<SelectionState>,
     priority: Option<Priority>,
+    /// Item Status, read so `park_ticket` can refuse an `active` Ticket
+    /// (ADR-0029). `unpark_ticket` ignores it — unparking is always
+    /// invariant-safe.
+    status: ItemStatus,
 }
 
 /// Read the [`SelectionRow`] for `id` within an open write transaction, or
@@ -136,7 +140,7 @@ fn read_selection_row(
     id: &str,
 ) -> rusqlite::Result<Option<SelectionRow>> {
     tx.query_row(
-        "select display_value, title, item_class, selection_state, priority \
+        "select display_value, title, item_class, selection_state, priority, status \
          from items where id = ?1",
         params![id],
         |r| {
@@ -146,6 +150,7 @@ fn read_selection_row(
                 item_class: r.get(2)?,
                 selection_state: r.get(3)?,
                 priority: r.get(4)?,
+                status: r.get(5)?,
             })
         },
     )
@@ -182,6 +187,10 @@ pub enum ParkError {
     /// before it can be parked.
     #[error("triage Ticket must be accepted first")]
     Triage,
+    /// The Ticket is `active`; it must be stopped (`tk stop`) before it can be
+    /// held, so `active ⟹ accepted` is preserved (ADR-0029).
+    #[error("active Ticket must be stopped first")]
+    Active,
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
 }
@@ -207,6 +216,7 @@ pub fn park_ticket<C: Clock + ?Sized>(
         item_class,
         selection_state,
         priority,
+        status,
     }) = read_selection_row(&tx, id)?
     else {
         return Err(ParkError::NotFound);
@@ -220,6 +230,12 @@ pub fn park_ticket<C: Clock + ?Sized>(
     // would be store corruption, treated like the Epic case rather than a panic.
     match selection_state {
         Some(SelectionState::Accepted) => {
+            // Only `accepted` open work can be held: an `active` Ticket must be
+            // stopped first, so `active ⟹ accepted` holds (ADR-0029). Door 2 of
+            // the invariant; `tk start`'s guard is Door 1.
+            if status == ItemStatus::Active {
+                return Err(ParkError::Active);
+            }
             // Accepted Tickets carry a Priority by the schema invariant
             // (ADR-0028); it is preserved across the hold so unparking returns
             // the work at the same rank. A NULL here would be store corruption,
@@ -301,6 +317,9 @@ pub fn unpark_ticket<C: Clock + ?Sized>(
         item_class,
         selection_state,
         priority,
+        // `status` is read for `park_ticket`'s active guard; unparking is
+        // invariant-safe at any status, so it is not consulted here.
+        ..
     }) = read_selection_row(&tx, id)?
     else {
         return Err(UnparkError::NotFound);
@@ -515,6 +534,41 @@ mod tests {
             before,
             "no-op must not bump updated_at"
         );
+    }
+
+    #[test]
+    fn parking_an_active_ticket_is_rejected() {
+        // tk-76 Door 2: an accepted Ticket being worked must be stopped before
+        // it can be held; parking it directly would violate `active ⟹ accepted`.
+        let mut store = open_seeded();
+        insert_fixture_item(
+            &store.conn,
+            FixtureItem {
+                id: "t",
+                display: "t",
+                title: "t",
+                status: "active",
+                priority: Some("P2"),
+                selection_state: Some("accepted"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        let clock = FakeClock::new(1_778_284_800_000);
+        assert!(matches!(
+            park_ticket(&mut store, &clock, "t"),
+            Err(ParkError::Active)
+        ));
+        let selection: String = store
+            .conn
+            .query_row(
+                "select selection_state from items where id = 't'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(selection, "accepted", "rejected park must not change state");
     }
 
     #[test]

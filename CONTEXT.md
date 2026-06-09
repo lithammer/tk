@@ -284,6 +284,10 @@ _Avoid_: ticket, tickets
 - **Park** moves an `accepted` **Ticket** to `parked` and preserves its **Priority**; parking an already `parked` **Ticket** is a harmless no-op.
 - **Unpark** moves a `parked` **Ticket** to `accepted` and preserves its **Priority**; unparking an already `accepted` **Ticket** is a harmless no-op.
 - **Park** and **Unpark** reject a `triage` **Ticket**, which must be **Accepted** first.
+- A **Ticket** has **Item Status** `active` only when its **Selection State** is `accepted`; the **Repository Store** enforces this invariant.
+- **Start** rejects a `triage` or `parked` **Ticket**: `triage` work must be **Accepted** and `parked` work **Unparked** before it can become `active`.
+- **Park** rejects an `active` **Ticket**, which must be **Stopped** before it can be held.
+- **`done`** is allowed from any **Selection State** — `triage`, `accepted`, or `parked` — so rejected or obsolete captured work can be closed without **Accepting** it first.
 - **`tk next`** and **`tk list --ready`** select only `accepted` **Tickets**; `triage` and `parked` **Tickets** are excluded both as candidates and as **Effective Priority** contributors.
 - **Selection State** changes are not **Mutations** and are not synced to a **Backend**; **Backend Pull** preserves a local **Selection State**.
 - **Assignee** support is deferred from v1 and may be omitted entirely.

@@ -49,6 +49,7 @@ const MIGRATION_2_SQL: &str = include_str!("migrations/002_items_no_escape_from_
 const MIGRATION_3_SQL: &str = include_str!("migrations/003_closing_reason.sql");
 const MIGRATION_4_SQL: &str = include_str!("migrations/004_selection_state.sql");
 const MIGRATION_5_SQL: &str = include_str!("migrations/005_relax_priority_for_triage.sql");
+const MIGRATION_6_SQL: &str = include_str!("migrations/006_require_accepted_for_active.sql");
 
 /// V1 Repository Store schema skeleton.
 pub const MIGRATION_1: Migration = Migration {
@@ -96,6 +97,17 @@ pub const MIGRATION_5: Migration = Migration {
     foreign_keys: ForeignKeys::Off,
 };
 
+/// Rebuilds `items` to enforce `active ⟹ accepted` (ADR-0029): a Ticket is
+/// `active` only while `accepted`. The clause folds into the combined Ticket
+/// invariant CHECK rather than a trigger, because it is a row-shape rule (it
+/// reads only the new row), unlike the done-terminal *transition* trigger.
+/// Runs `ForeignKeys::Off` for the same table-rebuild reason as MIGRATION_5.
+pub const MIGRATION_6: Migration = Migration {
+    version: 6,
+    sql: MIGRATION_6_SQL,
+    foreign_keys: ForeignKeys::Off,
+};
+
 /// Ordered migration list applied by [`apply_all`].
 pub const ALL_MIGRATIONS: &[Migration] = &[
     MIGRATION_1,
@@ -103,13 +115,14 @@ pub const ALL_MIGRATIONS: &[Migration] = &[
     MIGRATION_3,
     MIGRATION_4,
     MIGRATION_5,
+    MIGRATION_6,
 ];
 
 /// Highest schema version this binary can apply. Named so future migrations
 /// surface the threshold to `grep` instead of hiding it behind `.last()`.
 /// Adding `MIGRATION_6` is a two-line patch: append to `ALL_MIGRATIONS`, bump
 /// this constant, with a debug_assert below catching the drift.
-pub const MAX_KNOWN_VERSION: u32 = MIGRATION_5.version;
+pub const MAX_KNOWN_VERSION: u32 = MIGRATION_6.version;
 
 /// Errors returned while applying migrations.
 ///
@@ -300,7 +313,7 @@ mod tests {
         let mut conn = open_memory();
         apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
 
-        assert_eq!(current_version(&conn).unwrap(), 5);
+        assert_eq!(current_version(&conn).unwrap(), 6);
 
         let app_id: i64 = conn
             .query_row("pragma application_id", [], |r| r.get(0))
@@ -310,7 +323,7 @@ mod tests {
         let user_version: i64 = conn
             .query_row("pragma user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(user_version, 5);
+        assert_eq!(user_version, 6);
     }
 
     #[test]
@@ -322,7 +335,7 @@ mod tests {
         let count: i64 = conn
             .query_row("select count(*) from schema_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(count, 5);
+        assert_eq!(count, 6);
     }
 
     #[test]
@@ -719,6 +732,133 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_heals_active_non_accepted_loophole_rows() {
+        // tk-75 shipped `park` status-agnostic and without a start-guard (that
+        // is this slice), so a store it touched can hold `active` + parked /
+        // `active` + triage rows — legal under v5, illegal under v6's CHECK.
+        // The rebuild copy must heal them (demote to `open`, the equivalent of
+        // a stop), not abort the upgrade.
+        use crate::store::testing::{FixtureItem, insert_fixture_item};
+
+        let mut conn = open_memory();
+        apply_through(&mut conn, 5, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "a",
+                display: "tk-1",
+                title: "Active parked",
+                status: "active",
+                priority: Some("P2"),
+                selection_state: Some("parked"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "b",
+                display: "tk-2",
+                title: "Active triage",
+                status: "active",
+                priority: None,
+                selection_state: Some("triage"),
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+
+        apply_all(&mut conn, "2026-05-09T00:00:01.000Z")
+            .expect("the v6 upgrade must heal loophole rows, not abort");
+
+        let mut rows: Vec<(String, String, String)> = conn
+            .prepare("select id, status, selection_state from items order by created_seq")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec![
+                ("a".into(), "open".into(), "parked".into()),
+                ("b".into(), "open".into(), "triage".into()),
+            ],
+            "loophole rows heal to open, Selection State preserved"
+        );
+    }
+
+    #[test]
+    fn active_ticket_must_be_accepted() {
+        // tk-76 (ADR-0029): a Ticket may be `active` only while `accepted`.
+        // The CHECK is the defence-in-depth backstop behind the `tk start` /
+        // `tk park` Rust guards.
+        use crate::store::testing::{FixtureItem, insert_fixture_item};
+
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        // An accepted, active Ticket is valid.
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Working",
+                status: "active",
+                priority: Some("P2"),
+                selection_state: Some("accepted"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .expect("an accepted, active Ticket is valid");
+
+        // Parking it at the SQL layer (bypassing the Rust guard) must trip the
+        // CHECK: `active` work cannot be held.
+        let err = conn
+            .execute(
+                "update items set selection_state = 'parked' where id = 't1'",
+                [],
+            )
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("CHECK"),
+            "an active Ticket that is not accepted must violate the CHECK: {err}"
+        );
+    }
+
+    #[test]
+    fn active_triage_ticket_is_rejected_at_insert() {
+        // The CHECK covers INSERT, not just UPDATE — a reason it is a CHECK and
+        // not a BEFORE UPDATE trigger (ADR-0029).
+        use crate::store::testing::{FixtureItem, insert_fixture_item};
+
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        let result = insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Captured but active",
+                status: "active",
+                priority: None,
+                selection_state: Some("triage"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        );
+        assert!(
+            result.is_err(),
+            "an active triage Ticket must be rejected at INSERT"
+        );
+    }
+
+    #[test]
     fn rebuild_preserves_existing_priority_and_selection_state() {
         // Heal a v4 store with real rows through the v5 rebuild and confirm the
         // copy is lossless for the columns the rebuild reshapes.
@@ -756,7 +896,7 @@ mod tests {
         .unwrap();
 
         apply_all(&mut conn, "2026-05-09T00:00:01.000Z").unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 5);
+        assert_eq!(current_version(&conn).unwrap(), 6);
 
         let (priority, selection, container): (Option<String>, String, Option<String>) = conn
             .query_row(
@@ -814,7 +954,7 @@ mod tests {
             "foreign keys must be re-enabled after a failed rebuild"
         );
 
-        // The failed migration rolled back: no probe table, store still at v5.
+        // The failed migration rolled back: no probe table, store still at v6.
         let probe: Option<i64> = conn
             .query_row(
                 "select 1 from sqlite_master where type='table' and name='fk_probe'",
@@ -824,7 +964,7 @@ mod tests {
             .optional()
             .unwrap();
         assert!(probe.is_none(), "the failed rebuild must leave no trace");
-        assert_eq!(current_version(&conn).unwrap(), 5);
+        assert_eq!(current_version(&conn).unwrap(), 6);
     }
 
     #[test]
@@ -836,7 +976,7 @@ mod tests {
         // already-current store reproduces the loser's stale-snapshot view.
         let mut conn = open_memory();
         apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 5);
+        assert_eq!(current_version(&conn).unwrap(), 6);
 
         apply_one(&mut conn, &MIGRATION_3, "2026-05-09T00:00:01.000Z")
             .expect("re-applying an already-applied migration must be a clean no-op");
