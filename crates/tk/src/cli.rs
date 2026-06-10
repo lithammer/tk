@@ -95,10 +95,11 @@ pub struct Deps<'a> {
 /// Top-level argument parser.
 ///
 /// `version = env!("TK_VERSION_STRING")` makes `tk --version` emit
-/// `v<crate-version> (<triple>)` — the shape `tk self-update`'s smoke
+/// `v<version> (<triple>)` — the shape `tk self-update`'s smoke
 /// verification (ADR-0013) scans for the embedded tag and triple as whole
-/// tokens. `build.rs` injects `TK_VERSION_STRING`; the dev-build refusal
-/// branch in `commands::self_update` keys off the `dev` triple sentinel.
+/// tokens. `build.rs` injects `TK_VERSION_STRING` from the release tag
+/// (`TK_VERSION`, per ADR-0029); the dev-build refusal branch in
+/// `commands::self_update` keys off the `dev` triple sentinel.
 #[derive(Debug, Parser)]
 #[command(
     name = "tk",

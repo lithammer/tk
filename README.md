@@ -14,13 +14,13 @@ Prebuilt releases are published for Linux, Apple Silicon macOS, and Windows.
 ### Linux and Apple Silicon macOS
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/lithammer/tk/main/scripts/install.sh | sh
+curl -fsSL https://github.com/lithammer/tk/releases/latest/download/install.sh | sh
 ```
 
 ### Windows
 
 ```powershell
-irm https://raw.githubusercontent.com/lithammer/tk/main/scripts/install.ps1 | iex
+irm https://github.com/lithammer/tk/releases/latest/download/install.ps1 | iex
 ```
 
 This installs to `%LOCALAPPDATA%\tk\bin` and adds it to your User `PATH`;

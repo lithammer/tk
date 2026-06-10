@@ -1,7 +1,7 @@
 # Install tk via irm | iex, per ADR-0013.
 #
 # Usage:
-#     irm https://raw.githubusercontent.com/lithammer/tk/main/scripts/install.ps1 | iex
+#     irm https://github.com/lithammer/tk/releases/latest/download/install.ps1 | iex
 #
 # Environment variables:
 #     TK_VERSION       Release tag to install (e.g. v0.0.1). Defaults to latest.
