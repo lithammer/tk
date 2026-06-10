@@ -159,6 +159,15 @@ backend items yet.
 .B \-\-epic
 restricts the listing to Epics and composes with any view or Origin filter.
 .PP
+In every view a Ticket whose Selection State is not the default
+.B accepted
+carries a dim badge \(em
+.B [triage]
+for captured work not yet accepted,
+.B [parked]
+for accepted work held out of automatic selection. Accepted Tickets carry no
+badge.
+.PP
 On success with one local Ticket,
 .B tk list
 prints:

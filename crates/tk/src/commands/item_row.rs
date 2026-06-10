@@ -21,12 +21,13 @@ use crate::store::repository::list::ListRow;
 
 /// The muted list badge for a non-default Selection State, or `None` for a row
 /// that carries none. Rendering owns the badge token (ADR-0027); the domain
-/// enum owns only the storage spelling. tk-75 renders `[parked]` only — the
-/// `[triage]` arm is tk-78's one-line follow-up.
+/// enum owns only the storage spelling. `accepted` is the default and stays
+/// unbadged; `triage` and `parked` each get a cue.
 fn selection_badge(selection_state: Option<SelectionState>) -> Option<&'static str> {
     match selection_state {
+        Some(SelectionState::Triage) => Some("[triage]"),
         Some(SelectionState::Parked) => Some("[parked]"),
-        Some(SelectionState::Triage | SelectionState::Accepted) | None => None,
+        Some(SelectionState::Accepted) | None => None,
     }
 }
 
