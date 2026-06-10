@@ -388,6 +388,35 @@ mod tests {
     }
 
     #[test]
+    fn plain_list_marks_triage_tickets_with_a_badge() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Captured idea",
+                priority: None,
+                selection_state: Some("triage"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run(h.deps(), default_args());
+        assert_eq!(code, Exit::Ok);
+        let stdout = String::from_utf8(h.stdout).unwrap();
+        assert!(stdout.contains("[triage]"), "stdout={stdout:?}");
+        assert!(stdout.contains("Captured idea"), "stdout={stdout:?}");
+    }
+
+    #[test]
     fn renders_single_ticket_with_totals_and_legend() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);

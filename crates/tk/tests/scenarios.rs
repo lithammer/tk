@@ -345,6 +345,13 @@ fn parking_and_unparking_flow() {
     let plain = p.run("list");
     assert!(plain.contains("[parked]"), "plain={plain}");
 
+    // `tk show` reflects the parked Selection State (AC #5's third state).
+    let parked_show = p.run("show project-1");
+    assert!(
+        parked_show.contains("\n  Selection: parked\n"),
+        "parked_show={parked_show}"
+    );
+
     // Re-parking is an idempotent success.
     let again = p.run("park project-1");
     assert!(
@@ -379,6 +386,38 @@ fn parking_and_unparking_flow() {
         ),
         "park_triage={park_triage}"
     );
+}
+
+#[test]
+fn plain_list_badges_every_selection_state() {
+    // Lock the finished read contract (tk-78): in the default List Tree an
+    // accepted Ticket carries no badge, a triage Ticket gets a dim `[triage]`,
+    // and a parked Ticket a dim `[parked]`. The triage row is also blocked, so
+    // the badge is pinned rendering alongside the `⊘` blocked indicator.
+    let p = Repo::new("project");
+    p.run("init");
+
+    p.run("add -m 'Accepted work'"); // project-1 (accepted, P2)
+    p.run("add --triage -m 'Captured idea'"); // project-2 (triage)
+    p.run("add -m 'Held work'"); // project-3 (accepted, P2)
+    p.run("park project-3"); // project-3 -> parked
+    p.run("block project-2 project-1"); // triage Ticket carries an unresolved blocker
+
+    tk!(p, "list", @"
+    ○ project-1 ● P2 Accepted work
+    ○ project-2 ⊘ [triage] Captured idea
+    ○ project-3 ● P2 [parked] Held work
+    --------------------------------------------------------------------------------
+    Total: 3 items (3 open)
+
+    Status: ○ open  ◐ active  ✓ done
+    Blocked: ⊘ blocked
+    ");
+
+    // The view flags are primary and mutually exclusive: clap rejects a
+    // combination at the parser layer with exit 2 (AC #4).
+    let conflict = p.run("list --triage --ready");
+    assert!(conflict.contains("exit 2"), "conflict={conflict}");
 }
 
 #[test]
