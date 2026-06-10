@@ -289,7 +289,8 @@ _Avoid_: ticket, tickets
 - **Park** rejects an `active` **Ticket**, which must be **Stopped** before it can be held.
 - **`done`** is allowed from any **Selection State** — `triage`, `accepted`, or `parked` — so rejected or obsolete captured work can be closed without **Accepting** it first.
 - **`tk next`** and **`tk list --ready`** select only `accepted` **Tickets**; `triage` and `parked` **Tickets** are excluded both as candidates and as **Effective Priority** contributors.
-- **Selection State** changes are not **Mutations** and are not synced to a **Backend**; **Backend Pull** preserves a local **Selection State**.
+- **Selection State** changes are not **Mutations** and are not synced to a **Backend**; **Backend Pull** preserves a local **Selection State** and its **Priority**.
+- **Backend Pull** does not flip locally held work into progress: an incoming `active` **Item Status** on a non-`accepted` **Ticket** is demoted to `open`, upholding the `active` ⟹ `accepted` invariant.
 - **Assignee** support is deferred from v1 and may be omitted entirely.
 - If **Assignees** are introduced, a **Ticket** may have zero or more
   **Assignees**.
@@ -380,6 +381,10 @@ _Avoid_: ticket, tickets
   Store current-state changes, not **Mutations**.
 - **Promotion** is the boundary where current local state becomes backend
   intent.
+- **Promotion** preserves a **Ticket**'s `accepted` or `parked` **Selection
+  State**; the field stays local and is not pushed to the **Backend**.
+- **Promotion** rejects a `triage` **Ticket**, which must be **Accepted**
+  first — captured-but-unaccepted work is not pushed to a **Backend**.
 - A **Mutation** has exactly one **Mutation Type**.
 - The first implementation supports only **V1 Mutation Types**.
 - `update_ticket` and `update_epic` modify title and body only.
