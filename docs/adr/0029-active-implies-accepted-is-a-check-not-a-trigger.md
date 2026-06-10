@@ -12,6 +12,16 @@ tool: it covers INSERT as well as UPDATE and keeps the entire "what is a valid
 Ticket row" invariant in one place, alongside the priority × Selection State
 clause from ADR-0027/ADR-0028.
 
+## Consequences
+
+- Backend Pull is a fourth writer of Item Status, alongside the `tk start` /
+  `tk park` transition guards and the CHECK backstop. Its merge clamps an
+  incoming `active` on a non-`accepted` Ticket down to `open` (tk-77), the same
+  heal this migration applies on rebuild, so a backend signal cannot flip
+  locally held (`parked`) work into progress. The clamp covers the `active`
+  case only; a Pull onto a locally-`done` row is governed by the
+  `items_no_escape_from_done` trigger and is a separate sync-conflict concern.
+
 ## Considered Options
 
 - **A `BEFORE UPDATE` trigger**, mirroring the `items_no_escape_from_done`

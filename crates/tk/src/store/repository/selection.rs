@@ -683,6 +683,41 @@ mod tests {
     }
 
     #[test]
+    fn park_a_backend_ticket_emits_no_mutation() {
+        // AC #7 / ADR-0027: Selection State is local-only *across the backend
+        // boundary*. Parking a Backend-origin Ticket changes current state but
+        // must not append a Mutation, so the local hold is never pushed
+        // upstream. The local-origin cases above prove the same for local work.
+        let mut store = open_seeded();
+        insert_fixture_item(
+            &store.conn,
+            FixtureItem {
+                id: "t",
+                display: "gh-1",
+                title: "t",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("1"),
+                priority: Some("P2"),
+                selection_state: Some("accepted"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        let clock = FakeClock::new(1_778_284_800_000);
+        park_ticket(&mut store, &clock, "t").unwrap();
+        let mutations: i64 = store
+            .conn
+            .query_row("select count(*) from mutations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            mutations, 0,
+            "Selection State stays local even for a Backend Ticket"
+        );
+    }
+
+    #[test]
     fn accept_emits_no_mutation() {
         let mut store = open_seeded();
         seed(&store, "t", "triage", None);

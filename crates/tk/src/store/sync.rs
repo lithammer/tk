@@ -59,7 +59,10 @@ pub enum MergeError {
 ///   - B: match exists AND a pending/failed Mutation references it → SKIP the
 ///     UPDATE. The Mutation Log is the source of truth for in-flight edits.
 ///   - C: match exists with no in-flight Mutations → UPDATE title, body,
-///     status, updated_at; the Display ID is preserved.
+///     status, updated_at; the Display ID and the local Selection State /
+///     Priority are preserved. An incoming `active` status on a non-accepted
+///     (parked) Ticket is clamped to `open` so Backend Pull upholds the
+///     `active ⟹ accepted` invariant (ADR-0029).
 ///   - D: snapshot list shorter than local backend rows → v1 no-op (deletion
 ///     detection is deferred).
 ///
@@ -99,10 +102,21 @@ pub fn merge_backend_snapshots(
             }
 
             // Scenario C: overwrite title/body/status/updated_at; Display ID
-            // is left alone.
+            // and Selection State (a Local Field) are left alone. The status
+            // clamp makes Backend Pull a well-behaved door on `active ⟹
+            // accepted` (ADR-0029): an incoming `active` on a non-accepted
+            // (parked) Ticket is demoted to `open`, exactly the
+            // migration-006 heal, so a backend signal cannot flip locally
+            // held work in progress. This guards only the `active` case; a
+            // Pull onto a locally-`done` row is governed by the done-terminal
+            // trigger and is out of scope for tk-77.
             tx.execute(
                 "update items \
-                    set title = ?2, body = ?3, status = ?4, updated_at = ?5 \
+                    set title = ?2, body = ?3, updated_at = ?5, \
+                        status = case \
+                            when ?4 = 'active' and selection_state <> 'accepted' then 'open' \
+                            else ?4 \
+                        end \
                   where id = ?1",
                 params![item_id, snap.title, snap.body, snap.status.text(), now],
             )?;
@@ -694,29 +708,40 @@ mod tests {
         )
         .unwrap();
 
-        let (title, origin, kind, source, selection): (
+        let (title, origin, kind, source, selection, priority): (
             String,
             String,
             String,
             String,
             Option<String>,
+            Option<String>,
         ) = conn
             .query_row(
                 "select i.title, i.origin, i.backend_kind, \
                         (select source from item_ids where value = i.display_value), \
-                        i.selection_state \
+                        i.selection_state, i.priority \
                    from items i where i.display_value = 'gh-1'",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
             )
             .unwrap();
         assert_eq!(title, "First");
         assert_eq!(origin, "backend");
         assert_eq!(kind, "github");
         assert_eq!(source, "display");
-        // Imported Backend Tickets are seeded accepted (ADR-0027); tripwire on
-        // the seed literal so a wrong value cannot pass silently.
+        // Imported Backend Tickets default to accepted at Priority P2 (ADR-0027);
+        // tripwire on both seed literals so a wrong value cannot pass silently.
         assert_eq!(selection.as_deref(), Some("accepted"));
+        assert_eq!(priority.as_deref(), Some("P2"));
     }
 
     #[test]
@@ -838,6 +863,113 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn merge_scenario_c_preserves_local_selection_state_and_priority() {
+        // Selection State is a Local Field (ADR-0027); Backend Pull never reads
+        // it back, so a non-active Pull merging title/status must leave a local
+        // `parked` state and its Priority untouched. Regression lock against a
+        // future edit adding selection_state/priority to the Scenario C SET.
+        let mut conn = open_seeded();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "gh-1",
+                title: "Old",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("1"),
+                selection_state: Some("parked"),
+                priority: Some("P0"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+
+        let mut rng = StdRng::seed_from_u64(0);
+        merge_backend_snapshots(
+            &mut conn,
+            &mut rng,
+            &[snapshot(
+                "1",
+                "gh-1",
+                ItemClass::Ticket,
+                "Backend Title",
+                ItemStatus::Open,
+            )],
+            "2026-05-20T00:00:00Z",
+        )
+        .unwrap();
+
+        let (title, selection, priority): (String, String, String) = conn
+            .query_row(
+                "select title, selection_state, priority from items where id = 't1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(title, "Backend Title", "synced field still merges");
+        assert_eq!(selection, "parked", "local Selection State preserved");
+        assert_eq!(priority, "P0", "local Priority preserved");
+    }
+
+    #[test]
+    fn merge_scenario_c_clamps_active_to_open_on_a_parked_ticket() {
+        // A backend Ticket imported `accepted`, then locally parked (status
+        // open at park time — tk-76 Door 2). A later Pull reports it `active`.
+        // Backend Pull is the fourth door on `active ⟹ accepted` (ADR-0029):
+        // it must not flip held work `active`, so the incoming status clamps to
+        // `open` while the local Selection State and Priority are preserved.
+        let mut conn = open_seeded();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "gh-1",
+                title: "Old",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("1"),
+                selection_state: Some("parked"),
+                priority: Some("P1"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+
+        let mut rng = StdRng::seed_from_u64(0);
+        merge_backend_snapshots(
+            &mut conn,
+            &mut rng,
+            &[snapshot(
+                "1",
+                "gh-1",
+                ItemClass::Ticket,
+                "Backend Active",
+                ItemStatus::Active,
+            )],
+            "2026-05-20T00:00:00Z",
+        )
+        .unwrap();
+
+        let (title, status, selection, priority): (String, String, String, String) = conn
+            .query_row(
+                "select title, status, selection_state, priority from items where id = 't1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(title, "Backend Active", "non-status fields still merge");
+        assert_eq!(
+            status, "open",
+            "active clamped to open on a non-accepted row"
+        );
+        assert_eq!(selection, "parked", "local Selection State preserved");
+        assert_eq!(priority, "P1", "local Priority preserved");
     }
 
     // ---- load_applicable_mutations --------------------------------------
