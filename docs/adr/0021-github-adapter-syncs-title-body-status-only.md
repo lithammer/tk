@@ -1,11 +1,17 @@
-# The v1 GitHub Backend Adapter syncs title, body, and status only
+# The v1 GitHub Backend Adapter syncs item fields, not relationships
 
-The v1 GitHub Backend Adapter (tk-34) maps three things between tk and a
-GitHub repository, both directions, through the `gh issue` subcommands:
+The v1 GitHub Backend Adapter (tk-34) maps item *fields* between tk and a
+GitHub repository through the `gh issue` subcommands:
 
-- title and body (`gh issue edit`, from `update_ticket`),
+- title and body — bidirectional (`gh issue edit`, from `update_ticket`; read
+  back on Pull),
 - Item Status as a two-state axis — `done` ↔ CLOSED (`gh issue close`),
-  `open`/`active` ↔ OPEN (`gh issue reopen`) — and back on Pull,
+  `open`/`active` ↔ OPEN (`gh issue reopen`) — bidirectional,
+- Ticket Kind — Pull-only: the `issueType` `--json` field maps to
+  `TicketKind` (`"Bug"` → `Bug`; every other value — incl. `"Task"`,
+  `"Feature"`, org-custom types, and a typeless issue — → `Task`, matching the
+  closed two-variant `TicketKind`). No Mutation changes a Ticket's Kind, so
+  there is nothing to push; `--type` is never written in v1,
 - the issue itself (`gh issue list --state all` → `BackendItemSnapshot`).
 
 It does **not** sync Dependencies or Epic membership. Those Mutations are
@@ -15,55 +21,65 @@ returns a no-op `ApplyOutcome::Accepted` for them: it records that the
 Mutation was handled without driving any `gh` call. The local Dependency
 edge and Epic membership already live in the Repository Store and keep
 driving `tk next` and the read views; there is simply no backend action to
-take.
+take in v1.
 
 ## This is a scope choice, not a capability gap
 
-GitHub *can* model both relationships, and both are generally available:
+`gh` 2.94.0 (cli/cli#13057, "Add Issues 2.0 support") makes every
+relationship first-class in `gh issue` — no raw `gh api` required:
 
-- Issue dependencies ("blocked by" / "blocking") — REST API, GA 2025-08-21.
-- Sub-issues — GraphQL `addSubIssue` and REST, GA 2025.
+- Dependencies — `gh issue edit --add-blocked-by`/`--remove-blocked-by`
+  (and `--add-blocking`/`--remove-blocking`), read back via the
+  `blockedBy`/`blocking` `--json` fields.
+- Sub-issues / Epic membership — `gh issue edit --parent`/`--remove-parent`/
+  `--add-sub-issue`/`--remove-sub-issue`, read back via `parent`/`subIssues`.
 
-The deferral rests on three reasons, in order of weight:
+The deferral therefore rests on scope, not capability:
 
-1. **Round-trip symmetry.** `gh issue` has no relationship flags, so even
-   pushing a Dependency means dropping to raw `gh api` (REST for
-   dependencies, GraphQL-with-feature-header for sub-issues). Pushing on
-   Apply without reading relationships back on Pull yields an asymmetric
-   half-sync — the edge exists locally and on GitHub but cannot be
-   reconstructed from a fresh Pull. Closing that gap needs per-issue
-   relationship fetches (N+1) or GraphQL batching, the exact complexity
-   tk-34 scoped out.
-2. **Epics are unreachable pre-Promote.** Sub-issues map to Epic
-   membership, but no GitHub Backend Epic can exist in v1 — Promotion is
-   not implemented — so building sub-issue sync now is speculative.
-3. **`gh api` friction.** Sub-issue mutations through `gh api` have known
-   defects (cli/cli#12258), and the relationship surface is a second
-   integration with its own request shapes and error taxonomy.
+1. **Slice size.** tk-34 is already sizable and blocked on tk-106
+   (`tk remote set`); widening it to a second sync axis — two more Apply arms
+   plus the relationship fields on Pull — is held out so the first adapter
+   ships bounded. Dependency sync is now cheap and symmetric (native push
+   *and* read-back), so deferring it front-loads no technical risk; it is
+   purely a question of where the line falls. tk-107 owns it.
+2. **Epics are unreachable pre-Promote.** Sub-issues map to Epic membership,
+   but no GitHub Backend Epic can exist in v1 — Promotion is not implemented,
+   Pull hardcodes `item_class:Ticket`, and `gh issue create` is out of scope —
+   so there is no parent number to point `--parent` at. Sub-issue sync is
+   gated on the Promote slice regardless of `gh`'s capabilities.
 
 ## Considered Options
 
-- **Full bidirectional dependency sync via `gh api` now.** Rejected:
-  roughly doubles the slice (a second `gh api` surface, per-issue Pull
-  fetches, distinct error shapes) for a relationship tk already treats as
-  primarily local and selection-driving.
-- **Apply-only dependency push via `gh api`.** Rejected: the half-sync
-  asymmetry above is a durable wart, not a stepping stone.
+- **Fold dependency sync into tk-34 now.** Rejected: it adds a second sync
+  axis (two Apply arms, the `blockedBy`/`blocking` Pull fields) to a slice
+  already blocked and sizable. The native flags make it cheap and symmetric,
+  so it defers without technical risk — the only cost is the backfill debt
+  below.
 - **Reject relationship Mutations.** Rejected: the v1 sync engine stops at
   the first `ApplyOutcome::Rejected`, so a single `tk block` between two
-  GitHub Tickets would wedge the whole Mutation queue until `tk sync
-  --skip`.
+  GitHub Tickets would wedge the whole Mutation queue until `tk sync --skip`.
+  No-op-`Accepted` keeps the queue draining.
 
 ## Consequences
 
 - Relationship intent is not reflected on GitHub in v1, and Dependency
-  Mutations no-op-Accepted before relationship sync lands are already
-  `applied` — they will not auto-replay when it does. A future slice
+  Mutations no-op-`Accepted` before relationship sync lands are already
+  `applied` — they will not auto-replay when tk-107 ships. A future slice
   decides whether to backfill.
-- The full relationship surface (dependencies now; sub-issues once Promote
-  lands; an optional GitHub issue-type → `TicketKind` mapping on Pull) is
-  tracked by tk-107.
+- The relationship surface — dependencies, and sub-issues once Promote lands —
+  is tracked by tk-107, now via the native `gh issue` flags above rather than
+  raw `gh api`.
 - `active` has no GitHub representation; Pull normalises it toward `open`.
   The resulting clobber of a locally-`active` Ticket is a defect tracked by
   tk-108. Remote reopens of an item already imported as `done` remain
   deferred per ADR-0006.
+
+## History
+
+- Originally (tk-34, 2026-05) this ADR deferred relationship sync partly as a
+  capability gap: `gh issue` had no relationship flags, so any push meant raw
+  `gh api`, and tk-107 was framed around that mechanism. `gh` 2.94.0
+  (cli/cli#13057, 2026-06-10) made relationships and issue types native to
+  `gh issue`, so the deferral became purely a slice-size choice, issue-type →
+  `TicketKind` moved into tk-34's Pull, and tk-107 was re-scoped to the native
+  flags.
