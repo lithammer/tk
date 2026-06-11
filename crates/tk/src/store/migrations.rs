@@ -196,13 +196,13 @@ fn apply_one_txn(
     now_iso: &str,
     fk_off: bool,
 ) -> Result<(), ApplyError> {
-    // BEGIN IMMEDIATE takes the write lock at transaction start, so a second
-    // migrator (auto-migrate-on-open, tk-110) waits on `busy_timeout` rather
-    // than racing. Re-read the version *inside* the lock: the recorded version
+    // The write lock is taken at transaction start, so a second migrator
+    // (auto-migrate-on-open, tk-110) waits on `busy_timeout` rather than
+    // racing. Re-read the version *inside* the lock: the recorded version
     // [`apply_all`] sampled before the loop may be stale — the lock winner can
     // have applied this migration in the window. Skipping a since-applied
     // version closes the TOCTOU that would otherwise throw `duplicate column`.
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let tx = crate::store::write_transaction(conn)?;
     if i64::from(mig.version) <= current_version(&tx)? {
         return Ok(());
     }

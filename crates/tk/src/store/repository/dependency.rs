@@ -92,7 +92,7 @@ pub fn add_dependency<C: Clock + ?Sized>(
     edge: DependencyEdge<'_>,
 ) -> Result<(), AddDependencyError> {
     let now_iso = clock.now_iso();
-    let tx = store.conn.transaction()?;
+    let tx = crate::store::write_transaction(&mut store.conn)?;
 
     let Some(info) = read_endpoint_info(&tx, edge)? else {
         return Err(AddDependencyError::EndpointMissing);
@@ -173,7 +173,7 @@ pub fn remove_dependency<C: Clock + ?Sized>(
     edge: DependencyEdge<'_>,
 ) -> Result<(), RemoveDependencyError> {
     let now_iso = clock.now_iso();
-    let tx = store.conn.transaction()?;
+    let tx = crate::store::write_transaction(&mut store.conn)?;
 
     let Some(info) = read_endpoint_info(&tx, edge)? else {
         return Err(RemoveDependencyError::EndpointMissing);

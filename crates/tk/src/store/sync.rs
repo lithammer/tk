@@ -75,7 +75,7 @@ pub fn merge_backend_snapshots(
     snapshots: &[BackendItemSnapshot],
     now: &str,
 ) -> Result<(), MergeError> {
-    let tx = conn.transaction()?;
+    let tx = crate::store::write_transaction(conn)?;
 
     for snap in snapshots {
         let existing: Option<String> = tx
@@ -334,7 +334,7 @@ pub fn apply_mutation_outcome(
     outcome: &ApplyOutcome,
     now: &str,
 ) -> Result<(), ApplyMutationOutcomeError> {
-    let tx = conn.transaction()?;
+    let tx = crate::store::write_transaction(conn)?;
 
     let prior: Option<MutationState> = tx
         .query_row(
@@ -424,7 +424,7 @@ pub fn mark_mutation_skipped(
     sequence: i64,
     now: &str,
 ) -> Result<(), MarkSkippedError> {
-    let tx = conn.transaction()?;
+    let tx = crate::store::write_transaction(conn)?;
 
     let prior: Option<MutationState> = tx
         .query_row(

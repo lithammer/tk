@@ -68,9 +68,7 @@ pub fn accept_ticket<C: Clock + ?Sized>(
     id: &str,
     priority: Option<Priority>,
 ) -> Result<AcceptOutcome, AcceptError> {
-    let tx = store
-        .conn
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let tx = crate::store::write_transaction(&mut store.conn)?;
 
     let row: Option<(String, String, ItemClass, Option<SelectionState>)> = tx
         .query_row(
@@ -206,9 +204,7 @@ pub fn park_ticket<C: Clock + ?Sized>(
     clock: &C,
     id: &str,
 ) -> Result<ParkOutcome, ParkError> {
-    let tx = store
-        .conn
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let tx = crate::store::write_transaction(&mut store.conn)?;
 
     let Some(SelectionRow {
         display_id,
@@ -307,9 +303,7 @@ pub fn unpark_ticket<C: Clock + ?Sized>(
     clock: &C,
     id: &str,
 ) -> Result<UnparkOutcome, UnparkError> {
-    let tx = store
-        .conn
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let tx = crate::store::write_transaction(&mut store.conn)?;
 
     let Some(SelectionRow {
         display_id,

@@ -91,7 +91,7 @@ pub fn set_item_status<C: Clock + ?Sized>(
     req: SetStatusRequest<'_>,
 ) -> Result<StatusChangedItem, SetStatusError> {
     let now_iso = clock.now_iso();
-    let tx = store.conn.transaction()?;
+    let tx = crate::store::write_transaction(&mut store.conn)?;
 
     let current = tx
         .query_row(

@@ -31,10 +31,11 @@ pub enum SequenceError {
 /// Increment the named counter inside the caller's open write transaction
 /// and return the new value.
 ///
-/// The caller MUST have an active `begin immediate` transaction on `conn`;
-/// the helper does not start, commit, or roll one back. Passing a
-/// [`rusqlite::Transaction`] (which derefs to [`Connection`]) is the
-/// idiomatic way to satisfy that contract.
+/// The caller MUST have an active `begin immediate` transaction on `conn`
+/// (start one with [`crate::store::write_transaction`]); the helper does not
+/// start, commit, or roll one back. Passing a [`rusqlite::Transaction`]
+/// (which derefs to [`Connection`]) is the idiomatic way to satisfy that
+/// contract.
 ///
 /// `name` is a `&'static str` so the [`SequenceError::Missing`] arm can
 /// carry the offending counter name without an allocation; the schema's

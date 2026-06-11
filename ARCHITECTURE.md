@@ -105,6 +105,13 @@ Important stable contracts:
 - `schema_migrations` and `PRAGMA user_version` track migrations.
 - `PRAGMA application_id = 0x544B4442` identifies tk stores.
 - Connections enable foreign keys and a busy timeout; `tk init` enables WAL.
+- Every write transaction begins `IMMEDIATE` (`store::write_transaction`),
+  so parallel writers queue on the busy timeout. A deferred read-then-write
+  transaction would instead fail with `SQLITE_BUSY` the moment another
+  writer commits first — the busy timeout never covers a snapshot upgrade.
+  Guarded by `tests/concurrency.rs`; there is no internal retry/backoff
+  layer, and the "Repository Store is busy; retry the command" stderr line
+  is the backstop for a writer that holds the lock past the timeout.
 - `items` stores current Ticket/Epic state. Current state is the read model;
   the Mutation Log is an outbox, not an event-sourced source of truth.
 - `item_ids` resolves current Display IDs and Aliases case-insensitively.

@@ -104,7 +104,7 @@ where
     R: Rng + ?Sized,
 {
     let now_iso = clock.now_iso();
-    let tx = store.conn.transaction()?;
+    let tx = crate::store::write_transaction(&mut store.conn)?;
 
     let id = generate_internal_id(rng);
     let display_id = next_display_id(&tx)?;
@@ -169,7 +169,7 @@ where
     R: Rng + ?Sized,
 {
     let now_iso = clock.now_iso();
-    let tx = store.conn.transaction()?;
+    let tx = crate::store::write_transaction(&mut store.conn)?;
 
     let id = generate_internal_id(rng);
     let display_id = next_display_id(&tx)?;

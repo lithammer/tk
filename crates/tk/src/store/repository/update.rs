@@ -136,7 +136,7 @@ pub fn update_item<C: Clock + ?Sized>(
     req: UpdateRequest<'_>,
 ) -> Result<UpdatedItem, UpdateError> {
     let now_iso = clock.now_iso();
-    let tx = store.conn.transaction()?;
+    let tx = crate::store::write_transaction(&mut store.conn)?;
 
     let current = tx
         .query_row(
