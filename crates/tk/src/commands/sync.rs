@@ -86,7 +86,7 @@ fn run_sync(deps: Deps<'_>, skip: Option<i64>) -> Exit {
     let mut store = match resolver::open_for_command(runner, cwd, clock) {
         Ok(s) => s,
         Err(err) => {
-            resolver::render_open_error(stderr, COMMAND, &err);
+            resolver::open_error(&err).render(stderr, COMMAND);
             return Exit::Failure;
         }
     };
@@ -111,7 +111,7 @@ fn run_sync(deps: Deps<'_>, skip: Option<i64>) -> Exit {
             return Exit::Failure;
         }
         Err(FactoryOpenError::Storage(err)) => {
-            resolver::render_storage_error(stderr, COMMAND, &err);
+            resolver::storage_error(&err).render(stderr, COMMAND);
             return Exit::Failure;
         }
     };
@@ -147,7 +147,7 @@ fn run_log(deps: Deps<'_>, args: LogArgs) -> Exit {
     let store = match resolver::open_for_command(runner, cwd, clock) {
         Ok(s) => s,
         Err(err) => {
-            resolver::render_open_error(stderr, LOG_COMMAND, &err);
+            resolver::open_error(&err).render(stderr, LOG_COMMAND);
             return Exit::Failure;
         }
     };
@@ -163,7 +163,7 @@ fn run_log(deps: Deps<'_>, args: LogArgs) -> Exit {
                 Exit::Failure
             }
             Err(LogError::Storage(err)) => {
-                resolver::render_storage_error(stderr, LOG_COMMAND, &err);
+                resolver::storage_error(&err).render(stderr, LOG_COMMAND);
                 Exit::Failure
             }
             Err(LogError::FailureJson(err)) => {
@@ -189,7 +189,7 @@ fn run_log(deps: Deps<'_>, args: LogArgs) -> Exit {
     let rows = match store_sync::list_mutation_log(store.conn(), filter) {
         Ok(rows) => rows,
         Err(LogError::Storage(err)) => {
-            resolver::render_storage_error(stderr, LOG_COMMAND, &err);
+            resolver::storage_error(&err).render(stderr, LOG_COMMAND);
             return Exit::Failure;
         }
         Err(err) => {
@@ -248,7 +248,7 @@ fn render_skip_error<W: Write + ?Sized>(stderr: &mut W, err: &MarkSkippedError) 
         MarkSkippedError::MutationNotFound(seq) => {
             let _ = writeln!(stderr, "tk sync --skip: Mutation {seq} not found");
         }
-        MarkSkippedError::Storage(err) => resolver::render_storage_error(stderr, COMMAND, err),
+        MarkSkippedError::Storage(err) => resolver::storage_error(err).render(stderr, COMMAND),
     }
 }
 
@@ -277,7 +277,7 @@ fn render_run_sync_error<W: Write + ?Sized>(stderr: &mut W, err: &RunSyncError) 
         RunSyncError::Merge(MergeError::Storage(e))
         | RunSyncError::Load(LoadApplicableError::Storage(e))
         | RunSyncError::Outcome(ApplyMutationOutcomeError::Storage(e)) => {
-            resolver::render_storage_error(stderr, COMMAND, e);
+            resolver::storage_error(e).render(stderr, COMMAND);
         }
         other => {
             let _ = writeln!(stderr, "tk sync: {other}");
