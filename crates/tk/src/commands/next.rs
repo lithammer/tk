@@ -14,11 +14,9 @@ use std::io::Write;
 
 use clap::Args as ClapArgs;
 
-use crate::cli::{Deps, Exit};
+use crate::cli::{CommandError, Deps, Exit};
 use crate::commands::{resolver, scope};
 use crate::store::repository::next::{self, NextError, NextOptions, NextScope, Rationale};
-
-const COMMAND: &str = "next";
 
 /// Flags for `tk next`.
 #[derive(Debug, ClapArgs)]
@@ -30,29 +28,15 @@ pub struct Args {
     pub epic: Option<String>,
 }
 
-#[must_use]
-pub fn run(deps: Deps<'_>, args: Args) -> Exit {
-    let Deps {
-        stdout,
-        stderr,
-        runner,
-        clock,
-        cwd,
-        ..
-    } = deps;
+/// Run `tk next [epic]`. On failure returns the [`CommandError`] for the
+/// dispatch seam to frame as `tk next:` (ADR-0032). The Effective Priority
+/// rationale is informational stderr on success, so it is written directly,
+/// not framed as a diagnostic.
+pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
+    let store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
+        .map_err(|err| resolver::open_error(&err))?;
 
-    let store = match resolver::open_for_command(runner, cwd, clock) {
-        Ok(s) => s,
-        Err(err) => {
-            resolver::render_open_error(stderr, COMMAND, &err);
-            return Exit::Failure;
-        }
-    };
-
-    let scope_epic = match scope::resolve(&store, stderr, COMMAND, args.epic.as_deref()) {
-        Ok(scope) => scope,
-        Err(exit) => return exit,
-    };
+    let scope_epic = scope::resolve(&store, args.epic.as_deref())?;
 
     let next_scope = match &scope_epic {
         None => NextScope::None,
@@ -61,31 +45,20 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
 
     match next::next_ready_ticket(&store, NextOptions { scope: next_scope }) {
         Ok(Some(ticket)) => {
-            let _ = writeln!(stdout, "{}", ticket.display_id);
+            let _ = writeln!(deps.stdout, "{}", ticket.display_id);
             if let Some(rationale) = ticket.rationale.as_ref() {
-                render_rationale(stderr, &ticket.display_id, rationale);
+                render_rationale(deps.stderr, &ticket.display_id, rationale);
             }
-            Exit::Ok
+            Ok(Exit::Ok)
         }
-        Ok(None) => {
-            match &scope_epic {
-                Some(epic) => {
-                    let _ = writeln!(
-                        stderr,
-                        "tk next: no ready Tickets in Epic {}",
-                        epic.display_id
-                    );
-                }
-                None => {
-                    let _ = writeln!(stderr, "tk next: no ready Tickets");
-                }
-            }
-            Exit::Failure
-        }
-        Err(NextError::Storage(err)) => {
-            resolver::render_storage_error(stderr, COMMAND, &err);
-            Exit::Failure
-        }
+        Ok(None) => match &scope_epic {
+            Some(epic) => Err(CommandError::failure(format!(
+                "no ready Tickets in Epic {}",
+                epic.display_id
+            ))),
+            None => Err(CommandError::failure("no ready Tickets")),
+        },
+        Err(NextError::Storage(err)) => Err(resolver::storage_error(&err)),
     }
 }
 
@@ -192,6 +165,21 @@ mod tests {
         );
     }
 
+    /// Drive `run` and frame any returned error as the dispatch seam does
+    /// (ADR-0032: `tk next: <body>`). A success passes its `Exit` through; the
+    /// rationale line `run` writes to stderr on success is preserved.
+    fn run_rendered(h: &mut Harness<'_>, args: Args) -> Exit {
+        let mut deps = h.deps();
+        match run(&mut deps, args) {
+            Ok(exit) => exit,
+            Err(err) => {
+                let exit = err.exit();
+                err.render(deps.stderr, "next");
+                exit
+            }
+        }
+    }
+
     fn seed_epic(conn: &Connection, id: &str, display: &str, created_seq: i64) {
         insert_fixture_item(
             conn,
@@ -246,7 +234,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_open(&h, &store);
-        let code = run(h.deps(), args(None));
+        let code = run_rendered(&mut h, args(None));
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk next: no ready Tickets"));
@@ -264,7 +252,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_open(&h, &store);
-        let code = run(h.deps(), args(None));
+        let code = run_rendered(&mut h, args(None));
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert_eq!(stdout.trim(), "tk-2");
@@ -283,7 +271,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_open(&h, &store);
-        let code = run(h.deps(), args(None));
+        let code = run_rendered(&mut h, args(None));
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         let stderr = String::from_utf8(h.stderr).unwrap();
@@ -306,7 +294,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_open(&h, &store);
-        let code = run(h.deps(), args(Some("tk-1")));
+        let code = run_rendered(&mut h, args(Some("tk-1")));
         assert_eq!(code, Exit::Ok);
         // tk-3 outranks tk-2 globally, but the Epic Scope confines selection.
         assert_eq!(String::from_utf8(h.stdout).unwrap().trim(), "tk-2");
@@ -327,7 +315,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_open(&h, &store);
-        let code = run(h.deps(), args(Some("tk-1")));
+        let code = run_rendered(&mut h, args(Some("tk-1")));
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(
@@ -343,7 +331,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_open(&h, &store);
-        let code = run(h.deps(), args(Some("vanished")));
+        let code = run_rendered(&mut h, args(Some("vanished")));
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(
@@ -362,7 +350,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_open(&h, &store);
-        let code = run(h.deps(), args(Some("tk-1")));
+        let code = run_rendered(&mut h, args(Some("tk-1")));
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(

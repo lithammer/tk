@@ -245,14 +245,20 @@ pub fn run_argv(mut deps: Deps<'_>, argv: &[String]) -> std::io::Result<Exit> {
         Command::Unpark(args) => Ok(commands::unpark::run(deps, args)),
         Command::Init(args) => Ok(commands::init::run(deps, args)),
         Command::List(args) => Ok(commands::list::run(deps, args)),
-        Command::Next(args) => Ok(commands::next::run(deps, args)),
+        Command::Next(args) => {
+            let result = commands::next::run(&mut deps, args);
+            Ok(finish(&mut deps, "next", result))
+        }
         Command::Show(args) => {
             // Converted to the ADR-0032 seam: the handler returns the
             // diagnostic, `finish` frames it.
             let result = commands::show::run(&mut deps, args);
             Ok(finish(&mut deps, "show", result))
         }
-        Command::Search(args) => Ok(commands::search::run(deps, args)),
+        Command::Search(args) => {
+            let result = commands::search::run(&mut deps, args);
+            Ok(finish(&mut deps, "search", result))
+        }
         Command::Grep(args) => Ok(commands::grep::run(deps, args)),
         Command::Update(args) => Ok(commands::update::run(deps, args)),
         Command::Start(args) => Ok(commands::start::run(deps, args)),

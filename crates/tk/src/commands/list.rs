@@ -85,7 +85,8 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
         }
     };
 
-    let scope_epic = match scope::resolve(&store, stderr, COMMAND, args.epic_id.as_deref()) {
+    let scope_epic = match scope::resolve_rendered(&store, stderr, COMMAND, args.epic_id.as_deref())
+    {
         Ok(scope) => scope,
         Err(exit) => return exit,
     };
