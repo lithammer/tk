@@ -311,8 +311,14 @@ pub fn run_argv(mut deps: Deps<'_>, argv: &[String]) -> std::io::Result<Exit> {
             let result = commands::unblock::run(&mut deps, args);
             Ok(finish(&mut deps, "unblock", result))
         }
-        Command::Prime(args) => Ok(commands::prime::run(deps, args)),
-        Command::Manpage(args) => Ok(commands::manpage::run(deps, args)),
+        Command::Prime(args) => {
+            let result = commands::prime::run(&mut deps, args);
+            Ok(finish(&mut deps, "prime", result))
+        }
+        Command::Manpage(args) => {
+            let result = commands::manpage::run(&mut deps, args);
+            Ok(finish(&mut deps, "manpage", result))
+        }
         Command::SelfUpdate(args) => {
             let result = commands::self_update::run(&mut deps, args);
             Ok(finish(&mut deps, "self-update", result))

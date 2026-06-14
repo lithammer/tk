@@ -8,7 +8,7 @@
 
 use clap::Args as ClapArgs;
 
-use crate::cli::{Deps, Exit};
+use crate::cli::{CommandError, Deps, Exit};
 use crate::commands::resolver;
 
 /// Embedded briefing. CR bytes are forbidden inside the file (LF only) and
@@ -30,22 +30,16 @@ fn briefing() -> String {
     out
 }
 
-#[must_use]
-pub fn run(deps: Deps<'_>, _args: Args) -> Exit {
-    let Deps {
-        stdout,
-        runner,
-        clock,
-        cwd,
-        ..
-    } = deps;
-    // Prime prints only when a Repository Store is initialized here; with no
-    // openable store it exits 0 silently so a global agent hook stays quiet in
-    // any directory (ADR-0020).
-    if resolver::open_for_command(runner, cwd, clock).is_ok() {
-        let _ = stdout.write_all(briefing().as_bytes());
+/// Run `tk prime`. Never fails: with no openable Repository Store it exits 0
+/// silently so a global agent hook stays quiet in any directory (ADR-0020), so
+/// it never returns a [`CommandError`] — the signature matches the seam only
+/// for dispatch uniformity.
+pub fn run(deps: &mut Deps<'_>, _args: Args) -> Result<Exit, CommandError> {
+    // Prime prints only when a Repository Store is initialized here.
+    if resolver::open_for_command(deps.runner, deps.cwd, deps.clock).is_ok() {
+        let _ = deps.stdout.write_all(briefing().as_bytes());
     }
-    Exit::Ok
+    Ok(Exit::Ok)
 }
 
 #[cfg(test)]
@@ -109,7 +103,7 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let mut stdin = std::io::Cursor::new(Vec::new());
-        let deps = Deps {
+        let mut deps = Deps {
             stdout: &mut stdout,
             stderr: &mut stderr,
             stdin: &mut stdin,
@@ -120,7 +114,7 @@ mod tests {
             styler: Styler::plain(),
         };
 
-        assert_eq!(run(deps, Args {}), Exit::Ok);
+        assert_eq!(run(&mut deps, Args {}).unwrap(), Exit::Ok);
         assert!(
             String::from_utf8(stdout)
                 .unwrap()
