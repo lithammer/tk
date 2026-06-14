@@ -8,13 +8,12 @@
 //! never deletes an existing target on failure; `tk.1` is recreated by
 //! the rename step instead.
 
-use std::io::Write;
 use std::path::Path;
 
 use clap::Args as ClapArgs;
 use rand::Rng;
 
-use crate::cli::{Deps, Exit};
+use crate::cli::{CommandError, Deps, Exit};
 use crate::platform;
 
 const MANPAGE_BYTES: &[u8] = include_bytes!("tk.1");
@@ -28,8 +27,7 @@ pub struct Args {
     pub install: bool,
 }
 
-#[must_use]
-pub fn run(deps: Deps<'_>, args: Args) -> Exit {
+pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     // CR-byte guard at startup so a future change to tk.1 can't slip in
     // CRLF endings unnoticed.
     debug_assert!(
@@ -41,38 +39,27 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
         return install(deps);
     }
     let _ = deps.stdout.write_all(MANPAGE_BYTES);
-    Exit::Ok
+    Ok(Exit::Ok)
 }
 
-fn install(deps: Deps<'_>) -> Exit {
-    let Deps {
-        stdout,
-        stderr,
-        rng,
-        ..
-    } = deps;
-
+fn install(deps: &mut Deps<'_>) -> Result<Exit, CommandError> {
     if platform::IS_WINDOWS {
-        let _ = writeln!(stderr, "tk manpage: skipping install on Windows");
-        return Exit::Ok;
+        // Informational success, not a diagnostic: written straight to stderr
+        // on the Ok path, so it keeps its own `tk manpage:` prefix (the seam
+        // frames only Err).
+        let _ = writeln!(deps.stderr, "tk manpage: skipping install on Windows");
+        return Ok(Exit::Ok);
     }
 
-    let exe_path = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(err) => {
-            let _ = writeln!(
-                stderr,
-                "tk manpage: install failed: cannot resolve executable path: {err}"
-            );
-            return Exit::Failure;
-        }
-    };
+    let exe_path = std::env::current_exe().map_err(|err| {
+        CommandError::failure(format!(
+            "install failed: cannot resolve executable path: {err}"
+        ))
+    })?;
     let Some(exe_dir) = exe_path.parent() else {
-        let _ = writeln!(
-            stderr,
-            "tk manpage: install failed: cannot resolve executable path: executable path has no parent directory"
-        );
-        return Exit::Failure;
+        return Err(CommandError::failure(
+            "install failed: cannot resolve executable path: executable path has no parent directory",
+        ));
     };
 
     // Install prefix is the parent of the executable's directory
@@ -85,35 +72,35 @@ fn install(deps: Deps<'_>) -> Exit {
     let target_path = target_dir.join("tk.1");
 
     if let Err(err) = std::fs::create_dir_all(&target_dir) {
-        render_install_failure(stderr, &target_path, &err.to_string());
-        return Exit::Failure;
+        return Err(install_failure(&target_path, &err.to_string()));
     }
 
-    let stage_name = render_stage_name(rng);
+    let stage_name = render_stage_name(deps.rng);
     let stage_path = target_dir.join(&stage_name);
 
     if let Err(err) = std::fs::write(&stage_path, MANPAGE_BYTES) {
         let _ = std::fs::remove_file(&stage_path);
-        render_install_failure(stderr, &target_path, &err.to_string());
-        return Exit::Failure;
+        return Err(install_failure(&target_path, &err.to_string()));
     }
 
     if let Err(err) = std::fs::rename(&stage_path, &target_path) {
         let _ = std::fs::remove_file(&stage_path);
-        render_install_failure(stderr, &target_path, &err.to_string());
-        return Exit::Failure;
+        return Err(install_failure(&target_path, &err.to_string()));
     }
 
-    let _ = writeln!(stdout, "Installed manpage at {}", target_path.display());
-    Exit::Ok
+    let _ = writeln!(
+        deps.stdout,
+        "Installed manpage at {}",
+        target_path.display()
+    );
+    Ok(Exit::Ok)
 }
 
-fn render_install_failure<W: Write + ?Sized>(stderr: &mut W, path: &Path, reason: &str) {
-    let _ = writeln!(
-        stderr,
-        "tk manpage: install failed at {}: {reason}; existing file (if any) left unchanged",
+fn install_failure(path: &Path, reason: &str) -> CommandError {
+    CommandError::failure(format!(
+        "install failed at {}: {reason}; existing file (if any) left unchanged",
         path.display()
-    );
+    ))
 }
 
 /// Build the hex-suffixed staged filename. 64 random bits make concurrent
@@ -148,19 +135,17 @@ mod tests {
         let runner = FakeRunner::new();
         let clock = FakeClock::new(0);
         let mut rng = StdRng::seed_from_u64(0);
-        let code = run(
-            Deps {
-                stdout: &mut stdout,
-                stderr: &mut stderr,
-                stdin: &mut stdin,
-                runner: &runner,
-                clock: &clock,
-                rng: &mut rng,
-                cwd: cwd.as_path(),
-                styler: Styler::plain(),
-            },
-            Args { install: false },
-        );
+        let mut deps = Deps {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+            stdin: &mut stdin,
+            runner: &runner,
+            clock: &clock,
+            rng: &mut rng,
+            cwd: cwd.as_path(),
+            styler: Styler::plain(),
+        };
+        let code = run(&mut deps, Args { install: false }).unwrap();
         assert_eq!(code, Exit::Ok);
         assert_eq!(stdout.as_slice(), MANPAGE_BYTES);
         assert!(stderr.is_empty());

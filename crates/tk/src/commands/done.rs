@@ -6,7 +6,7 @@
 
 use clap::Args as ClapArgs;
 
-use crate::cli::{Deps, Exit};
+use crate::cli::{CommandError, Deps, Exit};
 use crate::commands::lifecycle::{self, SuccessLabel};
 use crate::domain::status::ItemStatus;
 
@@ -24,24 +24,15 @@ const SUCCESS: SuccessLabel = SuccessLabel {
     epic: "Done Epic: ",
 };
 
-#[must_use]
-pub fn run(deps: Deps<'_>, args: Args) -> Exit {
+pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     // Trim first, then reject empty: the column invariant is "absent = NULL,
     // present = non-empty" (ADR-0023), so a whitespace-only `-m` is a no-op
     // dressed as a reason and must fail loudly rather than store blank.
     let closing_reason = match args.message.as_deref().map(str::trim) {
         Some("") => {
-            let _ = writeln!(deps.stderr, "tk done: closing reason must not be empty");
-            return Exit::Failure;
+            return Err(CommandError::failure("closing reason must not be empty"));
         }
         other => other,
     };
-    lifecycle::transition(
-        deps,
-        "done",
-        &args.id,
-        ItemStatus::Done,
-        SUCCESS,
-        closing_reason,
-    )
+    lifecycle::transition(deps, &args.id, ItemStatus::Done, SUCCESS, closing_reason)
 }

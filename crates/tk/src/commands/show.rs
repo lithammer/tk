@@ -25,7 +25,7 @@ use std::io::Write;
 
 use clap::Args as ClapArgs;
 
-use crate::cli::{self, Deps, Exit};
+use crate::cli::{self, CommandError, Deps, Exit};
 use crate::commands::item_header::{self, Header};
 use crate::commands::resolver;
 use crate::domain::item_class::ItemClass;
@@ -33,8 +33,6 @@ use crate::render::palette;
 use crate::render::sanitize;
 use crate::render::styler::SubStyler;
 use crate::store::repository::show::{self, ExternalBlockerSummary, ItemDetail, ItemSummary};
-
-const COMMAND: &str = "show";
 
 /// Flags for `tk show`.
 #[derive(Debug, ClapArgs)]
@@ -44,50 +42,33 @@ pub struct Args {
     pub id: String,
 }
 
-/// Run `tk show <id>` against the supplied `Deps`. Returns the process exit code.
-#[must_use]
-pub fn run(deps: Deps<'_>, args: Args) -> Exit {
-    let Deps {
-        stdout,
-        stderr,
-        runner,
-        clock,
-        cwd,
-        styler,
-        ..
-    } = deps;
-
-    let store = match resolver::open_for_command(runner, cwd, clock) {
-        Ok(store) => store,
-        Err(err) => {
-            resolver::render_open_error(stderr, COMMAND, &err);
-            return Exit::Failure;
-        }
-    };
+/// Run `tk show <id>`. On failure returns the [`CommandError`] for the dispatch
+/// seam to frame as `tk show:` (ADR-0032); on success returns the process
+/// [`Exit`].
+pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
+    let store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
+        .map_err(|err| resolver::open_error(&err))?;
 
     let detail = match show::show_item(&store, &args.id) {
         Ok(Some(detail)) => detail,
+        // The not-found phrasing is `tk show`'s own, so it lives here rather
+        // than in a shared resolver helper (the body carries no prefix).
         Ok(None) => {
-            let _ = writeln!(
-                stderr,
-                "tk {COMMAND}: '{id}' is not a known Display ID or Alias",
+            return Err(CommandError::failure(format!(
+                "'{id}' is not a known Display ID or Alias",
                 id = args.id
-            );
-            return Exit::Failure;
+            )));
         }
-        Err(err) => {
-            resolver::render_storage_error(stderr, COMMAND, &err);
-            return Exit::Failure;
-        }
+        Err(err) => return Err(resolver::storage_error(&err)),
     };
 
-    let sub = styler.for_stdout();
-    if let Err(err) = render(stdout, &detail, sub) {
+    let sub = deps.styler.for_stdout();
+    if let Err(err) = render(deps.stdout, &detail, sub) {
         // A closed pager (`tk show | head`) is success; other write errors are
         // a diagnosed failure (shared policy).
-        return cli::exit_for_write_error(&err, stderr, COMMAND);
+        return cli::write_error(&err);
     }
-    Exit::Ok
+    Ok(Exit::Ok)
 }
 
 fn render<W: Write + ?Sized>(
@@ -348,6 +329,22 @@ mod tests {
         }
     }
 
+    /// Drive `run` and frame any returned error exactly as the dispatch seam
+    /// does (ADR-0032: `tk show: <body>`), so a test asserts the framed bytes
+    /// the user sees. A success passes its `Exit` straight through, writing no
+    /// stderr.
+    fn run_rendered(h: &mut Harness<'_>, args: Args) -> Exit {
+        let mut deps = h.deps();
+        match run(&mut deps, args) {
+            Ok(exit) => exit,
+            Err(err) => {
+                let exit = err.exit();
+                err.render(deps.stderr, "show");
+                exit
+            }
+        }
+    }
+
     #[test]
     fn broken_pipe_to_stdout_is_success() {
         // `tk show ID | head` (reader quits early) is success, not Failure: the
@@ -382,7 +379,7 @@ mod tests {
         let mut stdout = BrokenPipe;
         let mut stderr: Vec<u8> = Vec::new();
         let mut stdin = std::io::Cursor::new(Vec::new());
-        let deps = Deps {
+        let mut deps = Deps {
             stdout: &mut stdout,
             stderr: &mut stderr,
             stdin: &mut stdin,
@@ -392,7 +389,8 @@ mod tests {
             cwd: &cwd_path,
             styler: Styler::plain(),
         };
-        let code = run(deps, Args { id: "tk-1".into() });
+        let code = run(&mut deps, Args { id: "tk-1".into() })
+            .expect("a broken pipe is success, not an error");
         assert_eq!(code, Exit::Ok, "a broken pipe is success, not failure");
         assert!(
             stderr.is_empty(),
@@ -406,7 +404,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(h.deps(), Args { id: "tk-1".into() });
+        let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(
@@ -422,8 +420,8 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
+        let code = run_rendered(
+            &mut h,
             Args {
                 id: "tk-9999".into(),
             },
@@ -453,7 +451,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(h.deps(), Args { id: "tk-1".into() });
+        let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         // Status glyph + Display ID + title on the label line.
@@ -495,7 +493,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(h.deps(), Args { id: "tk-1".into() });
+        let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         // The facet bar opens at the Kind — no Priority token — and the
@@ -532,7 +530,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(h.deps(), Args { id: "tk-1".into() });
+        let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(
@@ -578,7 +576,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(h.deps(), Args { id: "tk-1".into() });
+        let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         // Facet bar carries the capitalized `Epic` token (asserted on the
@@ -623,7 +621,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(h.deps(), Args { id: "tk-1".into() });
+        let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(stdout.contains("Fixed in PR #12\n"), "stdout={stdout:?}");
@@ -663,7 +661,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(h.deps(), Args { id: "tk-1".into() });
+        let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(
@@ -693,7 +691,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let _ = run(h.deps(), Args { id: "tk-1".into() });
+        let _ = run_rendered(&mut h, Args { id: "tk-1".into() });
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(!stdout.contains("CLOSING REASON"), "stdout={stdout:?}");
     }
@@ -815,7 +813,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let _ = run(h.deps(), Args { id: "tk-1".into() });
+        let _ = run_rendered(&mut h, Args { id: "tk-1".into() });
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(stdout.contains("DESCRIPTION"));
         assert!(stdout.contains("Multi-line\nbody\n"));

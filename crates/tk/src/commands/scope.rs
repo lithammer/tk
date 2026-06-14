@@ -9,9 +9,7 @@
 //! The command layer owns Scope resolution (per CONTEXT.md); the store-facing
 //! selection accepts an already-resolved Epic id.
 
-use std::io::Write;
-
-use crate::cli::Exit;
+use crate::cli::CommandError;
 use crate::commands::resolver::{self, ResolveEpicError};
 use crate::store::repository::{ResolvedItemRefWithDisplay, Store};
 
@@ -20,38 +18,27 @@ use crate::store::repository::{ResolvedItemRefWithDisplay, Store};
 /// Epic without the agent restating it on each call.
 const SCOPE_ENV: &str = "TK_SCOPE";
 
-/// Resolve the active Scope for a command.
+/// Resolve the active Scope for a command (ADR-0032).
 ///
 /// Reads the `<epic-id>` `arg` if present, else `TK_SCOPE`, else `None`, then
-/// resolves Epic-only: a miss or a non-Epic is rendered to `stderr` with the
-/// `tk <command>:` prefix and returned as `Err(Exit::Failure)` for the caller
-/// to propagate. `Ok(None)` means no Scope was supplied.
-pub fn resolve<W: Write + ?Sized>(
+/// resolves Epic-only: a miss or a non-Epic becomes a [`CommandError`] for the
+/// dispatch seam to frame. `Ok(None)` means no Scope was supplied.
+pub fn resolve(
     store: &Store,
-    stderr: &mut W,
-    command: &str,
     arg: Option<&str>,
-) -> Result<Option<ResolvedItemRefWithDisplay>, Exit> {
+) -> Result<Option<ResolvedItemRefWithDisplay>, CommandError> {
     let Some(value) = effective_value(arg, env_value().as_deref()) else {
         return Ok(None);
     };
     match resolver::resolve_epic_with_display(store, &value) {
         Ok(epic) => Ok(Some(epic)),
-        Err(ResolveEpicError::NotFound) => {
-            let _ = writeln!(
-                stderr,
-                "tk {command}: scope '{value}' is not a known Display ID or Alias"
-            );
-            Err(Exit::Failure)
-        }
-        Err(ResolveEpicError::NotAnEpic) => {
-            let _ = writeln!(stderr, "tk {command}: scope '{value}' is not an Epic");
-            Err(Exit::Failure)
-        }
-        Err(ResolveEpicError::Storage(err)) => {
-            resolver::render_storage_error(stderr, command, &err);
-            Err(Exit::Failure)
-        }
+        Err(ResolveEpicError::NotFound) => Err(CommandError::failure(format!(
+            "scope '{value}' is not a known Display ID or Alias"
+        ))),
+        Err(ResolveEpicError::NotAnEpic) => Err(CommandError::failure(format!(
+            "scope '{value}' is not an Epic"
+        ))),
+        Err(ResolveEpicError::Storage(err)) => Err(resolver::storage_error(&err)),
     }
 }
 

@@ -1,5 +1,13 @@
 # Keep user-visible message constants verbatim, not generated
 
+> **Amended by ADR-0032.** The grep-able unit narrowed from the full line to the
+> message *body*: the `tk <command>:` frame is now synthesized once at the
+> dispatch seam, and the verbatim literal lives in each typed error's
+> `#[error("…")]` (the `messages` module described below no longer exists). The
+> principle — every stable user-visible line findable by exact-string search —
+> survives at body granularity.
+
+
 The per-command message families in the `messages` module —
 `<cmd>_missing_store`, `<cmd>_out_of_memory`, `<cmd>_store_busy_retry`,
 `<cmd>_id_not_found_prefix`, and the byte-identical

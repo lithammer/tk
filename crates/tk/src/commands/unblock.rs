@@ -2,11 +2,9 @@
 
 use clap::Args as ClapArgs;
 
-use crate::cli::{Deps, Exit};
+use crate::cli::{CommandError, Deps, Exit};
 use crate::commands::resolver;
 use crate::store::repository::dependency::{self, DependencyEdge, RemoveDependencyError};
-
-const COMMAND: &str = "unblock";
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
@@ -18,64 +16,38 @@ pub struct Args {
     pub blocking: String,
 }
 
-#[must_use]
-pub fn run(deps: Deps<'_>, args: Args) -> Exit {
-    let Deps {
-        stdout,
-        stderr,
-        runner,
-        clock,
-        cwd,
-        ..
-    } = deps;
-
-    let mut store = match resolver::open_for_command(runner, cwd, clock) {
-        Ok(s) => s,
-        Err(err) => {
-            resolver::render_open_error(stderr, COMMAND, &err);
-            return Exit::Failure;
-        }
-    };
+pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
+    let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
+        .map_err(|err| resolver::open_error(&err))?;
 
     let blocked = match resolver::resolve(&store, &args.blocked) {
         Ok(r) => r,
         Err(resolver::ResolveError::NotFound) => {
-            let _ = writeln!(
-                stderr,
-                "tk unblock: blocked '{}' is not a known Display ID or Alias",
+            return Err(CommandError::failure(format!(
+                "blocked '{}' is not a known Display ID or Alias",
                 args.blocked
-            );
-            return Exit::Failure;
+            )));
         }
-        Err(resolver::ResolveError::Storage(err)) => {
-            resolver::render_storage_error(stderr, COMMAND, &err);
-            return Exit::Failure;
-        }
+        Err(resolver::ResolveError::Storage(err)) => return Err(resolver::storage_error(&err)),
     };
     let blocking = match resolver::resolve(&store, &args.blocking) {
         Ok(r) => r,
         Err(resolver::ResolveError::NotFound) => {
-            let _ = writeln!(
-                stderr,
-                "tk unblock: blocking '{}' is not a known Display ID or Alias",
+            return Err(CommandError::failure(format!(
+                "blocking '{}' is not a known Display ID or Alias",
                 args.blocking
-            );
-            return Exit::Failure;
+            )));
         }
-        Err(resolver::ResolveError::Storage(err)) => {
-            resolver::render_storage_error(stderr, COMMAND, &err);
-            return Exit::Failure;
-        }
+        Err(resolver::ResolveError::Storage(err)) => return Err(resolver::storage_error(&err)),
     };
 
     if blocked.id == blocking.id {
-        let _ = writeln!(stderr, "tk unblock: an item cannot block itself");
-        return Exit::Failure;
+        return Err(CommandError::failure("an item cannot block itself"));
     }
 
     match dependency::remove_dependency(
         &mut store,
-        clock,
+        deps.clock,
         DependencyEdge {
             blocked_id: &blocked.id,
             blocking_id: &blocking.id,
@@ -83,23 +55,18 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
     ) {
         Ok(()) => {
             let _ = writeln!(
-                stdout,
+                deps.stdout,
                 "Unblocked: {} no longer blocked by {}",
                 args.blocked, args.blocking
             );
-            Exit::Ok
+            Ok(Exit::Ok)
         }
         Err(RemoveDependencyError::EndpointMissing) => {
-            let _ = writeln!(stderr, "tk unblock: endpoint missing in items table");
-            Exit::Failure
+            Err(CommandError::failure("endpoint missing in items table"))
         }
-        Err(RemoveDependencyError::Sqlite(err)) => {
-            resolver::render_storage_error(stderr, COMMAND, &err);
-            Exit::Failure
-        }
-        Err(RemoveDependencyError::Mutation(err)) => {
-            let _ = writeln!(stderr, "tk unblock: failed to append Mutation: {err}");
-            Exit::Failure
-        }
+        Err(RemoveDependencyError::Sqlite(err)) => Err(resolver::storage_error(&err)),
+        Err(RemoveDependencyError::Mutation(err)) => Err(CommandError::failure(format!(
+            "failed to append Mutation: {err}"
+        ))),
     }
 }

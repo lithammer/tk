@@ -8,18 +8,14 @@
 //! `-P`, and `--no-parent` since they have no Priority and no parent
 //! column.
 
-use std::io::Write;
-
 use clap::Args as ClapArgs;
 
-use crate::cli::{Deps, Exit};
+use crate::cli::{CommandError, Deps, Exit};
 use crate::commands::message::{self, Input as MessageInput};
 use crate::commands::resolver;
 use crate::domain::item_class::ItemClass;
 use crate::domain::priority::Priority;
 use crate::store::repository::update::{self, ParentOp, UpdateRequest};
-
-const COMMAND: &str = "update";
 
 /// Flags for `tk update`.
 #[derive(Debug, ClapArgs)]
@@ -49,28 +45,15 @@ pub struct Args {
     pub no_parent: bool,
 }
 
-#[must_use]
-pub fn run(deps: Deps<'_>, args: Args) -> Exit {
-    let Deps {
-        stdout,
-        stderr,
-        stdin,
-        runner,
-        clock,
-        cwd,
-        ..
-    } = deps;
-
+pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     let has_message_input = !args.message.is_empty() || args.file.is_some();
     let has_parent_op = args.parent.is_some() || args.no_parent;
 
     if !has_message_input && args.priority.is_none() && !has_parent_op {
-        let _ = writeln!(
-            stderr,
-            "tk update: no changes requested; supply at least one of \
-             -m / -F / -p / -P / --no-parent"
-        );
-        return Exit::Usage;
+        return Err(CommandError::usage(
+            "no changes requested; supply at least one of \
+             -m / -F / -p / -P / --no-parent",
+        ));
     }
 
     let parsed_msg = if has_message_input {
@@ -79,52 +62,33 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
         } else {
             MessageInput::Paragraphs(&args.message)
         };
-        match message::read_input(input, cwd, stdin) {
-            Ok(parsed) => Some(parsed),
-            Err(err) => {
-                render_message_error(stderr, &err);
-                return Exit::Failure;
-            }
-        }
+        Some(message::read_input(input, deps.cwd, deps.stdin).map_err(|err| message_error(&err))?)
     } else {
         None
     };
 
-    let mut store = match resolver::open_for_command(runner, cwd, clock) {
-        Ok(s) => s,
-        Err(err) => {
-            resolver::render_open_error(stderr, COMMAND, &err);
-            return Exit::Failure;
-        }
-    };
+    let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
+        .map_err(|err| resolver::open_error(&err))?;
 
     let resolved = match resolver::resolve(&store, &args.id) {
         Ok(r) => r,
         Err(resolver::ResolveError::NotFound) => {
-            let _ = writeln!(
-                stderr,
-                "tk update: '{id}' is not a known Display ID or Alias",
+            return Err(CommandError::failure(format!(
+                "'{id}' is not a known Display ID or Alias",
                 id = args.id
-            );
-            return Exit::Failure;
+            )));
         }
-        Err(resolver::ResolveError::Storage(err)) => {
-            resolver::render_storage_error(stderr, COMMAND, &err);
-            return Exit::Failure;
-        }
+        Err(resolver::ResolveError::Storage(err)) => return Err(resolver::storage_error(&err)),
     };
 
     if resolved.item_class == ItemClass::Epic {
         if args.priority.is_some() {
-            let _ = writeln!(stderr, "tk update: --priority cannot be set on an Epic");
-            return Exit::Usage;
+            return Err(CommandError::usage("--priority cannot be set on an Epic"));
         }
         if has_parent_op {
-            let _ = writeln!(
-                stderr,
-                "tk update: --parent / --no-parent cannot be set on an Epic"
-            );
-            return Exit::Usage;
+            return Err(CommandError::usage(
+                "--parent / --no-parent cannot be set on an Epic",
+            ));
         }
     }
 
@@ -132,19 +96,17 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
         match resolver::resolve_epic(&store, arg) {
             Ok(epic) => Some(epic),
             Err(resolver::ResolveEpicError::NotFound) => {
-                let _ = writeln!(
-                    stderr,
-                    "tk update: parent '{arg}' is not a known Display ID or Alias"
-                );
-                return Exit::Failure;
+                return Err(CommandError::failure(format!(
+                    "parent '{arg}' is not a known Display ID or Alias"
+                )));
             }
             Err(resolver::ResolveEpicError::NotAnEpic) => {
-                let _ = writeln!(stderr, "tk update: parent '{arg}' is not an Epic");
-                return Exit::Failure;
+                return Err(CommandError::failure(format!(
+                    "parent '{arg}' is not an Epic"
+                )));
             }
             Err(resolver::ResolveEpicError::Storage(err)) => {
-                resolver::render_storage_error(stderr, COMMAND, &err);
-                return Exit::Failure;
+                return Err(resolver::storage_error(&err));
             }
         }
     } else {
@@ -166,63 +128,48 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
         parent: parent_op,
     };
 
-    match update::update_item(&mut store, clock, req) {
+    match update::update_item(&mut store, deps.clock, req) {
         Ok(updated) => {
             let label = match updated.item_class {
                 ItemClass::Ticket => "Updated Ticket",
                 ItemClass::Epic => "Updated Epic",
             };
             let _ = writeln!(
-                stdout,
+                deps.stdout,
                 "{label}: {} - {}",
                 updated.display_id, updated.title
             );
-            Exit::Ok
+            Ok(Exit::Ok)
         }
-        Err(update::UpdateError::NotFound) => {
-            let _ = writeln!(
-                stderr,
-                "tk update: '{id}' is not a known Display ID or Alias",
-                id = args.id
-            );
-            Exit::Failure
-        }
-        Err(update::UpdateError::PriorityOnTriage) => {
-            let _ = writeln!(
-                stderr,
-                "tk update: '{id}' is in triage; set a Priority by accepting it with \
-                 'tk accept {id} --priority Pn'",
-                id = args.id
-            );
-            Exit::Failure
-        }
-        Err(update::UpdateError::Sqlite(err)) => {
-            resolver::render_storage_error(stderr, COMMAND, &err);
-            Exit::Failure
-        }
-        Err(update::UpdateError::Mutation(err)) => {
-            let _ = writeln!(stderr, "tk update: failed to append Mutation: {err}");
-            Exit::Failure
-        }
+        Err(update::UpdateError::NotFound) => Err(CommandError::failure(format!(
+            "'{id}' is not a known Display ID or Alias",
+            id = args.id
+        ))),
+        Err(update::UpdateError::PriorityOnTriage) => Err(CommandError::failure(format!(
+            "'{id}' is in triage; set a Priority by accepting it with \
+             'tk accept {id} --priority Pn'",
+            id = args.id
+        ))),
+        Err(update::UpdateError::Sqlite(err)) => Err(resolver::storage_error(&err)),
+        Err(update::UpdateError::Mutation(err)) => Err(CommandError::failure(format!(
+            "failed to append Mutation: {err}"
+        ))),
     }
 }
 
-fn render_message_error<W: Write + ?Sized>(stderr: &mut W, err: &message::ReadError) {
+fn message_error(err: &message::ReadError) -> CommandError {
     match err {
         message::ReadError::Parse(message::ParseError::Empty) => {
-            let _ = writeln!(stderr, "tk update: message is empty");
+            CommandError::failure("message is empty")
         }
         message::ReadError::Parse(message::ParseError::NulByte) => {
-            let _ = writeln!(stderr, "tk update: message contains a NUL byte");
+            CommandError::failure("message contains a NUL byte")
         }
         message::ReadError::File { path, source } => {
-            let _ = writeln!(stderr, "tk update: failed to read '{path}': {source}");
+            CommandError::failure(format!("failed to read '{path}': {source}"))
         }
         message::ReadError::Stdin(source) => {
-            let _ = writeln!(
-                stderr,
-                "tk update: failed to read message from stdin: {source}"
-            );
+            CommandError::failure(format!("failed to read message from stdin: {source}"))
         }
     }
 }
@@ -304,6 +251,20 @@ mod tests {
         );
     }
 
+    /// Drive `run` and frame any returned error as the dispatch seam does
+    /// (ADR-0032: `tk update: <body>`), so a test asserts the framed bytes.
+    fn run_rendered(h: &mut Harness<'_>, args: Args) -> Exit {
+        let mut deps = h.deps();
+        match run(&mut deps, args) {
+            Ok(exit) => exit,
+            Err(err) => {
+                let exit = err.exit();
+                err.render(deps.stderr, "update");
+                exit
+            }
+        }
+    }
+
     fn args(id: &str) -> Args {
         Args {
             id: id.to_owned(),
@@ -321,7 +282,7 @@ mod tests {
         seed_store(&store);
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        let code = run(h.deps(), args("tk-1"));
+        let code = run_rendered(&mut h, args("tk-1"));
         assert_eq!(code, Exit::Usage);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk update: no changes requested"));
@@ -351,7 +312,7 @@ mod tests {
         expect_git(&h, &store);
         let mut a = args("tk-1");
         a.priority = Some(crate::domain::priority::Priority::P1);
-        let code = run(h.deps(), a);
+        let code = run_rendered(&mut h, a);
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(
@@ -385,7 +346,7 @@ mod tests {
         expect_git(&h, &store);
         let mut a = args("tk-1");
         a.message = vec!["New title".into(), "New body line".into()];
-        let code = run(h.deps(), a);
+        let code = run_rendered(&mut h, a);
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(stdout.contains("Updated Ticket: tk-1 - New title"));
@@ -422,7 +383,7 @@ mod tests {
         expect_git(&h, &store);
         let mut a = args("tk-1");
         a.priority = Some(Priority::P0);
-        let code = run(h.deps(), a);
+        let code = run_rendered(&mut h, a);
         assert_eq!(code, Exit::Ok);
         let conn = Connection::open(store.db_path()).unwrap();
         let priority: String = conn
@@ -460,7 +421,7 @@ mod tests {
         expect_git(&h, &store);
         let mut a = args("tk-1");
         a.priority = Some(Priority::P0);
-        let code = run(h.deps(), a);
+        let code = run_rendered(&mut h, a);
         assert_eq!(code, Exit::Usage);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk update: --priority cannot be set on an Epic"));
@@ -491,7 +452,7 @@ mod tests {
         expect_git(&h, &store);
         let mut a = args("tk-1");
         a.no_parent = true;
-        let code = run(h.deps(), a);
+        let code = run_rendered(&mut h, a);
         assert_eq!(code, Exit::Usage);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk update: --parent / --no-parent cannot be set on an Epic"));
@@ -506,7 +467,7 @@ mod tests {
         expect_git(&h, &store);
         let mut a = args("tk-9999");
         a.message = vec!["X".into()];
-        let code = run(h.deps(), a);
+        let code = run_rendered(&mut h, a);
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk update: 'tk-9999' is not a known Display ID or Alias"));

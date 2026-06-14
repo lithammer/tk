@@ -2,11 +2,9 @@
 
 use clap::Args as ClapArgs;
 
-use crate::cli::{Deps, Exit};
+use crate::cli::{CommandError, Deps, Exit};
 use crate::commands::resolver;
 use crate::store::repository::dependency::{self, AddDependencyError, DependencyEdge};
-
-const COMMAND: &str = "block";
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
@@ -18,64 +16,38 @@ pub struct Args {
     pub blocking: String,
 }
 
-#[must_use]
-pub fn run(deps: Deps<'_>, args: Args) -> Exit {
-    let Deps {
-        stdout,
-        stderr,
-        runner,
-        clock,
-        cwd,
-        ..
-    } = deps;
-
-    let mut store = match resolver::open_for_command(runner, cwd, clock) {
-        Ok(s) => s,
-        Err(err) => {
-            resolver::render_open_error(stderr, COMMAND, &err);
-            return Exit::Failure;
-        }
-    };
+pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
+    let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
+        .map_err(|err| resolver::open_error(&err))?;
 
     let blocked = match resolver::resolve(&store, &args.blocked) {
         Ok(r) => r,
         Err(resolver::ResolveError::NotFound) => {
-            let _ = writeln!(
-                stderr,
-                "tk block: blocked '{}' is not a known Display ID or Alias",
+            return Err(CommandError::failure(format!(
+                "blocked '{}' is not a known Display ID or Alias",
                 args.blocked
-            );
-            return Exit::Failure;
+            )));
         }
-        Err(resolver::ResolveError::Storage(err)) => {
-            resolver::render_storage_error(stderr, COMMAND, &err);
-            return Exit::Failure;
-        }
+        Err(resolver::ResolveError::Storage(err)) => return Err(resolver::storage_error(&err)),
     };
     let blocking = match resolver::resolve(&store, &args.blocking) {
         Ok(r) => r,
         Err(resolver::ResolveError::NotFound) => {
-            let _ = writeln!(
-                stderr,
-                "tk block: blocking '{}' is not a known Display ID or Alias",
+            return Err(CommandError::failure(format!(
+                "blocking '{}' is not a known Display ID or Alias",
                 args.blocking
-            );
-            return Exit::Failure;
+            )));
         }
-        Err(resolver::ResolveError::Storage(err)) => {
-            resolver::render_storage_error(stderr, COMMAND, &err);
-            return Exit::Failure;
-        }
+        Err(resolver::ResolveError::Storage(err)) => return Err(resolver::storage_error(&err)),
     };
 
     if blocked.id == blocking.id {
-        let _ = writeln!(stderr, "tk block: an item cannot block itself");
-        return Exit::Failure;
+        return Err(CommandError::failure("an item cannot block itself"));
     }
 
     match dependency::add_dependency(
         &mut store,
-        clock,
+        deps.clock,
         DependencyEdge {
             blocked_id: &blocked.id,
             blocking_id: &blocking.id,
@@ -83,52 +55,38 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
     ) {
         Ok(()) => {
             let _ = writeln!(
-                stdout,
+                deps.stdout,
                 "Blocked: {} blocked by {}",
                 args.blocked, args.blocking
             );
-            Exit::Ok
+            Ok(Exit::Ok)
         }
         Err(AddDependencyError::EndpointMissing) => {
-            let _ = writeln!(stderr, "tk block: endpoint missing in items table");
-            Exit::Failure
+            Err(CommandError::failure("endpoint missing in items table"))
         }
-        Err(AddDependencyError::BlockedDone) => {
-            let _ = writeln!(stderr, "tk block: blocked '{}' is done", args.blocked);
-            Exit::Failure
-        }
-        Err(AddDependencyError::BlockingDone) => {
-            let _ = writeln!(stderr, "tk block: blocking '{}' is done", args.blocking);
-            Exit::Failure
-        }
-        Err(AddDependencyError::Cycle) => {
-            let _ = writeln!(stderr, "tk block: dependency cycle");
-            Exit::Failure
-        }
+        Err(AddDependencyError::BlockedDone) => Err(CommandError::failure(format!(
+            "blocked '{}' is done",
+            args.blocked
+        ))),
+        Err(AddDependencyError::BlockingDone) => Err(CommandError::failure(format!(
+            "blocking '{}' is done",
+            args.blocking
+        ))),
+        Err(AddDependencyError::Cycle) => Err(CommandError::failure("dependency cycle")),
         Err(AddDependencyError::BackendBlockedLocalBlocking) => {
-            let _ = writeln!(
-                stderr,
-                "tk block: Backend blocked '{}' cannot depend on Local blocking item '{}'",
+            Err(CommandError::failure(format!(
+                "Backend blocked '{}' cannot depend on Local blocking item '{}'",
                 args.blocked, args.blocking
-            );
-            Exit::Failure
+            )))
         }
-        Err(AddDependencyError::BackendKindMismatch) => {
-            let _ = writeln!(
-                stderr,
-                "tk block: Backend blocked '{}' cannot depend on blocking item '{}' from another Backend kind",
-                args.blocked, args.blocking
-            );
-            Exit::Failure
-        }
-        Err(AddDependencyError::Sqlite(err)) => {
-            resolver::render_storage_error(stderr, COMMAND, &err);
-            Exit::Failure
-        }
-        Err(AddDependencyError::Mutation(err)) => {
-            let _ = writeln!(stderr, "tk block: failed to append Mutation: {err}");
-            Exit::Failure
-        }
+        Err(AddDependencyError::BackendKindMismatch) => Err(CommandError::failure(format!(
+            "Backend blocked '{}' cannot depend on blocking item '{}' from another Backend kind",
+            args.blocked, args.blocking
+        ))),
+        Err(AddDependencyError::Sqlite(err)) => Err(resolver::storage_error(&err)),
+        Err(AddDependencyError::Mutation(err)) => Err(CommandError::failure(format!(
+            "failed to append Mutation: {err}"
+        ))),
     }
 }
 
@@ -209,6 +167,20 @@ mod tests {
         );
     }
 
+    /// Drive `run` and frame any returned error as the dispatch seam does
+    /// (ADR-0032: `tk block: <body>`), so a test asserts the framed bytes.
+    fn run_rendered(h: &mut Harness<'_>, args: Args) -> Exit {
+        let mut deps = h.deps();
+        match run(&mut deps, args) {
+            Ok(exit) => exit,
+            Err(err) => {
+                let exit = err.exit();
+                err.render(deps.stderr, "block");
+                exit
+            }
+        }
+    }
+
     #[test]
     fn block_inserts_dependency_and_renders_confirmation() {
         let store = TmpStore::new("repo");
@@ -240,8 +212,8 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
+        let code = run_rendered(
+            &mut h,
             Args {
                 blocked: "tk-2".into(),
                 blocking: "tk-1".into(),
@@ -272,8 +244,8 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
+        let code = run_rendered(
+            &mut h,
             Args {
                 blocked: "tk-1".into(),
                 blocking: "tk-1".into(),

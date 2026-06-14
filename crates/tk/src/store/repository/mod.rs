@@ -77,7 +77,7 @@ impl Store {
 /// One enum for every non-success path: the expected refusals (no store yet,
 /// foreign file, future schema) that render at exit 1, the forwarded
 /// discovery failure, and the genuine SQLite faults. The command layer picks
-/// the exit code and phrasing per variant (see `resolver::render_open_error`);
+/// the exit code and phrasing per variant (see `resolver::open_error`);
 /// each `#[error]` string is the stable user-facing line (ADR-0017), so an
 /// arg-free renderer can print it directly.
 #[derive(Debug, Error)]
@@ -96,7 +96,7 @@ pub enum OpenError {
     #[error("Repository Store was created by a newer tk version")]
     FromFutureVersion,
     /// A forward migration applied at open failed; the inner SQLite error is
-    /// rendered after this line (see `resolver::render_open_error`) so the
+    /// rendered after this line (see `resolver::open_error`) so the
     /// underlying cause is not lost. Kept distinct from [`Sqlite`] because the
     /// fault is an upgrade failure, not a plain read.
     #[error("failed to apply pending migrations to the Repository Store")]

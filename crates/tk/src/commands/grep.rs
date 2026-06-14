@@ -8,15 +8,13 @@ use std::ops::ControlFlow;
 use clap::Args as ClapArgs;
 use regex::{Regex, RegexBuilder};
 
-use crate::cli::{self, Deps, Exit};
+use crate::cli::{self, CommandError, Deps, Exit};
 use crate::commands::item_header::{self, Header};
 use crate::commands::resolver;
 use crate::render::highlight;
 use crate::render::palette;
 use crate::render::styler::SubStyler;
 use crate::store::repository::grep::{self, GrepItem, ScanError};
-
-const COMMAND: &str = "grep";
 
 /// Flags for `tk grep`.
 ///
@@ -76,44 +74,25 @@ fn build_matcher(pattern: &str, ignore_case: bool, fixed: bool) -> Result<Regex,
         .build()
 }
 
-#[must_use]
-pub fn run(deps: Deps<'_>, args: Args) -> Exit {
-    let Deps {
-        stdout,
-        stderr,
-        runner,
-        clock,
-        cwd,
-        styler,
-        ..
-    } = deps;
-
+/// Run `tk grep <pattern>`. On failure returns the [`CommandError`] for the
+/// dispatch seam to frame as `tk grep:` (ADR-0032); a clean run returns
+/// [`Exit::Ok`] / [`Exit::NoMatch`] per the grep 0/1 overload (ADR-0026).
+pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     // Reject only a truly empty pattern before any store work, mirroring
     // `tk search` (ADR-0026, amended): an empty regex matches every line and
     // would dump the whole store. A whitespace pattern is a valid (if unusual)
-    // needle — `grep`/`ripgrep` match it — so it is not rejected.
+    // needle — `grep`/`ripgrep` match it — so it is not rejected. An empty or
+    // malformed pattern is a usage error (exit 2), surfaced fail-fast.
     if args.pattern.is_empty() {
-        let _ = writeln!(stderr, "tk {COMMAND}: pattern must not be empty");
-        return Exit::Usage;
+        return Err(CommandError::usage("pattern must not be empty"));
     }
 
-    // Compile (and so validate) the pattern before opening the store: a
-    // malformed regex is a usage error, surfaced fail-fast (ADR-0026).
-    let re = match build_matcher(&args.pattern, args.ignore_case, args.fixed) {
-        Ok(re) => re,
-        Err(err) => {
-            let _ = writeln!(stderr, "tk {COMMAND}: invalid pattern: {err}");
-            return Exit::Usage;
-        }
-    };
+    // Compile (and so validate) the pattern before opening the store.
+    let re = build_matcher(&args.pattern, args.ignore_case, args.fixed)
+        .map_err(|err| CommandError::usage(format!("invalid pattern: {err}")))?;
 
-    let store = match resolver::open_for_command(runner, cwd, clock) {
-        Ok(store) => store,
-        Err(err) => {
-            resolver::render_open_error(stderr, COMMAND, &err);
-            return Exit::Failure;
-        }
-    };
+    let store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
+        .map_err(|err| resolver::open_error(&err))?;
 
     // Resolve the per-side context window: `-A`/`-B` override their side of
     // `-C`, which in turn overrides the default-3 (ADR-0026).
@@ -129,7 +108,8 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
     // Stream Items in creation order, rendering each match straight to stdout
     // (one Item in memory). `matched` drives the grep-style 0/1 exit overload;
     // `count` accumulates the matching-item total for `-c`.
-    let out = styler.for_stdout();
+    let out = deps.styler.for_stdout();
+    let stdout = &mut *deps.stdout;
     let mut matched = false;
     let mut count: usize = 0;
     let scan = grep::scan(&store, |item| {
@@ -156,26 +136,23 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
     });
     match scan {
         Ok(()) => {}
-        Err(ScanError::Sql(err)) => {
-            resolver::render_storage_error(stderr, COMMAND, &err);
-            return Exit::Failure;
-        }
+        Err(ScanError::Sql(err)) => return Err(resolver::storage_error(&err)),
         // A write only happens after a block has started, so a broken pipe
         // (`tk grep … | head`) means matches WERE found and piped: the shared
         // policy reports Ok for that and a diagnosed Failure for any other write
         // error (so its exit `1` is never misread as a no-match).
-        Err(ScanError::Write(err)) => return cli::exit_for_write_error(&err, stderr, COMMAND),
+        Err(ScanError::Write(err)) => return cli::write_error(&err),
     }
 
     // `-c` always prints a number (even `0`, like `grep -c`); the 0/1 exit
     // overload below still reports whether anything matched.
     if args.count {
         if let Err(err) = writeln!(stdout, "{count}") {
-            return cli::exit_for_write_error(&err, stderr, COMMAND);
+            return cli::write_error(&err);
         }
     }
 
-    if matched { Exit::Ok } else { Exit::NoMatch }
+    Ok(if matched { Exit::Ok } else { Exit::NoMatch })
 }
 
 /// Default `grep -C` context window, in lines each side of a match (matching
@@ -346,9 +323,6 @@ mod tests {
                 cwd,
             }
         }
-        fn deps(&mut self) -> Deps<'_> {
-            self.deps_with(Styler::plain())
-        }
         fn deps_with(&mut self, styler: Styler) -> Deps<'_> {
             Deps {
                 stdout: &mut self.stdout,
@@ -374,6 +348,27 @@ mod tests {
         );
     }
 
+    /// Drive `run` and frame any returned error as the dispatch seam does
+    /// (ADR-0032: `tk grep: <body>`). A success — including the `Exit::NoMatch`
+    /// half of grep's 0/1 overload — passes through, writing no stderr.
+    fn run_rendered(h: &mut Harness<'_>, args: Args) -> Exit {
+        run_rendered_with(h, Styler::plain(), args)
+    }
+
+    /// [`run_rendered`] with an explicit `Styler` so the colour-output tests can
+    /// exercise `Styler::always()`.
+    fn run_rendered_with(h: &mut Harness<'_>, styler: Styler, args: Args) -> Exit {
+        let mut deps = h.deps_with(styler);
+        match run(&mut deps, args) {
+            Ok(exit) => exit,
+            Err(err) => {
+                let exit = err.exit();
+                err.render(deps.stderr, "grep");
+                exit
+            }
+        }
+    }
+
     #[test]
     fn body_match_renders_a_show_style_block() {
         let store = TmpStore::new("repo");
@@ -395,8 +390,8 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
+        let code = run_rendered(
+            &mut h,
             Args {
                 pattern: "auth".to_owned(),
                 ..Args::default()
@@ -433,8 +428,8 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
+        let code = run_rendered(
+            &mut h,
             Args {
                 pattern: "nonexistent".to_owned(),
                 ..Args::default()
@@ -470,8 +465,8 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
+        let code = run_rendered(
+            &mut h,
             Args {
                 pattern: "MATCHHERE".to_owned(),
                 ..Args::default()
@@ -521,8 +516,8 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
+        let code = run_rendered(
+            &mut h,
             Args {
                 pattern: "match".to_owned(),
                 ..Args::default()
@@ -699,7 +694,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(h.deps(), args);
+        let code = run_rendered(&mut h, args);
         (code, String::from_utf8(h.stdout).unwrap())
     }
 
@@ -889,8 +884,8 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
+        let code = run_rendered(
+            &mut h,
             Args {
                 pattern: "SHARED".to_owned(),
                 count: true,
@@ -973,8 +968,9 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps_with(Styler::always()),
+        let code = run_rendered_with(
+            &mut h,
+            Styler::always(),
             Args {
                 pattern: "NEEDLE".to_owned(),
                 ..Args::default()
@@ -1018,8 +1014,8 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
+        let code = run_rendered(
+            &mut h,
             Args {
                 pattern: "SHARED".to_owned(),
                 ..Args::default()
@@ -1047,8 +1043,8 @@ mod tests {
         // git discovery runs (no expect_git below: an unexpected run would panic).
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        let code = run(
-            h.deps(),
+        let code = run_rendered(
+            &mut h,
             Args {
                 pattern: "a(".to_owned(),
                 ..Args::default()
@@ -1070,8 +1066,8 @@ mod tests {
         // the store is opened (no expect_git: an unexpected run would panic).
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        let code = run(
-            h.deps(),
+        let code = run_rendered(
+            &mut h,
             Args {
                 pattern: String::new(),
                 ..Args::default()
@@ -1132,8 +1128,8 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
+        let code = run_rendered(
+            &mut h,
             Args {
                 pattern: "UNIQUEWORD".to_owned(),
                 ..Args::default()
@@ -1178,8 +1174,8 @@ mod tests {
             let cwd_path = cwd();
             let mut h = Harness::new(&cwd_path);
             expect_git(&h, &store);
-            let code = run(
-                h.deps(),
+            let code = run_rendered(
+                &mut h,
                 Args {
                     pattern: "DONEMARKER".to_owned(),
                     ..Args::default()
@@ -1218,8 +1214,9 @@ mod tests {
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
         let styler = Styler::always();
-        let code = run(
-            h.deps_with(styler),
+        let code = run_rendered_with(
+            &mut h,
+            styler,
             Args {
                 pattern: "auth".to_owned(),
                 ..Args::default()
@@ -1282,8 +1279,9 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps_with(Styler::always()),
+        let code = run_rendered_with(
+            &mut h,
+            Styler::always(),
             Args {
                 pattern: "MARKER".to_owned(),
                 ..Args::default()
@@ -1358,7 +1356,7 @@ mod tests {
         let mut stdout = FailingWriter(std::io::ErrorKind::BrokenPipe);
         let mut stderr: Vec<u8> = Vec::new();
         let mut stdin = std::io::Cursor::new(Vec::new());
-        let deps = Deps {
+        let mut deps = Deps {
             stdout: &mut stdout,
             stderr: &mut stderr,
             stdin: &mut stdin,
@@ -1368,13 +1366,20 @@ mod tests {
             cwd: &cwd_path,
             styler: Styler::plain(),
         };
-        let code = run(
-            deps,
+        let code = match run(
+            &mut deps,
             Args {
                 pattern: "PIPEWORD".to_owned(),
                 ..Args::default()
             },
-        );
+        ) {
+            Ok(exit) => exit,
+            Err(err) => {
+                let exit = err.exit();
+                err.render(deps.stderr, "grep");
+                exit
+            }
+        };
         assert_eq!(
             code,
             Exit::Ok,
@@ -1423,7 +1428,7 @@ mod tests {
         let mut stdout = FailingWriter(std::io::ErrorKind::StorageFull);
         let mut stderr: Vec<u8> = Vec::new();
         let mut stdin = std::io::Cursor::new(Vec::new());
-        let deps = Deps {
+        let mut deps = Deps {
             stdout: &mut stdout,
             stderr: &mut stderr,
             stdin: &mut stdin,
@@ -1433,13 +1438,20 @@ mod tests {
             cwd: &cwd_path,
             styler: Styler::plain(),
         };
-        let code = run(
-            deps,
+        let code = match run(
+            &mut deps,
             Args {
                 pattern: "PIPEWORD".to_owned(),
                 ..Args::default()
             },
-        );
+        ) {
+            Ok(exit) => exit,
+            Err(err) => {
+                let exit = err.exit();
+                err.render(deps.stderr, "grep");
+                exit
+            }
+        };
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(stderr).unwrap();
         assert!(
@@ -1475,8 +1487,8 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
+        let code = run_rendered(
+            &mut h,
             Args {
                 pattern: "EPICWORD".to_owned(),
                 ..Args::default()

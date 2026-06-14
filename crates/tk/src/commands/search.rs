@@ -10,14 +10,12 @@ use std::io::Write;
 
 use clap::Args as ClapArgs;
 
-use crate::cli::{self, Deps, Exit};
+use crate::cli::{self, CommandError, Deps, Exit};
 use crate::commands::item_row::{render_chrome, render_row};
 use crate::commands::resolver;
 use crate::render::styler::SubStyler;
 use crate::store::repository::list::ListRow;
 use crate::store::repository::search;
-
-const COMMAND: &str = "search";
 
 /// Flags for `tk search`.
 #[derive(Debug, ClapArgs)]
@@ -27,48 +25,29 @@ pub struct Args {
     pub query: String,
 }
 
-#[must_use]
-pub fn run(deps: Deps<'_>, args: Args) -> Exit {
-    let Deps {
-        stdout,
-        stderr,
-        runner,
-        clock,
-        cwd,
-        styler,
-        ..
-    } = deps;
-
+/// Run `tk search <query>`. On failure returns the [`CommandError`] for the
+/// dispatch seam to frame as `tk search:` (ADR-0032).
+pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     // Reject only a truly empty query before any store work: `instr` against the
     // empty string matches every row and would dump the whole store. A
     // whitespace query is a valid (if unusual) literal substring — `grep`/
-    // `ripgrep` match it — so it is not rejected (ADR-0026, amended).
+    // `ripgrep` match it — so it is not rejected (ADR-0026, amended). An empty
+    // query is a Failure, not a usage error (the frozen contract).
     if args.query.is_empty() {
-        let _ = writeln!(stderr, "tk search: query must not be empty");
-        return Exit::Failure;
+        return Err(CommandError::failure("query must not be empty"));
     }
 
-    let store = match resolver::open_for_command(runner, cwd, clock) {
-        Ok(s) => s,
-        Err(err) => {
-            resolver::render_open_error(stderr, COMMAND, &err);
-            return Exit::Failure;
-        }
-    };
+    let store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
+        .map_err(|err| resolver::open_error(&err))?;
 
-    let rows = match search::search_rows(&store, &args.query) {
-        Ok(rows) => rows,
-        Err(err) => {
-            resolver::render_storage_error(stderr, COMMAND, &err);
-            return Exit::Failure;
-        }
-    };
+    let rows =
+        search::search_rows(&store, &args.query).map_err(|err| resolver::storage_error(&err))?;
 
-    let out = styler.for_stdout();
-    if let Err(err) = render(stdout, &rows, &args.query, out) {
-        return cli::exit_for_write_error(&err, stderr, COMMAND);
+    let out = deps.styler.for_stdout();
+    if let Err(err) = render(deps.stdout, &rows, &args.query, out) {
+        return cli::write_error(&err);
     }
-    Exit::Ok
+    Ok(Exit::Ok)
 }
 
 /// Render matches flat (no List Tree nesting) followed by the shared summary
@@ -169,6 +148,21 @@ mod tests {
         );
     }
 
+    /// Drive `run` and frame any returned error as the dispatch seam does
+    /// (ADR-0032: `tk search: <body>`). A success passes its `Exit` through,
+    /// writing no stderr.
+    fn run_rendered(h: &mut Harness<'_>, args: Args) -> Exit {
+        let mut deps = h.deps();
+        match run(&mut deps, args) {
+            Ok(exit) => exit,
+            Err(err) => {
+                let exit = err.exit();
+                err.render(deps.stderr, "search");
+                exit
+            }
+        }
+    }
+
     #[test]
     fn renders_a_title_match_with_chrome() {
         let store = TmpStore::new("repo");
@@ -200,8 +194,8 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
+        let code = run_rendered(
+            &mut h,
             Args {
                 query: "flaky".to_owned(),
             },
@@ -237,8 +231,8 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
+        let code = run_rendered(
+            &mut h,
             Args {
                 query: "nonexistent".to_owned(),
             },
@@ -300,8 +294,8 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
+        let code = run_rendered(
+            &mut h,
             Args {
                 query: "auth".to_owned(),
             },
@@ -333,8 +327,8 @@ mod tests {
         let mut h = Harness::new(&cwd_path);
         // No git expectation: a truly-empty query is rejected before discovery
         // (ADR-0026, amended) — an empty `instr` substring matches every row.
-        let code = run(
-            h.deps(),
+        let code = run_rendered(
+            &mut h,
             Args {
                 query: String::new(),
             },
@@ -382,8 +376,8 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
+        let code = run_rendered(
+            &mut h,
             Args {
                 query: "  ".to_owned(),
             },
@@ -400,8 +394,8 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
+        let code = run_rendered(
+            &mut h,
             Args {
                 query: "auth".to_owned(),
             },
