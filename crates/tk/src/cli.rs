@@ -371,21 +371,6 @@ pub fn write_error(err: &std::io::Error) -> Option<CommandError> {
     }
 }
 
-/// Map a failed stdout write to an [`Exit`], rendering any diagnostic to
-/// `stderr`. The pre-seam form of [`write_error`], still used by commands not
-/// yet converted to the ADR-0032 seam; both share the broken-pipe policy so it
-/// cannot drift between them.
-#[must_use]
-pub fn exit_for_write_error(err: &std::io::Error, stderr: &mut dyn Write, command: &str) -> Exit {
-    match write_error(err) {
-        None => Exit::Ok,
-        Some(diagnostic) => {
-            diagnostic.render(stderr, command);
-            diagnostic.exit()
-        }
-    }
-}
-
 /// Route `clap::Error` through `Deps` writers so command-handler tests can
 /// capture --help / --version output, then map clap's exit code into our
 /// process exit:
@@ -415,26 +400,19 @@ mod tests {
     use std::io::{Error, ErrorKind};
 
     #[test]
-    fn broken_pipe_write_error_is_success_with_empty_stderr() {
-        let mut stderr: Vec<u8> = Vec::new();
-        let exit = exit_for_write_error(
-            &Error::new(ErrorKind::BrokenPipe, "closed"),
-            &mut stderr,
-            "grep",
-        );
-        assert_eq!(exit, Exit::Ok);
-        assert!(stderr.is_empty(), "broken pipe writes no diagnostic");
+    fn broken_pipe_write_error_maps_to_no_diagnostic() {
+        // A closed reader is success: no CommandError, so the seam emits
+        // nothing and the caller maps it to Exit::Ok.
+        assert!(write_error(&Error::new(ErrorKind::BrokenPipe, "closed")).is_none());
     }
 
     #[test]
-    fn other_write_error_fails_with_a_diagnostic() {
+    fn other_write_error_frames_a_failure_diagnostic() {
+        let diagnostic = write_error(&Error::new(ErrorKind::StorageFull, "disk full"))
+            .expect("a non-broken-pipe write error is a diagnosed failure");
+        assert_eq!(diagnostic.exit(), Exit::Failure);
         let mut stderr: Vec<u8> = Vec::new();
-        let exit = exit_for_write_error(
-            &Error::new(ErrorKind::StorageFull, "disk full"),
-            &mut stderr,
-            "grep",
-        );
-        assert_eq!(exit, Exit::Failure);
+        diagnostic.render(&mut stderr, "grep");
         let stderr = String::from_utf8(stderr).unwrap();
         assert!(
             stderr.contains("tk grep: failed to write output"),

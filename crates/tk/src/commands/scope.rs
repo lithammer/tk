@@ -9,9 +9,7 @@
 //! The command layer owns Scope resolution (per CONTEXT.md); the store-facing
 //! selection accepts an already-resolved Epic id.
 
-use std::io::Write;
-
-use crate::cli::{CommandError, Exit};
+use crate::cli::CommandError;
 use crate::commands::resolver::{self, ResolveEpicError};
 use crate::store::repository::{ResolvedItemRefWithDisplay, Store};
 
@@ -42,21 +40,6 @@ pub fn resolve(
         ))),
         Err(ResolveEpicError::Storage(err)) => Err(resolver::storage_error(&err)),
     }
-}
-
-/// Resolve the active Scope, rendering any failure to `stderr` with the
-/// `tk <command>:` prefix and returning [`Exit::Failure`]. Pre-seam shim over
-/// [`resolve`] for commands not yet converted to the ADR-0032 seam.
-pub fn resolve_rendered<W: Write + ?Sized>(
-    store: &Store,
-    stderr: &mut W,
-    command: &str,
-    arg: Option<&str>,
-) -> Result<Option<ResolvedItemRefWithDisplay>, Exit> {
-    resolve(store, arg).map_err(|err| {
-        err.render(stderr, command);
-        err.exit()
-    })
 }
 
 /// The Scope value in effect for one invocation: the positional `arg` if

@@ -3,11 +3,10 @@
 //! Every item command runs the same prologue: open the Repository Store,
 //! then resolve a Display ID or Alias into an internal stable item ID.
 //! This module owns the typed errors that prologue can raise plus the
-//! shared stderr-rendering helpers; the per-command not-found phrasing
-//! is owned by the command itself, inlined into its own typed error
-//! variant.
+//! shared [`CommandError`] builders ([`open_error`], [`storage_error`]); the
+//! per-command not-found phrasing is owned by the command itself, inlined into
+//! its own typed error variant.
 
-use std::io::Write;
 use std::path::Path;
 
 use thiserror::Error;
@@ -18,8 +17,8 @@ use crate::proc::ProcRunner;
 use crate::store::repository::{self, ResolvedItemRef, ResolvedItemRefWithDisplay, Store};
 
 /// Errors re-exported from the store layer, where the operations that produce
-/// them live. [`OpenError`] is rendered by [`render_open_error`]; the resolve
-/// errors are matched and rendered by each command.
+/// them live. [`OpenError`] is turned into a [`CommandError`] by [`open_error`];
+/// the resolve errors are matched and rendered by each command.
 pub use crate::store::repository::{OpenError, ResolveEpicError};
 
 /// Failure of [`resolve`] / [`resolve_with_display`].
@@ -35,7 +34,7 @@ pub enum ResolveError {
 ///
 /// A thin command-facing alias for [`repository::open_existing`]; the rich
 /// [`OpenError`] now flows straight through (commands hand it to
-/// [`render_open_error`] without inspecting variants).
+/// [`open_error`] without inspecting variants).
 pub fn open_for_command<R: ProcRunner + ?Sized>(
     runner: &R,
     cwd: &Path,
@@ -108,23 +107,6 @@ pub fn storage_error(err: &rusqlite::Error) -> CommandError {
     } else {
         CommandError::failure(format!("failed to read Repository Store\n{err}"))
     }
-}
-
-/// Render an [`OpenError`] to stderr with the supplied `tk <command>:` prefix.
-/// Pre-seam shim over [`open_error`] for commands not yet converted to the
-/// ADR-0032 seam.
-pub fn render_open_error<W: Write + ?Sized>(stderr: &mut W, command: &str, err: &OpenError) {
-    open_error(err).render(stderr, command);
-}
-
-/// Render a Repository Store storage error to stderr. Pre-seam shim over
-/// [`storage_error`] for commands not yet converted to the ADR-0032 seam.
-pub fn render_storage_error<W: Write + ?Sized>(
-    stderr: &mut W,
-    command: &str,
-    err: &rusqlite::Error,
-) {
-    storage_error(err).render(stderr, command);
 }
 
 fn is_busy_error(err: &rusqlite::Error) -> bool {
