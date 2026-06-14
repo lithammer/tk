@@ -267,7 +267,10 @@ pub fn run_argv(mut deps: Deps<'_>, argv: &[String]) -> std::io::Result<Exit> {
             let result = commands::unpark::run(&mut deps, args);
             Ok(finish(&mut deps, "unpark", result))
         }
-        Command::Init(args) => Ok(commands::init::run(deps, args)),
+        Command::Init(args) => {
+            let result = commands::init::run(&mut deps, args);
+            Ok(finish(&mut deps, "init", result))
+        }
         Command::List(args) => {
             let result = commands::list::run(&mut deps, args);
             Ok(finish(&mut deps, "list", result))

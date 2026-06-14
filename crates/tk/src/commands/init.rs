@@ -14,7 +14,7 @@ use std::path::Path;
 use clap::Args as ClapArgs;
 use rusqlite::{Connection, OpenFlags};
 
-use crate::cli::{Deps, Exit};
+use crate::cli::{CommandError, Deps, Exit};
 use crate::git::discovery::{self, DiscoveredPaths};
 use crate::platform;
 use crate::store::{display_prefix, migrations};
@@ -45,36 +45,16 @@ pub enum StoreKind {
 /// [`crate::cli`] via clap-derive; this entrypoint receives a parsed [`Args`]
 /// (currently empty) and proceeds directly to the discovery → classify →
 /// pragmas → migrations → seed pipeline.
-#[must_use]
-pub fn run(deps: Deps<'_>, _args: Args) -> Exit {
-    let Deps {
-        stdout,
-        stderr,
-        runner,
-        clock,
-        cwd,
-        ..
-    } = deps;
-    let paths = match discovery::discover_paths(runner, cwd) {
-        Ok(p) => p,
-        Err(err) => {
-            discovery::render_failure(stderr, "init", &err);
-            return Exit::Failure;
-        }
-    };
+pub fn run(deps: &mut Deps<'_>, _args: Args) -> Result<Exit, CommandError> {
+    let paths = discovery::discover_paths(deps.runner, deps.cwd)
+        // DiscoveryError's Display is the stable body (ADR-0017); the seam
+        // supplies the `tk init:` frame.
+        .map_err(|err| CommandError::failure(err.to_string()))?;
 
     let tk_dir = paths.git_common_dir.join("tk");
-    let dir_created = match ensure_tk_dir(&tk_dir) {
-        Ok(c) => c,
-        Err(err) => {
-            let _ = writeln!(
-                stderr,
-                "tk init: failed to create {}: {err}",
-                tk_dir.display()
-            );
-            return Exit::Failure;
-        }
-    };
+    let dir_created = ensure_tk_dir(&tk_dir).map_err(|err| {
+        CommandError::failure(format!("failed to create {}: {err}", tk_dir.display()))
+    })?;
     if dir_created {
         // Per ARCHITECTURE.md: only tighten permissions when we created the
         // directory ourselves. A pre-existing directory with broader perms
@@ -83,85 +63,58 @@ pub fn run(deps: Deps<'_>, _args: Args) -> Exit {
     }
 
     let db_path = tk_dir.join("tk.db");
-    let mut conn = match Connection::open_with_flags(
+    let mut conn = Connection::open_with_flags(
         &db_path,
         OpenFlags::SQLITE_OPEN_READ_WRITE
             | OpenFlags::SQLITE_OPEN_CREATE
             | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) {
-        Ok(c) => c,
-        Err(err) => {
-            let _ = writeln!(
-                stderr,
-                "tk init: failed to open {}: {err}",
-                db_path.display()
-            );
-            return Exit::Failure;
-        }
-    };
+    )
+    .map_err(|err| CommandError::failure(format!("failed to open {}: {err}", db_path.display())))?;
 
     // Classify *before* enabling WAL or any other pragma that would mutate the
     // file. A foreign rollback-journal SQLite file at this path must stay
     // exactly as we found it when we refuse.
-    let kind = match classify(&conn) {
-        Ok(k) => k,
-        Err(err) => {
-            let _ = writeln!(
-                stderr,
-                "tk init: failed to inspect {}: {err}",
-                db_path.display()
-            );
-            return Exit::Failure;
-        }
-    };
+    let kind = classify(&conn).map_err(|err| {
+        CommandError::failure(format!("failed to inspect {}: {err}", db_path.display()))
+    })?;
     let is_existing = match kind {
         StoreKind::Foreign => {
-            let _ = writeln!(
-                stderr,
-                "tk init: {} exists but is not a tk Repository Store",
+            return Err(CommandError::failure(format!(
+                "{} exists but is not a tk Repository Store",
                 db_path.display(),
-            );
-            return Exit::Failure;
+            )));
         }
         StoreKind::Ours => true,
         StoreKind::Fresh => false,
     };
 
     if let Err(err) = configure_for_ticket_store(&conn) {
-        let _ = writeln!(
-            stderr,
-            "tk init: failed to configure {}: {err}",
+        return Err(CommandError::failure(format!(
+            "failed to configure {}: {err}",
             db_path.display()
-        );
-        return Exit::Failure;
+        )));
     }
 
-    let now_iso = clock.now_iso();
+    let now_iso = deps.clock.now_iso();
     if let Err(err) = migrations::apply_all(&mut conn, &now_iso) {
-        match err {
-            migrations::ApplyError::StoreFromFutureVersion => {
-                let _ = writeln!(
-                    stderr,
-                    "tk init: {} was created by a newer tk version",
-                    db_path.display(),
-                );
-            }
-            migrations::ApplyError::ForeignKeyCheck(table) => {
-                let _ = writeln!(
-                    stderr,
-                    "tk init: migration left a dangling foreign key in table '{table}'"
-                );
-            }
+        return Err(match err {
+            migrations::ApplyError::StoreFromFutureVersion => CommandError::failure(format!(
+                "{} was created by a newer tk version",
+                db_path.display(),
+            )),
+            migrations::ApplyError::ForeignKeyCheck(table) => CommandError::failure(format!(
+                "migration left a dangling foreign key in table '{table}'"
+            )),
             migrations::ApplyError::Sqlite(sqlite_err) => {
-                let _ = writeln!(stderr, "tk init: migration failed: {sqlite_err}");
+                CommandError::failure(format!("migration failed: {sqlite_err}"))
             }
-        }
-        return Exit::Failure;
+        });
     }
 
     if let Err(err) = seed_display_prefix(&conn, &paths) {
-        let _ = writeln!(stderr, "tk init: failed to seed display_prefix: {err}");
-        return Exit::Failure;
+        return Err(CommandError::failure(format!(
+            "failed to seed display_prefix: {err}"
+        )));
     }
 
     // ADR-0017 stable status lines; the trailing space is intentional — the
@@ -171,8 +124,8 @@ pub fn run(deps: Deps<'_>, _args: Args) -> Exit {
     } else {
         "Initialized Repository Store at "
     };
-    let _ = writeln!(stdout, "{prefix}{}", db_path.display());
-    Exit::Ok
+    let _ = writeln!(deps.stdout, "{prefix}{}", db_path.display());
+    Ok(Exit::Ok)
 }
 
 /// Classify an opened SQLite connection as fresh, ours, or foreign.
@@ -377,6 +330,20 @@ mod tests {
         }
     }
 
+    /// Drive `run` and frame any returned error as the dispatch seam does
+    /// (ADR-0032: `tk init: <body>`), so a test asserts the framed bytes.
+    fn run_rendered(h: &mut Harness<'_>, args: Args) -> Exit {
+        let mut deps = h.deps();
+        match run(&mut deps, args) {
+            Ok(exit) => exit,
+            Err(err) => {
+                let exit = err.exit();
+                err.render(deps.stderr, "init");
+                exit
+            }
+        }
+    }
+
     #[test]
     fn returns_exit_1_with_diagnostic_when_not_in_a_git_repo() {
         let cwd = std::env::current_dir().unwrap();
@@ -391,7 +358,7 @@ mod tests {
             },
         );
 
-        let code = run(h.deps(), Args {});
+        let code = run_rendered(&mut h, Args {});
         assert_eq!(code, Exit::Failure);
         assert!(h.stdout.is_empty());
         let stderr = String::from_utf8_lossy(&h.stderr);
@@ -410,7 +377,7 @@ mod tests {
                 stderr: Vec::new(),
             },
         );
-        let code = run(h.deps(), Args {});
+        let code = run_rendered(&mut h, Args {});
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8_lossy(&h.stderr);
         assert!(stderr.contains("not in a git repository"));
@@ -433,7 +400,7 @@ mod tests {
             },
         );
 
-        let code = run(h.deps(), Args {});
+        let code = run_rendered(&mut h, Args {});
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8_lossy(&h.stdout);
         assert!(stdout.contains("Initialized Repository Store at "));
@@ -473,7 +440,7 @@ mod tests {
                     stderr: Vec::new(),
                 },
             );
-            assert_eq!(run(h.deps(), Args {}), Exit::Ok);
+            assert_eq!(run_rendered(&mut h, Args {}), Exit::Ok);
         }
 
         // Overwrite prefix to assert init's idempotency doesn't clobber it.
@@ -497,7 +464,7 @@ mod tests {
                     stderr: Vec::new(),
                 },
             );
-            let code = run(h.deps(), Args {});
+            let code = run_rendered(&mut h, Args {});
             assert_eq!(code, Exit::Ok);
             let stdout = String::from_utf8_lossy(&h.stdout);
             assert!(stdout.contains("Repository Store already initialized at "));
@@ -559,7 +526,7 @@ mod tests {
             },
         );
 
-        let code = run(h.deps(), Args {});
+        let code = run_rendered(&mut h, Args {});
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8_lossy(&h.stderr);
         assert!(stderr.contains("not a tk Repository Store"));
@@ -590,7 +557,7 @@ mod tests {
                 stderr: Vec::new(),
             },
         );
-        let code = run(h.deps(), Args {});
+        let code = run_rendered(&mut h, Args {});
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8_lossy(&h.stderr);
         assert!(stderr.contains("newer tk version"));
@@ -609,7 +576,7 @@ mod tests {
                 stderr: Vec::new(),
             },
         );
-        let code = run(h.deps(), Args {});
+        let code = run_rendered(&mut h, Args {});
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8_lossy(&h.stderr);
         assert!(stderr.contains("git produced unexpected rev-parse output"));
