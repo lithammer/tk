@@ -252,9 +252,18 @@ pub fn run_argv(mut deps: Deps<'_>, argv: &[String]) -> std::io::Result<Exit> {
     };
     match cli.command {
         Command::Add(args) => Ok(commands::add::run(deps, args)),
-        Command::Accept(args) => Ok(commands::accept::run(deps, args)),
-        Command::Park(args) => Ok(commands::park::run(deps, args)),
-        Command::Unpark(args) => Ok(commands::unpark::run(deps, args)),
+        Command::Accept(args) => {
+            let result = commands::accept::run(&mut deps, args);
+            Ok(finish(&mut deps, "accept", result))
+        }
+        Command::Park(args) => {
+            let result = commands::park::run(&mut deps, args);
+            Ok(finish(&mut deps, "park", result))
+        }
+        Command::Unpark(args) => {
+            let result = commands::unpark::run(&mut deps, args);
+            Ok(finish(&mut deps, "unpark", result))
+        }
         Command::Init(args) => Ok(commands::init::run(deps, args)),
         Command::List(args) => Ok(commands::list::run(deps, args)),
         Command::Next(args) => {

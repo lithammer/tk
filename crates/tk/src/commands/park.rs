@@ -9,11 +9,9 @@
 
 use clap::Args as ClapArgs;
 
-use crate::cli::{Deps, Exit};
+use crate::cli::{CommandError, Deps, Exit};
 use crate::commands::resolver;
 use crate::store::repository::selection::{self, ParkError, ParkOutcome};
-
-const COMMAND: &str = "park";
 
 /// Flags for `tk park`.
 #[derive(Debug, ClapArgs)]
@@ -23,93 +21,54 @@ pub struct Args {
     pub id: String,
 }
 
-#[must_use]
-pub fn run(deps: Deps<'_>, args: Args) -> Exit {
-    let Deps {
-        stdout,
-        stderr,
-        runner,
-        clock,
-        cwd,
-        ..
-    } = deps;
-
-    let mut store = match resolver::open_for_command(runner, cwd, clock) {
-        Ok(s) => s,
-        Err(err) => {
-            resolver::render_open_error(stderr, COMMAND, &err);
-            return Exit::Failure;
-        }
-    };
+pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
+    let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
+        .map_err(|err| resolver::open_error(&err))?;
 
     let resolved = match resolver::resolve(&store, &args.id) {
         Ok(r) => r,
         Err(resolver::ResolveError::NotFound) => {
-            let _ = writeln!(
-                stderr,
-                "tk {COMMAND}: '{id}' is not a known Display ID or Alias",
+            return Err(CommandError::failure(format!(
+                "'{id}' is not a known Display ID or Alias",
                 id = args.id
-            );
-            return Exit::Failure;
+            )));
         }
-        Err(resolver::ResolveError::Storage(err)) => {
-            resolver::render_storage_error(stderr, COMMAND, &err);
-            return Exit::Failure;
-        }
+        Err(resolver::ResolveError::Storage(err)) => return Err(resolver::storage_error(&err)),
     };
 
-    match selection::park_ticket(&mut store, clock, &resolved.id) {
+    match selection::park_ticket(&mut store, deps.clock, &resolved.id) {
         Ok(ParkOutcome::Parked {
             display_id,
             title,
             priority,
         }) => {
-            let _ = writeln!(stdout, "Parked Ticket: {display_id} - {title}");
-            let _ = writeln!(stdout, "Priority: {priority}");
-            Exit::Ok
+            let _ = writeln!(deps.stdout, "Parked Ticket: {display_id} - {title}");
+            let _ = writeln!(deps.stdout, "Priority: {priority}");
+            Ok(Exit::Ok)
         }
         Ok(ParkOutcome::AlreadyParked { display_id }) => {
-            let _ = writeln!(stdout, "{display_id} is already parked");
-            Exit::Ok
+            let _ = writeln!(deps.stdout, "{display_id} is already parked");
+            Ok(Exit::Ok)
         }
-        Err(ParkError::NotFound) => {
-            // Race: the row vanished between resolve and the write lock.
-            let _ = writeln!(
-                stderr,
-                "tk {COMMAND}: '{id}' is not a known Display ID or Alias",
-                id = args.id
-            );
-            Exit::Failure
-        }
-        Err(ParkError::NotATicket) => {
-            let _ = writeln!(
-                stderr,
-                "tk {COMMAND}: '{id}' is an Epic; Selection State applies to Tickets",
-                id = args.id
-            );
-            Exit::Failure
-        }
-        Err(ParkError::Triage) => {
-            let _ = writeln!(
-                stderr,
-                "tk {COMMAND}: '{id}' is in triage; accept it first with \
-                 'tk accept {id} --priority P0..P4'",
-                id = args.id
-            );
-            Exit::Failure
-        }
-        Err(ParkError::Active) => {
-            let _ = writeln!(
-                stderr,
-                "tk {COMMAND}: '{id}' is active; stop it first with 'tk stop {id}'",
-                id = args.id
-            );
-            Exit::Failure
-        }
-        Err(ParkError::Sqlite(err)) => {
-            resolver::render_storage_error(stderr, COMMAND, &err);
-            Exit::Failure
-        }
+        // Race: the row vanished between resolve and the write lock.
+        Err(ParkError::NotFound) => Err(CommandError::failure(format!(
+            "'{id}' is not a known Display ID or Alias",
+            id = args.id
+        ))),
+        Err(ParkError::NotATicket) => Err(CommandError::failure(format!(
+            "'{id}' is an Epic; Selection State applies to Tickets",
+            id = args.id
+        ))),
+        Err(ParkError::Triage) => Err(CommandError::failure(format!(
+            "'{id}' is in triage; accept it first with \
+             'tk accept {id} --priority P0..P4'",
+            id = args.id
+        ))),
+        Err(ParkError::Active) => Err(CommandError::failure(format!(
+            "'{id}' is active; stop it first with 'tk stop {id}'",
+            id = args.id
+        ))),
+        Err(ParkError::Sqlite(err)) => Err(resolver::storage_error(&err)),
     }
 }
 
@@ -190,6 +149,20 @@ mod tests {
         );
     }
 
+    /// Drive `run` and frame any returned error as the dispatch seam does
+    /// (ADR-0032: `tk park: <body>`), so a test asserts the framed bytes.
+    fn run_rendered(h: &mut Harness<'_>, args: Args) -> Exit {
+        let mut deps = h.deps();
+        match run(&mut deps, args) {
+            Ok(exit) => exit,
+            Err(err) => {
+                let exit = err.exit();
+                err.render(deps.stderr, "park");
+                exit
+            }
+        }
+    }
+
     fn seed_ticket(
         conn: &Connection,
         id: &str,
@@ -221,7 +194,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(h.deps(), Args { id: "tk-1".into() });
+        let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Ok, "stderr={:?}", String::from_utf8(h.stderr));
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(
@@ -240,7 +213,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(h.deps(), Args { id: "tk-1".into() });
+        let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Ok);
         assert!(
             String::from_utf8(h.stdout)
@@ -258,7 +231,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(h.deps(), Args { id: "tk-1".into() });
+        let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(
@@ -289,7 +262,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(h.deps(), Args { id: "tk-1".into() });
+        let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(
@@ -305,8 +278,8 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
+        let code = run_rendered(
+            &mut h,
             Args {
                 id: "tk-9999".into(),
             },
