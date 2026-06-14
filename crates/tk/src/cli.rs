@@ -93,6 +93,18 @@ impl CommandError {
         }
     }
 
+    /// An operation failure (exit 1) whose frame is followed by a subprocess's
+    /// own stderr, forwarded verbatim. `tail` is written after tk's frame and
+    /// is never styled — it is the subprocess's voice. The caller includes any
+    /// trailing newline it wants in `tail`; [`render`](Self::render) writes the
+    /// bytes as-is.
+    pub fn failure_with_tail(body: impl std::fmt::Display, tail: Vec<u8>) -> Self {
+        Self::Failure {
+            body: body.to_string(),
+            tail: Some(tail),
+        }
+    }
+
     /// A usage error (exit 2) carrying `body` as its message line.
     pub fn usage(body: impl std::fmt::Display) -> Self {
         Self::Usage {
@@ -271,7 +283,10 @@ pub fn run_argv(mut deps: Deps<'_>, argv: &[String]) -> std::io::Result<Exit> {
         Command::Unblock(args) => Ok(commands::unblock::run(deps, args)),
         Command::Prime(args) => Ok(commands::prime::run(deps, args)),
         Command::Manpage(args) => Ok(commands::manpage::run(deps, args)),
-        Command::SelfUpdate(args) => Ok(commands::self_update::run(deps, args)),
+        Command::SelfUpdate(args) => {
+            let result = commands::self_update::run(&mut deps, args);
+            Ok(finish(&mut deps, "self-update", result))
+        }
         Command::Sync(args) => Ok(commands::sync::run(deps, args)),
         Command::Promote(args) => Ok(commands::promote::run(deps, args)),
     }
