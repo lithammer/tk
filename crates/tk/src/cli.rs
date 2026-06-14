@@ -293,7 +293,10 @@ pub fn run_argv(mut deps: Deps<'_>, argv: &[String]) -> std::io::Result<Exit> {
             let result = commands::grep::run(&mut deps, args);
             Ok(finish(&mut deps, "grep", result))
         }
-        Command::Update(args) => Ok(commands::update::run(deps, args)),
+        Command::Update(args) => {
+            let result = commands::update::run(&mut deps, args);
+            Ok(finish(&mut deps, "update", result))
+        }
         Command::Start(args) => {
             let result = commands::start::run(&mut deps, args);
             Ok(finish(&mut deps, "start", result))
