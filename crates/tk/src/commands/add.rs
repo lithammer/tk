@@ -9,11 +9,9 @@
 //! `--epic`, both `--bug` and `--epic`, both `-m` and `-F`) are gated by
 //! clap's `conflicts_with` so the handler doesn't repeat the policy.
 
-use std::io::Write;
-
 use clap::Args as ClapArgs;
 
-use crate::cli::{Deps, Exit};
+use crate::cli::{CommandError, Deps, Exit};
 use crate::commands::message::{self, Input as MessageInput};
 use crate::commands::resolver;
 use crate::domain::priority::Priority;
@@ -21,8 +19,6 @@ use crate::domain::ticket_kind::TicketKind;
 use crate::store::repository::create::{
     self, CreateError, CreateLocalEpicInput, CreateLocalTicketInput, NewTicketSelection,
 };
-
-const COMMAND: &str = "add";
 
 /// Flags for `tk add`.
 #[derive(Debug, ClapArgs)]
@@ -56,60 +52,30 @@ pub struct Args {
     pub triage: bool,
 }
 
-#[must_use]
-pub fn run(deps: Deps<'_>, args: Args) -> Exit {
-    let Deps {
-        stdout,
-        stderr,
-        stdin,
-        runner,
-        clock,
-        rng,
-        cwd,
-        ..
-    } = deps;
+pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
+    let input = select_input(&args).map_err(CommandError::usage)?;
 
-    let input = match select_input(&args) {
-        Ok(input) => input,
-        Err(line) => {
-            let _ = writeln!(stderr, "{line}");
-            return Exit::Usage;
-        }
-    };
+    let parsed =
+        message::read_input(input, deps.cwd, deps.stdin).map_err(|err| message_error(&err))?;
 
-    let parsed = match message::read_input(input, cwd, stdin) {
-        Ok(parsed) => parsed,
-        Err(err) => {
-            render_message_error(stderr, &err);
-            return Exit::Failure;
-        }
-    };
-
-    let mut store = match resolver::open_for_command(runner, cwd, clock) {
-        Ok(s) => s,
-        Err(err) => {
-            resolver::render_open_error(stderr, COMMAND, &err);
-            return Exit::Failure;
-        }
-    };
+    let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
+        .map_err(|err| resolver::open_error(&err))?;
 
     let parent_ref = if let Some(arg) = args.parent.as_deref() {
         match resolver::resolve_epic_with_display(&store, arg) {
             Ok(r) => Some(r),
             Err(resolver::ResolveEpicError::NotFound) => {
-                let _ = writeln!(
-                    stderr,
-                    "tk add: parent '{arg}' is not a known Display ID or Alias"
-                );
-                return Exit::Failure;
+                return Err(CommandError::failure(format!(
+                    "parent '{arg}' is not a known Display ID or Alias"
+                )));
             }
             Err(resolver::ResolveEpicError::NotAnEpic) => {
-                let _ = writeln!(stderr, "tk add: parent '{arg}' is not an Epic");
-                return Exit::Failure;
+                return Err(CommandError::failure(format!(
+                    "parent '{arg}' is not an Epic"
+                )));
             }
             Err(resolver::ResolveEpicError::Storage(err)) => {
-                resolver::render_storage_error(stderr, COMMAND, &err);
-                return Exit::Failure;
+                return Err(resolver::storage_error(&err));
             }
         }
     } else {
@@ -117,25 +83,23 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
     };
 
     if args.epic {
-        let result = create::create_local_epic(
+        let epic = create::create_local_epic(
             &mut store,
-            clock,
-            rng,
+            deps.clock,
+            deps.rng,
             CreateLocalEpicInput {
                 title: &parsed.title,
                 body: &parsed.body,
             },
+        )
+        .map_err(|err| create_error(&err))?;
+        let _ = writeln!(
+            deps.stdout,
+            "Created Epic: {} - {}",
+            epic.display_id, epic.title
         );
-        let epic = match result {
-            Ok(e) => e,
-            Err(err) => {
-                render_create_error(stderr, &err);
-                return Exit::Failure;
-            }
-        };
-        let _ = writeln!(stdout, "Created Epic: {} - {}", epic.display_id, epic.title);
-        let _ = writeln!(stdout, "Status: {}", epic.status);
-        return Exit::Ok;
+        let _ = writeln!(deps.stdout, "Status: {}", epic.status);
+        return Ok(Exit::Ok);
     }
 
     let kind = if args.bug {
@@ -153,10 +117,10 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
     };
     let parent_id = parent_ref.as_ref().map(|r| r.id.as_str());
 
-    let ticket = match create::create_local_ticket(
+    let ticket = create::create_local_ticket(
         &mut store,
-        clock,
-        rng,
+        deps.clock,
+        deps.rng,
         CreateLocalTicketInput {
             kind,
             selection,
@@ -164,35 +128,30 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
             title: &parsed.title,
             body: &parsed.body,
         },
-    ) {
-        Ok(t) => t,
-        Err(err) => {
-            render_create_error(stderr, &err);
-            return Exit::Failure;
-        }
-    };
+    )
+    .map_err(|err| create_error(&err))?;
 
     let _ = writeln!(
-        stdout,
+        deps.stdout,
         "Created Ticket: {} - {}",
         ticket.display_id, ticket.title
     );
-    let _ = writeln!(stdout, "Kind: {}", ticket.kind);
+    let _ = writeln!(deps.stdout, "Kind: {}", ticket.kind);
     // A triage Ticket has no Priority, so it surfaces its Selection State
     // instead; accepted Tickets stay the quiet default and show only Priority.
     match ticket.priority {
         Some(priority) => {
-            let _ = writeln!(stdout, "Priority: {priority}");
+            let _ = writeln!(deps.stdout, "Priority: {priority}");
         }
         None => {
-            let _ = writeln!(stdout, "Selection: {}", ticket.selection_state);
+            let _ = writeln!(deps.stdout, "Selection: {}", ticket.selection_state);
         }
     }
-    let _ = writeln!(stdout, "Status: {}", ticket.status);
+    let _ = writeln!(deps.stdout, "Status: {}", ticket.status);
     if let Some(parent) = parent_ref.as_ref() {
-        let _ = writeln!(stdout, "Parent: {}", parent.display_id);
+        let _ = writeln!(deps.stdout, "Parent: {}", parent.display_id);
     }
-    Exit::Ok
+    Ok(Exit::Ok)
 }
 
 fn select_input(args: &Args) -> Result<MessageInput<'_>, &'static str> {
@@ -202,41 +161,35 @@ fn select_input(args: &Args) -> Result<MessageInput<'_>, &'static str> {
     if let Some(path) = args.file.as_deref() {
         return Ok(MessageInput::File(path));
     }
-    Err("tk add: a message is required (use -m or -F)")
+    Err("a message is required (use -m or -F)")
 }
 
-fn render_message_error<W: Write + ?Sized>(stderr: &mut W, err: &message::ReadError) {
+fn message_error(err: &message::ReadError) -> CommandError {
     match err {
         message::ReadError::Parse(message::ParseError::Empty) => {
-            let _ = writeln!(stderr, "tk add: message is empty");
+            CommandError::failure("message is empty")
         }
         message::ReadError::Parse(message::ParseError::NulByte) => {
-            let _ = writeln!(stderr, "tk add: message contains a NUL byte");
+            CommandError::failure("message contains a NUL byte")
         }
         message::ReadError::File { path, source } => {
-            let _ = writeln!(stderr, "tk add: failed to read '{path}': {source}");
+            CommandError::failure(format!("failed to read '{path}': {source}"))
         }
         message::ReadError::Stdin(source) => {
-            let _ = writeln!(
-                stderr,
-                "tk add: failed to read message from stdin: {source}"
-            );
+            CommandError::failure(format!("failed to read message from stdin: {source}"))
         }
     }
 }
 
-fn render_create_error<W: Write + ?Sized>(stderr: &mut W, err: &CreateError) {
+fn create_error(err: &CreateError) -> CommandError {
     match err {
-        CreateError::Sqlite(err) => resolver::render_storage_error(stderr, COMMAND, err),
+        CreateError::Sqlite(err) => resolver::storage_error(err),
         CreateError::Sequence(err) => {
-            let _ = writeln!(stderr, "tk add: Repository Store corruption: {err}");
+            CommandError::failure(format!("Repository Store corruption: {err}"))
         }
-        CreateError::DisplayPrefixMissing => {
-            let _ = writeln!(
-                stderr,
-                "tk add: Repository Store is missing the display_prefix seed (run 'tk init')"
-            );
-        }
+        CreateError::DisplayPrefixMissing => CommandError::failure(
+            "Repository Store is missing the display_prefix seed (run 'tk init')",
+        ),
     }
 }
 
@@ -319,6 +272,20 @@ mod tests {
         );
     }
 
+    /// Drive `run` and frame any returned error as the dispatch seam does
+    /// (ADR-0032: `tk add: <body>`), so a test asserts the framed bytes.
+    fn run_rendered(h: &mut Harness<'_>, args: Args) -> Exit {
+        let mut deps = h.deps();
+        match run(&mut deps, args) {
+            Ok(exit) => exit,
+            Err(err) => {
+                let exit = err.exit();
+                err.render(deps.stderr, "add");
+                exit
+            }
+        }
+    }
+
     fn args_with(message: Vec<String>) -> Args {
         Args {
             message,
@@ -338,7 +305,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(h.deps(), args_with(vec!["Ship it".into()]));
+        let code = run_rendered(&mut h, args_with(vec!["Ship it".into()]));
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(stdout.contains("Created Ticket: tk-1 - Ship it"));
@@ -356,7 +323,7 @@ mod tests {
         expect_git(&h, &store);
         let mut a = args_with(vec!["Crash on click".into()]);
         a.bug = true;
-        let code = run(h.deps(), a);
+        let code = run_rendered(&mut h, a);
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(stdout.contains("Kind: bug"));
@@ -372,7 +339,7 @@ mod tests {
         let mut a = args_with(vec!["Investigate flaky test".into()]);
         a.triage = true;
         a.bug = true; // a triage bug is valid (ADR-0027)
-        let code = run(h.deps(), a);
+        let code = run_rendered(&mut h, a);
         assert_eq!(code, Exit::Ok, "stderr={:?}", String::from_utf8(h.stderr));
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(stdout.contains("Kind: bug"));
@@ -390,7 +357,7 @@ mod tests {
         expect_git(&h, &store);
         let mut a = args_with(vec!["Big work".into()]);
         a.epic = true;
-        let code = run(h.deps(), a);
+        let code = run_rendered(&mut h, a);
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(stdout.contains("Created Epic: tk-1 - Big work"));
@@ -410,7 +377,7 @@ mod tests {
             expect_git(&h, &store);
             let mut a = args_with(vec!["Epic".into()]);
             a.epic = true;
-            assert_eq!(run(h.deps(), a), Exit::Ok);
+            assert_eq!(run_rendered(&mut h, a), Exit::Ok);
         }
 
         // Then a child ticket referencing it. Distinct seed so the internal
@@ -419,7 +386,7 @@ mod tests {
         expect_git(&h, &store);
         let mut a = args_with(vec!["Child ticket".into()]);
         a.parent = Some("tk-1".into());
-        let code = run(h.deps(), a);
+        let code = run_rendered(&mut h, a);
         let stderr = String::from_utf8(h.stderr.clone()).unwrap();
         let stdout = String::from_utf8(h.stdout.clone()).unwrap();
         assert_eq!(code, Exit::Ok, "stderr={stderr:?} stdout={stdout:?}");
@@ -436,7 +403,7 @@ mod tests {
         expect_git(&h, &store);
         let mut a = args_with(vec!["Title".into()]);
         a.parent = Some("nope".into());
-        let code = run(h.deps(), a);
+        let code = run_rendered(&mut h, a);
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk add: parent 'nope' is not a known Display ID or Alias"));
@@ -453,7 +420,7 @@ mod tests {
             let mut h = Harness::new(&cwd_path);
             expect_git(&h, &store);
             assert_eq!(
-                run(h.deps(), args_with(vec!["Standalone".into()])),
+                run_rendered(&mut h, args_with(vec!["Standalone".into()])),
                 Exit::Ok
             );
         }
@@ -463,7 +430,7 @@ mod tests {
         expect_git(&h, &store);
         let mut a = args_with(vec!["Child".into()]);
         a.parent = Some("tk-1".into());
-        let code = run(h.deps(), a);
+        let code = run_rendered(&mut h, a);
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk add: parent 'tk-1' is not an Epic"));
@@ -476,7 +443,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(h.deps(), args_with(vec!["   ".into()]));
+        let code = run_rendered(&mut h, args_with(vec!["   ".into()]));
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk add: message is empty"));
@@ -488,7 +455,7 @@ mod tests {
         seed_store(&store);
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        let code = run(h.deps(), args_with(vec![]));
+        let code = run_rendered(&mut h, args_with(vec![]));
         assert_eq!(code, Exit::Usage);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk add: a message is required"));
@@ -504,7 +471,7 @@ mod tests {
         expect_git(&h, &store);
         let mut a = args_with(vec![]);
         a.file = Some("-".into());
-        let code = run(h.deps(), a);
+        let code = run_rendered(&mut h, a);
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(stdout.contains("Created Ticket: tk-1 - From stdin"));

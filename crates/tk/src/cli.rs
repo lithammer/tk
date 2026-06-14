@@ -251,7 +251,10 @@ pub fn run_argv(mut deps: Deps<'_>, argv: &[String]) -> std::io::Result<Exit> {
         Err(err) => return Ok(render_clap_error(deps, &err)),
     };
     match cli.command {
-        Command::Add(args) => Ok(commands::add::run(deps, args)),
+        Command::Add(args) => {
+            let result = commands::add::run(&mut deps, args);
+            Ok(finish(&mut deps, "add", result))
+        }
         Command::Accept(args) => {
             let result = commands::accept::run(&mut deps, args);
             Ok(finish(&mut deps, "accept", result))
