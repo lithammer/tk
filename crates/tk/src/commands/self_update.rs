@@ -295,6 +295,10 @@ fn parse_semver(s: &str) -> Result<(u64, u64, u64), ()> {
     Ok((major, minor, patch))
 }
 
+/// These are `--check` result lines on **stdout**, not stderr diagnostics, so
+/// they keep their own `tk self-update:` prefix: the ADR-0032 seam frames only
+/// the `Err` (stderr) path, and the full stdout line is the frozen ADR-0017
+/// grep target here.
 fn render_check_result<W: Write + ?Sized>(
     stdout: &mut W,
     cmp: Comparison,

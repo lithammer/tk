@@ -66,7 +66,7 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     if let Err(err) = render(deps.stdout, &detail, sub) {
         // A closed pager (`tk show | head`) is success; other write errors are
         // a diagnosed failure (shared policy).
-        return cli::write_error(&err).map_or(Ok(Exit::Ok), Err);
+        return cli::write_error(&err);
     }
     Ok(Exit::Ok)
 }

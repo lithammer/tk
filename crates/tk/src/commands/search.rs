@@ -45,7 +45,7 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
 
     let out = deps.styler.for_stdout();
     if let Err(err) = render(deps.stdout, &rows, &args.query, out) {
-        return cli::write_error(&err).map_or(Ok(Exit::Ok), Err);
+        return cli::write_error(&err);
     }
     Ok(Exit::Ok)
 }

@@ -141,14 +141,14 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         // (`tk grep … | head`) means matches WERE found and piped: the shared
         // policy reports Ok for that and a diagnosed Failure for any other write
         // error (so its exit `1` is never misread as a no-match).
-        Err(ScanError::Write(err)) => return cli::write_error(&err).map_or(Ok(Exit::Ok), Err),
+        Err(ScanError::Write(err)) => return cli::write_error(&err),
     }
 
     // `-c` always prints a number (even `0`, like `grep -c`); the 0/1 exit
     // overload below still reports whether anything matched.
     if args.count {
         if let Err(err) = writeln!(stdout, "{count}") {
-            return cli::write_error(&err).map_or(Ok(Exit::Ok), Err);
+            return cli::write_error(&err);
         }
     }
 

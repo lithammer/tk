@@ -83,12 +83,12 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     // Hint so a Scope-filtered tree never reads as the full store (ADR-0022).
     if let Some(epic) = scope_epic.as_ref() {
         if let Err(err) = render_scope_hint(deps.stdout, &epic.display_id, out) {
-            return cli::write_error(&err).map_or(Ok(Exit::Ok), Err);
+            return cli::write_error(&err);
         }
     }
 
     if let Err(err) = render(deps.stdout, &rows, options, out) {
-        return cli::write_error(&err).map_or(Ok(Exit::Ok), Err);
+        return cli::write_error(&err);
     }
     Ok(Exit::Ok)
 }

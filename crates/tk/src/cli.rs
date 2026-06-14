@@ -280,8 +280,6 @@ pub fn run_argv(mut deps: Deps<'_>, argv: &[String]) -> std::io::Result<Exit> {
             Ok(finish(&mut deps, "next", result))
         }
         Command::Show(args) => {
-            // Converted to the ADR-0032 seam: the handler returns the
-            // diagnostic, `finish` frames it.
             let result = commands::show::run(&mut deps, args);
             Ok(finish(&mut deps, "show", result))
         }
@@ -351,21 +349,21 @@ fn finish(deps: &mut Deps<'_>, command: &str, result: Result<Exit, CommandError>
     }
 }
 
-/// Classify a failed stdout write under the shared broken-pipe policy.
+/// Map a failed stdout write to a command outcome under the shared broken-pipe
+/// policy, so a rendering command can `return cli::write_error(&err);`.
 ///
 /// A **broken pipe** — a downstream reader that closed early (`tk … | head`, a
 /// quit pager) — is success, not failure: the command did its job and the
-/// consumer simply stopped reading, so this returns `None` (map to
-/// [`Exit::Ok`]). Every other write error (e.g. a full disk on `tk … > file`)
-/// becomes a [`CommandError::Failure`] so its [`Exit::Failure`] carries a
-/// stderr line (the frozen contract) and stays distinguishable from a query
-/// command's empty-stderr "no result" ([`Exit::NoMatch`]).
-#[must_use]
-pub fn write_error(err: &std::io::Error) -> Option<CommandError> {
+/// consumer simply stopped reading, so this returns `Ok(Exit::Ok)`. Every other
+/// write error (e.g. a full disk on `tk … > file`) becomes a
+/// [`CommandError::Failure`] so its [`Exit::Failure`] carries a stderr line (the
+/// frozen contract) and stays distinguishable from a query command's
+/// empty-stderr "no result" ([`Exit::NoMatch`]).
+pub fn write_error(err: &std::io::Error) -> Result<Exit, CommandError> {
     if err.kind() == std::io::ErrorKind::BrokenPipe {
-        None
+        Ok(Exit::Ok)
     } else {
-        Some(CommandError::failure(format!(
+        Err(CommandError::failure(format!(
             "failed to write output\n{err}"
         )))
     }
@@ -400,16 +398,17 @@ mod tests {
     use std::io::{Error, ErrorKind};
 
     #[test]
-    fn broken_pipe_write_error_maps_to_no_diagnostic() {
-        // A closed reader is success: no CommandError, so the seam emits
-        // nothing and the caller maps it to Exit::Ok.
-        assert!(write_error(&Error::new(ErrorKind::BrokenPipe, "closed")).is_none());
+    fn broken_pipe_write_error_is_success() {
+        // A closed reader is success: Exit::Ok with no diagnostic.
+        let exit = write_error(&Error::new(ErrorKind::BrokenPipe, "closed"))
+            .expect("a broken pipe is success, not a failure");
+        assert_eq!(exit, Exit::Ok);
     }
 
     #[test]
     fn other_write_error_frames_a_failure_diagnostic() {
         let diagnostic = write_error(&Error::new(ErrorKind::StorageFull, "disk full"))
-            .expect("a non-broken-pipe write error is a diagnosed failure");
+            .expect_err("a non-broken-pipe write error is a diagnosed failure");
         assert_eq!(diagnostic.exit(), Exit::Failure);
         let mut stderr: Vec<u8> = Vec::new();
         diagnostic.render(&mut stderr, "grep");

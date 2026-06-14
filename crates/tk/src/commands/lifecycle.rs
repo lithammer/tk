@@ -2,10 +2,10 @@
 //! `tk done`.
 //!
 //! All three commands open the store, resolve a Display ID or Alias,
-//! attempt a [`set_item_status`] write to a fixed target, and render the
-//! same shape of success / not-found / locked-done diagnostics. The
-//! `command` and `target` parameters carry the only per-command
-//! variation.
+//! attempt a [`set_item_status`] write to a fixed target, and return the
+//! same shape of success / not-found / locked-done outcomes. The `target`
+//! and `success` parameters carry the only per-command variation; the
+//! `tk <command>:` frame is supplied by the dispatch seam (ADR-0032).
 
 use crate::cli::{CommandError, Deps, Exit};
 use crate::commands::resolver;
@@ -32,9 +32,9 @@ impl SuccessLabel {
     }
 }
 
-/// Run a lifecycle transition against the supplied Deps and report the
-/// outcome with per-command phrasing. `command` is the subcommand name
-/// (`"start"` / `"stop"` / `"done"`) used in stderr diagnostics.
+/// Run a lifecycle transition against the supplied Deps. On failure returns the
+/// [`CommandError`] for the dispatch seam to frame as `tk start:` / `tk stop:` /
+/// `tk done:` (ADR-0032); `success` selects the per-command success phrasing.
 pub fn transition(
     deps: &mut Deps<'_>,
     id: &str,
