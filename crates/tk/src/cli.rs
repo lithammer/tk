@@ -28,8 +28,10 @@ use crate::render::Styler;
 /// literals never leak into command control flow.
 ///
 /// - [`Exit::Ok`] (`0`) — success.
-/// - [`Exit::Failure`] (`1`) — a curated command failure; the handler has
-///   already written its ADR-0017 diagnostic to stderr.
+/// - [`Exit::Failure`] (`1`) — a curated command failure carrying a stderr
+///   diagnostic. A command converted to the ADR-0032 seam returns a
+///   [`CommandError`] that [`run_argv`] frames; an unconverted command writes
+///   the diagnostic itself and returns this directly.
 /// - [`Exit::NoMatch`] (`1`) — a query subcommand's "no result" verdict, not a
 ///   failure: `tk grep` overloads `1` as the negative half of a `grep -q`-style
 ///   predicate (ADR-0026, ARCHITECTURE.md). Distinct from [`Exit::Failure`]
@@ -60,6 +62,70 @@ impl Exit {
             Self::Failure | Self::NoMatch => 1,
             Self::Usage => 2,
             Self::Internal => 3,
+        }
+    }
+}
+
+/// A command failure, framed once at the dispatch seam (ADR-0032).
+///
+/// A converted command handler returns `Err(CommandError)` instead of writing
+/// its own stderr. The seam ([`run_argv`]) supplies the `tk <command>:` prefix
+/// and the exit code; the variant carries only the message *body* — never the
+/// prefix (ADR-0032 narrows ADR-0017's grep-able unit to the body, which lives
+/// verbatim in each typed error's `#[error]`).
+#[derive(Debug)]
+pub enum CommandError {
+    /// Operation failed (exit 1). `tail` carries a subprocess's own stderr
+    /// forwarded verbatim as a separate line after tk's frame (bytes, because
+    /// a subprocess's stderr is not guaranteed UTF-8).
+    Failure { body: String, tail: Option<Vec<u8>> },
+    /// Command invoked incorrectly (exit 2). Caught during argument validation,
+    /// before any subprocess runs — so a usage error never forwards a tail.
+    Usage { body: String },
+}
+
+impl CommandError {
+    /// An operation failure (exit 1) carrying `body` as its message line.
+    pub fn failure(body: impl std::fmt::Display) -> Self {
+        Self::Failure {
+            body: body.to_string(),
+            tail: None,
+        }
+    }
+
+    /// A usage error (exit 2) carrying `body` as its message line.
+    pub fn usage(body: impl std::fmt::Display) -> Self {
+        Self::Usage {
+            body: body.to_string(),
+        }
+    }
+
+    /// The exit code this failure maps to.
+    #[must_use]
+    pub fn exit(&self) -> Exit {
+        match self {
+            Self::Failure { .. } => Exit::Failure,
+            Self::Usage { .. } => Exit::Usage,
+        }
+    }
+
+    /// Frame the diagnostic to `stderr` with the `tk <command>:` prefix. The
+    /// body's own newlines pass through, so a multi-line body (a cause detail
+    /// after the headline) is framed on its first line only — matching the
+    /// pre-seam `writeln!(stderr, "tk {command}: {body}")` bytes exactly. A
+    /// forwarded `tail` is written verbatim after the frame and is never
+    /// styled — it is the subprocess's voice, not tk's.
+    pub fn render<W: Write + ?Sized>(&self, stderr: &mut W, command: &str) {
+        match self {
+            Self::Failure { body, tail } => {
+                let _ = writeln!(stderr, "tk {command}: {body}");
+                if let Some(tail) = tail {
+                    let _ = stderr.write_all(tail);
+                }
+            }
+            Self::Usage { body } => {
+                let _ = writeln!(stderr, "tk {command}: {body}");
+            }
         }
     }
 }
@@ -163,7 +229,7 @@ enum Command {
 /// Entrypoint that the binary's `main.rs` and the scenario harness share.
 ///
 /// `argv` is the post-`tk` argument vector. Returns the process [`Exit`] status.
-pub fn run_argv(deps: Deps<'_>, argv: &[String]) -> std::io::Result<Exit> {
+pub fn run_argv(mut deps: Deps<'_>, argv: &[String]) -> std::io::Result<Exit> {
     // `try_parse_from` expects argv[0] to be the binary name; prepend it.
     let full_argv: Vec<&str> = std::iter::once("tk")
         .chain(argv.iter().map(String::as_str))
@@ -180,7 +246,12 @@ pub fn run_argv(deps: Deps<'_>, argv: &[String]) -> std::io::Result<Exit> {
         Command::Init(args) => Ok(commands::init::run(deps, args)),
         Command::List(args) => Ok(commands::list::run(deps, args)),
         Command::Next(args) => Ok(commands::next::run(deps, args)),
-        Command::Show(args) => Ok(commands::show::run(deps, args)),
+        Command::Show(args) => {
+            // Converted to the ADR-0032 seam: the handler returns the
+            // diagnostic, `finish` frames it.
+            let result = commands::show::run(&mut deps, args);
+            Ok(finish(&mut deps, "show", result))
+        }
         Command::Search(args) => Ok(commands::search::run(deps, args)),
         Command::Grep(args) => Ok(commands::grep::run(deps, args)),
         Command::Update(args) => Ok(commands::update::run(deps, args)),
@@ -197,22 +268,52 @@ pub fn run_argv(deps: Deps<'_>, argv: &[String]) -> std::io::Result<Exit> {
     }
 }
 
-/// Map a failed stdout render/write to an [`Exit`].
+/// Render a returned [`CommandError`] at the dispatch seam and surface its exit
+/// code. The single place the `tk <command>:` frame is applied for converted
+/// commands (ADR-0032); a successful command's [`Exit`] passes straight
+/// through.
+fn finish(deps: &mut Deps<'_>, command: &str, result: Result<Exit, CommandError>) -> Exit {
+    match result {
+        Ok(exit) => exit,
+        Err(err) => {
+            err.render(deps.stderr, command);
+            err.exit()
+        }
+    }
+}
+
+/// Classify a failed stdout write under the shared broken-pipe policy.
 ///
 /// A **broken pipe** — a downstream reader that closed early (`tk … | head`, a
 /// quit pager) — is success, not failure: the command did its job and the
-/// consumer simply stopped reading. Every other write error (e.g. a full disk
-/// on `tk … > file`) gets a curated diagnostic so its [`Exit::Failure`] carries
-/// a stderr line (the frozen contract) and stays distinguishable from a query
-/// command's empty-stderr "no result" ([`Exit::NoMatch`]). Shared by every
-/// rendering command so the broken-pipe policy cannot drift between them.
+/// consumer simply stopped reading, so this returns `None` (map to
+/// [`Exit::Ok`]). Every other write error (e.g. a full disk on `tk … > file`)
+/// becomes a [`CommandError::Failure`] so its [`Exit::Failure`] carries a
+/// stderr line (the frozen contract) and stays distinguishable from a query
+/// command's empty-stderr "no result" ([`Exit::NoMatch`]).
+#[must_use]
+pub fn write_error(err: &std::io::Error) -> Option<CommandError> {
+    if err.kind() == std::io::ErrorKind::BrokenPipe {
+        None
+    } else {
+        Some(CommandError::failure(format!(
+            "failed to write output\n{err}"
+        )))
+    }
+}
+
+/// Map a failed stdout write to an [`Exit`], rendering any diagnostic to
+/// `stderr`. The pre-seam form of [`write_error`], still used by commands not
+/// yet converted to the ADR-0032 seam; both share the broken-pipe policy so it
+/// cannot drift between them.
 #[must_use]
 pub fn exit_for_write_error(err: &std::io::Error, stderr: &mut dyn Write, command: &str) -> Exit {
-    if err.kind() == std::io::ErrorKind::BrokenPipe {
-        Exit::Ok
-    } else {
-        let _ = writeln!(stderr, "tk {command}: failed to write output\n{err}");
-        Exit::Failure
+    match write_error(err) {
+        None => Exit::Ok,
+        Some(diagnostic) => {
+            diagnostic.render(stderr, command);
+            diagnostic.exit()
+        }
     }
 }
 
