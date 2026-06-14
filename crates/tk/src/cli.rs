@@ -276,9 +276,18 @@ pub fn run_argv(mut deps: Deps<'_>, argv: &[String]) -> std::io::Result<Exit> {
             Ok(finish(&mut deps, "grep", result))
         }
         Command::Update(args) => Ok(commands::update::run(deps, args)),
-        Command::Start(args) => Ok(commands::start::run(deps, args)),
-        Command::Stop(args) => Ok(commands::stop::run(deps, args)),
-        Command::Done(args) => Ok(commands::done::run(deps, args)),
+        Command::Start(args) => {
+            let result = commands::start::run(&mut deps, args);
+            Ok(finish(&mut deps, "start", result))
+        }
+        Command::Stop(args) => {
+            let result = commands::stop::run(&mut deps, args);
+            Ok(finish(&mut deps, "stop", result))
+        }
+        Command::Done(args) => {
+            let result = commands::done::run(&mut deps, args);
+            Ok(finish(&mut deps, "done", result))
+        }
         Command::Block(args) => Ok(commands::block::run(deps, args)),
         Command::Unblock(args) => Ok(commands::unblock::run(deps, args)),
         Command::Prime(args) => Ok(commands::prime::run(deps, args)),

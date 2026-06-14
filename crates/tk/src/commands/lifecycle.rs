@@ -7,7 +7,7 @@
 //! `command` and `target` parameters carry the only per-command
 //! variation.
 
-use crate::cli::{Deps, Exit};
+use crate::cli::{CommandError, Deps, Exit};
 use crate::commands::resolver;
 use crate::domain::item_class::ItemClass;
 use crate::domain::status::ItemStatus;
@@ -35,50 +35,29 @@ impl SuccessLabel {
 /// Run a lifecycle transition against the supplied Deps and report the
 /// outcome with per-command phrasing. `command` is the subcommand name
 /// (`"start"` / `"stop"` / `"done"`) used in stderr diagnostics.
-#[must_use]
 pub fn transition(
-    deps: Deps<'_>,
-    command: &'static str,
+    deps: &mut Deps<'_>,
     id: &str,
     target: ItemStatus,
     success: SuccessLabel,
     closing_reason: Option<&str>,
-) -> Exit {
-    let Deps {
-        stdout,
-        stderr,
-        runner,
-        clock,
-        cwd,
-        ..
-    } = deps;
-
-    let mut store = match resolver::open_for_command(runner, cwd, clock) {
-        Ok(s) => s,
-        Err(err) => {
-            resolver::render_open_error(stderr, command, &err);
-            return Exit::Failure;
-        }
-    };
+) -> Result<Exit, CommandError> {
+    let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
+        .map_err(|err| resolver::open_error(&err))?;
 
     let resolved = match resolver::resolve(&store, id) {
         Ok(r) => r,
         Err(resolver::ResolveError::NotFound) => {
-            let _ = writeln!(
-                stderr,
-                "tk {command}: '{id}' is not a known Display ID or Alias"
-            );
-            return Exit::Failure;
+            return Err(CommandError::failure(format!(
+                "'{id}' is not a known Display ID or Alias"
+            )));
         }
-        Err(resolver::ResolveError::Storage(err)) => {
-            resolver::render_storage_error(stderr, command, &err);
-            return Exit::Failure;
-        }
+        Err(resolver::ResolveError::Storage(err)) => return Err(resolver::storage_error(&err)),
     };
 
     match status::set_item_status(
         &mut store,
-        clock,
+        deps.clock,
         SetStatusRequest {
             id: &resolved.id,
             status: target,
@@ -87,57 +66,32 @@ pub fn transition(
     ) {
         Ok(item) => {
             let prefix = success.select(item.item_class);
-            let _ = writeln!(stdout, "{prefix}{} - {}", item.display_id, item.title);
-            Exit::Ok
+            let _ = writeln!(deps.stdout, "{prefix}{} - {}", item.display_id, item.title);
+            Ok(Exit::Ok)
         }
-        Err(SetStatusError::NotFound) => {
-            // Race: row vanished between resolve and the BEGIN IMMEDIATE.
-            let _ = writeln!(
-                stderr,
-                "tk {command}: '{id}' is not a known Display ID or Alias"
-            );
-            Exit::Failure
-        }
-        Err(SetStatusError::LockedDone(class)) => {
-            let _ = writeln!(
-                stderr,
-                "tk {command}: {label} '{id}' is done and cannot be reopened",
-                label = class.label()
-            );
-            Exit::Failure
-        }
-        Err(SetStatusError::AlreadyClosed(_)) => {
-            // Set-once (ADR-0023): re-closing is not an amend path. Only
-            // `tk done -m` reaches this, so `{command}` is always "done".
-            let _ = writeln!(
-                stderr,
-                "tk {command}: '{id}' is already done; closing reason not changed"
-            );
-            Exit::Failure
-        }
-        Err(SetStatusError::TriageNotStartable) => {
-            let _ = writeln!(
-                stderr,
-                "tk {command}: '{id}' is in triage; accept it first with \
-                 'tk accept {id} --priority P0..P4'"
-            );
-            Exit::Failure
-        }
-        Err(SetStatusError::ParkedNotStartable) => {
-            let _ = writeln!(
-                stderr,
-                "tk {command}: '{id}' is parked; unpark it first with 'tk unpark {id}'"
-            );
-            Exit::Failure
-        }
-        Err(SetStatusError::Sqlite(err)) => {
-            resolver::render_storage_error(stderr, command, &err);
-            Exit::Failure
-        }
-        Err(SetStatusError::Mutation(err)) => {
-            let _ = writeln!(stderr, "tk {command}: failed to append Mutation: {err}");
-            Exit::Failure
-        }
+        // Race: row vanished between resolve and the BEGIN IMMEDIATE.
+        Err(SetStatusError::NotFound) => Err(CommandError::failure(format!(
+            "'{id}' is not a known Display ID or Alias"
+        ))),
+        Err(SetStatusError::LockedDone(class)) => Err(CommandError::failure(format!(
+            "{label} '{id}' is done and cannot be reopened",
+            label = class.label()
+        ))),
+        // Set-once (ADR-0023): re-closing is not an amend path.
+        Err(SetStatusError::AlreadyClosed(_)) => Err(CommandError::failure(format!(
+            "'{id}' is already done; closing reason not changed"
+        ))),
+        Err(SetStatusError::TriageNotStartable) => Err(CommandError::failure(format!(
+            "'{id}' is in triage; accept it first with \
+             'tk accept {id} --priority P0..P4'"
+        ))),
+        Err(SetStatusError::ParkedNotStartable) => Err(CommandError::failure(format!(
+            "'{id}' is parked; unpark it first with 'tk unpark {id}'"
+        ))),
+        Err(SetStatusError::Sqlite(err)) => Err(resolver::storage_error(&err)),
+        Err(SetStatusError::Mutation(err)) => Err(CommandError::failure(format!(
+            "failed to append Mutation: {err}"
+        ))),
     }
 }
 
@@ -209,6 +163,28 @@ mod tests {
         );
     }
 
+    /// Drive `transition` and frame any returned error as the dispatch seam
+    /// does (ADR-0032: `tk <command>: <body>`), so a test asserts the framed
+    /// bytes. `command` is the subcommand name the seam would supply.
+    fn run_rendered(
+        h: &mut Harness<'_>,
+        command: &str,
+        id: &str,
+        target: ItemStatus,
+        success: SuccessLabel,
+        closing_reason: Option<&str>,
+    ) -> Exit {
+        let mut deps = h.deps();
+        match transition(&mut deps, id, target, success, closing_reason) {
+            Ok(exit) => exit,
+            Err(err) => {
+                let exit = err.exit();
+                err.render(deps.stderr, command);
+                exit
+            }
+        }
+    }
+
     const STARTED: SuccessLabel = SuccessLabel {
         ticket: "Started Ticket: ",
         epic: "Started Epic: ",
@@ -234,7 +210,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = transition(h.deps(), "start", "tk-1", ItemStatus::Active, STARTED, None);
+        let code = run_rendered(&mut h, "start", "tk-1", ItemStatus::Active, STARTED, None);
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(stdout.contains("Started Ticket: tk-1 - Subject"));
@@ -261,7 +237,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = transition(h.deps(), "start", "tk-1", ItemStatus::Active, STARTED, None);
+        let code = run_rendered(&mut h, "start", "tk-1", ItemStatus::Active, STARTED, None);
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk start: Ticket 'tk-1' is done and cannot be reopened"));
@@ -323,8 +299,8 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = transition(
-            h.deps(),
+        let code = run_rendered(
+            &mut h,
             "done",
             "tk-1",
             ItemStatus::Done,
@@ -383,7 +359,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = transition(h.deps(), "start", "tk-1", ItemStatus::Active, STARTED, None);
+        let code = run_rendered(&mut h, "start", "tk-1", ItemStatus::Active, STARTED, None);
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(
@@ -404,7 +380,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = transition(h.deps(), "start", "tk-1", ItemStatus::Active, STARTED, None);
+        let code = run_rendered(&mut h, "start", "tk-1", ItemStatus::Active, STARTED, None);
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(
@@ -420,7 +396,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = transition(h.deps(), "stop", "tk-9999", ItemStatus::Open, STARTED, None);
+        let code = run_rendered(&mut h, "stop", "tk-9999", ItemStatus::Open, STARTED, None);
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk stop: 'tk-9999' is not a known Display ID or Alias"));

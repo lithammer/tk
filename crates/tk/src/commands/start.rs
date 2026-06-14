@@ -2,7 +2,7 @@
 
 use clap::Args as ClapArgs;
 
-use crate::cli::{Deps, Exit};
+use crate::cli::{CommandError, Deps, Exit};
 use crate::commands::lifecycle::{self, SuccessLabel};
 use crate::domain::status::ItemStatus;
 
@@ -17,7 +17,6 @@ const SUCCESS: SuccessLabel = SuccessLabel {
     epic: "Started Epic: ",
 };
 
-#[must_use]
-pub fn run(deps: Deps<'_>, args: Args) -> Exit {
-    lifecycle::transition(deps, "start", &args.id, ItemStatus::Active, SUCCESS, None)
+pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
+    lifecycle::transition(deps, &args.id, ItemStatus::Active, SUCCESS, None)
 }
