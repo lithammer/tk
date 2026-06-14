@@ -265,7 +265,10 @@ pub fn run_argv(mut deps: Deps<'_>, argv: &[String]) -> std::io::Result<Exit> {
             Ok(finish(&mut deps, "unpark", result))
         }
         Command::Init(args) => Ok(commands::init::run(deps, args)),
-        Command::List(args) => Ok(commands::list::run(deps, args)),
+        Command::List(args) => {
+            let result = commands::list::run(&mut deps, args);
+            Ok(finish(&mut deps, "list", result))
+        }
         Command::Next(args) => {
             let result = commands::next::run(&mut deps, args);
             Ok(finish(&mut deps, "next", result))
@@ -312,7 +315,10 @@ pub fn run_argv(mut deps: Deps<'_>, argv: &[String]) -> std::io::Result<Exit> {
             Ok(finish(&mut deps, "self-update", result))
         }
         Command::Sync(args) => Ok(commands::sync::run(deps, args)),
-        Command::Promote(args) => Ok(commands::promote::run(deps, args)),
+        Command::Promote(args) => {
+            let result = commands::promote::run(&mut deps, args);
+            Ok(finish(&mut deps, "promote", result))
+        }
     }
 }
 

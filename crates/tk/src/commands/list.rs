@@ -14,7 +14,7 @@ use std::io::Write;
 
 use clap::Args as ClapArgs;
 
-use crate::cli::{self, Deps, Exit};
+use crate::cli::{self, CommandError, Deps, Exit};
 use crate::commands::item_row::{render_chrome, render_row};
 use crate::commands::{resolver, scope};
 use crate::render::palette;
@@ -22,8 +22,6 @@ use crate::render::styler::SubStyler;
 use crate::store::repository::list::{
     self, ListClassFilter, ListOptions, ListOriginFilter, ListRow, ListView,
 };
-
-const COMMAND: &str = "list";
 
 /// Flags for `tk list`.
 ///
@@ -65,31 +63,11 @@ pub struct Args {
     pub epic_id: Option<String>,
 }
 
-#[must_use]
-pub fn run(deps: Deps<'_>, args: Args) -> Exit {
-    let Deps {
-        stdout,
-        stderr,
-        runner,
-        clock,
-        cwd,
-        styler,
-        ..
-    } = deps;
+pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
+    let store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
+        .map_err(|err| resolver::open_error(&err))?;
 
-    let store = match resolver::open_for_command(runner, cwd, clock) {
-        Ok(s) => s,
-        Err(err) => {
-            resolver::render_open_error(stderr, COMMAND, &err);
-            return Exit::Failure;
-        }
-    };
-
-    let scope_epic = match scope::resolve_rendered(&store, stderr, COMMAND, args.epic_id.as_deref())
-    {
-        Ok(scope) => scope,
-        Err(exit) => return exit,
-    };
+    let scope_epic = scope::resolve(&store, args.epic_id.as_deref())?;
 
     let options = ListOptions {
         view: select_view(&args),
@@ -98,27 +76,21 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
         scope: scope_epic.as_ref().map(|epic| epic.id.as_str()),
     };
 
-    let rows = match list::list_rows(&store, options) {
-        Ok(rows) => rows,
-        Err(err) => {
-            resolver::render_storage_error(stderr, COMMAND, &err);
-            return Exit::Failure;
-        }
-    };
+    let rows = list::list_rows(&store, options).map_err(|err| resolver::storage_error(&err))?;
 
-    let out = styler.for_stdout();
+    let out = deps.styler.for_stdout();
 
     // Hint so a Scope-filtered tree never reads as the full store (ADR-0022).
     if let Some(epic) = scope_epic.as_ref() {
-        if let Err(err) = render_scope_hint(stdout, &epic.display_id, out) {
-            return cli::exit_for_write_error(&err, stderr, COMMAND);
+        if let Err(err) = render_scope_hint(deps.stdout, &epic.display_id, out) {
+            return cli::write_error(&err).map_or(Ok(Exit::Ok), Err);
         }
     }
 
-    if let Err(err) = render(stdout, &rows, options, out) {
-        return cli::exit_for_write_error(&err, stderr, COMMAND);
+    if let Err(err) = render(deps.stdout, &rows, options, out) {
+        return cli::write_error(&err).map_or(Ok(Exit::Ok), Err);
     }
-    Exit::Ok
+    Ok(Exit::Ok)
 }
 
 /// One-line banner above a Scope-filtered List Tree: a bold `Scope:` label,
@@ -333,6 +305,20 @@ mod tests {
         );
     }
 
+    /// Drive `run` and frame any returned error as the dispatch seam does
+    /// (ADR-0032: `tk list: <body>`), so a test asserts the framed bytes.
+    fn run_rendered(h: &mut Harness<'_>, args: Args) -> Exit {
+        let mut deps = h.deps();
+        match run(&mut deps, args) {
+            Ok(exit) => exit,
+            Err(err) => {
+                let exit = err.exit();
+                err.render(deps.stderr, "list");
+                exit
+            }
+        }
+    }
+
     fn default_args() -> Args {
         Args {
             ready: false,
@@ -354,7 +340,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(h.deps(), default_args());
+        let code = run_rendered(&mut h, default_args());
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert_eq!(stdout, "No open or active items.\n");
@@ -381,7 +367,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(h.deps(), default_args());
+        let code = run_rendered(&mut h, default_args());
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(stdout.contains("[parked]"), "stdout={stdout:?}");
@@ -410,7 +396,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(h.deps(), default_args());
+        let code = run_rendered(&mut h, default_args());
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(stdout.contains("[triage]"), "stdout={stdout:?}");
@@ -437,7 +423,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(h.deps(), default_args());
+        let code = run_rendered(&mut h, default_args());
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(
@@ -491,8 +477,8 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
+        let code = run_rendered(
+            &mut h,
             Args {
                 ready: true,
                 ..default_args()
@@ -539,8 +525,8 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
+        let code = run_rendered(
+            &mut h,
             Args {
                 epic: true,
                 ..default_args()
@@ -572,8 +558,8 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
+        let code = run_rendered(
+            &mut h,
             Args {
                 epic: true,
                 ..default_args()
@@ -606,8 +592,8 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
+        let code = run_rendered(
+            &mut h,
             Args {
                 ready: true,
                 epic: true,
@@ -627,8 +613,8 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
+        let code = run_rendered(
+            &mut h,
             Args {
                 epic: true,
                 local: true,
@@ -645,7 +631,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(h.deps(), default_args());
+        let code = run_rendered(&mut h, default_args());
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk list: Repository Store not initialized; run 'tk init'"));
@@ -698,8 +684,8 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
+        let code = run_rendered(
+            &mut h,
             Args {
                 epic_id: Some("tk-1".to_owned()),
                 ..default_args()
@@ -736,8 +722,8 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
+        let code = run_rendered(
+            &mut h,
             Args {
                 epic_id: Some("tk-1".to_owned()),
                 ..default_args()
@@ -787,7 +773,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(h.deps(), default_args());
+        let code = run_rendered(&mut h, default_args());
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         // Epic line and the single └── child below it.
