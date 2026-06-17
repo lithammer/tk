@@ -27,6 +27,7 @@
 
 pub mod apply_outcome;
 pub mod backend_item_snapshot;
+pub mod backend_kind;
 pub mod item_class;
 pub mod mutation_payload;
 pub mod mutation_state;

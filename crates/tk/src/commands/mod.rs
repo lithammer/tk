@@ -26,6 +26,7 @@ pub mod next;
 pub mod park;
 pub mod prime;
 pub mod promote;
+pub mod remote;
 pub mod resolver;
 pub mod scope;
 pub mod search;

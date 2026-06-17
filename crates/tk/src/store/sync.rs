@@ -18,6 +18,7 @@ use thiserror::Error;
 
 use crate::domain::apply_outcome::ApplyOutcome;
 use crate::domain::backend_item_snapshot::BackendItemSnapshot;
+use crate::domain::backend_kind::BackendKind;
 use crate::domain::item_class::ItemClass;
 use crate::domain::mutation_payload::{
     DependencyRef, EpicRef, MutationPayload, StatusChange, TitleBody,
@@ -488,6 +489,110 @@ pub fn pending_or_failed_mutation_count(conn: &Connection) -> rusqlite::Result<i
         [],
         |r| r.get(0),
     )
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Remote set / clear (tk remote set / tk remote clear)
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Outcome of [`set_remote`]: whether a `remotes` row was created, or the call
+/// was an idempotent no-op because one already existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetRemoteOutcome {
+    Created,
+    Unchanged,
+}
+
+/// Configure the v1 singleton Remote (`name = 'primary'`) and seed its Sync
+/// Cursor at 0, inside one IMMEDIATE transaction.
+///
+/// Idempotent by the v1 model (ADR-0033): when a Remote already exists this is
+/// a no-op. A v1 GitHub Remote stores no repository, so re-running `tk remote
+/// set github` changes nothing; replacing a Remote is therefore not modelled —
+/// switching Backends is `tk remote clear` (orphan-guarded) then `tk remote
+/// set`. `config_json` is the caller's already-built Backend configuration
+/// (today always `{}` for GitHub).
+pub fn set_remote(
+    conn: &mut Connection,
+    kind: BackendKind,
+    config_json: &str,
+    now: &str,
+) -> rusqlite::Result<SetRemoteOutcome> {
+    let tx = crate::store::write_transaction(conn)?;
+
+    let exists = tx
+        .query_row("select 1 from remotes where name = 'primary'", [], |_| {
+            Ok(())
+        })
+        .optional()?
+        .is_some();
+    if exists {
+        return Ok(SetRemoteOutcome::Unchanged);
+    }
+
+    tx.execute(
+        "insert into remotes(name, backend_kind, config_json, created_at, updated_at) \
+         values ('primary', ?1, ?2, ?3, ?3)",
+        params![kind.text(), config_json, now],
+    )?;
+    tx.execute(
+        "insert into sync_cursors(remote_name, backend_kind, last_applied_sequence, updated_at) \
+         values ('primary', ?1, 0, ?2)",
+        params![kind.text(), now],
+    )?;
+
+    tx.commit()?;
+    Ok(SetRemoteOutcome::Created)
+}
+
+/// Error returned by [`clear_remote`].
+#[derive(Debug, Error)]
+pub enum ClearRemoteError {
+    #[error(transparent)]
+    Storage(#[from] rusqlite::Error),
+    /// No `remotes` row to remove.
+    #[error("no Remote configured")]
+    NotConfigured,
+    /// Pending or failed Mutations still target the Backend; removing the
+    /// Remote would orphan them (CONTEXT.md). Carries the count for the
+    /// verbatim diagnostic.
+    #[error(
+        "{0} pending or failed Mutation(s) would be orphaned; resolve them with 'tk sync' or skip them with 'tk sync --skip <id>' before clearing the Remote"
+    )]
+    WouldOrphan(i64),
+}
+
+/// Remove the v1 singleton Remote and its Sync Cursor, inside one IMMEDIATE
+/// transaction, but only when no pending or failed Mutations would be orphaned
+/// (ADR-0033, CONTEXT.md).
+///
+/// Deletes `sync_cursors` before `remotes` because the
+/// `sync_cursors.remote_name` foreign key is `on delete restrict`. Backend
+/// `items` and applied/skipped Mutation history are left intact; clearing is
+/// not a Mutation. A refusal drops the transaction, so nothing is removed.
+pub fn clear_remote(conn: &mut Connection) -> Result<(), ClearRemoteError> {
+    let tx = crate::store::write_transaction(conn)?;
+
+    let exists = tx
+        .query_row("select 1 from remotes where name = 'primary'", [], |_| {
+            Ok(())
+        })
+        .optional()?
+        .is_some();
+    if !exists {
+        return Err(ClearRemoteError::NotConfigured);
+    }
+
+    let in_flight = pending_or_failed_mutation_count(&tx)?;
+    if in_flight > 0 {
+        return Err(ClearRemoteError::WouldOrphan(in_flight));
+    }
+
+    tx.execute("delete from sync_cursors where remote_name = 'primary'", [])?;
+    tx.execute("delete from remotes where name = 'primary'", [])?;
+
+    tx.commit()?;
+    Ok(())
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -1373,6 +1478,83 @@ mod tests {
             .unwrap();
         }
         assert_eq!(pending_or_failed_mutation_count(&conn).unwrap(), 2);
+    }
+
+    // ---- set_remote / clear_remote --------------------------------------
+
+    #[test]
+    fn set_remote_creates_row_then_no_ops() {
+        let mut conn = open_seeded();
+        let outcome =
+            set_remote(&mut conn, BackendKind::Github, "{}", "2026-06-17T00:00:00Z").unwrap();
+        assert_eq!(outcome, SetRemoteOutcome::Created);
+
+        let row = get_remote(&conn).unwrap().unwrap();
+        assert_eq!(row.backend_kind, "github");
+        assert_eq!(row.config_json, "{}");
+        assert_eq!(row.last_applied_sequence, 0);
+
+        // A second set is an idempotent no-op (ADR-0033): no replace, one row.
+        let again =
+            set_remote(&mut conn, BackendKind::Github, "{}", "2026-06-18T00:00:00Z").unwrap();
+        assert_eq!(again, SetRemoteOutcome::Unchanged);
+        let count: i64 = conn
+            .query_row("select count(*) from remotes", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn clear_remote_removes_remote_and_cursor_when_clean() {
+        let mut conn = open_seeded();
+        set_remote(&mut conn, BackendKind::Github, "{}", "2026-06-17T00:00:00Z").unwrap();
+
+        clear_remote(&mut conn).unwrap();
+
+        assert_eq!(get_remote(&conn).unwrap(), None);
+        let cursors: i64 = conn
+            .query_row("select count(*) from sync_cursors", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            cursors, 0,
+            "the child sync_cursors row is deleted before the restrict FK"
+        );
+    }
+
+    #[test]
+    fn clear_remote_refuses_when_no_remote() {
+        let mut conn = open_seeded();
+        match clear_remote(&mut conn).unwrap_err() {
+            ClearRemoteError::NotConfigured => {}
+            other => panic!("expected NotConfigured, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clear_remote_refuses_when_pending_or_failed_would_orphan() {
+        let mut conn = open_seeded();
+        set_remote(&mut conn, BackendKind::Github, "{}", "2026-06-17T00:00:00Z").unwrap();
+        backend_ticket(&conn, "t1", "gh-1", "1", 1);
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "update_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"A","body":""}"#,
+                state: "failed",
+                failure_json: Some(r#"{"detail":"x"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        match clear_remote(&mut conn).unwrap_err() {
+            ClearRemoteError::WouldOrphan(1) => {}
+            other => panic!("expected WouldOrphan(1), got {other:?}"),
+        }
+        // The Remote survives a refused clear.
+        assert!(get_remote(&conn).unwrap().is_some());
     }
 
     // ---- log read -------------------------------------------------------

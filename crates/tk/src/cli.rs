@@ -232,6 +232,8 @@ enum Command {
     Manpage(commands::manpage::Args),
     /// Replace the running tk binary with the latest release.
     SelfUpdate(commands::self_update::Args),
+    /// Configure the Primary Backend.
+    Remote(commands::remote::Args),
     /// Apply pending Mutations through the configured Remote.
     Sync(commands::sync::Args),
     /// Promote a Local Ticket or Epic through the configured Remote.
@@ -326,6 +328,10 @@ pub fn run_argv(mut deps: Deps<'_>, argv: &[String]) -> std::io::Result<Exit> {
         Command::SelfUpdate(args) => {
             let result = commands::self_update::run(&mut deps, args);
             Ok(finish(&mut deps, "self-update", result))
+        }
+        Command::Remote(args) => {
+            let result = commands::remote::run(&mut deps, args);
+            Ok(finish(&mut deps, "remote", result))
         }
         Command::Sync(args) => Ok(commands::sync::run(deps, args)),
         Command::Promote(args) => {
