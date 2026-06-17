@@ -335,7 +335,8 @@ _Avoid_: ticket, tickets
 - v1 supports zero or one configured **Remote**.
 - **`tk remote`** shows the configured **Remote**.
 - **`tk remote set <kind>`** configures or replaces the **Remote**.
-- **`tk remote clear`** removes the configured **Remote** when no pending remote **Mutations** would be orphaned.
+- **`tk remote clear`** removes the configured **Remote** when no pending or failed remote **Mutations** would be orphaned.
+- Configuring or clearing a **Remote** is not a **Mutation** and is never recorded in the **Mutation Log**.
 - **Remote** authentication is delegated to backend-specific external CLIs.
 - A **Backend Adapter** exposes **Backend Pull** and **Mutation Apply** operations.
 - Sync runs **Backend Pull** before applying pending **Mutations** in v1.
