@@ -83,3 +83,10 @@ The deferral therefore rests on scope, not capability:
   `gh issue`, so the deferral became purely a slice-size choice, issue-type →
   `TicketKind` moved into tk-34's Pull, and tk-107 was re-scoped to the native
   flags.
+- (tk-34, 2026-06) The Pull *mechanism* this ADR specified — a single
+  `gh issue list --state all` mirroring every issue into the Repository Store —
+  is superseded by ADR-0034: tk syncs an opt-in working set, so Backend Pull
+  refreshes only the Adopted items by key (`gh issue view <n>`) and never
+  discovers un-Adopted issues. The field set, the two-state status axis, the
+  relationship-deferral decision, and the issueType → `TicketKind` mapping
+  recorded above are unaffected — only the list-everything ingest is replaced.

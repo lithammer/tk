@@ -153,8 +153,8 @@ A component that maps between **tk** domain concepts and a specific **Backend**.
 _Avoid_: Facade, Provider, Connector
 
 **Backend Pull**:
-A **Backend Adapter** operation that imports backend state into the **Repository Store**.
-_Avoid_: Fetch, Import
+A **Backend Adapter** operation that refreshes the **Adopted** **Backend** items not yet `done`, importing each one's current title, body, and **Item Status**. It refreshes only items tk already tracks; it neither mirrors nor discovers a **Backend**.
+_Avoid_: Fetch, Import, Mirror
 
 **Mutation Apply**:
 A **Backend Adapter** operation that applies one pending **Mutation** to a **Backend**.
@@ -179,6 +179,10 @@ _Avoid_: Local Group
 **Backend Epic**:
 An **Epic** whose **Origin** is a **Backend**.
 _Avoid_: Remote Epic, Synced Epic
+
+**Adopt**:
+The **`tk`** command intent for bringing an existing **Backend** issue into the **Repository Store** as a **Backend Ticket** to be worked locally and synced, without creating a new backend issue. The inverse intake direction to **Promotion**, which instead pushes a **Local** item up to a **Backend**.
+_Avoid_: Track, Link, Import, Watch
 
 **Promotion**:
 The act of converting a **Local Ticket** or **Local Epic** into a backend-backed object through the **Primary Backend**.
@@ -277,7 +281,7 @@ _Avoid_: ticket, tickets
 - A **Ticket** has exactly one **Selection State**.
 - An **Epic** has no **Selection State**.
 - **Selection State** is a **Local Field** in v1.
-- The default **Selection State** is `accepted`; newly imported **Backend Tickets** also default to `accepted`.
+- The default **Selection State** is `accepted`; a newly **Adopted** **Backend Ticket** also defaults to `accepted`, since **Adopting** an issue is the choice to work it.
 - A `triage` **Ticket** carries no **Priority**; `accepted` and `parked` **Tickets** carry a **Priority**.
 - **Accept** moves a `triage` **Ticket** to `accepted` and assigns its **Priority**; accepting an already `accepted` **Ticket** is a harmless no-op.
 - **Accept** preserves a **Ticket**'s **Dependencies** and **External Blockers**, so an accepted **Ticket** may be immediately blocked.
@@ -340,6 +344,8 @@ _Avoid_: ticket, tickets
 - **Remote** authentication is delegated to backend-specific external CLIs.
 - A **Backend Adapter** exposes **Backend Pull** and **Mutation Apply** operations.
 - Sync runs **Backend Pull** before applying pending **Mutations** in v1.
+- **Adopt** and **Promotion** are the two intake directions across the local/**Backend** boundary; both yield a **Backend Ticket**, and tk syncs only items that entered through one of them.
+- tk does not mirror or auto-discover a **Backend**; **Backend Pull** refreshes only the **Adopted** **Backend** items that are not `done`.
 - A **Mutation Apply** returns a **Mutation Receipt** or a failure.
 - The sync engine owns mutation ordering, cursors, retries, and failure policy.
 - The sync engine applies pending **Mutations** in global **Mutation Sequence** order in v1.
@@ -594,3 +600,4 @@ _Avoid_: ticket, tickets
 - Honouring `TK_SCOPE` in **`tk search`** was considered — resolved: search is a whole-**Repository Store** lookup; silently narrowing it to an ambient Epic would hide the searched-for item, the hidden-state smell ADR-0022 rejected.
 - The **`tk grep`** matching model — literal substring, regular expression, FTS5 full-text, or Levenshtein/fuzzy — was considered (tk-113) — resolved: **regular expression** by default. Literal is a trap (the default cannot be flipped to regex later without changing the meaning of `.`/`*`/`(`/`|`); regex is a strict superset that degrades to literal for metacharacter-free patterns. FTS5 and fuzzy produce ranked/scored output that cannot inhabit **`tk grep`**'s deterministic line-context block, so both are reserved for future ranked **`tk search`** recall modes (ADR-0026).
 - A relevance/edit-distance ordering for **`tk grep`** was considered — resolved: **`tk grep`** orders matches by creation and never ranks, because ranked output is incompatible with streaming one matched item to stdout at a time and belongs to the **Search** family, not **Grep** (ADR-0026).
+- Mirroring the whole **Backend** into the **Repository Store** on every sync — the original tk-34 model — was considered (tk-34) — resolved: tk is a local-first tracker with **opt-in** **Backend** support. **Backend** issues enter only by **Adopt** (or **Promotion**), and **Backend Pull** refreshes just the **Adopted** non-`done` items; tk neither mirrors nor auto-discovers a **Backend**. Mirroring would import an entire tracker (e.g. a 15k-item Jira project) as `accepted` **Backend Tickets**, swamping **`tk next`**, and a fixed pull cap silently drops items past the cap.
