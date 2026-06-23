@@ -25,7 +25,10 @@ use crate::domain::mutation_payload::{
 use crate::domain::mutation_state::MutationState;
 use crate::domain::mutation_type::MutationType;
 use crate::domain::mutation_view::MutationView;
+use crate::domain::priority::Priority;
 use crate::domain::selection_state::SelectionState;
+use crate::domain::status::ItemStatus;
+use crate::domain::ticket_kind::TicketKind;
 use crate::store::repository::create::generate_internal_id;
 use crate::store::sequences::{self, SequenceError};
 
@@ -467,6 +470,45 @@ pub fn get_remote(conn: &Connection) -> rusqlite::Result<Option<RemoteRow>> {
                 backend_kind: row.get(0)?,
                 config_json: row.get(1)?,
                 last_applied_sequence: row.get(2)?,
+            })
+        },
+    )
+    .optional()
+}
+
+/// The rendered fields of one Backend item, addressed by its backend identity.
+/// `tk adopt` uses this both to decide its idempotent "Already adopted" exit
+/// (reading only `display_id`) and to render the created-item block from the
+/// row `merge_backend_snapshots` just wrote — so the displayed Priority is
+/// always the stored value (`P2` in v1), not a constant the command duplicates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackendItemRow {
+    pub display_id: String,
+    pub ticket_kind: Option<TicketKind>,
+    pub priority: Option<Priority>,
+    pub status: ItemStatus,
+    pub title: String,
+}
+
+/// Look up a Backend item by its `(backend_kind, backend_key)` identity, the
+/// pair `merge_backend_snapshots` keys inserts on. Returns `None` when no item
+/// carries that identity. The pair is unique, so at most one row matches.
+pub fn find_backend_item(
+    conn: &Connection,
+    backend_kind: &str,
+    backend_key: &str,
+) -> rusqlite::Result<Option<BackendItemRow>> {
+    conn.query_row(
+        "select display_value, ticket_kind, priority, status, title \
+           from items where backend_kind = ?1 and backend_key = ?2",
+        params![backend_kind, backend_key],
+        |row| {
+            Ok(BackendItemRow {
+                display_id: row.get(0)?,
+                ticket_kind: row.get(1)?,
+                priority: row.get(2)?,
+                status: row.get(3)?,
+                title: row.get(4)?,
             })
         },
     )

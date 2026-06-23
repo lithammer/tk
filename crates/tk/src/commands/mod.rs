@@ -12,6 +12,7 @@
 
 pub mod accept;
 pub mod add;
+pub mod adopt;
 pub mod block;
 pub mod done;
 pub mod grep;
