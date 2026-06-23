@@ -12,11 +12,10 @@
 //! connection without managing one.
 
 use rusqlite::{Connection, OptionalExtension, params};
-use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use thiserror::Error;
 
-use crate::domain::apply_outcome::ApplyOutcome;
+use crate::domain::apply_outcome::{ApplyOutcome, Failure, FailureClass};
 use crate::domain::backend_item_snapshot::BackendItemSnapshot;
 use crate::domain::backend_kind::BackendKind;
 use crate::domain::item_class::ItemClass;
@@ -297,15 +296,6 @@ fn decode_mutation_payload(
 // Apply outcome / mark skipped / cursor
 // ──────────────────────────────────────────────────────────────────────────
 
-/// On-disk wire shape for `mutations.failure_json`. Encoder and decoder share
-/// this one type so the two sides cannot drift. `serde_json` always emits
-/// valid JSON (control bytes escaped as `\uXXXX`), satisfying the column's
-/// `json_valid()` CHECK.
-#[derive(Debug, Serialize, Deserialize)]
-struct FailureJsonWrapper {
-    detail: String,
-}
-
 /// Error returned by [`apply_mutation_outcome`].
 #[derive(Debug, Error)]
 pub enum ApplyMutationOutcomeError {
@@ -362,10 +352,11 @@ pub fn apply_mutation_outcome(
             advance_sync_cursor(&tx, sequence, now)?;
         }
         ApplyOutcome::Rejected(failure) => {
-            let failure_json = serde_json::to_string(&FailureJsonWrapper {
-                detail: failure.detail.clone(),
-            })
-            .expect("FailureJsonWrapper serializes infallibly");
+            // The Failure type *is* the on-disk shape (ADR-0016 amendment), so
+            // it serializes straight into `failure_json`; `serde_json` always
+            // emits valid JSON, satisfying the column's `json_valid()` CHECK.
+            let failure_json =
+                serde_json::to_string(failure).expect("Failure serializes infallibly");
             if prior == MutationState::Pending {
                 tx.execute(
                     "update mutations \
@@ -489,6 +480,23 @@ pub fn pending_or_failed_mutation_count(conn: &Connection) -> rusqlite::Result<i
         [],
         |r| r.get(0),
     )
+}
+
+/// Backend keys the next Backend Pull should refresh: the Adopted working
+/// set's still-active items (`origin = 'backend'`, status `open`/`active`), in
+/// creation order. `done` items are terminal and stay frozen (ADR-0034); v1
+/// has a single Remote, so every backend-origin item belongs to it.
+pub fn active_backend_keys(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "select backend_key from items \
+          where origin = 'backend' and backend_key is not null \
+            and status in ('open', 'active') \
+          order by created_seq asc",
+    )?;
+    let keys = stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(keys)
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -617,8 +625,11 @@ pub struct LogListRow {
     pub mutation_type: MutationType,
     pub target_display_id: String,
     pub created_at: String,
-    /// Decoded `failure.detail`; set only for `failed` rows.
+    /// Decoded `Failure.detail`; set only for `failed` rows.
     pub failure_detail: Option<String>,
+    /// Decoded `Failure.class`; set only for `failed` rows. `Some(Unknown)` is
+    /// a failure tk could not classify — rendering suppresses it.
+    pub failure_class: Option<FailureClass>,
 }
 
 /// One row of the `tk sync log <sequence>` detail view.
@@ -631,6 +642,7 @@ pub struct LogDetailRow {
     pub item_class: ItemClass,
     pub payload_json: String,
     pub failure_detail: Option<String>,
+    pub failure_class: Option<FailureClass>,
     pub created_at: String,
     pub state_changed_at: String,
 }
@@ -643,7 +655,7 @@ pub enum LogError {
     /// No `mutations` row matches the supplied sequence.
     #[error("mutation {0} not found")]
     MutationNotFound(i64),
-    /// Persisted `failure_json` did not match [`FailureJsonWrapper`].
+    /// Persisted `failure_json` did not decode as a [`Failure`] record.
     #[error("malformed failure_json: {0}")]
     FailureJson(#[from] serde_json::Error),
 }
@@ -673,9 +685,11 @@ pub fn list_mutation_log(
     let mut out = Vec::new();
     while let Some(row) = rows.next()? {
         let raw_failure: Option<String> = row.get(5)?;
-        let failure_detail = raw_failure
-            .map(|raw| decode_failure_detail(&raw))
-            .transpose()?;
+        let failure = raw_failure.map(|raw| decode_failure(&raw)).transpose()?;
+        let (failure_detail, failure_class) = match failure {
+            Some(f) => (Some(f.detail), Some(f.class)),
+            None => (None, None),
+        };
         out.push(LogListRow {
             sequence: row.get(0)?,
             state: row.get(1)?,
@@ -683,6 +697,7 @@ pub fn list_mutation_log(
             target_display_id: row.get(3)?,
             created_at: row.get(4)?,
             failure_detail,
+            failure_class,
         });
     }
     Ok(out)
@@ -690,9 +705,9 @@ pub fn list_mutation_log(
 
 /// Look up one Mutation Log entry by sequence and return its full detail.
 pub fn show_mutation_log(conn: &Connection, sequence: i64) -> Result<LogDetailRow, LogError> {
-    // The closure populates `failure_detail` with the raw `failure_json`
-    // wrapper; it is decoded to the bare detail after the query because the
-    // rusqlite row closure can only surface `rusqlite::Error`, not `LogError`.
+    // The closure stashes the raw `failure_json` in `failure_detail`; it is
+    // decoded into the typed Failure after the query, because a rusqlite row
+    // closure can only surface `rusqlite::Error`, not `LogError`.
     let mut detail = conn
         .query_row(
             "select m.sequence, m.state, m.mutation_type, i.display_value, \
@@ -711,6 +726,7 @@ pub fn show_mutation_log(conn: &Connection, sequence: i64) -> Result<LogDetailRo
                     item_class: r.get(4)?,
                     payload_json: r.get(5)?,
                     failure_detail: r.get(6)?,
+                    failure_class: None,
                     created_at: r.get(7)?,
                     state_changed_at: r.get(8)?,
                 })
@@ -720,16 +736,18 @@ pub fn show_mutation_log(conn: &Connection, sequence: i64) -> Result<LogDetailRo
         .ok_or(LogError::MutationNotFound(sequence))?;
 
     if let Some(raw) = detail.failure_detail.take() {
-        detail.failure_detail = Some(decode_failure_detail(&raw)?);
+        let failure = decode_failure(&raw)?;
+        detail.failure_detail = Some(failure.detail);
+        detail.failure_class = Some(failure.class);
     }
     Ok(detail)
 }
 
-/// Decode the `failure_json` text column into the bare detail string — the
-/// inverse of the [`FailureJsonWrapper`] encoder.
-fn decode_failure_detail(raw: &str) -> Result<String, LogError> {
-    let wrapper: FailureJsonWrapper = serde_json::from_str(raw)?;
-    Ok(wrapper.detail)
+/// Decode the `failure_json` text column into the typed [`Failure`] — the
+/// inverse of the encoder in [`apply_mutation_outcome`]. A legacy
+/// `{"detail":"…"}` row decodes with class `unknown` and no retry hint.
+fn decode_failure(raw: &str) -> Result<Failure, LogError> {
+    Ok(serde_json::from_str(raw)?)
 }
 
 #[cfg(test)]

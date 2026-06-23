@@ -28,14 +28,14 @@ use thiserror::Error;
 /// adapter unavailability (the ADR-0009 sync failure taxonomy).
 pub type ApplyError = ProcError;
 
-/// Error returned by [`Adapter::pull_backend_items`].
+/// Error returned by [`Adapter::fetch_snapshots`].
 ///
 /// Extends the runner's environment failures with [`PullError::Failed`] for
 /// adapter-level rejection (the CLI ran but exited non-zero). `Failed` carries
 /// the CLI stderr the adapter captured — ADR-0018 carries this diagnostic on
 /// the typed error itself. The engine renders the
-/// detail and stops the sync: Pull is all-or-nothing in v1 because the
-/// snapshot model assumes a consistent backend view.
+/// detail and stops the sync: Pull is all-or-nothing in v1, so one bad key
+/// (e.g. a deleted Adopted issue) fails the whole refresh.
 #[derive(Debug, Error)]
 pub enum PullError {
     /// Adapter unavailable — backend CLI missing on PATH or spawn failed.
@@ -49,11 +49,14 @@ pub enum PullError {
 
 /// Type-erased Backend Adapter.
 pub trait Adapter {
-    /// Fetch the current snapshot of backend-owned Items.
+    /// Fetch snapshots of the given backend `keys` — the Adopted working set's
+    /// active items, per ADR-0034. The sync engine derives the key set; the
+    /// adapter fetches exactly those and neither lists nor discovers. An empty
+    /// `keys` slice yields an empty result with no backend call.
     ///
     /// On [`PullError::Failed`] the payload is the CLI stderr the adapter
     /// captured; the engine renders it and stops the sync.
-    fn pull_backend_items(&mut self) -> Result<Vec<BackendItemSnapshot>, PullError>;
+    fn fetch_snapshots(&mut self, keys: &[&str]) -> Result<Vec<BackendItemSnapshot>, PullError>;
 
     /// Apply one pending Mutation Log entry to the backend.
     ///

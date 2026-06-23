@@ -1,8 +1,8 @@
 //! Snapshot of one backend-owned Item observed during a Backend Pull.
 //!
 //! A self-owned value (no borrows) so it can cross the Backend Adapter
-//! boundary freely: produced by `Adapter::pull_backend_items` and consumed by
-//! `store::merge_backend_snapshots` (future).
+//! boundary freely: produced by `Adapter::fetch_snapshots` and consumed by
+//! `store::merge_backend_snapshots`.
 
 use super::item_class::ItemClass;
 use super::status::ItemStatus;
