@@ -13,7 +13,7 @@ use crate::proc::ProcError;
 
 use super::adapter::{Adapter, ApplyError, PullError};
 
-/// Scripted response for one [`Adapter::pull_backend_items`] call.
+/// Scripted response for one [`Adapter::fetch_snapshots`] call.
 #[derive(Debug, Clone)]
 pub enum PullResponse {
     /// Success — the fake returns this snapshot list.
@@ -58,6 +58,9 @@ pub struct FakeAdapter {
     /// Recorded apply invocations in call order — populated on every path,
     /// including rejection and environment failure.
     pub captured_applies: Vec<ApplyCall>,
+    /// Backend key sets passed to each `fetch_snapshots` call, in order, so
+    /// engine tests can assert the Adopted working set the engine derived.
+    pub captured_pull_keys: Vec<Vec<String>>,
 }
 
 impl FakeAdapter {
@@ -69,12 +72,17 @@ impl FakeAdapter {
             pull_index: 0,
             apply_index: 0,
             captured_applies: Vec::new(),
+            captured_pull_keys: Vec::new(),
         }
     }
 }
 
 impl Adapter for FakeAdapter {
-    fn pull_backend_items(&mut self) -> Result<Vec<BackendItemSnapshot>, PullError> {
+    fn fetch_snapshots(&mut self, keys: &[&str]) -> Result<Vec<BackendItemSnapshot>, PullError> {
+        // Record the requested key set so engine tests can assert the Adopted
+        // working set the engine derived; the scripted response is independent.
+        self.captured_pull_keys
+            .push(keys.iter().map(|k| (*k).to_string()).collect());
         let response = self
             .pull_script
             .get(self.pull_index)
@@ -166,7 +174,7 @@ mod tests {
             ])],
             vec![],
         );
-        let got = fake.pull_backend_items().unwrap();
+        let got = fake.fetch_snapshots(&[]).unwrap();
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].display_id, "gh-1");
         assert_eq!(got[0].ticket_kind, Some(TicketKind::Task));
@@ -177,7 +185,7 @@ mod tests {
     #[test]
     fn pull_returns_empty_snapshot_list() {
         let mut fake = FakeAdapter::new(vec![PullResponse::Snapshots(vec![])], vec![]);
-        assert!(fake.pull_backend_items().unwrap().is_empty());
+        assert!(fake.fetch_snapshots(&[]).unwrap().is_empty());
     }
 
     #[test]
@@ -186,7 +194,7 @@ mod tests {
             vec![PullResponse::RecordedFailure("gh: HTTP 502".into())],
             vec![],
         );
-        let err = fake.pull_backend_items().unwrap_err();
+        let err = fake.fetch_snapshots(&[]).unwrap_err();
         match err {
             PullError::Failed(detail) => assert!(detail.contains("HTTP 502")),
             PullError::Env(e) => panic!("expected Failed, got Env({e:?})"),
@@ -200,7 +208,7 @@ mod tests {
             vec![],
         );
         assert!(matches!(
-            fake.pull_backend_items().unwrap_err(),
+            fake.fetch_snapshots(&[]).unwrap_err(),
             PullError::Env(ProcError::ExecutableNotFound)
         ));
     }
@@ -214,8 +222,8 @@ mod tests {
             ],
             vec![],
         );
-        assert_eq!(fake.pull_backend_items().unwrap().len(), 1);
-        assert!(fake.pull_backend_items().is_err());
+        assert_eq!(fake.fetch_snapshots(&[]).unwrap().len(), 1);
+        assert!(fake.fetch_snapshots(&[]).is_err());
         assert_eq!(fake.pull_index, 2);
     }
 

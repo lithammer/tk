@@ -4,10 +4,12 @@
 //! Promote flow). It composes the backend-blind [`Adapter`] trait with the
 //! SQL helpers in [`crate::store::sync`]:
 //!
-//! 1. Pull. [`Adapter::pull_backend_items`] returns a snapshot slice (or
-//!    [`PullError::Failed`] carrying captured stderr), which the engine merges
-//!    via [`merge_backend_snapshots`]. The merge transaction is skipped when
-//!    the Pull is empty so an idle sync takes no write lock.
+//! 1. Pull. The engine derives the Adopted working set's active backend keys
+//!    ([`active_backend_keys`]) and [`Adapter::fetch_snapshots`] returns a
+//!    snapshot slice for exactly those (or [`PullError::Failed`] carrying
+//!    captured stderr), which the engine merges via [`merge_backend_snapshots`].
+//!    The merge transaction is skipped when the Pull is empty so an idle sync
+//!    takes no write lock.
 //! 2. Apply loop. [`load_applicable_mutations`] returns pending+failed
 //!    [`MutationView`]s in sequence order. Each is handed to
 //!    [`Adapter::apply_mutation`], then persisted via [`apply_mutation_outcome`].
@@ -25,8 +27,8 @@ use thiserror::Error;
 use crate::domain::apply_outcome::ApplyOutcome;
 use crate::remote::adapter::{Adapter, ApplyError, PullError};
 use crate::store::sync::{
-    ApplyMutationOutcomeError, LoadApplicableError, MergeError, apply_mutation_outcome,
-    load_applicable_mutations, merge_backend_snapshots,
+    ApplyMutationOutcomeError, LoadApplicableError, MergeError, active_backend_keys,
+    apply_mutation_outcome, load_applicable_mutations, merge_backend_snapshots,
 };
 
 /// Summary of one sync run for the calling command to render.
@@ -85,8 +87,13 @@ pub fn run_sync(
         stopped_at_sequence: None,
     };
 
-    // Pull and merge.
-    let snapshots = adapter.pull_backend_items()?;
+    // Pull and merge. The engine derives the Adopted working set's active keys
+    // and the adapter fetches exactly those (ADR-0034 opt-in refresh-by-key);
+    // an empty set means no backend call. A storage fault deriving the keys is
+    // a pull-side store error, surfaced through the merge boundary.
+    let keys = active_backend_keys(conn).map_err(MergeError::Storage)?;
+    let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+    let snapshots = adapter.fetch_snapshots(&key_refs)?;
     report.pulled_count = snapshots.len();
     if !snapshots.is_empty() {
         merge_backend_snapshots(conn, rng, &snapshots, now)?;
@@ -205,14 +212,15 @@ mod tests {
     }
 
     #[test]
-    fn pull_inserts_a_discovered_backend_item() {
+    fn pull_refreshes_an_adopted_backend_item() {
         let mut conn = open_seeded();
+        backend_ticket(&conn, "t1", "gh-42", "42", 1);
         seed_remote(&conn);
         let mut fake = FakeAdapter::new(
             vec![PullResponse::Snapshots(vec![snapshot(
                 "42",
                 "gh-42",
-                "Discovered",
+                "Refreshed",
             )])],
             vec![],
         );
@@ -220,14 +228,59 @@ mod tests {
         let report = run(&mut conn, &mut fake).unwrap();
         assert_eq!(report.pulled_count, 1);
 
+        // The engine derived the active Adopted key set and asked for exactly it.
+        assert_eq!(fake.captured_pull_keys, vec![vec!["42".to_string()]]);
+
+        // Merge scenario C refreshed the known row in place.
         let title: String = conn
             .query_row(
-                "select title from items where backend_kind = 'github' and backend_key = '42'",
+                "select title from items where backend_key = '42'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(title, "Discovered");
+        assert_eq!(title, "Refreshed");
+    }
+
+    #[test]
+    fn pull_requests_only_active_adopted_keys() {
+        let mut conn = open_seeded();
+        // Adopted and open -> in the refresh set.
+        backend_ticket(&conn, "t1", "gh-1", "1", 1);
+        // Adopted but done -> terminal, excluded (ADR-0034).
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t2",
+                display: "gh-2",
+                title: "Closed",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("2"),
+                status: "done",
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        // Local item -> no backend key, excluded.
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t3",
+                display: "tk-3",
+                title: "Local",
+                created_seq: 3,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        seed_remote(&conn);
+
+        let mut fake = FakeAdapter::new(vec![PullResponse::Snapshots(vec![])], vec![]);
+        run(&mut conn, &mut fake).unwrap();
+
+        assert_eq!(fake.captured_pull_keys, vec![vec!["1".to_string()]]);
     }
 
     #[test]

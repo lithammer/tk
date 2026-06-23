@@ -20,6 +20,7 @@ use clap::{Args as ClapArgs, Subcommand};
 
 use crate::cli::{Deps, Exit};
 use crate::commands::resolver;
+use crate::domain::apply_outcome::FailureClass;
 use crate::remote::adapter::PullError;
 use crate::remote::factory::{self, OpenError as FactoryOpenError};
 use crate::store::sync::{
@@ -101,7 +102,7 @@ fn run_sync(deps: Deps<'_>, skip: Option<i64>) -> Exit {
         }
     }
 
-    let adapter_opt = match factory::open_configured(store.conn()) {
+    let adapter_opt = match factory::open_configured(store.conn(), runner, cwd) {
         Ok(a) => a,
         Err(FactoryOpenError::NotImplemented) => {
             let _ = writeln!(
@@ -292,7 +293,16 @@ fn render_log_row<W: Write + ?Sized>(stdout: &mut W, row: &LogListRow) {
         row.sequence, row.state, row.mutation_type, row.target_display_id, row.created_at
     );
     if let Some(detail) = &row.failure_detail {
-        let _ = writeln!(stdout, "  └─ {detail}");
+        // The class is shown only when the adapter actually classified the
+        // failure; an `unknown` row carries no signal, so it renders bare.
+        match row.failure_class.filter(|c| *c != FailureClass::Unknown) {
+            Some(class) => {
+                let _ = writeln!(stdout, "  └─ [{class}] {detail}");
+            }
+            None => {
+                let _ = writeln!(stdout, "  └─ {detail}");
+            }
+        }
     }
 }
 
@@ -308,6 +318,9 @@ fn render_log_detail<W: Write + ?Sized>(stdout: &mut W, detail: &LogDetailRow) {
     let _ = writeln!(stdout, "Updated:    {}", detail.state_changed_at);
     let _ = writeln!(stdout, "Payload:    {}", detail.payload_json);
     if let Some(d) = &detail.failure_detail {
+        if let Some(class) = detail.failure_class.filter(|c| *c != FailureClass::Unknown) {
+            let _ = writeln!(stdout, "Class:      {class}");
+        }
         let _ = writeln!(stdout, "Failure:\n  {d}");
     }
 }
@@ -435,14 +448,16 @@ mod tests {
     }
 
     #[test]
-    fn sync_github_remote_returns_adapter_not_implemented() {
+    fn sync_github_with_no_adopted_items_is_a_noop() {
+        // github now resolves to a real adapter; with no Adopted items the
+        // engine derives an empty key set and makes no gh call.
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_remote(
             &conn,
             FixtureRemote {
                 backend_kind: "github",
-                config_json: r#"{"repo":"o/r"}"#,
+                config_json: "{}",
                 ..FixtureRemote::default()
             },
         )
@@ -451,7 +466,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&h, &store); // only git discovery; no gh call expected
         let code = run(
             h.deps(),
             Args {
@@ -459,12 +474,85 @@ mod tests {
                 skip: None,
             },
         );
-        assert_eq!(code, Exit::Failure);
+        assert_eq!(code, Exit::Ok);
         assert!(
-            String::from_utf8(h.stderr)
+            String::from_utf8(h.stdout)
                 .unwrap()
-                .contains("adapter is not implemented in this build")
+                .contains("Sync complete: 0 pulled, 0 applied.")
         );
+    }
+
+    #[test]
+    fn sync_github_drives_gh_through_the_factory() {
+        // End-to-end wiring: command -> factory -> real GithubAdapter -> gh via
+        // the same FakeRunner. An Adopted item with a pending update_ticket
+        // refreshes (scenario B shields the edit) then applies through gh.
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_remote(
+            &conn,
+            FixtureRemote {
+                backend_kind: "github",
+                config_json: "{}",
+                ..FixtureRemote::default()
+            },
+        )
+        .unwrap();
+        backend_ticket(&conn, "t1", "gh-1", "1", 1);
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "update_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"New Title","body":""}"#,
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        h.runner.expect(
+            &["gh", "issue", "view", "1"],
+            RunOutput {
+                exit_code: 0,
+                stdout: br#"{"number":1,"title":"Backend","body":"B","state":"OPEN","issueType":null,"updatedAt":"2026-05-19T00:00:00Z","url":"https://github.com/o/r/issues/1"}"#.to_vec(),
+                stderr: Vec::new(),
+            },
+        );
+        h.runner.expect(
+            &["gh", "issue", "edit", "1"],
+            RunOutput {
+                exit_code: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            },
+        );
+        let code = run(
+            h.deps(),
+            Args {
+                subcommand: None,
+                skip: None,
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        assert!(
+            String::from_utf8(h.stdout)
+                .unwrap()
+                .contains("Sync complete: 1 pulled, 1 applied.")
+        );
+
+        let state: String = Connection::open(store.db_path())
+            .unwrap()
+            .query_row("select state from mutations where sequence = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(state, "applied");
     }
 
     #[test]
@@ -674,6 +762,95 @@ mod tests {
         assert!(out.contains("Target:     tk-1 (ticket)"));
         assert!(out.contains("Payload:    {\"status\":\"done\"}"));
         assert!(out.contains("Failure:\n  backend said no"));
+    }
+
+    #[test]
+    fn sync_log_lists_classified_failure_with_class_tag() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        backend_ticket(&conn, "t1", "tk-1", "1", 1);
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "set_item_status",
+                item_id: "t1",
+                payload_json: r#"{"status":"done"}"#,
+                state: "failed",
+                failure_json: Some(r#"{"detail":"HTTP 401: Bad credentials","class":"auth"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run(
+            h.deps(),
+            Args {
+                subcommand: Some(Sub::Log(LogArgs {
+                    pending: false,
+                    failed: false,
+                    skipped: false,
+                    id: None,
+                })),
+                skip: None,
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        let out = String::from_utf8(h.stdout).unwrap();
+        assert!(
+            out.contains("  └─ [auth] HTTP 401: Bad credentials"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn sync_log_detail_renders_class_line_when_classified() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        backend_ticket(&conn, "t1", "tk-1", "1", 1);
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 3,
+                mutation_type: "set_item_status",
+                item_id: "t1",
+                payload_json: r#"{"status":"done"}"#,
+                state: "failed",
+                failure_json: Some(
+                    r#"{"detail":"HTTP 422: Validation Failed","class":"validation"}"#,
+                ),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run(
+            h.deps(),
+            Args {
+                subcommand: Some(Sub::Log(LogArgs {
+                    pending: false,
+                    failed: false,
+                    skipped: false,
+                    id: Some(3),
+                })),
+                skip: None,
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        let out = String::from_utf8(h.stdout).unwrap();
+        assert!(out.contains("Class:      validation"), "{out}");
+        assert!(
+            out.contains("Failure:\n  HTTP 422: Validation Failed"),
+            "{out}"
+        );
     }
 
     #[test]
