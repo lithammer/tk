@@ -119,14 +119,35 @@ impl Adapter for GithubAdapter<'_> {
                 let number = backend_number(view);
                 self.run_apply(&["gh", "issue", verb, number])
             }
-            // Relationship sync is deferred (ADR-0021): these Mutations still
-            // reach the adapter but drive no `gh` call. No-op Accepted keeps the
-            // queue draining instead of wedging it on a permanent rejection.
+            // Dependency sync (ADR-0021, tk-107): the blocked issue is the
+            // Mutation's item; `--add-blocked-by`/`--remove-blocked-by` take the
+            // blocking issue's number, resolved store-side onto
+            // `counterpart_backend_key`. Native `gh issue edit` flags, so the
+            // adapter requires `gh` >= 2.94.0; an older `gh` rejects the unknown
+            // flag and the Mutation fails like any other (no longer no-op).
+            MutationType::AddDependency => self.run_apply(&[
+                "gh",
+                "issue",
+                "edit",
+                backend_number(view),
+                "--add-blocked-by",
+                counterpart_number(view),
+            ]),
+            MutationType::RemoveDependency => self.run_apply(&[
+                "gh",
+                "issue",
+                "edit",
+                backend_number(view),
+                "--remove-blocked-by",
+                counterpart_number(view),
+            ]),
+            // Epic-membership sync stays deferred to a Promote-gated ticket
+            // (ADR-0021): no GitHub Backend Epic can exist pre-Promotion, so
+            // these never reference a real backend parent. No-op Accepted keeps
+            // the queue draining instead of wedging on a permanent rejection.
             MutationType::UpdateEpic
             | MutationType::AddTicketToEpic
-            | MutationType::RemoveTicketFromEpic
-            | MutationType::AddDependency
-            | MutationType::RemoveDependency => Ok(ApplyOutcome::accepted()),
+            | MutationType::RemoveTicketFromEpic => Ok(ApplyOutcome::accepted()),
             // load_applicable_mutations rejects these payload-less kinds before
             // they reach any adapter.
             MutationType::PromoteTicket
@@ -146,6 +167,16 @@ fn backend_number(view: &MutationView) -> &str {
     view.backend_key
         .as_deref()
         .expect("a backend Ticket Mutation carries a backend key")
+}
+
+/// The GitHub issue number of a dependency Mutation's Blocking Item, resolved
+/// store-side onto `counterpart_backend_key`. Dependency Mutations are emitted
+/// only for same-backend pairs, so the counterpart is always a Backend Item
+/// with a key by the time the Mutation reaches this adapter.
+fn counterpart_number(view: &MutationView) -> &str {
+    view.counterpart_backend_key.as_deref().expect(
+        "load_applicable_mutations resolves counterpart_backend_key for dependency mutations",
+    )
 }
 
 /// Raw `gh issue view --json` shape. Only the fields tk maps are named; serde
@@ -314,6 +345,23 @@ mod tests {
             payload,
             backend_kind: Some("github".into()),
             backend_key: key.map(str::to_string),
+            counterpart_backend_key: None,
+        }
+    }
+
+    /// A dependency Mutation `view`, carrying the Blocking Item's resolved
+    /// backend number on `counterpart_backend_key` (the store-side resolution
+    /// the adapter relies on).
+    fn dep_view(mt: MutationType, blocked: &str, blocking: &str) -> MutationView {
+        MutationView {
+            counterpart_backend_key: Some(blocking.into()),
+            ..view(
+                mt,
+                MutationPayload::DependencyRef(DependencyRef {
+                    blocking_id: "blocking-internal-id".into(),
+                }),
+                Some(blocked),
+            )
         }
     }
 
@@ -632,9 +680,10 @@ mod tests {
     }
 
     #[test]
-    fn apply_relationship_mutations_are_noop_accepted_without_a_call() {
-        // FakeRunner has no expectations, so any gh call panics. These arms
-        // returning Accepted proves they drive no subprocess (ADR-0021).
+    fn apply_epic_membership_mutations_are_noop_accepted_without_a_call() {
+        // Epic-membership sync stays deferred to a Promote-gated ticket
+        // (ADR-0021): no backend Epic exists pre-Promotion. FakeRunner has no
+        // expectations, so any gh call panics — Accepted proves no subprocess.
         let cases = [
             (
                 MutationType::UpdateEpic,
@@ -655,18 +704,6 @@ mod tests {
                     epic_id: "e".into(),
                 }),
             ),
-            (
-                MutationType::AddDependency,
-                MutationPayload::DependencyRef(DependencyRef {
-                    blocking_id: "b".into(),
-                }),
-            ),
-            (
-                MutationType::RemoveDependency,
-                MutationPayload::DependencyRef(DependencyRef {
-                    blocking_id: "b".into(),
-                }),
-            ),
         ];
         for (mt, payload) in cases {
             let runner = FakeRunner::new();
@@ -680,6 +717,81 @@ mod tests {
                 ),
                 "{mt}"
             );
+        }
+    }
+
+    #[test]
+    fn apply_add_dependency_edits_blocked_by() {
+        let runner = FakeRunner::new();
+        runner.expect(
+            &["gh", "issue", "edit", "5", "--add-blocked-by", "9"],
+            ok(""),
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let v = dep_view(MutationType::AddDependency, "5", "9");
+        assert!(matches!(
+            adapter.apply_mutation(&v, NOW).unwrap(),
+            ApplyOutcome::Accepted(_)
+        ));
+    }
+
+    #[test]
+    fn apply_remove_dependency_edits_remove_blocked_by() {
+        let runner = FakeRunner::new();
+        runner.expect(
+            &["gh", "issue", "edit", "5", "--remove-blocked-by", "9"],
+            ok(""),
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let v = dep_view(MutationType::RemoveDependency, "5", "9");
+        assert!(matches!(
+            adapter.apply_mutation(&v, NOW).unwrap(),
+            ApplyOutcome::Accepted(_)
+        ));
+    }
+
+    #[test]
+    fn apply_dependency_exit_zero_with_stderr_is_accepted() {
+        // The idempotent re-link no-op: gh may print to stderr yet exit 0.
+        // Success is judged by exit code, so this must read as Accepted.
+        let runner = FakeRunner::new();
+        runner.expect(
+            &["gh", "issue", "edit", "5", "--add-blocked-by", "9"],
+            RunOutput {
+                exit_code: 0,
+                stdout: Vec::new(),
+                stderr: b"! Issue already blocked by #9".to_vec(),
+            },
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let v = dep_view(MutationType::AddDependency, "5", "9");
+        assert!(matches!(
+            adapter.apply_mutation(&v, NOW).unwrap(),
+            ApplyOutcome::Accepted(_)
+        ));
+    }
+
+    #[test]
+    fn apply_dependency_non_zero_is_classified_rejection() {
+        // A stale gh (< 2.94.0) rejects the unknown flag; the Mutation fails
+        // like any other (no longer no-op-Accepted) and the queue wedges.
+        let runner = FakeRunner::new();
+        runner.expect(
+            &["gh", "issue", "edit", "5", "--add-blocked-by", "9"],
+            fail(1, "unknown flag: --add-blocked-by"),
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let v = dep_view(MutationType::AddDependency, "5", "9");
+        match adapter.apply_mutation(&v, NOW).unwrap() {
+            ApplyOutcome::Rejected(f) => {
+                assert!(f.detail.contains("unknown flag"), "{}", f.detail);
+                assert_eq!(f.class, FailureClass::Unknown);
+            }
+            ApplyOutcome::Accepted(_) => panic!("stale gh must reject, not no-op"),
         }
     }
 

@@ -90,3 +90,29 @@ The deferral therefore rests on scope, not capability:
   discovers un-Adopted issues. The field set, the two-state status axis, the
   relationship-deferral decision, and the issueType → `TicketKind` mapping
   recorded above are unaffected — only the list-everything ingest is replaced.
+- (tk-107, 2026-06) Dependency sync lands, **push-only**. Apply for
+  `add_dependency` / `remove_dependency` drives the native `gh issue edit
+  --add-blocked-by` / `--remove-blocked-by` flags (`gh` ≥ 2.94.0), replacing
+  their no-op-Accepted arms. The Mutation sits on the blocked item
+  (`backend_key`); the blocking item's number is resolved from its internal
+  `items.id` at Mutation-load time onto `MutationView.counterpart_backend_key`,
+  so the adapter stays store-free. Three consequences worth recording:
+  - **Title/body/status round-trip; dependencies do not.** Backend Pull does
+    not reconstruct Dependency edges in v1 — relationship sync is one
+    directional (local intent → GitHub). Read-back is deferred to its own
+    ticket because ADR-0034's opt-in working set makes edge reconciliation a
+    distinct problem: only an edge whose *both* endpoints are Adopted could
+    round-trip, and an edge to an un-Adopted issue has no local item to point
+    at. This asymmetry is the deliberate v1 shape, not an oversight.
+  - **Dependencies become ordinary wedge-on-`Rejected` Mutations.** This ADR's
+    earlier "no-op-Accepted keeps the queue draining" rationale was a
+    workaround for having no real apply; now that one exists, a failed
+    dependency Apply stops the Apply loop at its `sequence` like any
+    `update_ticket`, recovered by fixing the cause or `tk sync --skip`. No
+    backfill of dependency Mutations that no-op-Accepted before this slice.
+  - **Sub-issue / Epic-membership sync stays deferred and splits to a
+    Promote-gated ticket.** No GitHub Backend Epic can exist pre-Promotion
+    (Pull hardcodes `item_class: Ticket`, `tk adopt` inserts Tickets), so
+    `add_ticket_to_epic` is unreachable; its arm stays no-op-Accepted. It will
+    reuse the same `counterpart_backend_key` resolution (`EpicRef` → parent
+    number) once backend Epics are real.

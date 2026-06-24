@@ -228,11 +228,18 @@ pub enum LoadApplicableError {
 pub fn load_applicable_mutations(
     conn: &Connection,
 ) -> Result<Vec<MutationView>, LoadApplicableError> {
+    // `cp` resolves a relationship Mutation's counterpart to its backend_key:
+    // a dependency payload's `blocking_id` is an internal `items.id`
+    // (promote-safe), and the adapter needs the corresponding backend number.
+    // The LEFT JOIN yields NULL for every non-dependency row (their payloads
+    // carry no `blocking_id` key, so `json_extract` is NULL and nothing
+    // matches) — exactly the `counterpart_backend_key = None` contract.
     let mut stmt = conn.prepare(
         "select m.sequence, m.mutation_type, m.item_id, m.item_class, \
-                m.payload_json, i.backend_kind, i.backend_key \
+                m.payload_json, i.backend_kind, i.backend_key, cp.backend_key \
            from mutations m \
            join items i on i.id = m.item_id and i.item_class = m.item_class \
+           left join items cp on cp.id = json_extract(m.payload_json, '$.blocking_id') \
           where m.state in ('pending','failed') \
           order by m.sequence asc",
     )?;
@@ -247,6 +254,7 @@ pub fn load_applicable_mutations(
         let payload_text: String = row.get(4)?;
         let backend_kind: Option<String> = row.get(5)?;
         let backend_key: Option<String> = row.get(6)?;
+        let counterpart_backend_key: Option<String> = row.get(7)?;
 
         let mutation_type = MutationType::from_str(&type_text)
             .map_err(|_| LoadApplicableError::UnknownMutationType(type_text))?;
@@ -260,6 +268,7 @@ pub fn load_applicable_mutations(
             payload,
             backend_kind,
             backend_key,
+            counterpart_backend_key,
         });
     }
 
@@ -1198,6 +1207,58 @@ mod tests {
         }
         assert_eq!(views[0].backend_kind.as_deref(), Some("github"));
         assert_eq!(views[0].backend_key.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn load_applicable_resolves_dependency_counterpart_backend_key() {
+        // A dependency Mutation's payload stores the Blocking Item's internal
+        // id; the load must resolve it to that item's backend_key so the
+        // adapter can reach the backend. Non-dependency Mutations stay None.
+        let conn = open_seeded();
+        backend_ticket(&conn, "blocked", "gh-5", "5", 1);
+        backend_ticket(&conn, "blocking", "gh-9", "9", 2);
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "add_dependency",
+                item_id: "blocked",
+                payload_json: r#"{"blocking_id":"blocking"}"#,
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        let views = load_applicable_mutations(&conn).unwrap();
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].backend_key.as_deref(), Some("5"), "blocked item");
+        assert_eq!(
+            views[0].counterpart_backend_key.as_deref(),
+            Some("9"),
+            "blocking item resolved from its internal id"
+        );
+    }
+
+    #[test]
+    fn load_applicable_leaves_counterpart_none_for_non_dependency() {
+        let conn = open_seeded();
+        backend_ticket(&conn, "t1", "gh-1", "1", 1);
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "set_item_status",
+                item_id: "t1",
+                payload_json: r#"{"status":"done"}"#,
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        let views = load_applicable_mutations(&conn).unwrap();
+        assert_eq!(views[0].counterpart_backend_key, None);
     }
 
     #[test]

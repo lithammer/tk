@@ -29,4 +29,14 @@ pub struct MutationView {
     /// Backend-native identifier of the target Item, when known. `None` for
     /// items that have never reached the backend (local-origin pre-Promotion).
     pub backend_key: Option<String>,
+    /// Backend-native identifier of the *related* Item a relationship Mutation
+    /// points at — the Blocking Item for `add_dependency`/`remove_dependency`
+    /// (and, once sub-issue sync lands, the parent Epic). The Mutation payload
+    /// stores the counterpart's internal `items.id` (promote-safe); the
+    /// store-layer load resolves it to a `backend_key` here so the adapter
+    /// reaches the backend without a store of its own. `None` for every
+    /// non-relationship Mutation; for a relationship Mutation it is `Some` by
+    /// construction, since those Mutations are emitted only for same-backend
+    /// pairs (the counterpart is therefore a Backend Item with a key).
+    pub counterpart_backend_key: Option<String>,
 }
