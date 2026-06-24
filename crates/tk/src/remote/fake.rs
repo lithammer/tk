@@ -162,6 +162,7 @@ mod tests {
             payload,
             backend_kind: Some("github".into()),
             backend_key: Some("1".into()),
+            counterpart_backend_key: None,
         }
     }
 
