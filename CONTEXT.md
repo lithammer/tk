@@ -192,6 +192,12 @@ _Avoid_: Publish, Export
 The directly contained local items included by `tk promote <id> --children`.
 _Avoid_: Recursive Promotion
 
+**Pending Promotion**:
+A **Local Ticket** or **Local Epic** with durable **Promotion** intent that has
+not yet received its backend identity. Later backend-applicable changes remain
+ordered behind its **Promotion** in the **Mutation Log**.
+_Avoid_: In-flight Promotion
+
 **Mutation**:
 A durable local intent to modify backend-backed **tk** domain state through a **Backend**.
 _Avoid_: Local Edit, Change, Audit Entry
@@ -271,7 +277,8 @@ _Avoid_: ticket, tickets
 - The default **Priority** is `P2`.
 - Lower **Priority** numbers sort before higher **Priority** numbers.
 - A candidate **Ticket**'s **Effective Priority** is the lowest of its own **Priority** and the **Effective Priorities** of every unfinished **Blocked Item** (**Item Status** `open` or `active`) it reaches through transitive `blocked_by` **Dependencies** within the active **Scope**.
-- A `done` **Blocked Item** resolves the **Dependency** and does not contribute to **Effective Priority**.
+- A `done` **Blocking Item** resolves the **Dependency** for readiness and
+  **Effective Priority**, but does not remove the relationship.
 - An **Epic** in the **Effective Priority** chain contributes the lowest **Effective Priority** over its unfinished child **Tickets**.
 - **Effective Priority** propagation stops at the **Scope** boundary; items outside the active **Scope** do not contribute.
 - **External Blockers** carry no **Priority** and do not interrupt **Effective Priority** propagation.
@@ -376,6 +383,9 @@ _Avoid_: ticket, tickets
 - **Promotion** does not include contained **Tickets** unless `--children` is used.
 - v1 **Promotion Children** are directly contained **Local Tickets** only.
 - **Promotion Children** do not follow **Dependencies**.
+- `tk promote <epic-id> --children` evaluates the **Local Epic** and all
+  **Promotion Children** together, so **Dependencies** among them become
+  backend intent regardless of creation order.
 - Newly created **Tickets** and **Epics** are local by default, even when a **Primary Backend** exists.
 - Default ticket views include both **Local Tickets** and **Backend Tickets**.
 - Ticket views do not render **Origin** as a separate field; common origin is
@@ -388,6 +398,14 @@ _Avoid_: ticket, tickets
   Store current-state changes, not **Mutations**.
 - **Promotion** is the boundary where current local state becomes backend
   intent.
+- **Promotion** makes an existing **Dependency** backend intent when both its
+  **Blocked Item** and **Blocking Item** are backend-backed by the same
+  **Backend** after the **Promotion**.
+- **Promotion** rejects an operation that would leave a backend-backed
+  **Blocked Item** waiting on a local **Blocking Item**.
+- **Promotion** rejects before creating backend objects when the configured
+  **Backend Adapter** cannot represent a **Dependency** that the operation
+  would make backend intent.
 - **Promotion** preserves a **Ticket**'s `accepted` or `parked` **Selection
   State**; the field stays local and is not pushed to the **Backend**.
 - **Promotion** rejects a `triage` **Ticket**, which must be **Accepted**
