@@ -20,7 +20,7 @@ use crate::domain::backend_item_snapshot::BackendItemSnapshot;
 use crate::domain::backend_kind::BackendKind;
 use crate::domain::item_class::ItemClass;
 use crate::domain::mutation_payload::{
-    DependencyRef, EpicRef, MutationPayload, StatusChange, TitleBody,
+    DependencyRef, EpicRef, MutationPayload, Promotion, StatusChange, TitleBody,
 };
 use crate::domain::mutation_state::MutationState;
 use crate::domain::mutation_type::MutationType;
@@ -210,8 +210,8 @@ pub enum LoadApplicableError {
     #[error("unrecognised mutation_type: {0}")]
     UnknownMutationType(String),
     /// `mutation_type` decoded, but [`MutationPayload`] has no matching variant
-    /// (today: `promote_*`, `*_external_blocker`). A forward-compatibility
-    /// guard so a future Mutation kind cannot be silently skipped.
+    /// (today: `*_external_blocker`). A forward-compatibility guard so a
+    /// future Mutation kind cannot be silently skipped.
     #[error("no payload projection for mutation kind: {0}")]
     PayloadVariantMissing(MutationType),
     /// `payload_json` parsed as JSON (the column's CHECK guarantees that) but
@@ -295,10 +295,10 @@ fn decode_mutation_payload(
         Mt::AddDependency | Mt::RemoveDependency => {
             MutationPayload::DependencyRef(serde_json::from_str::<DependencyRef>(payload_text)?)
         }
-        Mt::PromoteTicket
-        | Mt::PromoteEpic
-        | Mt::AddExternalBlocker
-        | Mt::ResolveExternalBlocker => {
+        Mt::PromoteTicket | Mt::PromoteEpic => {
+            MutationPayload::Promotion(serde_json::from_str::<Promotion>(payload_text)?)
+        }
+        Mt::AddExternalBlocker | Mt::ResolveExternalBlocker => {
             return Err(LoadApplicableError::PayloadVariantMissing(mutation_type));
         }
     })
@@ -1269,7 +1269,7 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                mutation_type: "promote_ticket",
+                mutation_type: "add_external_blocker",
                 item_id: "t1",
                 payload_json: "{}",
                 state: "pending",
@@ -1279,8 +1279,41 @@ mod tests {
         .unwrap();
 
         match load_applicable_mutations(&conn).unwrap_err() {
-            LoadApplicableError::PayloadVariantMissing(MutationType::PromoteTicket) => {}
+            LoadApplicableError::PayloadVariantMissing(MutationType::AddExternalBlocker) => {}
             other => panic!("expected PayloadVariantMissing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_applicable_decodes_promotion_payload() {
+        let conn = open_seeded();
+        backend_ticket(&conn, "t1", "gh-1", "1", 1);
+        for (seq, mutation_type) in [(1, "promote_ticket"), (2, "promote_epic")] {
+            insert_fixture_mutation(
+                &conn,
+                FixtureMutation {
+                    sequence: seq,
+                    mutation_type,
+                    item_id: "t1",
+                    payload_json: r#"{"title":"T","body":"B","backend_kind":"github"}"#,
+                    state: "pending",
+                    ..FixtureMutation::default()
+                },
+            )
+            .unwrap();
+        }
+
+        let views = load_applicable_mutations(&conn).unwrap();
+        assert_eq!(views.len(), 2);
+        for view in &views {
+            match &view.payload {
+                MutationPayload::Promotion(p) => {
+                    assert_eq!(p.title, "T");
+                    assert_eq!(p.body, "B");
+                    assert_eq!(p.backend_kind, "github");
+                }
+                other => panic!("expected Promotion, got {other:?}"),
+            }
         }
     }
 

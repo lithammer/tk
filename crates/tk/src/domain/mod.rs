@@ -2,11 +2,11 @@
 //!
 //! The schema-determined value types: Priority, ItemStatus, SelectionState,
 //! TicketKind, ItemClass, Origin, MutationType, MutationState,
-//! MutationPayload, MutationView, and BackendItemSnapshot. Each one is pinned
-//! by an existing SQL CHECK constraint
-//! or by an ADR — the shape exists independently of any future Backend Adapter
-//! — so the rest of the codebase uses typed values instead of raw strings at
-//! the store boundary.
+//! MutationPayload, MutationView, BackendItemSnapshot, and
+//! PromotionCapabilities. Each one is pinned by an existing SQL CHECK
+//! constraint or by an ADR — the shape exists independently of any future
+//! Backend Adapter — so the rest of the codebase uses typed values instead of
+//! raw strings at the store boundary.
 //!
 //! Two shapes are deliberately not modelled as standalone types here:
 //!
@@ -35,6 +35,7 @@ pub mod mutation_type;
 pub mod mutation_view;
 pub mod origin;
 pub mod priority;
+pub mod promotion_capability;
 pub mod selection_state;
 pub mod status;
 pub mod ticket_kind;

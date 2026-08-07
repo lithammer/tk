@@ -20,6 +20,7 @@ use crate::domain::item_class::ItemClass;
 use crate::domain::mutation_payload::MutationPayload;
 use crate::domain::mutation_type::MutationType;
 use crate::domain::mutation_view::MutationView;
+use crate::domain::promotion_capability::PromotionCapabilities;
 use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
 use crate::proc::{ProcRunner, RunOutput};
@@ -97,7 +98,10 @@ impl Adapter for GithubAdapter<'_> {
                         "load_applicable_mutations pairs update_ticket with UpdateTitleBody"
                     )
                 };
-                let number = backend_number(view);
+                let number = match backend_number(view) {
+                    Ok(n) => n,
+                    Err(rejection) => return Ok(rejection),
+                };
                 self.run_apply(&[
                     "gh", "issue", "edit", number, "--title", &tb.title, "--body", &tb.body,
                 ])
@@ -116,7 +120,10 @@ impl Adapter for GithubAdapter<'_> {
                         )));
                     }
                 };
-                let number = backend_number(view);
+                let number = match backend_number(view) {
+                    Ok(n) => n,
+                    Err(rejection) => return Ok(rejection),
+                };
                 self.run_apply(&["gh", "issue", verb, number])
             }
             // Dependency sync (ADR-0021, tk-107): the blocked issue is the
@@ -125,22 +132,42 @@ impl Adapter for GithubAdapter<'_> {
             // `counterpart_backend_key`. Native `gh issue edit` flags, so the
             // adapter requires `gh` >= 2.94.0; an older `gh` rejects the unknown
             // flag and the Mutation fails like any other (no longer no-op).
-            MutationType::AddDependency => self.run_apply(&[
-                "gh",
-                "issue",
-                "edit",
-                backend_number(view),
-                "--add-blocked-by",
-                counterpart_number(view),
-            ]),
-            MutationType::RemoveDependency => self.run_apply(&[
-                "gh",
-                "issue",
-                "edit",
-                backend_number(view),
-                "--remove-blocked-by",
-                counterpart_number(view),
-            ]),
+            MutationType::AddDependency => {
+                let number = match backend_number(view) {
+                    Ok(n) => n,
+                    Err(rejection) => return Ok(rejection),
+                };
+                let counterpart = match counterpart_number(view) {
+                    Ok(c) => c,
+                    Err(rejection) => return Ok(rejection),
+                };
+                self.run_apply(&[
+                    "gh",
+                    "issue",
+                    "edit",
+                    number,
+                    "--add-blocked-by",
+                    counterpart,
+                ])
+            }
+            MutationType::RemoveDependency => {
+                let number = match backend_number(view) {
+                    Ok(n) => n,
+                    Err(rejection) => return Ok(rejection),
+                };
+                let counterpart = match counterpart_number(view) {
+                    Ok(c) => c,
+                    Err(rejection) => return Ok(rejection),
+                };
+                self.run_apply(&[
+                    "gh",
+                    "issue",
+                    "edit",
+                    number,
+                    "--remove-blocked-by",
+                    counterpart,
+                ])
+            }
             // Epic-membership sync stays deferred to a Promote-gated ticket
             // (ADR-0021): no GitHub Backend Epic can exist pre-Promotion, so
             // these never reference a real backend parent. No-op Accepted keeps
@@ -148,35 +175,53 @@ impl Adapter for GithubAdapter<'_> {
             MutationType::UpdateEpic
             | MutationType::AddTicketToEpic
             | MutationType::RemoveTicketFromEpic => Ok(ApplyOutcome::accepted()),
+            // Preflight (ADR-0036) should catch a Promotion Mutation before
+            // Apply, since GitHub's promotion_capabilities() declares
+            // nothing. This arm is the safe fallback if that seam is
+            // skipped — a rejection, not a panic, over reachable state.
+            MutationType::PromoteTicket | MutationType::PromoteEpic => Ok(ApplyOutcome::rejected(
+                "the GitHub Backend Adapter cannot apply a Promotion in this build",
+            )),
             // load_applicable_mutations rejects these payload-less kinds before
             // they reach any adapter.
-            MutationType::PromoteTicket
-            | MutationType::PromoteEpic
-            | MutationType::AddExternalBlocker
-            | MutationType::ResolveExternalBlocker => {
+            MutationType::AddExternalBlocker | MutationType::ResolveExternalBlocker => {
                 unreachable!("load_applicable_mutations filters payload-less mutation kinds")
             }
         }
     }
+
+    fn promotion_capabilities(&self) -> PromotionCapabilities {
+        // ADR-0036 "Backend capability is declared per facet and staged":
+        // GitHub declares no Item Class, Ticket Kind, Dependency, or Epic
+        // membership yet. tk-137 turns on Task and Epic creation once `gh
+        // issue create` is implemented; tk-132 turns on Epic membership once
+        // sub-issue Apply is implemented.
+        PromotionCapabilities::none()
+    }
 }
 
-/// The GitHub issue number for a Ticket Mutation. A Mutation only exists for a
-/// Backend item (pre-Promotion local edits are current-state changes, not
-/// Mutations), so the backend key is always present here.
-fn backend_number(view: &MutationView) -> &str {
-    view.backend_key
-        .as_deref()
-        .expect("a backend Ticket Mutation carries a backend key")
+/// The GitHub issue number for a Ticket Mutation, or the rejection to return
+/// when the target Item has no backend identity. A Pending Promotion Item
+/// keeps appending ordinary Mutations behind its Promotion (ADR-0036), so a
+/// Mutation can reach Apply before the receipt that assigns its key. Owning
+/// the rejection here keeps one user-facing wording across every Apply arm.
+fn backend_number(view: &MutationView) -> Result<&str, ApplyOutcome> {
+    view.backend_key.as_deref().ok_or_else(|| {
+        ApplyOutcome::rejected(
+            "the target Item has no backend identity yet; its Promotion has not yet been applied",
+        )
+    })
 }
 
 /// The GitHub issue number of a dependency Mutation's Blocking Item, resolved
-/// store-side onto `counterpart_backend_key`. Dependency Mutations are emitted
-/// only for same-backend pairs, so the counterpart is always a Backend Item
-/// with a key by the time the Mutation reaches this adapter.
-fn counterpart_number(view: &MutationView) -> &str {
-    view.counterpart_backend_key.as_deref().expect(
-        "load_applicable_mutations resolves counterpart_backend_key for dependency mutations",
-    )
+/// store-side onto `counterpart_backend_key`, or the rejection to return when
+/// that Item's Promotion has not yet been applied (ADR-0036).
+fn counterpart_number(view: &MutationView) -> Result<&str, ApplyOutcome> {
+    view.counterpart_backend_key.as_deref().ok_or_else(|| {
+        ApplyOutcome::rejected(
+            "the Blocking Item has no backend identity yet; its Promotion has not yet been applied",
+        )
+    })
 }
 
 /// Raw `gh issue view --json` shape. Only the fields tk maps are named; serde
@@ -297,7 +342,9 @@ fn stderr_string(output: &RunOutput) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::mutation_payload::{DependencyRef, EpicRef, StatusChange, TitleBody};
+    use crate::domain::mutation_payload::{
+        DependencyRef, EpicRef, Promotion, StatusChange, TitleBody,
+    };
     use crate::proc::{ErrorInjectingRunner, FakeRunner, ProcError, RunOutput};
     use std::path::PathBuf;
 
@@ -792,6 +839,117 @@ mod tests {
                 assert_eq!(f.class, FailureClass::Unknown);
             }
             ApplyOutcome::Accepted(_) => panic!("stale gh must reject, not no-op"),
+        }
+    }
+
+    // ---- Promotion -------------------------------------------------------
+
+    #[test]
+    fn apply_promote_ticket_and_epic_are_rejected_without_a_call() {
+        // GitHub's promotion_capabilities() declares nothing (ADR-0036), so
+        // Apply must reject rather than spawn `gh`; FakeRunner has no
+        // expectations, so any call panics.
+        for mt in [MutationType::PromoteTicket, MutationType::PromoteEpic] {
+            let runner = FakeRunner::new();
+            let cwd = cwd();
+            let mut adapter = GithubAdapter::new(&runner, &cwd);
+            let v = view(
+                mt,
+                MutationPayload::Promotion(Promotion {
+                    title: "T".into(),
+                    body: "B".into(),
+                    backend_kind: "github".into(),
+                }),
+                Some("42"),
+            );
+            match adapter.apply_mutation(&v, NOW).unwrap() {
+                ApplyOutcome::Rejected(f) => {
+                    assert!(f.detail.contains("Promotion"), "{}", f.detail);
+                }
+                ApplyOutcome::Accepted(_) => {
+                    panic!("{mt}: GitHub declares no Promotion capability");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn github_declares_no_promotion_capabilities() {
+        let runner = FakeRunner::new();
+        let cwd = cwd();
+        let adapter = GithubAdapter::new(&runner, &cwd);
+        let caps = adapter.promotion_capabilities();
+        assert!(!caps.can_create_item_class(ItemClass::Ticket));
+        assert!(!caps.can_create_item_class(ItemClass::Epic));
+        assert!(!caps.can_create_ticket_kind(TicketKind::Task));
+        assert!(!caps.can_create_ticket_kind(TicketKind::Bug));
+        assert!(!caps.can_represent_dependencies());
+        assert!(!caps.can_represent_epic_membership());
+    }
+
+    #[test]
+    fn apply_update_ticket_without_backend_key_is_rejected_not_panicked() {
+        // A Pending Promotion Item can carry ordinary Mutations behind its
+        // unapplied Promotion (ADR-0036), so `backend_key` can be absent for a
+        // Mutation Type other than promote_*. FakeRunner has no expectations,
+        // so any `gh` call panics.
+        let runner = FakeRunner::new();
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let v = view(
+            MutationType::UpdateTicket,
+            MutationPayload::UpdateTitleBody(TitleBody {
+                title: "New".into(),
+                body: "Body".into(),
+            }),
+            None,
+        );
+        match adapter.apply_mutation(&v, NOW).unwrap() {
+            ApplyOutcome::Rejected(f) => {
+                assert!(f.detail.contains("no backend identity"), "{}", f.detail);
+            }
+            ApplyOutcome::Accepted(_) => panic!("expected rejection"),
+        }
+    }
+
+    #[test]
+    fn apply_add_dependency_without_backend_key_is_rejected_not_panicked() {
+        let runner = FakeRunner::new();
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let v = MutationView {
+            counterpart_backend_key: Some("9".into()),
+            ..view(
+                MutationType::AddDependency,
+                MutationPayload::DependencyRef(DependencyRef {
+                    blocking_id: "blocking-internal-id".into(),
+                }),
+                None,
+            )
+        };
+        match adapter.apply_mutation(&v, NOW).unwrap() {
+            ApplyOutcome::Rejected(f) => {
+                assert!(f.detail.contains("target Item"), "{}", f.detail);
+            }
+            ApplyOutcome::Accepted(_) => panic!("expected rejection"),
+        }
+    }
+
+    #[test]
+    fn apply_add_dependency_without_counterpart_backend_key_is_rejected_not_panicked() {
+        let runner = FakeRunner::new();
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let v = dep_view(MutationType::AddDependency, "5", "9");
+        let v = MutationView {
+            counterpart_backend_key: None,
+            ..v
+        };
+        match adapter.apply_mutation(&v, NOW).unwrap() {
+            ApplyOutcome::Rejected(f) => {
+                assert!(f.detail.contains("Blocking Item"), "{}", f.detail);
+            }
+            ApplyOutcome::Accepted(_) => panic!("expected rejection"),
         }
     }
 
