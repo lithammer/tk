@@ -435,7 +435,7 @@ pub fn apply_mutation_outcome(
                     // payload rather than read from Remote configuration
                     // (ADR-0036); the Adapter owns only the key and Display ID.
                     let payload: Promotion = serde_json::from_str(&payload_json)?;
-                    crate::store::promotion::apply_promotion_receipt(
+                    crate::store::promotion::apply_receipt(
                         &tx,
                         &item_id,
                         &payload.backend_kind,
@@ -1476,7 +1476,7 @@ mod tests {
         let rows = load_applicable_mutations(&conn).unwrap();
 
         let tx = crate::store::write_transaction(&mut conn).unwrap();
-        crate::store::promotion::apply_promotion_receipt(
+        crate::store::promotion::apply_receipt(
             &tx,
             "t1",
             "github",

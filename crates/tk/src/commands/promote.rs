@@ -33,12 +33,12 @@ use crate::domain::item_class::ItemClass;
 use crate::domain::mutation_state::MutationState;
 use crate::domain::promotion_graph::{GraphItem, PromotionGraph};
 use crate::domain::promotion_plan::PromotionPlan;
-use crate::promotion::plan::{DependencyRemedy, PromotionFinding, plan_promotion};
+use crate::promotion::plan::{PromotionFinding, plan_promotion};
 use crate::remote::adapter::Adapter;
 use crate::remote::factory::{self, OpenError as FactoryOpenError};
 use crate::store::mutations::AppendError;
 use crate::store::promotion::{
-    self as store_promotion, CommitPlanError, MutationStatus, ReadGraphError,
+    self as store_promotion, CommitPlanError, MutationSummary, ReadGraphError,
 };
 use crate::store::repository::{ResolvedItemRefWithDisplay, Store};
 use crate::store::sync as store_sync;
@@ -135,15 +135,14 @@ fn promote(
     children: bool,
     now: &str,
 ) -> Result<Exit, CommandError> {
-    let graph = store_promotion::read_promotion_graph(store.conn(), &target.id, children)
+    let graph = store_promotion::read_graph(store.conn(), &target.id, children)
         .map_err(read_graph_error)?;
     let plan = plan_promotion(&graph, adapter.promotion_capabilities(), backend)
         .map_err(|findings| refusal(&target.display_id, &findings, backend))?;
 
     let captured = capture_display_ids(&graph, &plan);
-    let operation_id =
-        store_promotion::commit_promotion_plan(store.conn_mut(), &plan, &mut *deps.rng, now)
-            .map_err(commit_error)?;
+    let operation_id = store_promotion::commit_plan(store.conn_mut(), &plan, &mut *deps.rng, now)
+        .map_err(commit_error)?;
     if plan.is_empty() {
         render_nothing_to_promote(deps.stdout, target_item(&graph));
     }
@@ -167,7 +166,7 @@ fn promote(
             None => Ok(Exit::Ok),
         };
     };
-    let unresolved = store_promotion::unresolved_operation_mutations(store.conn(), &operation_id)
+    let unresolved = store_promotion::unresolved_in_operation(store.conn(), &operation_id)
         .map_err(|e| resolver::storage_error(&e))?;
     let Some(first_unresolved) = unresolved.first() else {
         // Every Mutation of this Promotion Operation resolved; a failure later
@@ -282,8 +281,8 @@ fn render_nothing_to_promote<W: Write + ?Sized>(stdout: &mut W, target: &GraphIt
 /// the Promotion is durable and applies once that Mutation clears — while one of
 /// the operation's own Mutations is the Promotion itself not landing.
 fn unresolved_failure(
-    blocker: Option<&MutationStatus>,
-    unresolved: &MutationStatus,
+    blocker: Option<&MutationSummary>,
+    unresolved: &MutationSummary,
     sync_error: Option<&RunSyncError>,
 ) -> CommandError {
     let (headline, guidance) = match blocker {
@@ -329,7 +328,7 @@ fn unresolved_failure(
 /// log` on such a row renders no Failure block, so sending the reader there
 /// answers nothing — the cause is the line above. Only a `failed` row has
 /// something recorded for them to inspect.
-fn recovery_guidance(mutation: &MutationStatus) -> String {
+fn recovery_guidance(mutation: &MutationSummary) -> String {
     match mutation.state {
         MutationState::Failed => format!(
             "Inspect it with 'tk sync log {}', then run 'tk sync' to apply the rest of the Promotion.",
@@ -378,34 +377,27 @@ fn render_finding(finding: &PromotionFinding, backend: BackendKind) -> String {
             item.display_id,
             ticket_kind.label()
         ),
+        // ADR-0035 asks a rejected Dependency to name both endpoints, the
+        // reason, and a remedy. The remedy follows from the reason, so both
+        // come out of one match rather than being chosen twice.
         PromotionFinding::DependencyRejected {
             blocked,
             blocking,
             reason,
-            remedy,
-        } => {
-            let reason = match reason {
-                DependencyRejection::BackendBlockedLocalBlocking => format!(
-                    "{} would be backend-backed while its Blocking Item {} stays local.",
-                    blocked.display_id, blocking.display_id
-                ),
-                DependencyRejection::BackendKindMismatch => format!(
-                    "{} and {} would be backed by different Backends.",
-                    blocked.display_id, blocking.display_id
-                ),
-            };
-            let remedy = match remedy {
-                DependencyRemedy::PromoteBlockingItemOrUnblock => format!(
-                    "Promote {} in the same operation, or run 'tk unblock {} {}' to drop the Dependency.",
-                    blocking.display_id, blocked.display_id, blocking.display_id
-                ),
-                DependencyRemedy::Unblock => format!(
-                    "Run 'tk unblock {} {}' to drop the Dependency.",
-                    blocked.display_id, blocking.display_id
-                ),
-            };
-            format!("{reason} {remedy}")
-        }
+        } => match reason {
+            DependencyRejection::BackendBlockedLocalBlocking => format!(
+                "{blocked_id} would be backend-backed while its Blocking Item {blocking_id} stays local. \
+                 Promote {blocking_id} in the same operation, or run 'tk unblock {blocked_id} {blocking_id}' to drop the Dependency.",
+                blocked_id = blocked.display_id,
+                blocking_id = blocking.display_id,
+            ),
+            DependencyRejection::BackendKindMismatch => format!(
+                "{blocked_id} and {blocking_id} would be backed by different Backends. \
+                 Run 'tk unblock {blocked_id} {blocking_id}' to drop the Dependency.",
+                blocked_id = blocked.display_id,
+                blocking_id = blocking.display_id,
+            ),
+        },
         PromotionFinding::DependencyNotRepresentable { blocked, blocking } => format!(
             "{} depends on {}, and the {backend} Backend cannot represent a Dependency under Promotion.",
             blocked.display_id, blocking.display_id
@@ -810,7 +802,6 @@ mod tests {
                 blocked: item_ref("tk-1"),
                 blocking: item_ref("tk-2"),
                 reason: DependencyRejection::BackendBlockedLocalBlocking,
-                remedy: DependencyRemedy::PromoteBlockingItemOrUnblock,
             }),
             "tk-1 would be backend-backed while its Blocking Item tk-2 stays local. \
              Promote tk-2 in the same operation, or run 'tk unblock tk-1 tk-2' to drop the Dependency."
@@ -826,7 +817,6 @@ mod tests {
                 blocked: item_ref("tk-1"),
                 blocking: item_ref("jira-7"),
                 reason: DependencyRejection::BackendKindMismatch,
-                remedy: DependencyRemedy::Unblock,
             }),
             "tk-1 and jira-7 would be backed by different Backends. \
              Run 'tk unblock tk-1 jira-7' to drop the Dependency."
@@ -1317,8 +1307,8 @@ mod tests {
 
     // ---- unresolved-failure dispatch -------------------------------------
 
-    fn status(sequence: i64, state: MutationState, display: &str) -> MutationStatus {
-        MutationStatus {
+    fn status(sequence: i64, state: MutationState, display: &str) -> MutationSummary {
+        MutationSummary {
             sequence,
             state,
             target_display_id: display.to_owned(),

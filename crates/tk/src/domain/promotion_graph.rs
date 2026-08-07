@@ -6,7 +6,7 @@
 //! and what order the outbox takes are the planner's, and every one of them is
 //! a pure function of this snapshot.
 //!
-//! [`crate::store::promotion::read_promotion_graph`] is the only producer.
+//! [`crate::store::promotion::read_graph`] is the only producer.
 
 use crate::domain::backend_intent::BackendIntent;
 use crate::domain::item_class::ItemClass;

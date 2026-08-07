@@ -8,7 +8,7 @@
 //! have to import.
 //!
 //! [`crate::promotion::plan::plan_promotion`] is the only producer;
-//! [`crate::store::promotion::commit_promotion_plan`] the only consumer.
+//! [`crate::store::promotion::commit_plan`] the only consumer.
 
 use super::item_class::ItemClass;
 use super::mutation_payload::MutationPayload;

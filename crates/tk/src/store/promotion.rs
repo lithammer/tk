@@ -2,22 +2,22 @@
 //! `tk promote`, the outbox commit that follows planning, and receipt
 //! application at the end of it (ADR-0035, ADR-0036).
 //!
-//! [`read_promotion_graph`] gathers the facts
+//! [`read_graph`] gathers the facts
 //! [`crate::domain::promotion_graph::PromotionGraph`] carries; the planner that
 //! reasons over them owns every decision.
 //!
-//! [`commit_promotion_plan`] writes the planner's ordered
+//! [`commit_plan`] writes the planner's ordered
 //! [`crate::domain::promotion_plan::PromotionPlan`] to the Mutation Log outbox
 //! as one Promotion Operation, in the single local transaction ADR-0035
 //! requires before any Backend call.
 //!
-//! [`apply_promotion_receipt`] runs inside the caller's open transaction — it
+//! [`apply_receipt`] runs inside the caller's open transaction — it
 //! takes a borrowed connection and neither begins nor commits one — so the
 //! conversion commits together with the Mutation Log state transition that
 //! records the Promotion as applied. No window exists in which a Mutation is
 //! `applied` while its Item is still Local.
 //!
-//! [`earliest_applicable_mutation`] and [`unresolved_operation_mutations`]
+//! [`earliest_applicable_mutation`] and [`unresolved_in_operation`]
 //! close the loop: after the sync that follows the commit, they are how the
 //! command tells a Promotion queued behind an older Mutation from one whose
 //! own Mutations did not land.
@@ -36,7 +36,7 @@ use crate::domain::promotion_plan::PromotionPlan;
 use crate::store::mutations;
 use crate::store::repository::create::generate_internal_id;
 
-/// Error returned by [`read_promotion_graph`].
+/// Error returned by [`read_graph`].
 #[derive(Debug, Error)]
 pub enum ReadGraphError {
     #[error(transparent)]
@@ -76,7 +76,7 @@ pub enum ReadGraphError {
 /// A `target_id` no `items` row matches is a caller fault (the command
 /// resolves the Display ID first) and surfaces as
 /// [`ReadGraphError::Storage`].
-pub fn read_promotion_graph(
+pub fn read_graph(
     conn: &Connection,
     target_id: &str,
     children_requested: bool,
@@ -170,7 +170,7 @@ fn read_graph_item(conn: &Connection, id: &str) -> Result<GraphItem, ReadGraphEr
     Ok(item)
 }
 
-/// Error returned by [`commit_promotion_plan`].
+/// Error returned by [`commit_plan`].
 #[derive(Debug, Error)]
 pub enum CommitPlanError {
     /// Underlying SQLite error opening or committing the transaction.
@@ -198,7 +198,7 @@ pub enum CommitPlanError {
 /// already Backend or already Pending Promotion appends nothing (see
 /// [`crate::domain::promotion_plan::PromotionPlan::is_empty`]) — and returns
 /// `None` rather than minting an identity that would own zero Mutations.
-pub fn commit_promotion_plan<R: Rng + ?Sized>(
+pub fn commit_plan<R: Rng + ?Sized>(
     conn: &mut Connection,
     plan: &PromotionPlan,
     rng: &mut R,
@@ -240,7 +240,7 @@ pub fn commit_promotion_plan<R: Rng + ?Sized>(
 /// A Display ID the receipt names but another Item already claims fails the
 /// `item_ids` insert; the error propagates so the caller's transaction rolls
 /// back with the Mutation still applicable (ADR-0036 Consequences).
-pub fn apply_promotion_receipt(
+pub fn apply_receipt(
     conn: &Connection,
     item_id: &str,
     backend_kind: &str,
@@ -288,7 +288,7 @@ pub fn apply_promotion_receipt(
 /// whether it was rejected or simply never reached, and the Display ID of the
 /// Item it targets.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MutationStatus {
+pub struct MutationSummary {
     pub sequence: i64,
     pub state: MutationState,
     pub target_display_id: String,
@@ -303,7 +303,9 @@ pub struct MutationStatus {
 /// operation-scoped query could never name it. It is also the only place the
 /// answer exists when Apply hits an environment failure, which leaves the
 /// in-flight row `pending` and writes no outcome.
-pub fn earliest_applicable_mutation(conn: &Connection) -> rusqlite::Result<Option<MutationStatus>> {
+pub fn earliest_applicable_mutation(
+    conn: &Connection,
+) -> rusqlite::Result<Option<MutationSummary>> {
     conn.query_row(
         "select m.sequence, m.state, i.display_value \
            from mutations m join items i on i.id = m.item_id \
@@ -311,7 +313,7 @@ pub fn earliest_applicable_mutation(conn: &Connection) -> rusqlite::Result<Optio
           order by m.sequence asc limit 1",
         [],
         |r| {
-            Ok(MutationStatus {
+            Ok(MutationSummary {
                 sequence: r.get(0)?,
                 state: r.get(1)?,
                 target_display_id: r.get(2)?,
@@ -329,10 +331,10 @@ pub fn earliest_applicable_mutation(conn: &Connection) -> rusqlite::Result<Optio
 /// resolve (CONTEXT.md Promotion Operation). Comparing a non-empty result
 /// against [`earliest_applicable_mutation`] separates a Promotion queued behind
 /// an older Mutation from one of the operation's own Mutations being rejected.
-pub fn unresolved_operation_mutations(
+pub fn unresolved_in_operation(
     conn: &Connection,
     operation_id: &str,
-) -> rusqlite::Result<Vec<MutationStatus>> {
+) -> rusqlite::Result<Vec<MutationSummary>> {
     let mut stmt = conn.prepare(
         "select m.sequence, m.state, i.display_value \
            from mutations m join items i on i.id = m.item_id \
@@ -340,7 +342,7 @@ pub fn unresolved_operation_mutations(
           order by m.sequence asc",
     )?;
     let rows = stmt.query_map(params![operation_id], |r| {
-        Ok(MutationStatus {
+        Ok(MutationSummary {
             sequence: r.get(0)?,
             state: r.get(1)?,
             target_display_id: r.get(2)?,
@@ -400,7 +402,7 @@ mod tests {
     }
 
     /// Drive the receipt through a caller-owned transaction, the shape
-    /// [`apply_promotion_receipt`] contracts for: the deferred `items` →
+    /// [`apply_receipt`] contracts for: the deferred `items` →
     /// `item_ids` foreign key is only tolerated mid-transaction, and a failure
     /// rolls the whole conversion back.
     fn promote(
@@ -409,7 +411,7 @@ mod tests {
         receipt: &PromotionReceipt,
     ) -> rusqlite::Result<()> {
         let tx = crate::store::write_transaction(conn)?;
-        apply_promotion_receipt(&tx, item_id, "github", receipt, NOW)?;
+        apply_receipt(&tx, item_id, "github", receipt, NOW)?;
         tx.commit()
     }
 
@@ -631,7 +633,7 @@ mod tests {
         seed_ticket(&conn, "t1", "tk-1", 1);
         seed_ticket(&conn, "elsewhere", "tk-2", 2);
 
-        let graph = read_promotion_graph(&conn, "t1", false).unwrap();
+        let graph = read_graph(&conn, "t1", false).unwrap();
 
         assert_eq!(graph.target_id, "t1");
         assert!(!graph.children_requested);
@@ -671,7 +673,7 @@ mod tests {
         .unwrap();
         seed_ticket(&conn, "outside", "tk-4", 4);
 
-        let graph = read_promotion_graph(&conn, "epic", true).unwrap();
+        let graph = read_graph(&conn, "epic", true).unwrap();
 
         assert!(graph.children_requested);
         assert_eq!(
@@ -691,7 +693,7 @@ mod tests {
         seed_epic(&conn, "epic", "tk-1", 1);
         seed_child(&conn, "child", "tk-2", "epic", 2);
 
-        let graph = read_promotion_graph(&conn, "epic", false).unwrap();
+        let graph = read_graph(&conn, "epic", false).unwrap();
 
         assert_eq!(item_ids(&graph), vec!["epic", "child"]);
         assert!(!graph.children_requested);
@@ -704,7 +706,7 @@ mod tests {
         seed_child(&conn, "child", "tk-2", "epic", 2);
         seed_child(&conn, "sibling", "tk-3", "epic", 3);
 
-        let graph = read_promotion_graph(&conn, "child", false).unwrap();
+        let graph = read_graph(&conn, "child", false).unwrap();
 
         // The Epic joins because Promotion has to decide about membership; the
         // sibling does not — `--children` descends from an Epic target only.
@@ -718,7 +720,7 @@ mod tests {
         seed_ticket(&conn, "outside", "tk-2", 2);
         insert_dependency(&conn, "outside", "t1").unwrap();
 
-        let graph = read_promotion_graph(&conn, "t1", false).unwrap();
+        let graph = read_graph(&conn, "t1", false).unwrap();
 
         // Preflight rejects a backend-backed Blocked Item left waiting on a
         // Local Blocking Item (ADR-0035), which it can only see if the
@@ -745,7 +747,7 @@ mod tests {
         .unwrap();
         insert_dependency(&conn, "finished", "t1").unwrap();
 
-        let graph = read_promotion_graph(&conn, "t1", false).unwrap();
+        let graph = read_graph(&conn, "t1", false).unwrap();
 
         // A done Blocking Item resolves readiness but keeps its Dependency
         // (ADR-0035), so the resulting backend graph still carries the edge.
@@ -762,7 +764,7 @@ mod tests {
         insert_dependency(&conn, "blocker", "t1").unwrap();
         insert_dependency(&conn, "t1", "blocked").unwrap();
 
-        let graph = read_promotion_graph(&conn, "t1", false).unwrap();
+        let graph = read_graph(&conn, "t1", false).unwrap();
 
         assert_eq!(item_ids(&graph), vec!["blocker", "t1", "blocked"]);
         let mut found = edges(&graph);
@@ -778,7 +780,7 @@ mod tests {
         seed_child(&conn, "second", "tk-3", "epic", 3);
         insert_dependency(&conn, "first", "second").unwrap();
 
-        let graph = read_promotion_graph(&conn, "epic", true).unwrap();
+        let graph = read_graph(&conn, "epic", true).unwrap();
 
         assert_eq!(edges(&graph), vec![("second", "first")]);
     }
@@ -820,7 +822,7 @@ mod tests {
         )
         .unwrap();
 
-        let graph = read_promotion_graph(&conn, "epic", true).unwrap();
+        let graph = read_graph(&conn, "epic", true).unwrap();
 
         let intents: Vec<&BackendIntent> = graph.items.iter().map(|i| &i.backend_intent).collect();
         assert_eq!(
@@ -876,8 +878,7 @@ mod tests {
         let mut conn = open_seeded();
 
         let result =
-            commit_promotion_plan(&mut conn, &PromotionPlan::default(), &mut seeded_rng(), NOW)
-                .unwrap();
+            commit_plan(&mut conn, &PromotionPlan::default(), &mut seeded_rng(), NOW).unwrap();
 
         assert_eq!(
             result, None,
@@ -898,7 +899,7 @@ mod tests {
             mutations: vec![draft("t3"), draft("t1"), draft("t2")],
         };
 
-        commit_promotion_plan(&mut conn, &plan, &mut seeded_rng(), NOW).unwrap();
+        commit_plan(&mut conn, &plan, &mut seeded_rng(), NOW).unwrap();
 
         let mut stmt = conn
             .prepare("select item_id from mutations order by sequence")
@@ -920,7 +921,7 @@ mod tests {
             mutations: vec![draft("t1"), draft("t2")],
         };
 
-        let operation_id = commit_promotion_plan(&mut conn, &plan, &mut seeded_rng(), NOW)
+        let operation_id = commit_plan(&mut conn, &plan, &mut seeded_rng(), NOW)
             .unwrap()
             .expect("a non-empty plan mints an operation");
 
@@ -950,7 +951,7 @@ mod tests {
         };
 
         let before = mutation_seq(&conn).unwrap();
-        let err = commit_promotion_plan(&mut conn, &plan, &mut seeded_rng(), NOW).unwrap_err();
+        let err = commit_plan(&mut conn, &plan, &mut seeded_rng(), NOW).unwrap_err();
 
         assert!(
             matches!(
@@ -1005,7 +1006,7 @@ mod tests {
         let plan = PromotionPlan {
             mutations: vec![draft("t2")],
         };
-        commit_promotion_plan(&mut conn, &plan, &mut seeded_rng(), NOW).unwrap();
+        commit_plan(&mut conn, &plan, &mut seeded_rng(), NOW).unwrap();
 
         let (sequence, promotion_operation_id, mutation_type): (i64, Option<String>, String) = conn
             .query_row(
@@ -1084,7 +1085,7 @@ mod tests {
 
         assert_eq!(
             earliest_applicable_mutation(&conn).unwrap(),
-            Some(MutationStatus {
+            Some(MutationSummary {
                 sequence: 1,
                 state: MutationState::Failed,
                 target_display_id: "tk-1".to_owned(),
@@ -1116,9 +1117,7 @@ mod tests {
         seed_mutation(&conn, 2, "t1", "applied", Some("op-1"));
 
         assert!(
-            unresolved_operation_mutations(&conn, "op-1")
-                .unwrap()
-                .is_empty(),
+            unresolved_in_operation(&conn, "op-1").unwrap().is_empty(),
             "an operation whose every Mutation applied is resolved"
         );
     }
@@ -1134,14 +1133,14 @@ mod tests {
         seed_mutation(&conn, 4, "t1", "pending", Some("op-1"));
 
         assert_eq!(
-            unresolved_operation_mutations(&conn, "op-1").unwrap(),
+            unresolved_in_operation(&conn, "op-1").unwrap(),
             vec![
-                MutationStatus {
+                MutationSummary {
                     sequence: 3,
                     state: MutationState::Failed,
                     target_display_id: "tk-1".to_owned(),
                 },
-                MutationStatus {
+                MutationSummary {
                     sequence: 4,
                     state: MutationState::Pending,
                     target_display_id: "tk-1".to_owned(),
@@ -1158,9 +1157,6 @@ mod tests {
         seed_ticket(&conn, "t1", "tk-1", 1);
         seed_mutation(&conn, 1, "t1", "skipped", Some("op-1"));
 
-        assert_eq!(
-            unresolved_operation_mutations(&conn, "op-1").unwrap().len(),
-            1
-        );
+        assert_eq!(unresolved_in_operation(&conn, "op-1").unwrap().len(), 1);
     }
 }

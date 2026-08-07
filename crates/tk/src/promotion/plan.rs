@@ -69,7 +69,6 @@ pub enum PromotionFinding {
         blocked: ItemRef,
         blocking: ItemRef,
         reason: DependencyRejection,
-        remedy: DependencyRemedy,
     },
     /// A Dependency the operation would make backend intent, on a Backend
     /// that declares it cannot represent Dependencies. Keeping it local
@@ -81,28 +80,6 @@ pub enum PromotionFinding {
     EpicMembershipNotRepresentable { ticket: ItemRef, epic: ItemRef },
 }
 
-/// What the user can do about a rejected Dependency.
-///
-/// Derived from the rejection reason at plan time so the command renders one
-/// typed choice instead of inventing advice per call site.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DependencyRemedy {
-    /// Promote the Blocking Item in the same operation, or drop the edge.
-    PromoteBlockingItemOrUnblock,
-    /// The endpoints belong to two different Backends and no Promotion moves
-    /// either one, so only dropping the edge resolves it.
-    Unblock,
-}
-
-impl DependencyRemedy {
-    fn for_rejection(reason: DependencyRejection) -> Self {
-        match reason {
-            DependencyRejection::BackendBlockedLocalBlocking => Self::PromoteBlockingItemOrUnblock,
-            DependencyRejection::BackendKindMismatch => Self::Unblock,
-        }
-    }
-}
-
 /// Sort key for relationship work: the creation order of the first endpoint,
 /// then of the second. Dependencies order by (Blocked, Blocking) and Epic
 /// membership by (Ticket, Epic), so findings and Mutations about the same
@@ -112,7 +89,7 @@ type EndpointOrder = (i64, i64);
 /// Both endpoints of every edge are present in `PromotionGraph::items` by the
 /// snapshot's own contract — edges are collected from the Items, so neither
 /// endpoint can be one the read never saw. A missing one is a
-/// `read_promotion_graph` fault, not user input.
+/// `read_graph` fault, not user input.
 const GRAPH_IS_CLOSED: &str = "PromotionGraph carries both endpoints of every edge it names";
 
 /// Preflight a `tk promote` of `graph.target_id` against `backend`, the
@@ -185,7 +162,6 @@ pub fn plan_promotion(
                         blocked: ItemRef::of(blocked),
                         blocking: ItemRef::of(blocking),
                         reason,
-                        remedy: DependencyRemedy::for_rejection(reason),
                     },
                 ));
             }
@@ -229,7 +205,7 @@ pub fn plan_promotion(
             continue;
         }
         // A container absent from the snapshot is a torn concurrent edit, not a
-        // graph fault: `read_promotion_graph` collects the item set first and
+        // graph fault: `read_graph` collects the item set first and
         // re-reads each Item's `container_id` second, un-transacted, so a
         // `tk update --parent` committing in between names an Epic the read
         // never saw. Nothing can be decided about a membership only half of
@@ -716,7 +692,6 @@ mod tests {
                     display_id: "tk-2".to_owned(),
                 },
                 reason: DependencyRejection::BackendBlockedLocalBlocking,
-                remedy: DependencyRemedy::PromoteBlockingItemOrUnblock,
             }]
         );
     }
@@ -735,7 +710,6 @@ mod tests {
             findings(&g, PromotionCapabilities::all()).as_slice(),
             [PromotionFinding::DependencyRejected {
                 reason: DependencyRejection::BackendKindMismatch,
-                remedy: DependencyRemedy::Unblock,
                 ..
             }]
         ));

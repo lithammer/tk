@@ -247,21 +247,21 @@ pub fn mutation_types(conn: &Connection) -> rusqlite::Result<Vec<String>> {
 ///
 /// The one helper here that drives production code rather than bypassing it.
 /// The Backend Intent gates (ADR-0036) are validated against Mutation Log rows
-/// `commit_promotion_plan` actually wrote, so a change to the Promotion payload
+/// `commit_plan` actually wrote, so a change to the Promotion payload
 /// or to what counts as pending breaks the gate tests too.
 pub fn commit_promotion(conn: &mut Connection, id: &str) {
     use crate::domain::backend_kind::BackendKind;
     use crate::domain::promotion_capability::PromotionCapabilities;
 
-    let graph = crate::store::promotion::read_promotion_graph(conn, id, false)
-        .expect("read the Promotion graph");
+    let graph =
+        crate::store::promotion::read_graph(conn, id, false).expect("read the Promotion graph");
     let plan = crate::promotion::plan::plan_promotion(
         &graph,
         PromotionCapabilities::all(),
         BackendKind::Github,
     )
     .expect("a promotable fixture");
-    crate::store::promotion::commit_promotion_plan(
+    crate::store::promotion::commit_plan(
         conn,
         &plan,
         &mut rand::rngs::StdRng::seed_from_u64(7),
