@@ -15,6 +15,7 @@
 
 use std::path::{Path, PathBuf};
 
+use rand::SeedableRng;
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
 
@@ -229,6 +230,50 @@ pub fn insert_external_blocker(
 /// Return the current count of rows in the `mutations` outbox.
 pub fn mutation_count(conn: &Connection) -> rusqlite::Result<i64> {
     conn.query_row("select count(*) from mutations", [], |r| r.get(0))
+}
+
+/// Every Mutation Type in the outbox in Mutation Sequence order — the shape
+/// that shows both which intent a write path appended and that it landed
+/// behind the Mutations already in the log.
+pub fn mutation_types(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare("select mutation_type from mutations order by sequence")?;
+    let rows = stmt.query_map([], |r| r.get(0))?;
+    rows.collect()
+}
+
+/// Give the Item at internal `items.id` `id` a Pending Promotion the way
+/// `tk promote` does: preflight the real Promotion graph and commit the
+/// planner's outbox.
+///
+/// The one helper here that drives production code rather than bypassing it.
+/// The Backend Intent gates (ADR-0036) are validated against Mutation Log rows
+/// `commit_promotion_plan` actually wrote, so a change to the Promotion payload
+/// or to what counts as pending breaks the gate tests too.
+pub fn commit_promotion(conn: &mut Connection, id: &str) {
+    use crate::domain::backend_kind::BackendKind;
+    use crate::domain::item_class::ItemClass;
+    use crate::domain::promotion_capability::PromotionCapabilities;
+    use crate::domain::ticket_kind::TicketKind;
+
+    let capabilities = PromotionCapabilities::none()
+        .with_item_class(ItemClass::Ticket)
+        .with_item_class(ItemClass::Epic)
+        .with_ticket_kind(TicketKind::Task)
+        .with_ticket_kind(TicketKind::Bug)
+        .with_dependencies()
+        .with_epic_membership();
+
+    let graph = crate::store::promotion::read_promotion_graph(conn, id, false)
+        .expect("read the Promotion graph");
+    let plan = crate::promotion::plan::plan_promotion(&graph, capabilities, BackendKind::Github)
+        .expect("a promotable fixture");
+    crate::store::promotion::commit_promotion_plan(
+        conn,
+        &plan,
+        &mut rand::rngs::StdRng::seed_from_u64(7),
+        "2026-05-09T00:00:00.000Z",
+    )
+    .expect("commit the Promotion outbox");
 }
 
 /// Raw Mutation Log fixture for sync engine and read-side outbox tests.

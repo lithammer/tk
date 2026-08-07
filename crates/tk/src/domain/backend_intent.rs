@@ -31,6 +31,14 @@ pub enum BackendIntent {
 }
 
 impl BackendIntent {
+    /// Whether a backend-applicable change to this Item appends a Mutation:
+    /// the Item is backend-bound, either already Backend or carrying a Pending
+    /// Promotion the Mutation is ordered behind (ADR-0036).
+    #[must_use]
+    pub fn is_backend_bound(&self) -> bool {
+        !matches!(self, Self::Local)
+    }
+
     /// The Backend this Item belongs to, or will belong to once its Promotion
     /// resolves. `None` only for a Local Item with no Promotion intent.
     #[must_use]
@@ -47,6 +55,23 @@ impl BackendIntent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_local_item_is_not_backend_bound() {
+        assert!(!BackendIntent::Local.is_backend_bound());
+        assert!(
+            BackendIntent::PendingPromotion {
+                backend_kind: "github".into()
+            }
+            .is_backend_bound()
+        );
+        assert!(
+            BackendIntent::Backend {
+                backend_kind: "github".into()
+            }
+            .is_backend_bound()
+        );
+    }
 
     #[test]
     fn only_a_local_item_has_no_backend() {

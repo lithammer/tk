@@ -3,7 +3,8 @@
 //! Every item command runs the same prologue: open the Repository Store,
 //! then resolve a Display ID or Alias into an internal stable item ID.
 //! This module owns the typed errors that prologue can raise plus the
-//! shared [`CommandError`] builders ([`open_error`], [`storage_error`]); the
+//! shared [`CommandError`] builders ([`open_error`], [`storage_error`],
+//! [`backend_intent_error`]); the
 //! per-command not-found phrasing is owned by the command itself, inlined into
 //! its own typed error variant.
 
@@ -14,6 +15,7 @@ use thiserror::Error;
 use crate::cli::CommandError;
 use crate::clock::Clock;
 use crate::proc::ProcRunner;
+use crate::store::mutations;
 use crate::store::repository::{self, ResolvedItemRef, ResolvedItemRefWithDisplay, Store};
 
 /// Errors re-exported from the store layer, where the operations that produce
@@ -106,6 +108,20 @@ pub fn storage_error(err: &rusqlite::Error) -> CommandError {
         CommandError::failure("Repository Store is busy; retry the command")
     } else {
         CommandError::failure(format!("failed to read Repository Store\n{err}"))
+    }
+}
+
+/// Build the [`CommandError`] for a failed Backend Intent read (ADR-0036).
+///
+/// Every write path that gates a Mutation on Backend Intent can hit this. Only
+/// the SQLite arm is an ordinary storage fault; a `promote_*` payload that does
+/// not decode, or a backend-Origin Item with no Backend, is Repository Store
+/// corruption and says so.
+#[must_use]
+pub fn backend_intent_error(err: &mutations::BackendIntentError) -> CommandError {
+    match err {
+        mutations::BackendIntentError::Sqlite(e) => storage_error(e),
+        corruption => CommandError::failure(format!("Repository Store corruption: {corruption}")),
     }
 }
 

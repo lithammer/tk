@@ -2,10 +2,10 @@
 //!
 //! Diffs each requested field against the stored value inside the same
 //! `begin immediate` transaction the read used, writes only the changed
-//! columns, and emits one Mutation per changed field-group (title/body
-//! becomes a single full snapshot; parent change is `remove_ticket_from_epic`
-//! plus `add_ticket_to_epic` in that order; priority is a stored change
-//! only — Backend Adapters do not consume Priority).
+//! columns, and — for a backend-bound Item — emits one Mutation per changed
+//! field-group (title/body becomes a single full snapshot; parent change is
+//! `remove_ticket_from_epic` plus `add_ticket_to_epic` in that order; priority
+//! is a stored change only — Backend Adapters do not consume Priority).
 //!
 //! `updated_at` is bumped only when at least one column actually changes;
 //! a request whose values all match the stored state commits a no-op
@@ -17,7 +17,6 @@ use crate::clock::Clock;
 use crate::domain::item_class::ItemClass;
 use crate::domain::mutation_payload::{EpicRef, MutationPayload, TitleBody};
 use crate::domain::mutation_type::MutationType;
-use crate::domain::origin::Origin;
 use crate::domain::priority::Priority;
 use crate::domain::selection_state::SelectionState;
 use crate::store::mutations;
@@ -83,6 +82,8 @@ pub enum UpdateError {
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
+    BackendIntent(#[from] mutations::BackendIntentError),
+    #[error(transparent)]
     Mutation(#[from] mutations::AppendError),
 }
 
@@ -96,7 +97,6 @@ impl ItemClass {
 }
 
 struct Current {
-    origin: Origin,
     title: String,
     body: String,
     priority: Option<String>,
@@ -140,17 +140,16 @@ pub fn update_item<C: Clock + ?Sized>(
 
     let current = tx
         .query_row(
-            "select origin, title, body, priority, selection_state, container_id \
+            "select title, body, priority, selection_state, container_id \
                from items where id = ?1",
             params![req.id],
             |r| {
                 Ok(Current {
-                    origin: r.get(0)?,
-                    title: r.get(1)?,
-                    body: r.get(2)?,
-                    priority: r.get(3)?,
-                    selection_state: r.get(4)?,
-                    container_id: r.get(5)?,
+                    title: r.get(0)?,
+                    body: r.get(1)?,
+                    priority: r.get(2)?,
+                    selection_state: r.get(3)?,
+                    container_id: r.get(4)?,
                 })
             },
         )
@@ -243,7 +242,11 @@ pub fn update_item<C: Clock + ?Sized>(
         &now_iso,
     )?;
 
-    if current.origin == Origin::Backend {
+    // Backend Intent, not Origin, decides whether the edit is also backend
+    // intent (ADR-0036): a title change made between `tk promote` and the next
+    // `tk sync` belongs in the Mutation Log, ordered behind the Promotion that
+    // will give the Item its backend identity.
+    if mutations::resolve_backend_intent(&tx, req.id)?.is_backend_bound() {
         if let Some(old_id) = old_epic_id {
             mutations::append(
                 &tx,
@@ -371,7 +374,9 @@ mod tests {
     use super::*;
     use crate::clock::FakeClock;
     use crate::store::migrations;
-    use crate::store::testing::{FixtureItem, insert_fixture_item};
+    use crate::store::testing::{
+        FixtureItem, commit_promotion, insert_fixture_item, mutation_types,
+    };
     use rusqlite::Connection;
 
     fn open_seeded() -> Store {
@@ -498,6 +503,42 @@ mod tests {
             .query_row("select count(*) from mutations", [], |r| r.get(0))
             .unwrap();
         assert_eq!(mutations, 0);
+    }
+
+    #[test]
+    fn update_on_a_pending_promotion_item_appends_intent_behind_the_promotion() {
+        // ADR-0036: an edit made between `tk promote` and the next `tk sync`
+        // reaches the Backend, ordered behind the Promotion that gives the
+        // Item its backend identity.
+        let mut store = open_seeded();
+        seed_local_ticket(&store, "t1", "tk-1", 1);
+        commit_promotion(&mut store.conn, "t1");
+
+        update_item(
+            &mut store,
+            &clock(),
+            UpdateRequest {
+                id: "t1",
+                item_class: ItemClass::Ticket,
+                title: Some("Renamed"),
+                ..UpdateRequest::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            mutation_types(&store.conn).unwrap(),
+            vec!["promote_ticket", "update_ticket"]
+        );
+        let payload: String = store
+            .conn
+            .query_row(
+                "select payload_json from mutations where mutation_type = 'update_ticket'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(payload, r#"{"title":"Renamed","body":"Body0"}"#);
     }
 
     #[test]

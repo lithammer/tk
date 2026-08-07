@@ -137,10 +137,14 @@ Important stable contracts:
   Custom prefix configuration is tracked by `tk-22`.
 
 Write commands use `BEGIN IMMEDIATE` and commit current-state changes together
-with any required Mutation appends. Origin gates Mutations: Local items update
-current state only until Promotion; Backend items append backend-applicable
-Mutations in the same transaction as the visible state change. Priority remains
-a Local Field and does not emit Mutations.
+with any required Mutation appends. Backend Intent gates Mutations
+([ADR 0036](./docs/adr/0036-promotion-intent-precedes-backend-capability.md)):
+an item appends backend-applicable Mutations in the same transaction as the
+visible state change once it is backend-bound — already a Backend item, or a
+Local item whose Promotion is durable in the Mutation Log, whose later
+Mutations are therefore ordered behind that Promotion. A Local item with no
+Promotion intent updates current state only. Priority remains a Local Field and
+does not emit Mutations.
 
 `done` is terminal in v1 per
 [ADR 0006](./docs/adr/0006-done-is-terminal-in-v1.md). Store-facing status

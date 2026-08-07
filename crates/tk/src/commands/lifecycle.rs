@@ -89,6 +89,7 @@ pub fn transition(
             "'{id}' is parked; unpark it first with 'tk unpark {id}'"
         ))),
         Err(SetStatusError::Sqlite(err)) => Err(resolver::storage_error(&err)),
+        Err(SetStatusError::BackendIntent(err)) => Err(resolver::backend_intent_error(&err)),
         Err(SetStatusError::Mutation(err)) => Err(CommandError::failure(format!(
             "failed to append Mutation: {err}"
         ))),

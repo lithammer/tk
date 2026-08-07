@@ -205,15 +205,17 @@ whether the whole operation resolved.
 _Avoid_: Promotion Batch, Promotion Transaction, Promotion Group
 
 **Mutation**:
-A durable local intent to modify backend-backed **tk** domain state through a **Backend**.
+A durable local intent to modify **tk** domain state through a **Backend**. Its
+target is a **Backend Ticket** or **Backend Epic**, or a **Pending Promotion**
+whose **Promotion** the intent is ordered behind.
 _Avoid_: Local Edit, Change, Audit Entry
 
 **Ticket Mutation**:
-A **Mutation** that modifies exactly one **Backend Ticket**.
+A **Mutation** that modifies exactly one **Ticket**.
 _Avoid_: Ticket Change, Change, Audit Entry
 
 **Epic Mutation**:
-A **Mutation** that modifies exactly one **Backend Epic** or its ticket membership.
+A **Mutation** that modifies exactly one **Epic** or its ticket membership.
 _Avoid_: Epic Change, Change, Audit Entry
 
 **Mutation Type**:
@@ -398,8 +400,10 @@ _Avoid_: ticket, tickets
   inferred from the **Display ID** shape.
 - A **Ticket Mutation** is a **Mutation**.
 - An **Epic Mutation** is a **Mutation**.
-- A **Ticket Mutation** modifies exactly one **Backend Ticket**.
-- An **Epic Mutation** modifies exactly one **Backend Epic** or its ticket membership.
+- A **Mutation** targets a **Backend Ticket**, a **Backend Epic**, or a
+  **Pending Promotion**.
+- A **Ticket Mutation** modifies exactly one **Ticket**.
+- An **Epic Mutation** modifies exactly one **Epic** or its ticket membership.
 - Pre-Promotion edits to **Local Tickets** and **Local Epics** are Repository
   Store current-state changes, not **Mutations**.
 - **Promotion** is the boundary where current local state becomes backend

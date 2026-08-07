@@ -1,18 +1,21 @@
 //! Add/remove Dependency edges between Tickets and Epics.
 //!
-//! Dependencies are current-state relationship data; same-backend Dependency
-//! changes between two backend-origin endpoints also append intent through
-//! the Mutation Log. The cycle check happens before the INSERT so a typed
-//! [`AddDependencyError::Cycle`] reaches the command layer rather than a
-//! raw constraint-trigger SQLite error.
+//! Dependencies are current-state relationship data; an edge whose endpoints
+//! are backend-bound to the same Backend also appends intent through the
+//! Mutation Log. Which of the two an edge is — and which edges may not exist
+//! at all — is [`crate::domain::dependency_rule`]'s call, the same rules
+//! Promotion preflight judges its resulting graph by (ADR-0035), so `tk block`
+//! and `tk promote` cannot drift. The cycle check happens before the INSERT so
+//! a typed [`AddDependencyError::Cycle`] reaches the command layer rather than
+//! a raw constraint-trigger SQLite error.
 
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::clock::Clock;
+use crate::domain::dependency_rule::{self, DependencyClassification, DependencyRejection};
 use crate::domain::item_class::ItemClass;
 use crate::domain::mutation_payload::{DependencyRef, MutationPayload};
 use crate::domain::mutation_type::MutationType;
-use crate::domain::origin::Origin;
 use crate::domain::status::ItemStatus;
 use crate::store::mutations;
 
@@ -48,18 +51,29 @@ pub enum AddDependencyError {
     /// The edge would close a cycle in the Dependency graph.
     #[error("dependency cycle")]
     Cycle,
-    /// A Backend Blocked Item cannot wait on a still-local Blocking Item:
-    /// the Mutation would target an unaddressable reference.
+    /// A backend-bound Blocked Item cannot wait on a Blocking Item with no
+    /// backend intent: the Mutation would target an unaddressable reference.
     #[error("backend blocked item cannot depend on a local blocking item")]
     BackendBlockedLocalBlocking,
-    /// Two backend-origin endpoints from different backend kinds cannot
-    /// share a Dependency Mutation.
+    /// Endpoints bound to two different Backends cannot share a Dependency
+    /// Mutation.
     #[error("backend endpoints from different backend kinds")]
     BackendKindMismatch,
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
+    BackendIntent(#[from] mutations::BackendIntentError),
+    #[error(transparent)]
     Mutation(#[from] mutations::AppendError),
+}
+
+impl From<DependencyRejection> for AddDependencyError {
+    fn from(rejection: DependencyRejection) -> Self {
+        match rejection {
+            DependencyRejection::BackendBlockedLocalBlocking => Self::BackendBlockedLocalBlocking,
+            DependencyRejection::BackendKindMismatch => Self::BackendKindMismatch,
+        }
+    }
 }
 
 /// Why [`remove_dependency`] failed. Success is `Ok(())` — the edge is absent
@@ -72,17 +86,15 @@ pub enum RemoveDependencyError {
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
+    BackendIntent(#[from] mutations::BackendIntentError),
+    #[error(transparent)]
     Mutation(#[from] mutations::AppendError),
 }
 
 struct EndpointInfo {
     blocked_status: ItemStatus,
-    blocked_origin: Origin,
     blocked_class: ItemClass,
-    blocked_backend_kind: Option<String>,
     blocking_status: ItemStatus,
-    blocking_origin: Origin,
-    blocking_backend_kind: Option<String>,
 }
 
 /// Insert a Dependency edge from `blocking_id` to `blocked_id`.
@@ -106,16 +118,11 @@ pub fn add_dependency<C: Clock + ?Sized>(
         tx.commit()?;
         return Err(AddDependencyError::BlockingDone);
     }
-    if info.blocked_origin == Origin::Backend && info.blocking_origin == Origin::Local {
+
+    let classification = classify_edge(&tx, edge)?;
+    if let DependencyClassification::Rejected(rejection) = classification {
         tx.commit()?;
-        return Err(AddDependencyError::BackendBlockedLocalBlocking);
-    }
-    if info.blocked_origin == Origin::Backend
-        && info.blocking_origin == Origin::Backend
-        && info.blocked_backend_kind != info.blocking_backend_kind
-    {
-        tx.commit()?;
-        return Err(AddDependencyError::BackendKindMismatch);
+        return Err(rejection.into());
     }
 
     let cycles_into_existing = tx
@@ -145,10 +152,7 @@ pub fn add_dependency<C: Clock + ?Sized>(
         params![edge.blocking_id, edge.blocked_id, now_iso],
     )?;
 
-    let same_backend_pair = info.blocked_origin == Origin::Backend
-        && info.blocking_origin == Origin::Backend
-        && info.blocked_backend_kind == info.blocking_backend_kind;
-    if !had_edge && same_backend_pair {
+    if !had_edge && classification == DependencyClassification::BecomesBackendIntent {
         mutations::append(
             &tx,
             mutations::AppendRequest {
@@ -181,6 +185,10 @@ pub fn remove_dependency<C: Clock + ?Sized>(
     let Some(info) = read_endpoint_info(&tx, edge)? else {
         return Err(RemoveDependencyError::EndpointMissing);
     };
+    // The same pairing question `add_dependency` asks, so an edge only leaves
+    // the Mutation Log the way it entered: a pairing the rule rejects never
+    // carried a Mutation, and dropping its edge is current-state cleanup.
+    let classification = classify_edge(&tx, edge)?;
     let had_edge = edge_exists(&tx, edge)?;
 
     tx.execute(
@@ -188,10 +196,7 @@ pub fn remove_dependency<C: Clock + ?Sized>(
         params![edge.blocking_id, edge.blocked_id],
     )?;
 
-    let same_backend_pair = info.blocked_origin == Origin::Backend
-        && info.blocking_origin == Origin::Backend
-        && info.blocked_backend_kind == info.blocking_backend_kind;
-    if had_edge && same_backend_pair {
+    if had_edge && classification == DependencyClassification::BecomesBackendIntent {
         mutations::append(
             &tx,
             mutations::AppendRequest {
@@ -212,12 +217,11 @@ pub fn remove_dependency<C: Clock + ?Sized>(
 }
 
 fn read_endpoint_info(
-    conn: &rusqlite::Connection,
+    conn: &Connection,
     edge: DependencyEdge<'_>,
 ) -> Result<Option<EndpointInfo>, rusqlite::Error> {
     conn.query_row(
-        "select blocked.status, blocked.origin, blocked.item_class, blocked.backend_kind, \
-                blocking.status, blocking.origin, blocking.backend_kind \
+        "select blocked.status, blocked.item_class, blocking.status \
            from items blocked \
            join items blocking on blocking.id = ?2 \
           where blocked.id = ?1",
@@ -225,22 +229,33 @@ fn read_endpoint_info(
         |row| {
             Ok(EndpointInfo {
                 blocked_status: row.get(0)?,
-                blocked_origin: row.get(1)?,
-                blocked_class: row.get(2)?,
-                blocked_backend_kind: row.get(3)?,
-                blocking_status: row.get(4)?,
-                blocking_origin: row.get(5)?,
-                blocking_backend_kind: row.get(6)?,
+                blocked_class: row.get(1)?,
+                blocking_status: row.get(2)?,
             })
         },
     )
     .optional()
 }
 
-fn edge_exists(
-    conn: &rusqlite::Connection,
+/// What this edge means for the Mutation Log, judged from both endpoints'
+/// Backend Intent rather than their Origin: a Pending Promotion Item is bound
+/// to the Backend its Promotion targets (ADR-0036), so an edge it carries is
+/// ordered behind that Promotion instead of being swallowed as a local-only
+/// edit.
+///
+/// Both endpoints are known to exist — [`read_endpoint_info`] answered first —
+/// so a missing `items` row here is a Repository Store fault, not a caller
+/// mistake.
+fn classify_edge(
+    conn: &Connection,
     edge: DependencyEdge<'_>,
-) -> Result<bool, rusqlite::Error> {
+) -> Result<DependencyClassification, mutations::BackendIntentError> {
+    let blocked = mutations::resolve_backend_intent(conn, edge.blocked_id)?;
+    let blocking = mutations::resolve_backend_intent(conn, edge.blocking_id)?;
+    Ok(dependency_rule::classify(&blocked, &blocking))
+}
+
+fn edge_exists(conn: &Connection, edge: DependencyEdge<'_>) -> Result<bool, rusqlite::Error> {
     let present: Option<i64> = conn
         .query_row(
             "select 1 from dependencies where blocking_id = ?1 and blocked_id = ?2",
@@ -256,7 +271,9 @@ mod tests {
     use super::*;
     use crate::clock::FakeClock;
     use crate::store::migrations;
-    use crate::store::testing::{FixtureItem, insert_dependency, insert_fixture_item};
+    use crate::store::testing::{
+        FixtureItem, commit_promotion, insert_dependency, insert_fixture_item, mutation_types,
+    };
     use rusqlite::Connection;
 
     fn open_seeded() -> Store {
@@ -526,6 +543,84 @@ mod tests {
     }
 
     #[test]
+    fn add_dependency_refuses_a_pending_blocked_item_waiting_on_a_local_blocking_item() {
+        // The gap ADR-0036's gate closes: while the rule read Origin, the
+        // Blocked Item still counted as local and the edge was accepted, so
+        // `tk block` could build a graph the next `tk promote` refuses.
+        let mut store = open_seeded();
+        seed_ticket(&store, "blocked", "tk-1", 1);
+        seed_ticket(&store, "blocking", "tk-2", 2);
+        commit_promotion(&mut store.conn, "blocked");
+
+        let err = add_dependency(
+            &mut store,
+            &clock(),
+            DependencyEdge {
+                blocked_id: "blocked",
+                blocking_id: "blocking",
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            AddDependencyError::BackendBlockedLocalBlocking
+        ));
+        let edges: i64 = store
+            .conn
+            .query_row("select count(*) from dependencies", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(edges, 0);
+    }
+
+    #[test]
+    fn add_dependency_between_two_pending_items_emits_intent_behind_both_promotions() {
+        let mut store = open_seeded();
+        seed_ticket(&store, "blocked", "tk-1", 1);
+        seed_ticket(&store, "blocking", "tk-2", 2);
+        commit_promotion(&mut store.conn, "blocked");
+        commit_promotion(&mut store.conn, "blocking");
+
+        add_dependency(
+            &mut store,
+            &clock(),
+            DependencyEdge {
+                blocked_id: "blocked",
+                blocking_id: "blocking",
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            mutation_types(&store.conn).unwrap(),
+            vec!["promote_ticket", "promote_ticket", "add_dependency"]
+        );
+    }
+
+    #[test]
+    fn add_dependency_from_a_pending_item_onto_the_same_backend_emits_a_mutation() {
+        let mut store = open_seeded();
+        seed_ticket(&store, "blocked", "tk-1", 1);
+        seed_backend(&store, "blocking", "gh-2", "github", "2", 2);
+        commit_promotion(&mut store.conn, "blocked");
+
+        add_dependency(
+            &mut store,
+            &clock(),
+            DependencyEdge {
+                blocked_id: "blocked",
+                blocking_id: "blocking",
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            mutation_types(&store.conn).unwrap(),
+            vec!["promote_ticket", "add_dependency"]
+        );
+    }
+
+    #[test]
     fn remove_dependency_drops_edge_and_emits_mutation_for_backend_pair() {
         let mut store = open_seeded();
         seed_backend(&store, "blocking", "tk-1", "github", "1", 1);
@@ -552,6 +647,60 @@ mod tests {
             .query_row("select mutation_type from mutations", [], |r| r.get(0))
             .unwrap();
         assert_eq!(mt, "remove_dependency");
+    }
+
+    #[test]
+    fn remove_dependency_between_two_pending_items_emits_a_mutation() {
+        let mut store = open_seeded();
+        seed_ticket(&store, "blocked", "tk-1", 1);
+        seed_ticket(&store, "blocking", "tk-2", 2);
+        commit_promotion(&mut store.conn, "blocked");
+        commit_promotion(&mut store.conn, "blocking");
+        insert_dependency(&store.conn, "blocking", "blocked").unwrap();
+
+        remove_dependency(
+            &mut store,
+            &clock(),
+            DependencyEdge {
+                blocked_id: "blocked",
+                blocking_id: "blocking",
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            mutation_types(&store.conn).unwrap(),
+            vec!["promote_ticket", "promote_ticket", "remove_dependency"]
+        );
+    }
+
+    #[test]
+    fn remove_dependency_emits_nothing_when_only_the_blocking_item_is_pending() {
+        // The Blocked Item carries no backend intent, so the edge was never
+        // backend intent and its removal is current-state cleanup — the same
+        // answer `add_dependency` gives this pairing.
+        let mut store = open_seeded();
+        seed_ticket(&store, "blocked", "tk-1", 1);
+        seed_ticket(&store, "blocking", "tk-2", 2);
+        insert_dependency(&store.conn, "blocking", "blocked").unwrap();
+        commit_promotion(&mut store.conn, "blocking");
+
+        remove_dependency(
+            &mut store,
+            &clock(),
+            DependencyEdge {
+                blocked_id: "blocked",
+                blocking_id: "blocking",
+            },
+        )
+        .unwrap();
+
+        assert_eq!(mutation_types(&store.conn).unwrap(), vec!["promote_ticket"]);
+        let edges: i64 = store
+            .conn
+            .query_row("select count(*) from dependencies", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(edges, 0);
     }
 
     #[test]

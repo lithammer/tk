@@ -65,6 +65,7 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
             Err(CommandError::failure("endpoint missing in items table"))
         }
         Err(RemoveDependencyError::Sqlite(err)) => Err(resolver::storage_error(&err)),
+        Err(RemoveDependencyError::BackendIntent(err)) => Err(resolver::backend_intent_error(&err)),
         Err(RemoveDependencyError::Mutation(err)) => Err(CommandError::failure(format!(
             "failed to append Mutation: {err}"
         ))),
