@@ -517,12 +517,22 @@ pub enum MarkSkippedError {
     /// curation tool for Mutations the backend has already rejected.
     #[error("mutation {0} is not in the failed state")]
     MutationNotFailed(i64),
+    /// The matched row's Mutation Type is `promote_ticket` / `promote_epic`.
+    /// Every Mutation the same Promotion Operation queued behind it targets,
+    /// or names as a counterpart, an Item whose backend identity only this
+    /// Promotion's receipt would assign (ADR-0036 Pending Promotion);
+    /// skipping it would leave those Mutations with no key to apply against.
+    /// Abandoning a Pending Promotion is a broader recovery decision than
+    /// curating one rejected Mutation, so Sync Skip does not attempt it.
+    #[error("mutation {0} is a Promotion and cannot be skipped")]
+    CannotSkipPromotion(i64),
 }
 
 /// Transition a `failed` Mutation Log entry into `skipped`, inside its own
-/// transaction. Refuses a Mutation that is not `failed`. Clears no metadata —
-/// the latest `failure_json` is preserved so `tk sync log` can show why the
-/// Mutation was abandoned.
+/// transaction. Refuses a Mutation that is not `failed`, or whose Mutation
+/// Type is `promote_ticket` / `promote_epic` ([`MarkSkippedError::CannotSkipPromotion`]).
+/// Clears no metadata — the latest `failure_json` is preserved so `tk sync
+/// log` can show why the Mutation was abandoned.
 pub fn mark_mutation_skipped(
     conn: &mut Connection,
     sequence: i64,
@@ -530,16 +540,22 @@ pub fn mark_mutation_skipped(
 ) -> Result<(), MarkSkippedError> {
     let tx = crate::store::write_transaction(conn)?;
 
-    let prior: Option<MutationState> = tx
+    let row: Option<(MutationState, MutationType)> = tx
         .query_row(
-            "select state from mutations where sequence = ?1",
+            "select state, mutation_type from mutations where sequence = ?1",
             params![sequence],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    let prior = prior.ok_or(MarkSkippedError::MutationNotFound(sequence))?;
+    let (prior, mutation_type) = row.ok_or(MarkSkippedError::MutationNotFound(sequence))?;
     if prior != MutationState::Failed {
         return Err(MarkSkippedError::MutationNotFailed(sequence));
+    }
+    if matches!(
+        mutation_type,
+        MutationType::PromoteTicket | MutationType::PromoteEpic
+    ) {
+        return Err(MarkSkippedError::CannotSkipPromotion(sequence));
     }
 
     tx.execute(
@@ -1993,6 +2009,55 @@ mod tests {
         match mark_mutation_skipped(&mut conn, 42, "2026-05-19T00:00:00Z").unwrap_err() {
             MarkSkippedError::MutationNotFound(42) => {}
             other => panic!("expected MutationNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mark_skipped_refuses_a_failed_promotion() {
+        // Both Promotion Mutation Types gate the same way: skipping either
+        // would strand whatever the invocation queued behind it with no
+        // backend identity to resolve against (ADR-0036 Pending Promotion).
+        for mutation_type in ["promote_ticket", "promote_epic"] {
+            let mut conn = open_seeded();
+            insert_fixture_item(
+                &conn,
+                FixtureItem {
+                    id: "t1",
+                    display: "tk-1",
+                    title: "Local work",
+                    created_seq: 1,
+                    ..FixtureItem::default()
+                },
+            )
+            .unwrap();
+            insert_fixture_mutation(
+                &conn,
+                FixtureMutation {
+                    sequence: 1,
+                    mutation_type,
+                    item_id: "t1",
+                    payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
+                    state: "failed",
+                    failure_json: Some(r#"{"detail":"boom"}"#),
+                    ..FixtureMutation::default()
+                },
+            )
+            .unwrap();
+
+            match mark_mutation_skipped(&mut conn, 1, "2026-05-19T00:00:00Z").unwrap_err() {
+                MarkSkippedError::CannotSkipPromotion(1) => {}
+                other => panic!("expected CannotSkipPromotion for {mutation_type}, got {other:?}"),
+            }
+
+            let state: String = conn
+                .query_row("select state from mutations where sequence = 1", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(
+                state, "failed",
+                "a refused skip must leave the row failed, not skipped"
+            );
         }
     }
 

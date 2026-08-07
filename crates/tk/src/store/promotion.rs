@@ -1,10 +1,15 @@
 //! Store-side Promotion helpers: the preflight graph read at the start of
-//! `tk promote`, and receipt application at the end of it (ADR-0035,
-//! ADR-0036).
+//! `tk promote`, the outbox commit that follows planning, and receipt
+//! application at the end of it (ADR-0035, ADR-0036).
 //!
 //! [`read_promotion_graph`] gathers the facts
 //! [`crate::domain::promotion_graph::PromotionGraph`] carries; the planner that
 //! reasons over them owns every decision.
+//!
+//! [`commit_promotion_plan`] writes the planner's ordered
+//! [`crate::promotion::plan::PromotionPlan`] to the Mutation Log outbox as one
+//! Promotion Operation, in the single local transaction ADR-0035 requires
+//! before any Backend call.
 //!
 //! [`apply_promotion_receipt`] runs inside the caller's open transaction — it
 //! takes a borrowed connection and neither begins nor commits one — so the
@@ -14,13 +19,16 @@
 
 use std::collections::BTreeSet;
 
+use rand::Rng;
 use rusqlite::{Connection, params};
 use thiserror::Error;
 
 use crate::domain::apply_outcome::PromotionReceipt;
 use crate::domain::origin::Origin;
 use crate::domain::promotion_graph::{GraphDependency, GraphItem, PromotionGraph};
+use crate::promotion::plan::PromotionPlan;
 use crate::store::mutations;
+use crate::store::repository::create::generate_internal_id;
 
 /// Error returned by [`read_promotion_graph`].
 #[derive(Debug, Error)]
@@ -156,6 +164,63 @@ fn read_graph_item(conn: &Connection, id: &str) -> Result<GraphItem, ReadGraphEr
     Ok(item)
 }
 
+/// Error returned by [`commit_promotion_plan`].
+#[derive(Debug, Error)]
+pub enum CommitPlanError {
+    /// Underlying SQLite error opening or committing the transaction.
+    #[error(transparent)]
+    Storage(#[from] rusqlite::Error),
+    /// Underlying error from appending one draft to the outbox.
+    #[error(transparent)]
+    Append(#[from] mutations::AppendError),
+}
+
+/// Commit `plan` to the Mutation Log outbox as one Promotion Operation, in
+/// the single local transaction ADR-0035 requires before any Backend call: a
+/// process failure part-way through must leave no partial Promotion.
+///
+/// Mints one Promotion Operation identity for the invocation with
+/// [`generate_internal_id`] — the same opaque-ID scheme `items.id` uses,
+/// reused rather than inventing a second one — and stamps every appended
+/// Mutation with it (ADR-0036), so a caller can later ask whether every
+/// Mutation belonging to it resolved (CONTEXT.md Promotion Operation).
+/// Drafts are appended in plan order, which is what makes the resulting
+/// ascending Mutation Sequence order match the plan's contract order: `append`
+/// allocates sequences as it goes.
+///
+/// An empty plan is a legitimate no-op — re-invoking `tk promote` on work
+/// already Backend or already Pending Promotion appends nothing (see
+/// [`crate::promotion::plan::PromotionPlan::is_empty`]) — and returns `None`
+/// rather than minting an identity that would own zero Mutations.
+pub fn commit_promotion_plan<R: Rng + ?Sized>(
+    conn: &mut Connection,
+    plan: &PromotionPlan,
+    rng: &mut R,
+    now: &str,
+) -> Result<Option<String>, CommitPlanError> {
+    if plan.is_empty() {
+        return Ok(None);
+    }
+
+    let operation_id = generate_internal_id(rng);
+    let tx = crate::store::write_transaction(conn)?;
+    for draft in &plan.mutations {
+        mutations::append(
+            &tx,
+            mutations::AppendRequest {
+                mutation_type: draft.mutation_type,
+                item_id: &draft.item_id,
+                item_class: draft.item_class,
+                payload: &draft.payload,
+                promotion_operation_id: Some(&operation_id),
+                now_iso: now,
+            },
+        )?;
+    }
+    tx.commit()?;
+    Ok(Some(operation_id))
+}
+
 /// Convert the Local Item `item_id` into a Backend Item using the identity its
 /// Promotion receipt carries: store `backend_kind` / `receipt.backend_key`,
 /// replace the Display ID with `receipt.display_id`, and keep the outgoing
@@ -217,14 +282,18 @@ mod tests {
     use super::*;
     use crate::domain::backend_intent::BackendIntent;
     use crate::domain::item_class::ItemClass;
-    use crate::domain::mutation_payload::{MutationPayload, Promotion};
+    use crate::domain::mutation_payload::{MutationPayload, Promotion, TitleBody};
+    use crate::domain::mutation_type::MutationType;
     use crate::domain::status::ItemStatus;
+    use crate::promotion::plan::MutationDraft;
     use crate::store::migrations;
     use crate::store::repository::resolve_item_ref;
     use crate::store::testing::{
         FixtureItem, FixtureMutation, insert_dependency, insert_fixture_item,
-        insert_fixture_mutation,
+        insert_fixture_mutation, mutation_count,
     };
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
 
     const NOW: &str = "2026-06-01T00:00:00Z";
 
@@ -694,6 +763,182 @@ mod tests {
                     backend_kind: "github".into()
                 },
             ]
+        );
+    }
+
+    // ── Outbox commit ─────────────────────────────────────────────────────
+
+    fn seeded_rng() -> StdRng {
+        StdRng::seed_from_u64(7)
+    }
+
+    /// A `promote_ticket` draft naming `item_id`. The payload shape is not
+    /// under test here — every draft reuses the same Promotion payload so
+    /// the tests can focus on ordering, stamping, and atomicity.
+    fn draft(item_id: &str) -> MutationDraft {
+        MutationDraft {
+            mutation_type: MutationType::PromoteTicket,
+            item_id: item_id.to_owned(),
+            item_class: ItemClass::Ticket,
+            payload: MutationPayload::Promotion(Promotion {
+                title: "T".into(),
+                body: String::new(),
+                backend_kind: "github".into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn commit_promotion_plan_on_an_empty_plan_mints_no_operation() {
+        let mut conn = open_seeded();
+
+        let result =
+            commit_promotion_plan(&mut conn, &PromotionPlan::default(), &mut seeded_rng(), NOW)
+                .unwrap();
+
+        assert_eq!(
+            result, None,
+            "re-invoking promote on already-resolved work must not mint an operation that owns no Mutations"
+        );
+        assert_eq!(mutation_count(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn commit_promotion_plan_appends_drafts_in_plan_order() {
+        let mut conn = open_seeded();
+        seed_ticket(&conn, "t1", "tk-1", 1);
+        seed_ticket(&conn, "t2", "tk-2", 2);
+        seed_ticket(&conn, "t3", "tk-3", 3);
+        // Deliberately out of created_seq order: the outbox must follow the
+        // plan's order, not the Items' creation order.
+        let plan = PromotionPlan {
+            mutations: vec![draft("t3"), draft("t1"), draft("t2")],
+        };
+
+        commit_promotion_plan(&mut conn, &plan, &mut seeded_rng(), NOW).unwrap();
+
+        let mut stmt = conn
+            .prepare("select item_id from mutations order by sequence")
+            .unwrap();
+        let ids: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(ids, vec!["t3", "t1", "t2"]);
+    }
+
+    #[test]
+    fn commit_promotion_plan_stamps_every_mutation_with_the_returned_operation() {
+        let mut conn = open_seeded();
+        seed_ticket(&conn, "t1", "tk-1", 1);
+        seed_ticket(&conn, "t2", "tk-2", 2);
+        let plan = PromotionPlan {
+            mutations: vec![draft("t1"), draft("t2")],
+        };
+
+        let operation_id = commit_promotion_plan(&mut conn, &plan, &mut seeded_rng(), NOW)
+            .unwrap()
+            .expect("a non-empty plan mints an operation");
+
+        let mut stmt = conn
+            .prepare("select promotion_operation_id from mutations order by sequence")
+            .unwrap();
+        let stamped: Vec<Option<String>> = stmt
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            stamped,
+            vec![Some(operation_id.clone()), Some(operation_id)]
+        );
+    }
+
+    #[test]
+    fn commit_promotion_plan_rolls_back_the_whole_batch_on_a_mid_batch_failure() {
+        let mut conn = open_seeded();
+        seed_ticket(&conn, "t1", "tk-1", 1);
+        // "missing" names no `items` row, so its append violates the
+        // `mutations` -> `items` composite foreign key after "t1" has
+        // already been inserted earlier in the same transaction.
+        let plan = PromotionPlan {
+            mutations: vec![draft("t1"), draft("missing")],
+        };
+
+        let err = commit_promotion_plan(&mut conn, &plan, &mut seeded_rng(), NOW).unwrap_err();
+
+        assert!(
+            matches!(
+                err,
+                CommitPlanError::Append(mutations::AppendError::Sqlite(_))
+            ),
+            "expected a foreign key violation on the second draft, got {err:?}"
+        );
+        assert_eq!(
+            mutation_count(&conn).unwrap(),
+            0,
+            "the draft that appended before the failure must not survive the rollback"
+        );
+    }
+
+    #[test]
+    fn commit_promotion_plan_leaves_pre_existing_mutations_undisturbed() {
+        let mut conn = open_seeded();
+        seed_ticket(&conn, "existing", "tk-1", 1);
+        seed_ticket(&conn, "t2", "tk-2", 2);
+
+        // Seed a Mutation the way earlier tk activity would have: through the
+        // production outbox writer, consuming a real `mutation_seq` value
+        // before the plan commit ever runs.
+        let seed_tx = conn.unchecked_transaction().unwrap();
+        mutations::append(
+            &seed_tx,
+            mutations::AppendRequest {
+                mutation_type: MutationType::UpdateTicket,
+                item_id: "existing",
+                item_class: ItemClass::Ticket,
+                payload: &MutationPayload::UpdateTitleBody(TitleBody {
+                    title: "Prior".into(),
+                    body: String::new(),
+                }),
+                promotion_operation_id: None,
+                now_iso: NOW,
+            },
+        )
+        .unwrap();
+        seed_tx.commit().unwrap();
+
+        let plan = PromotionPlan {
+            mutations: vec![draft("t2")],
+        };
+        commit_promotion_plan(&mut conn, &plan, &mut seeded_rng(), NOW).unwrap();
+
+        let (sequence, promotion_operation_id, mutation_type): (i64, Option<String>, String) = conn
+            .query_row(
+                "select sequence, promotion_operation_id, mutation_type \
+                   from mutations where item_id = 'existing'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            sequence, 1,
+            "the pre-existing row keeps its original sequence"
+        );
+        assert_eq!(promotion_operation_id, None);
+        assert_eq!(mutation_type, "update_ticket");
+
+        let new_sequence: i64 = conn
+            .query_row(
+                "select sequence from mutations where item_id = 't2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            new_sequence, 2,
+            "the new append continues the counter rather than restarting it"
         );
     }
 }

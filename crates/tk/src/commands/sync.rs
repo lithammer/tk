@@ -249,6 +249,12 @@ fn render_skip_error<W: Write + ?Sized>(stderr: &mut W, err: &MarkSkippedError) 
         MarkSkippedError::MutationNotFound(seq) => {
             let _ = writeln!(stderr, "tk sync --skip: Mutation {seq} not found");
         }
+        MarkSkippedError::CannotSkipPromotion(seq) => {
+            let _ = writeln!(
+                stderr,
+                "tk sync --skip: Mutation {seq} is a Promotion; skipping it would leave every Mutation queued behind it with no backend identity to apply against"
+            );
+        }
         MarkSkippedError::Storage(err) => resolver::storage_error(err).render(stderr, COMMAND),
     }
 }
@@ -596,6 +602,62 @@ mod tests {
             })
             .unwrap();
         assert_eq!(state, "skipped", "skip committed before the no-remote exit");
+    }
+
+    #[test]
+    fn sync_skip_a_failed_promotion_reports_and_does_not_skip() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Local work",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "promote_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
+                state: "failed",
+                failure_json: Some(r#"{"detail":"boom"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run(
+            h.deps(),
+            Args {
+                subcommand: None,
+                skip: Some(1),
+            },
+        );
+        assert_eq!(code, Exit::Failure);
+        assert!(
+            String::from_utf8(h.stderr)
+                .unwrap()
+                .contains("Mutation 1 is a Promotion")
+        );
+
+        let conn = Connection::open(store.db_path()).unwrap();
+        let state: String = conn
+            .query_row("select state from mutations where sequence = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(state, "failed", "the refusal must not commit the skip");
     }
 
     #[test]

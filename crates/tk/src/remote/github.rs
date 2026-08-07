@@ -168,10 +168,14 @@ impl Adapter for GithubAdapter<'_> {
                     counterpart,
                 ])
             }
-            // Epic-membership sync stays deferred to a Promote-gated ticket
-            // (ADR-0021): no GitHub Backend Epic can exist pre-Promotion, so
-            // these never reference a real backend parent. No-op Accepted keeps
-            // the queue draining instead of wedging on a permanent rejection.
+            // Epic-membership Apply is deferred to tk-132, Epic creation to
+            // tk-137. GitHub's promotion_capabilities() below declares
+            // neither representable, so ADR-0036 preflight refuses any
+            // Promotion that would create a GitHub Backend Epic or
+            // membership in one before either Mutation reaches the outbox —
+            // this arm never sees one naming a real backend parent. No-op
+            // Accepted keeps the queue draining instead of wedging on a
+            // permanent rejection.
             MutationType::UpdateEpic
             | MutationType::AddTicketToEpic
             | MutationType::RemoveTicketFromEpic => Ok(ApplyOutcome::accepted()),
