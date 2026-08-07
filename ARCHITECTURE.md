@@ -20,9 +20,14 @@ crates/tk/src/
   commands/                per-command clap-derive Args and handlers
   domain/                  pure domain enums and helpers (incl. sync contract
                            types: MutationPayload, MutationView,
-                           BackendItemSnapshot, ApplyOutcome)
+                           BackendItemSnapshot, ApplyOutcome, and the
+                           Promotion contract types: BackendIntent,
+                           PromotionCapabilities, PromotionGraph)
   git/                     Git subprocess discovery façade
   proc.rs                  subprocess runner trait and fakes
+  promotion/               Promotion engine: the `tk promote` preflight planner
+                           over a Repository Store snapshot (sibling of
+                           sync.rs)
   remote/                  Backend Adapter trait, factory, and FakeAdapter
   render/                  terminal-rendering subsystem (palette, styler,
                            sanitize)

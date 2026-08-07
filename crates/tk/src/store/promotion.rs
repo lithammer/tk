@@ -1,5 +1,10 @@
-//! Promotion receipt application: converting a Local Item into a Backend Item
-//! in place once its Promotion Mutation has been applied (ADR-0036).
+//! Store-side Promotion helpers: the preflight graph read at the start of
+//! `tk promote`, and receipt application at the end of it (ADR-0035,
+//! ADR-0036).
+//!
+//! [`read_promotion_graph`] gathers the facts
+//! [`crate::domain::promotion_graph::PromotionGraph`] carries; the planner that
+//! reasons over them owns every decision.
 //!
 //! [`apply_promotion_receipt`] runs inside the caller's open transaction — it
 //! takes a borrowed connection and neither begins nor commits one — so the
@@ -7,10 +12,146 @@
 //! records the Promotion as applied. No window exists in which a Mutation is
 //! `applied` while its Item is still Local.
 
+use std::collections::BTreeSet;
+
 use rusqlite::{Connection, params};
+use thiserror::Error;
 
 use crate::domain::apply_outcome::PromotionReceipt;
 use crate::domain::origin::Origin;
+use crate::domain::promotion_graph::{GraphDependency, GraphItem, PromotionGraph};
+use crate::store::mutations;
+
+/// Error returned by [`read_promotion_graph`].
+#[derive(Debug, Error)]
+pub enum ReadGraphError {
+    #[error(transparent)]
+    Storage(#[from] rusqlite::Error),
+    #[error(transparent)]
+    BackendIntent(#[from] mutations::BackendIntentError),
+}
+
+/// Snapshot the Items and Dependency edges a `tk promote` of `target_id`
+/// preflights over. `children_requested` mirrors `--children`.
+///
+/// Membership, in order of how it is built:
+///
+/// - the target;
+/// - every Item the target directly contains, when children were requested.
+///   Only an Epic can contain Items, so a Ticket target contributes none;
+///   Origin is not filtered here, because which contained Tickets are
+///   Promotion Children is the planner's call;
+/// - the target's containing Epic, when it has one — Epic membership is a
+///   facet the operation has to decide about;
+/// - both endpoints of every Dependency edge that touches any of the above.
+///
+/// Edges are collected from that pre-expansion set alone: Promotion inspects
+/// one hop out to judge the resulting graph but never follows Dependencies to
+/// discover further items (ADR-0035). That bound is what keeps both endpoints
+/// of every returned edge present in `items`.
+///
+/// Edges whose Blocking Item is `done` are retained — a done Blocking Item
+/// resolves readiness without removing its Dependency (ADR-0035), so the
+/// resulting backend graph still needs it. The `tk show` dependency reads
+/// filter `status <> 'done'` because they answer a readiness question; this
+/// one does not.
+///
+/// A `target_id` no `items` row matches is a caller fault (the command
+/// resolves the Display ID first) and surfaces as
+/// [`ReadGraphError::Storage`].
+pub fn read_promotion_graph(
+    conn: &Connection,
+    target_id: &str,
+    children_requested: bool,
+) -> Result<PromotionGraph, ReadGraphError> {
+    let mut core: BTreeSet<String> = BTreeSet::new();
+    core.insert(target_id.to_owned());
+
+    let container_id: Option<String> = conn.query_row(
+        "select container_id from items where id = ?1",
+        params![target_id],
+        |r| r.get(0),
+    )?;
+    if let Some(container_id) = container_id {
+        core.insert(container_id);
+    }
+
+    if children_requested {
+        let mut stmt = conn.prepare("select id from items where container_id = ?1")?;
+        let rows = stmt.query_map(params![target_id], |r| r.get::<_, String>(0))?;
+        for id in rows {
+            core.insert(id?);
+        }
+    }
+
+    // An edge with both endpoints in `core` matches this query twice; the set
+    // collapses it, and orders the result deterministically for a caller that
+    // does not re-sort.
+    let mut edges: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut stmt = conn.prepare(
+        "select blocked_id, blocking_id from dependencies \
+          where blocked_id = ?1 or blocking_id = ?1",
+    )?;
+    for id in &core {
+        let rows = stmt.query_map(params![id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        for edge in rows {
+            edges.insert(edge?);
+        }
+    }
+
+    let mut item_ids = core;
+    for (blocked_id, blocking_id) in &edges {
+        item_ids.insert(blocked_id.clone());
+        item_ids.insert(blocking_id.clone());
+    }
+
+    let mut items = Vec::with_capacity(item_ids.len());
+    for id in &item_ids {
+        items.push(read_graph_item(conn, id)?);
+    }
+    items.sort_by_key(|item| item.created_seq);
+
+    Ok(PromotionGraph {
+        target_id: target_id.to_owned(),
+        children_requested,
+        items,
+        dependencies: edges
+            .into_iter()
+            .map(|(blocked_id, blocking_id)| GraphDependency {
+                blocked_id,
+                blocking_id,
+            })
+            .collect(),
+    })
+}
+
+fn read_graph_item(conn: &Connection, id: &str) -> Result<GraphItem, ReadGraphError> {
+    let backend_intent = mutations::resolve_backend_intent(conn, id)?;
+    let item = conn.query_row(
+        "select display_value, item_class, ticket_kind, selection_state, status, \
+                title, body, created_seq, container_id \
+           from items where id = ?1",
+        params![id],
+        |r| {
+            Ok(GraphItem {
+                id: id.to_owned(),
+                display_id: r.get(0)?,
+                item_class: r.get(1)?,
+                ticket_kind: r.get(2)?,
+                selection_state: r.get(3)?,
+                status: r.get(4)?,
+                title: r.get(5)?,
+                body: r.get(6)?,
+                created_seq: r.get(7)?,
+                container_id: r.get(8)?,
+                backend_intent,
+            })
+        },
+    )?;
+    Ok(item)
+}
 
 /// Convert the Local Item `item_id` into a Backend Item using the identity its
 /// Promotion receipt carries: store `backend_kind` / `receipt.backend_key`,
@@ -71,9 +212,16 @@ pub fn apply_promotion_receipt(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::backend_intent::BackendIntent;
+    use crate::domain::item_class::ItemClass;
+    use crate::domain::mutation_payload::{MutationPayload, Promotion};
+    use crate::domain::status::ItemStatus;
     use crate::store::migrations;
     use crate::store::repository::resolve_item_ref;
-    use crate::store::testing::{FixtureItem, insert_fixture_item};
+    use crate::store::testing::{
+        FixtureItem, FixtureMutation, insert_dependency, insert_fixture_item,
+        insert_fixture_mutation,
+    };
 
     const NOW: &str = "2026-06-01T00:00:00Z";
 
@@ -271,5 +419,273 @@ mod tests {
         assert_eq!(display, "gh-7");
         assert_eq!(origin, "backend");
         assert_eq!(selection, None, "Epics stay outside Selection State");
+    }
+
+    // ── Preflight graph read ──────────────────────────────────────────────
+
+    fn seed_ticket(conn: &Connection, id: &str, display: &str, created_seq: i64) {
+        insert_fixture_item(
+            conn,
+            FixtureItem {
+                id,
+                display,
+                title: "Ticket",
+                created_seq,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+    }
+
+    fn seed_epic(conn: &Connection, id: &str, display: &str, created_seq: i64) {
+        insert_fixture_item(
+            conn,
+            FixtureItem {
+                id,
+                display,
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                title: "Epic",
+                created_seq,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+    }
+
+    fn seed_child(conn: &Connection, id: &str, display: &str, epic_id: &str, created_seq: i64) {
+        insert_fixture_item(
+            conn,
+            FixtureItem {
+                id,
+                display,
+                title: "Child",
+                container_id: Some(epic_id),
+                created_seq,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+    }
+
+    fn item_ids(graph: &PromotionGraph) -> Vec<&str> {
+        graph.items.iter().map(|i| i.id.as_str()).collect()
+    }
+
+    fn edges(graph: &PromotionGraph) -> Vec<(&str, &str)> {
+        graph
+            .dependencies
+            .iter()
+            .map(|d| (d.blocked_id.as_str(), d.blocking_id.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn an_unrelated_target_is_the_whole_graph() {
+        let conn = open_seeded();
+        seed_ticket(&conn, "t1", "tk-1", 1);
+        seed_ticket(&conn, "elsewhere", "tk-2", 2);
+
+        let graph = read_promotion_graph(&conn, "t1", false).unwrap();
+
+        assert_eq!(graph.target_id, "t1");
+        assert!(!graph.children_requested);
+        assert_eq!(item_ids(&graph), vec!["t1"]);
+        assert!(graph.dependencies.is_empty());
+
+        let target = &graph.items[0];
+        assert_eq!(target.display_id, "tk-1");
+        assert_eq!(target.item_class, ItemClass::Ticket);
+        assert_eq!(target.status, ItemStatus::Open);
+        assert_eq!(target.created_seq, 1);
+        assert_eq!(target.container_id, None);
+    }
+
+    #[test]
+    fn requested_children_join_the_snapshot_whatever_their_origin() {
+        // Origin is not filtered here: which contained Tickets are Promotion
+        // Children is the planner's call, and it needs to see an already
+        // backend-backed sibling to judge the resulting graph.
+        let conn = open_seeded();
+        seed_epic(&conn, "epic", "tk-1", 1);
+        seed_child(&conn, "local-child", "tk-2", "epic", 2);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "backend-child",
+                display: "gh-9",
+                title: "Adopted",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("9"),
+                container_id: Some("epic"),
+                created_seq: 3,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        seed_ticket(&conn, "outside", "tk-4", 4);
+
+        let graph = read_promotion_graph(&conn, "epic", true).unwrap();
+
+        assert!(graph.children_requested);
+        assert_eq!(
+            item_ids(&graph),
+            vec!["epic", "local-child", "backend-child"]
+        );
+        assert_eq!(graph.items[1].container_id.as_deref(), Some("epic"));
+    }
+
+    #[test]
+    fn children_stay_out_when_they_were_not_requested() {
+        let conn = open_seeded();
+        seed_epic(&conn, "epic", "tk-1", 1);
+        seed_child(&conn, "child", "tk-2", "epic", 2);
+
+        let graph = read_promotion_graph(&conn, "epic", false).unwrap();
+
+        assert_eq!(item_ids(&graph), vec!["epic"]);
+    }
+
+    #[test]
+    fn a_ticket_target_pulls_in_its_containing_epic() {
+        let conn = open_seeded();
+        seed_epic(&conn, "epic", "tk-1", 1);
+        seed_child(&conn, "child", "tk-2", "epic", 2);
+        seed_child(&conn, "sibling", "tk-3", "epic", 3);
+
+        let graph = read_promotion_graph(&conn, "child", false).unwrap();
+
+        // The Epic joins because Promotion has to decide about membership; the
+        // sibling does not — `--children` descends from an Epic target only.
+        assert_eq!(item_ids(&graph), vec!["epic", "child"]);
+    }
+
+    #[test]
+    fn a_dependency_endpoint_outside_the_operation_joins_as_an_item() {
+        let conn = open_seeded();
+        seed_ticket(&conn, "t1", "tk-1", 1);
+        seed_ticket(&conn, "outside", "tk-2", 2);
+        insert_dependency(&conn, "outside", "t1").unwrap();
+
+        let graph = read_promotion_graph(&conn, "t1", false).unwrap();
+
+        // Preflight rejects a backend-backed Blocked Item left waiting on a
+        // Local Blocking Item (ADR-0035), which it can only see if the
+        // out-of-scope endpoint is in the snapshot.
+        assert_eq!(item_ids(&graph), vec!["t1", "outside"]);
+        assert_eq!(edges(&graph), vec![("t1", "outside")]);
+    }
+
+    #[test]
+    fn a_done_blocking_items_edge_is_retained() {
+        let conn = open_seeded();
+        seed_ticket(&conn, "t1", "tk-1", 1);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "finished",
+                display: "tk-2",
+                title: "Finished",
+                status: "done",
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_dependency(&conn, "finished", "t1").unwrap();
+
+        let graph = read_promotion_graph(&conn, "t1", false).unwrap();
+
+        // A done Blocking Item resolves readiness but keeps its Dependency
+        // (ADR-0035), so the resulting backend graph still carries the edge.
+        assert_eq!(edges(&graph), vec![("t1", "finished")]);
+        assert_eq!(graph.items[1].status, ItemStatus::Done);
+    }
+
+    #[test]
+    fn edges_are_captured_in_both_directions() {
+        let conn = open_seeded();
+        seed_ticket(&conn, "blocker", "tk-1", 1);
+        seed_ticket(&conn, "t1", "tk-2", 2);
+        seed_ticket(&conn, "blocked", "tk-3", 3);
+        insert_dependency(&conn, "blocker", "t1").unwrap();
+        insert_dependency(&conn, "t1", "blocked").unwrap();
+
+        let graph = read_promotion_graph(&conn, "t1", false).unwrap();
+
+        assert_eq!(item_ids(&graph), vec!["blocker", "t1", "blocked"]);
+        let mut found = edges(&graph);
+        found.sort_unstable();
+        assert_eq!(found, vec![("blocked", "t1"), ("t1", "blocker")]);
+    }
+
+    #[test]
+    fn a_dependency_between_two_children_is_captured_once() {
+        let conn = open_seeded();
+        seed_epic(&conn, "epic", "tk-1", 1);
+        seed_child(&conn, "first", "tk-2", "epic", 2);
+        seed_child(&conn, "second", "tk-3", "epic", 3);
+        insert_dependency(&conn, "first", "second").unwrap();
+
+        let graph = read_promotion_graph(&conn, "epic", true).unwrap();
+
+        assert_eq!(edges(&graph), vec![("second", "first")]);
+    }
+
+    #[test]
+    fn every_item_carries_its_backend_intent() {
+        let conn = open_seeded();
+        seed_epic(&conn, "epic", "tk-1", 1);
+        seed_child(&conn, "plain-local", "tk-2", "epic", 2);
+        seed_child(&conn, "pending", "tk-3", "epic", 3);
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                mutation_type: "promote_ticket",
+                item_id: "pending",
+                payload_json: &MutationPayload::Promotion(Promotion {
+                    title: "Child".into(),
+                    body: String::new(),
+                    backend_kind: "github".into(),
+                })
+                .to_json_string(),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "adopted",
+                display: "gh-9",
+                title: "Adopted",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("9"),
+                container_id: Some("epic"),
+                created_seq: 4,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+
+        let graph = read_promotion_graph(&conn, "epic", true).unwrap();
+
+        let intents: Vec<&BackendIntent> = graph.items.iter().map(|i| &i.backend_intent).collect();
+        assert_eq!(
+            intents,
+            vec![
+                &BackendIntent::Local,
+                &BackendIntent::Local,
+                &BackendIntent::PendingPromotion {
+                    backend_kind: "github".into()
+                },
+                &BackendIntent::Backend {
+                    backend_kind: "github".into()
+                },
+            ]
+        );
     }
 }
