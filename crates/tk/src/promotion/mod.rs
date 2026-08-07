@@ -10,3 +10,8 @@
 //! is testable without a database, and it lives in `domain/` because `store/`
 //! produces it (ARCHITECTURE.md: infrastructure-free contract types shared by
 //! `store/` and an engine). [`crate::store::promotion`] owns the SQL.
+//!
+//! [`plan`] is the reasoning itself: snapshot in, ordered Mutations or
+//! collected findings out.
+
+pub mod plan;

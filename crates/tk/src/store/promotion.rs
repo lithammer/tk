@@ -37,10 +37,13 @@ pub enum ReadGraphError {
 /// Membership, in order of how it is built:
 ///
 /// - the target;
-/// - every Item the target directly contains, when children were requested.
-///   Only an Epic can contain Items, so a Ticket target contributes none;
-///   Origin is not filtered here, because which contained Tickets are
-///   Promotion Children is the planner's call;
+/// - every Item the target directly contains, whether or not children were
+///   requested. `--children` decides which contained Tickets are Promotion
+///   Children, but promoting an Epic also snapshots membership for the
+///   Tickets it already contains on the same Backend, so the planner needs
+///   them either way. Only an Epic can contain Items, so a Ticket target
+///   contributes none, and Origin is not filtered here because both
+///   questions are the planner's;
 /// - the target's containing Epic, when it has one — Epic membership is a
 ///   facet the operation has to decide about;
 /// - both endpoints of every Dependency edge that touches any of the above.
@@ -76,7 +79,7 @@ pub fn read_promotion_graph(
         core.insert(container_id);
     }
 
-    if children_requested {
+    {
         let mut stmt = conn.prepare("select id from items where container_id = ?1")?;
         let rows = stmt.query_map(params![target_id], |r| r.get::<_, String>(0))?;
         for id in rows {
@@ -538,14 +541,19 @@ mod tests {
     }
 
     #[test]
-    fn children_stay_out_when_they_were_not_requested() {
+    fn contained_tickets_are_snapshotted_even_without_children() {
+        // Promoting an Epic snapshots membership for the Tickets it already
+        // contains on the same Backend, so the snapshot carries them whether
+        // or not `--children` was passed; `children_requested` only decides
+        // which of them the planner treats as Promotion Children.
         let conn = open_seeded();
         seed_epic(&conn, "epic", "tk-1", 1);
         seed_child(&conn, "child", "tk-2", "epic", 2);
 
         let graph = read_promotion_graph(&conn, "epic", false).unwrap();
 
-        assert_eq!(item_ids(&graph), vec!["epic"]);
+        assert_eq!(item_ids(&graph), vec!["epic", "child"]);
+        assert!(!graph.children_requested);
     }
 
     #[test]

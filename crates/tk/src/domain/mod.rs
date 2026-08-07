@@ -26,6 +26,10 @@
 //! [`apply_outcome`] carries the typed Apply-result shape (ADR-0009 taxonomy);
 //! the sync engine is the consumer ADR-0018 deferred it for.
 //!
+//! [`dependency_rule`] is the one behaviour rather than a value type: what a
+//! Dependency edge means for the Mutation Log (ADR-0035). It sits here because
+//! both `tk block` and Promotion preflight decide it, over different graphs.
+//!
 //! `display_prefix` already lives under [`crate::store`] alongside its only
 //! current consumer (`tk init`); revisit the placement when real cross-module
 //! consumers exist.
@@ -34,6 +38,7 @@ pub mod apply_outcome;
 pub mod backend_intent;
 pub mod backend_item_snapshot;
 pub mod backend_kind;
+pub mod dependency_rule;
 pub mod item_class;
 pub mod mutation_payload;
 pub mod mutation_state;
