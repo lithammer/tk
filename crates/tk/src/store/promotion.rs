@@ -16,14 +16,20 @@
 //! conversion commits together with the Mutation Log state transition that
 //! records the Promotion as applied. No window exists in which a Mutation is
 //! `applied` while its Item is still Local.
+//!
+//! [`earliest_applicable_mutation`] and [`unresolved_operation_mutations`]
+//! close the loop: after the sync that follows the commit, they are how the
+//! command tells a Promotion queued behind an older Mutation from one whose
+//! own Mutations did not land.
 
 use std::collections::BTreeSet;
 
 use rand::Rng;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 
 use crate::domain::apply_outcome::PromotionReceipt;
+use crate::domain::mutation_state::MutationState;
 use crate::domain::origin::Origin;
 use crate::domain::promotion_graph::{GraphDependency, GraphItem, PromotionGraph};
 use crate::promotion::plan::PromotionPlan;
@@ -275,6 +281,72 @@ pub fn apply_promotion_receipt(
         ],
     )?;
     Ok(())
+}
+
+/// One Mutation Log entry as `tk promote`'s post-sync report names it: the
+/// Mutation Sequence the user hands to `tk sync log`, the state that says
+/// whether it was rejected or simply never reached, and the Display ID of the
+/// Item it targets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutationStatus {
+    pub sequence: i64,
+    pub state: MutationState,
+    pub target_display_id: String,
+}
+
+/// The earliest Mutation an Apply would still attempt: the lowest Mutation
+/// Sequence in `pending` or `failed` state, across the whole Mutation Log.
+///
+/// Deliberately not scoped to a Promotion Operation. A Promotion is appended
+/// behind whatever the outbox already held, so the Mutation that stops the sync
+/// may predate the operation and carry no Promotion Operation at all — an
+/// operation-scoped query could never name it. It is also the only place the
+/// answer exists when Apply hits an environment failure, which leaves the
+/// in-flight row `pending` and writes no outcome.
+pub fn earliest_applicable_mutation(conn: &Connection) -> rusqlite::Result<Option<MutationStatus>> {
+    conn.query_row(
+        "select m.sequence, m.state, i.display_value \
+           from mutations m join items i on i.id = m.item_id \
+          where m.state in ('pending','failed') \
+          order by m.sequence asc limit 1",
+        [],
+        |r| {
+            Ok(MutationStatus {
+                sequence: r.get(0)?,
+                state: r.get(1)?,
+                target_display_id: r.get(2)?,
+            })
+        },
+    )
+    .optional()
+}
+
+/// The Mutations of `operation_id` that have not reached `applied`, in Mutation
+/// Sequence order.
+///
+/// An empty result is the success condition for one `tk promote`: overall
+/// success requires every Mutation in the requested Promotion Operation to
+/// resolve (CONTEXT.md Promotion Operation). Comparing a non-empty result
+/// against [`earliest_applicable_mutation`] separates a Promotion queued behind
+/// an older Mutation from one of the operation's own Mutations being rejected.
+pub fn unresolved_operation_mutations(
+    conn: &Connection,
+    operation_id: &str,
+) -> rusqlite::Result<Vec<MutationStatus>> {
+    let mut stmt = conn.prepare(
+        "select m.sequence, m.state, i.display_value \
+           from mutations m join items i on i.id = m.item_id \
+          where m.promotion_operation_id = ?1 and m.state <> 'applied' \
+          order by m.sequence asc",
+    )?;
+    let rows = stmt.query_map(params![operation_id], |r| {
+        Ok(MutationStatus {
+            sequence: r.get(0)?,
+            state: r.get(1)?,
+            target_display_id: r.get(2)?,
+        })
+    })?;
+    rows.collect()
 }
 
 #[cfg(test)]
@@ -939,6 +1011,135 @@ mod tests {
         assert_eq!(
             new_sequence, 2,
             "the new append continues the counter rather than restarting it"
+        );
+    }
+
+    // ── Post-sync operation state ─────────────────────────────────────────
+
+    /// Seed one Mutation Log row directly, so a test can place states and
+    /// Promotion Operations the outbox writer alone could not produce.
+    fn seed_mutation(
+        conn: &Connection,
+        sequence: i64,
+        item_id: &str,
+        state: &str,
+        op: Option<&str>,
+    ) {
+        insert_fixture_mutation(
+            conn,
+            FixtureMutation {
+                sequence,
+                mutation_type: "update_ticket",
+                item_id,
+                payload_json: r#"{"title":"T","body":""}"#,
+                state,
+                failure_json: (state == "failed").then_some(r#"{"detail":"boom"}"#),
+                promotion_operation_id: op,
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn no_applicable_mutation_when_the_log_is_drained() {
+        let conn = open_seeded();
+        seed_ticket(&conn, "t1", "tk-1", 1);
+        seed_mutation(&conn, 1, "t1", "applied", None);
+        seed_mutation(&conn, 2, "t1", "skipped", None);
+
+        assert_eq!(earliest_applicable_mutation(&conn).unwrap(), None);
+    }
+
+    #[test]
+    fn the_earliest_applicable_mutation_may_predate_the_promotion_operation() {
+        // The whole reason this read is not operation-scoped: the row that
+        // stops the sync carries no Promotion Operation.
+        let conn = open_seeded();
+        seed_ticket(&conn, "older", "tk-1", 1);
+        seed_ticket(&conn, "t2", "tk-2", 2);
+        seed_mutation(&conn, 1, "older", "failed", None);
+        seed_mutation(&conn, 2, "t2", "pending", Some("op-1"));
+
+        assert_eq!(
+            earliest_applicable_mutation(&conn).unwrap(),
+            Some(MutationStatus {
+                sequence: 1,
+                state: MutationState::Failed,
+                target_display_id: "tk-1".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn an_applied_row_ahead_of_a_pending_one_is_not_the_blocker() {
+        let conn = open_seeded();
+        seed_ticket(&conn, "t1", "tk-1", 1);
+        seed_mutation(&conn, 1, "t1", "applied", Some("op-1"));
+        seed_mutation(&conn, 2, "t1", "pending", Some("op-1"));
+
+        assert_eq!(
+            earliest_applicable_mutation(&conn)
+                .unwrap()
+                .unwrap()
+                .sequence,
+            2
+        );
+    }
+
+    #[test]
+    fn a_fully_applied_operation_has_no_unresolved_mutations() {
+        let conn = open_seeded();
+        seed_ticket(&conn, "t1", "tk-1", 1);
+        seed_mutation(&conn, 1, "t1", "applied", Some("op-1"));
+        seed_mutation(&conn, 2, "t1", "applied", Some("op-1"));
+
+        assert!(
+            unresolved_operation_mutations(&conn, "op-1")
+                .unwrap()
+                .is_empty(),
+            "an operation whose every Mutation applied is resolved"
+        );
+    }
+
+    #[test]
+    fn unresolved_operation_mutations_ignore_other_operations() {
+        let conn = open_seeded();
+        seed_ticket(&conn, "t1", "tk-1", 1);
+        seed_ticket(&conn, "t2", "tk-2", 2);
+        seed_mutation(&conn, 1, "t1", "pending", None);
+        seed_mutation(&conn, 2, "t2", "failed", Some("other"));
+        seed_mutation(&conn, 3, "t1", "failed", Some("op-1"));
+        seed_mutation(&conn, 4, "t1", "pending", Some("op-1"));
+
+        assert_eq!(
+            unresolved_operation_mutations(&conn, "op-1").unwrap(),
+            vec![
+                MutationStatus {
+                    sequence: 3,
+                    state: MutationState::Failed,
+                    target_display_id: "tk-1".to_owned(),
+                },
+                MutationStatus {
+                    sequence: 4,
+                    state: MutationState::Pending,
+                    target_display_id: "tk-1".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_skipped_mutation_of_the_operation_is_still_unresolved() {
+        // `skipped` is abandoned intent, not a resolved one: the operation did
+        // not do everything it promised.
+        let conn = open_seeded();
+        seed_ticket(&conn, "t1", "tk-1", 1);
+        seed_mutation(&conn, 1, "t1", "skipped", Some("op-1"));
+
+        assert_eq!(
+            unresolved_operation_mutations(&conn, "op-1").unwrap().len(),
+            1
         );
     }
 }

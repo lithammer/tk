@@ -329,18 +329,24 @@ fn collect_item_findings(
             item: ItemRef::of(item),
         });
     }
-    if !capabilities.can_create_item_class(item.item_class) {
+    // Findings accumulate rather than short-circuit (ADR-0036), but the Ticket
+    // Kind question only arises for a Backend that can create the Item Class at
+    // all: reporting both against a Backend declaring neither says one thing
+    // twice. A Backend that takes Tickets but not one Kind — GitHub and `bug`,
+    // once tk-137 lands — still reports the Kind on its own.
+    if capabilities.can_create_item_class(item.item_class) {
+        if let Some(ticket_kind) = item.ticket_kind
+            && !capabilities.can_create_ticket_kind(ticket_kind)
+        {
+            findings.push(PromotionFinding::TicketKindNotRepresentable {
+                item: ItemRef::of(item),
+                ticket_kind,
+            });
+        }
+    } else {
         findings.push(PromotionFinding::ItemClassNotRepresentable {
             item: ItemRef::of(item),
             item_class: item.item_class,
-        });
-    }
-    if let Some(ticket_kind) = item.ticket_kind
-        && !capabilities.can_create_ticket_kind(ticket_kind)
-    {
-        findings.push(PromotionFinding::TicketKindNotRepresentable {
-            item: ItemRef::of(item),
-            ticket_kind,
         });
     }
 }
@@ -687,13 +693,33 @@ mod tests {
             }],
         );
 
+        // Selection State and Ticket Kind are independent facets, so a Backend
+        // that takes the Item Class still reports both.
+        let capabilities = PromotionCapabilities::none().with_item_class(ItemClass::Ticket);
         assert!(matches!(
-            findings(&g, PromotionCapabilities::none()).as_slice(),
+            findings(&g, capabilities).as_slice(),
             [
                 PromotionFinding::TriageTicket { .. },
-                PromotionFinding::ItemClassNotRepresentable { .. },
                 PromotionFinding::TicketKindNotRepresentable { .. },
             ]
+        ));
+    }
+
+    #[test]
+    fn an_unrepresentable_item_class_subsumes_the_ticket_kind_finding() {
+        // A Backend that cannot create Tickets at all has nothing to say about
+        // which Kind, and reporting both says one thing twice.
+        let g = graph(
+            "t1",
+            vec![GraphItem {
+                ticket_kind: Some(TicketKind::Bug),
+                ..ticket("t1", 1)
+            }],
+        );
+
+        assert!(matches!(
+            findings(&g, PromotionCapabilities::none()).as_slice(),
+            [PromotionFinding::ItemClassNotRepresentable { .. }]
         ));
     }
 
@@ -1005,9 +1031,7 @@ mod tests {
             vec![
                 "class e1",
                 "class c1",
-                "kind c1",
                 "class c2",
-                "kind c2",
                 "membership c1->e1",
                 "membership c2->e1",
                 "dependency c2->c1",

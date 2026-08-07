@@ -2,3 +2,6 @@
 /target/
 
 .mise.local.toml
+
+# insta writes these next to a test whose snapshot did not match
+*.pending-snap

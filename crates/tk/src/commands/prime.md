@@ -95,7 +95,7 @@ create or manage git worktrees; use `git worktree` directly.
 ### Human Curation
 
 ```sh
-tk promote <id>
+tk promote <id> [--children]
 tk sync
 tk sync --skip <mutation-id>
 tk remote
