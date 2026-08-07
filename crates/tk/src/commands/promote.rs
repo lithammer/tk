@@ -26,7 +26,7 @@ use clap::Args as ClapArgs;
 
 use crate::cli::{CommandError, Deps, Exit};
 use crate::commands::resolver;
-use crate::domain::backend_intent::BackendIntent;
+use crate::domain::backend_binding::BackendBinding;
 use crate::domain::backend_kind::BackendKind;
 use crate::domain::dependency_rule::DependencyRejection;
 use crate::domain::item_class::ItemClass;
@@ -262,13 +262,13 @@ fn render_mappings<W: Write + ?Sized>(
 
 /// Report the idempotent no-op an empty plan means.
 fn render_nothing_to_promote<W: Write + ?Sized>(stdout: &mut W, target: &GraphItem) {
-    match &target.backend_intent {
-        BackendIntent::Backend { .. } => {
+    match &target.backend_binding {
+        BackendBinding::Backend { .. } => {
             let _ = writeln!(stdout, "Already promoted: {}", target.display_id);
         }
         // A Local target is always promoted, so an empty plan leaves only work
         // whose Promotion intent is already durable.
-        BackendIntent::PendingPromotion { .. } | BackendIntent::Local => {
+        BackendBinding::PendingPromotion { .. } | BackendBinding::Local => {
             let _ = writeln!(stdout, "Promotion already pending: {}", target.display_id);
         }
     }
@@ -419,7 +419,7 @@ fn no_remote() -> CommandError {
 fn read_graph_error(err: ReadGraphError) -> CommandError {
     match err {
         ReadGraphError::Storage(e) => resolver::storage_error(&e),
-        ReadGraphError::BackendIntent(e) => resolver::backend_intent_error(&e),
+        ReadGraphError::BackendBinding(e) => resolver::backend_binding_error(&e),
     }
 }
 

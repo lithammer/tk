@@ -8,7 +8,7 @@
 //!
 //! [`crate::store::promotion::read_graph`] is the only producer.
 
-use crate::domain::backend_intent::BackendIntent;
+use crate::domain::backend_binding::BackendBinding;
 use crate::domain::item_class::ItemClass;
 use crate::domain::selection_state::SelectionState;
 use crate::domain::status::ItemStatus;
@@ -38,7 +38,7 @@ pub struct GraphItem {
     pub created_seq: i64,
     /// Containing Epic's internal id, when the Item is a Ticket in one.
     pub container_id: Option<String>,
-    pub backend_intent: BackendIntent,
+    pub backend_binding: BackendBinding,
 }
 
 /// One Dependency edge in the snapshot, as internal `items.id` endpoints.

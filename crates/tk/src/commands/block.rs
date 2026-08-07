@@ -84,7 +84,7 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
             args.blocked, args.blocking
         ))),
         Err(AddDependencyError::Sqlite(err)) => Err(resolver::storage_error(&err)),
-        Err(AddDependencyError::BackendIntent(err)) => Err(resolver::backend_intent_error(&err)),
+        Err(AddDependencyError::BackendBinding(err)) => Err(resolver::backend_binding_error(&err)),
         Err(AddDependencyError::Mutation(err)) => Err(CommandError::failure(format!(
             "failed to append Mutation: {err}"
         ))),

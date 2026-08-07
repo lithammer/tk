@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::domain::backend_intent::BackendIntent;
+use crate::domain::backend_binding::BackendBinding;
 use crate::domain::backend_kind::BackendKind;
 use crate::domain::dependency_rule::{self, DependencyClassification, DependencyRejection};
 use crate::domain::item_class::ItemClass;
@@ -124,13 +124,13 @@ pub fn plan_promotion(
     let promoted: HashSet<&str> = operation.iter().map(|i| i.id.as_str()).collect();
     // Every rule below reads the Origins the whole operation *will* produce,
     // not the ones it starts from (ADR-0035).
-    let intent_after = |item: &GraphItem| -> BackendIntent {
+    let binding_after = |item: &GraphItem| -> BackendBinding {
         if promoted.contains(item.id.as_str()) {
-            BackendIntent::PendingPromotion {
+            BackendBinding::PendingPromotion {
                 backend_kind: backend.text().to_owned(),
             }
         } else {
-            item.backend_intent.clone()
+            item.backend_binding.clone()
         }
     };
 
@@ -154,7 +154,7 @@ pub fn plan_promotion(
         let blocking = *by_id.get(edge.blocking_id.as_str()).expect(GRAPH_IS_CLOSED);
         let order = (blocked.created_seq, blocking.created_seq);
 
-        match dependency_rule::classify(&intent_after(blocked), &intent_after(blocking)) {
+        match dependency_rule::classify(&binding_after(blocked), &binding_after(blocking)) {
             DependencyClassification::Rejected(reason) => {
                 relationship_findings.push((
                     order,
@@ -216,8 +216,8 @@ pub fn plan_promotion(
         // Membership becomes backend intent only when Ticket and Epic are
         // backed by the same Backend after the operation. Mixed-Origin
         // membership stays local and is not a problem.
-        if intent_after(ticket).backend_kind() != Some(backend.text())
-            || intent_after(epic).backend_kind() != Some(backend.text())
+        if binding_after(ticket).backend_kind() != Some(backend.text())
+            || binding_after(epic).backend_kind() != Some(backend.text())
         {
             continue;
         }
@@ -260,7 +260,7 @@ pub fn plan_promotion(
 /// children while contributing no Promotion of its own. That is a supported
 /// operation, not an error.
 fn is_promoted(graph: &PromotionGraph, item: &GraphItem) -> bool {
-    if item.backend_intent != BackendIntent::Local {
+    if item.backend_binding != BackendBinding::Local {
         return false;
     }
     item.id == graph.target_id
@@ -369,7 +369,7 @@ mod tests {
             body: String::new(),
             created_seq,
             container_id: None,
-            backend_intent: BackendIntent::Local,
+            backend_binding: BackendBinding::Local,
         }
     }
 
@@ -391,7 +391,7 @@ mod tests {
 
     fn on_backend(kind: &str, item: GraphItem) -> GraphItem {
         GraphItem {
-            backend_intent: BackendIntent::Backend {
+            backend_binding: BackendBinding::Backend {
                 backend_kind: kind.to_owned(),
             },
             ..item
@@ -400,7 +400,7 @@ mod tests {
 
     fn pending_on(kind: &str, item: GraphItem) -> GraphItem {
         GraphItem {
-            backend_intent: BackendIntent::PendingPromotion {
+            backend_binding: BackendBinding::PendingPromotion {
                 backend_kind: kind.to_owned(),
             },
             ..item

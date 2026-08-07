@@ -1,4 +1,4 @@
-//! What a Dependency edge means once both endpoints' Backend Intent is known
+//! What a Dependency edge means once both endpoints' Backend Binding is known
 //! (ADR-0035).
 //!
 //! Two callers ask the same question of different graphs: `tk block` judges an
@@ -9,7 +9,7 @@
 //! interpolates the arguments the user typed and the other names both
 //! endpoints and a remedy.
 
-use super::backend_intent::BackendIntent;
+use super::backend_binding::BackendBinding;
 
 /// What a Dependency edge means for the Mutation Log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,13 +37,13 @@ pub enum DependencyRejection {
     BackendKindMismatch,
 }
 
-/// Classify one Dependency edge from its endpoints' Backend Intent.
+/// Classify one Dependency edge from its endpoints' Backend Binding.
 ///
 /// Pending Promotion counts as bound to the Backend its Promotion targets:
 /// the edge's Mutation is ordered behind that Promotion and resolves against
 /// the identity its receipt assigns (ADR-0036).
 #[must_use]
-pub fn classify(blocked: &BackendIntent, blocking: &BackendIntent) -> DependencyClassification {
+pub fn classify(blocked: &BackendBinding, blocking: &BackendBinding) -> DependencyClassification {
     match (blocked.backend_kind(), blocking.backend_kind()) {
         (None, _) => DependencyClassification::StaysLocal,
         (Some(_), None) => {
@@ -62,14 +62,14 @@ pub fn classify(blocked: &BackendIntent, blocking: &BackendIntent) -> Dependency
 mod tests {
     use super::*;
 
-    fn backend(kind: &str) -> BackendIntent {
-        BackendIntent::Backend {
+    fn backend(kind: &str) -> BackendBinding {
+        BackendBinding::Backend {
             backend_kind: kind.to_owned(),
         }
     }
 
-    fn pending(kind: &str) -> BackendIntent {
-        BackendIntent::PendingPromotion {
+    fn pending(kind: &str) -> BackendBinding {
+        BackendBinding::PendingPromotion {
             backend_kind: kind.to_owned(),
         }
     }
@@ -77,11 +77,11 @@ mod tests {
     #[test]
     fn a_local_blocked_item_keeps_the_edge_local() {
         assert_eq!(
-            classify(&BackendIntent::Local, &BackendIntent::Local),
+            classify(&BackendBinding::Local, &BackendBinding::Local),
             DependencyClassification::StaysLocal
         );
         assert_eq!(
-            classify(&BackendIntent::Local, &backend("github")),
+            classify(&BackendBinding::Local, &backend("github")),
             DependencyClassification::StaysLocal
         );
     }
@@ -89,7 +89,7 @@ mod tests {
     #[test]
     fn a_backend_blocked_item_may_not_wait_on_a_local_blocking_item() {
         assert_eq!(
-            classify(&backend("github"), &BackendIntent::Local),
+            classify(&backend("github"), &BackendBinding::Local),
             DependencyClassification::Rejected(DependencyRejection::BackendBlockedLocalBlocking)
         );
     }
@@ -117,7 +117,7 @@ mod tests {
             DependencyClassification::BecomesBackendIntent
         );
         assert_eq!(
-            classify(&pending("github"), &BackendIntent::Local),
+            classify(&pending("github"), &BackendBinding::Local),
             DependencyClassification::Rejected(DependencyRejection::BackendBlockedLocalBlocking)
         );
         assert_eq!(

@@ -21,7 +21,7 @@ crates/tk/src/
   domain/                  pure domain enums and helpers (incl. sync contract
                            types: MutationPayload, MutationView,
                            BackendItemSnapshot, ApplyOutcome, and the
-                           Promotion contract types: BackendIntent,
+                           Promotion contract types: BackendBinding,
                            PromotionCapabilities, PromotionGraph,
                            PromotionPlan)
   git/                     Git subprocess discovery façade
@@ -150,7 +150,7 @@ Important stable contracts:
   Custom prefix configuration is tracked by `tk-22`.
 
 Write commands use `BEGIN IMMEDIATE` and commit current-state changes together
-with any required Mutation appends. Backend Intent gates Mutations
+with any required Mutation appends. Backend Binding gates Mutations
 ([ADR 0036](./docs/adr/0036-promotion-intent-precedes-backend-capability.md)):
 an item appends backend-applicable Mutations in the same transaction as the
 visible state change once it is backend-bound — already a Backend item, or a

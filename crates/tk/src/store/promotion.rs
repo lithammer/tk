@@ -42,7 +42,7 @@ pub enum ReadGraphError {
     #[error(transparent)]
     Storage(#[from] rusqlite::Error),
     #[error(transparent)]
-    BackendIntent(#[from] mutations::BackendIntentError),
+    BackendBinding(#[from] mutations::BackendBindingError),
 }
 
 /// Snapshot the Items and Dependency edges a `tk promote` of `target_id`
@@ -145,7 +145,7 @@ pub fn read_graph(
 }
 
 fn read_graph_item(conn: &Connection, id: &str) -> Result<GraphItem, ReadGraphError> {
-    let backend_intent = mutations::resolve_backend_intent(conn, id)?;
+    let backend_binding = mutations::resolve_backend_intent(conn, id)?;
     let item = conn.query_row(
         "select display_value, item_class, ticket_kind, selection_state, status, \
                 title, body, created_seq, container_id \
@@ -163,7 +163,7 @@ fn read_graph_item(conn: &Connection, id: &str) -> Result<GraphItem, ReadGraphEr
                 body: r.get(6)?,
                 created_seq: r.get(7)?,
                 container_id: r.get(8)?,
-                backend_intent,
+                backend_binding,
             })
         },
     )?;
@@ -354,7 +354,7 @@ pub fn unresolved_in_operation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::backend_intent::BackendIntent;
+    use crate::domain::backend_binding::BackendBinding;
     use crate::domain::item_class::ItemClass;
     use crate::domain::mutation_payload::{MutationPayload, Promotion, TitleBody};
     use crate::domain::mutation_type::MutationType;
@@ -824,16 +824,17 @@ mod tests {
 
         let graph = read_graph(&conn, "epic", true).unwrap();
 
-        let intents: Vec<&BackendIntent> = graph.items.iter().map(|i| &i.backend_intent).collect();
+        let intents: Vec<&BackendBinding> =
+            graph.items.iter().map(|i| &i.backend_binding).collect();
         assert_eq!(
             intents,
             vec![
-                &BackendIntent::Local,
-                &BackendIntent::Local,
-                &BackendIntent::PendingPromotion {
+                &BackendBinding::Local,
+                &BackendBinding::Local,
+                &BackendBinding::PendingPromotion {
                     backend_kind: "github".into()
                 },
-                &BackendIntent::Backend {
+                &BackendBinding::Backend {
                     backend_kind: "github".into()
                 },
             ]

@@ -1,4 +1,4 @@
-//! Backend Intent: whether an Item carries backend identity, will carry one
+//! Backend Binding: whether an Item carries backend identity, will carry one
 //! because its Promotion is already durable, or is Local with no Promotion
 //! intent at all.
 //!
@@ -16,7 +16,7 @@
 
 /// Where an Item stands relative to backend identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BackendIntent {
+pub enum BackendBinding {
     /// Local Origin with no Promotion in the Mutation Log: changes to this
     /// Item are Repository Store current state and nothing more.
     Local,
@@ -30,7 +30,7 @@ pub enum BackendIntent {
     Backend { backend_kind: String },
 }
 
-impl BackendIntent {
+impl BackendBinding {
     /// Whether a backend-applicable change to this Item appends a Mutation:
     /// the Item is backend-bound, either already Backend or carrying a Pending
     /// Promotion the Mutation is ordered behind (ADR-0036).
@@ -58,15 +58,15 @@ mod tests {
 
     #[test]
     fn only_a_local_item_is_not_backend_bound() {
-        assert!(!BackendIntent::Local.is_backend_bound());
+        assert!(!BackendBinding::Local.is_backend_bound());
         assert!(
-            BackendIntent::PendingPromotion {
+            BackendBinding::PendingPromotion {
                 backend_kind: "github".into()
             }
             .is_backend_bound()
         );
         assert!(
-            BackendIntent::Backend {
+            BackendBinding::Backend {
                 backend_kind: "github".into()
             }
             .is_backend_bound()
@@ -75,16 +75,16 @@ mod tests {
 
     #[test]
     fn only_a_local_item_has_no_backend() {
-        assert_eq!(BackendIntent::Local.backend_kind(), None);
+        assert_eq!(BackendBinding::Local.backend_kind(), None);
         assert_eq!(
-            BackendIntent::PendingPromotion {
+            BackendBinding::PendingPromotion {
                 backend_kind: "github".into()
             }
             .backend_kind(),
             Some("github")
         );
         assert_eq!(
-            BackendIntent::Backend {
+            BackendBinding::Backend {
                 backend_kind: "jira".into()
             }
             .backend_kind(),

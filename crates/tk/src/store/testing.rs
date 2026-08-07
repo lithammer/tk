@@ -246,7 +246,7 @@ pub fn mutation_types(conn: &Connection) -> rusqlite::Result<Vec<String>> {
 /// planner's outbox.
 ///
 /// The one helper here that drives production code rather than bypassing it.
-/// The Backend Intent gates (ADR-0036) are validated against Mutation Log rows
+/// The Backend Binding gates (ADR-0036) are validated against Mutation Log rows
 /// `commit_plan` actually wrote, so a change to the Promotion payload
 /// or to what counts as pending breaks the gate tests too.
 pub fn commit_promotion(conn: &mut Connection, id: &str) {

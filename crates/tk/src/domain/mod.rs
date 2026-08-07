@@ -2,13 +2,13 @@
 //!
 //! The schema-determined value types: Priority, ItemStatus, SelectionState,
 //! TicketKind, ItemClass, Origin, MutationType, MutationState,
-//! MutationPayload, MutationView, BackendItemSnapshot, BackendIntent, and
+//! MutationPayload, MutationView, BackendItemSnapshot, BackendBinding, and
 //! PromotionCapabilities. Each one is pinned by an existing SQL CHECK
 //! constraint or by an ADR — the shape exists independently of any future
 //! Backend Adapter — so the rest of the codebase uses typed values instead of
 //! raw strings at the store boundary.
 //!
-//! [`backend_intent`] is the one derived from two sources rather than read off
+//! [`backend_binding`] is the one derived from two sources rather than read off
 //! a column: Origin plus the Mutation Log answer whether an Item is Pending
 //! Promotion (ADR-0036). The store resolves it; the type keeps the vocabulary
 //! out of raw origin/`backend_kind` pairs.
@@ -41,7 +41,7 @@
 //! consumers exist.
 
 pub mod apply_outcome;
-pub mod backend_intent;
+pub mod backend_binding;
 pub mod backend_item_snapshot;
 pub mod backend_kind;
 pub mod dependency_rule;

@@ -62,7 +62,7 @@ pub enum AddDependencyError {
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
-    BackendIntent(#[from] mutations::BackendIntentError),
+    BackendBinding(#[from] mutations::BackendBindingError),
     #[error(transparent)]
     Mutation(#[from] mutations::AppendError),
 }
@@ -86,7 +86,7 @@ pub enum RemoveDependencyError {
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
-    BackendIntent(#[from] mutations::BackendIntentError),
+    BackendBinding(#[from] mutations::BackendBindingError),
     #[error(transparent)]
     Mutation(#[from] mutations::AppendError),
 }
@@ -238,7 +238,7 @@ fn read_endpoint_info(
 }
 
 /// What this edge means for the Mutation Log, judged from both endpoints'
-/// Backend Intent rather than their Origin: a Pending Promotion Item is bound
+/// Backend Binding rather than their Origin: a Pending Promotion Item is bound
 /// to the Backend its Promotion targets (ADR-0036), so an edge it carries is
 /// ordered behind that Promotion instead of being swallowed as a local-only
 /// edit.
@@ -249,7 +249,7 @@ fn read_endpoint_info(
 fn classify_edge(
     conn: &Connection,
     edge: DependencyEdge<'_>,
-) -> Result<DependencyClassification, mutations::BackendIntentError> {
+) -> Result<DependencyClassification, mutations::BackendBindingError> {
     let blocked = mutations::resolve_backend_intent(conn, edge.blocked_id)?;
     let blocking = mutations::resolve_backend_intent(conn, edge.blocking_id)?;
     Ok(dependency_rule::classify(&blocked, &blocking))

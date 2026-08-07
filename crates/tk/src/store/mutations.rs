@@ -18,7 +18,7 @@
 use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 
-use crate::domain::backend_intent::BackendIntent;
+use crate::domain::backend_binding::BackendBinding;
 use crate::domain::item_class::ItemClass;
 use crate::domain::mutation_payload::{MutationPayload, Promotion};
 use crate::domain::mutation_type::MutationType;
@@ -84,7 +84,7 @@ pub fn append(conn: &Connection, req: AppendRequest<'_>) -> Result<i64, AppendEr
 
 /// Errors returned by [`resolve_backend_intent`].
 #[derive(Debug, Error)]
-pub enum BackendIntentError {
+pub enum BackendBindingError {
     /// Underlying SQLite error from the `items` or `mutations` read.
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
@@ -100,7 +100,7 @@ pub enum BackendIntentError {
     CorruptBackendKind(String),
 }
 
-/// Resolve the Backend Intent of the Item at internal `items.id` `item_id`.
+/// Resolve the Backend Binding of the Item at internal `items.id` `item_id`.
 ///
 /// Backend Origin answers from `items` alone. A Local Item is Pending
 /// Promotion when the Mutation Log holds a `promote_ticket` / `promote_epic`
@@ -116,11 +116,11 @@ pub enum BackendIntentError {
 /// items").
 ///
 /// An `item_id` no `items` row matches is a caller fault, not a domain
-/// outcome, and surfaces as [`BackendIntentError::Sqlite`].
+/// outcome, and surfaces as [`BackendBindingError::Sqlite`].
 pub fn resolve_backend_intent(
     conn: &Connection,
     item_id: &str,
-) -> Result<BackendIntent, BackendIntentError> {
+) -> Result<BackendBinding, BackendBindingError> {
     let (origin, backend_kind): (Origin, Option<String>) = conn.query_row(
         "select origin, backend_kind from items where id = ?1",
         params![item_id],
@@ -129,8 +129,8 @@ pub fn resolve_backend_intent(
 
     if origin == Origin::Backend {
         let backend_kind = backend_kind
-            .ok_or_else(|| BackendIntentError::CorruptBackendKind(item_id.to_string()))?;
-        return Ok(BackendIntent::Backend { backend_kind });
+            .ok_or_else(|| BackendBindingError::CorruptBackendKind(item_id.to_string()))?;
+        return Ok(BackendBinding::Backend { backend_kind });
     }
 
     let payload_json: Option<String> = conn
@@ -145,11 +145,11 @@ pub fn resolve_backend_intent(
         )
         .optional()?;
     let Some(payload_json) = payload_json else {
-        return Ok(BackendIntent::Local);
+        return Ok(BackendBinding::Local);
     };
 
     let payload: Promotion = serde_json::from_str(&payload_json)?;
-    Ok(BackendIntent::PendingPromotion {
+    Ok(BackendBinding::PendingPromotion {
         backend_kind: payload.backend_kind,
     })
 }
@@ -537,7 +537,7 @@ mod tests {
 
         assert_eq!(
             resolve_backend_intent(&conn, "t1").unwrap(),
-            BackendIntent::Backend {
+            BackendBinding::Backend {
                 backend_kind: "github".into()
             }
         );
@@ -550,7 +550,7 @@ mod tests {
 
         assert_eq!(
             resolve_backend_intent(&conn, "t1").unwrap(),
-            BackendIntent::Local
+            BackendBinding::Local
         );
     }
 
@@ -573,7 +573,7 @@ mod tests {
 
         assert_eq!(
             resolve_backend_intent(&conn, "t1").unwrap(),
-            BackendIntent::PendingPromotion {
+            BackendBinding::PendingPromotion {
                 backend_kind: "github".into()
             }
         );
@@ -587,7 +587,7 @@ mod tests {
 
         assert_eq!(
             resolve_backend_intent(&conn, "t1").unwrap(),
-            BackendIntent::PendingPromotion {
+            BackendBinding::PendingPromotion {
                 backend_kind: "github".into()
             }
         );
@@ -604,7 +604,7 @@ mod tests {
 
             assert_eq!(
                 resolve_backend_intent(&conn, "t1").unwrap(),
-                BackendIntent::Local,
+                BackendBinding::Local,
                 "a {state} Promotion is resolved intent"
             );
         }
@@ -627,7 +627,7 @@ mod tests {
 
         assert_eq!(
             resolve_backend_intent(&conn, "t1").unwrap(),
-            BackendIntent::Local
+            BackendBinding::Local
         );
     }
 
@@ -636,7 +636,7 @@ mod tests {
         // `resolve_backend_intent`'s `mutation_type in (...)` list is a second
         // encoding of `MutationType::is_promotion`. A Promotion kind the SQL
         // does not name resolves as Local, silently reopening every write gate
-        // ADR-0036 put on Backend Intent — so a new kind belongs in that query
+        // ADR-0036 put on Backend Binding — so a new kind belongs in that query
         // (and in the `mutations` CHECK), not in an exemption here.
         let payload = MutationPayload::Promotion(Promotion {
             title: "Local".into(),
@@ -682,7 +682,7 @@ mod tests {
 
             assert_eq!(
                 resolve_backend_intent(&conn, item_id).unwrap(),
-                BackendIntent::PendingPromotion {
+                BackendBinding::PendingPromotion {
                     backend_kind: "github".into()
                 },
                 "{mutation_type} must leave its Item Pending Promotion"
@@ -707,7 +707,7 @@ mod tests {
 
         let err = resolve_backend_intent(&conn, "t1").unwrap_err();
         assert!(
-            matches!(err, BackendIntentError::PayloadJson(_)),
+            matches!(err, BackendBindingError::PayloadJson(_)),
             "a promote_* row without a Backend is store corruption, got {err:?}"
         );
     }

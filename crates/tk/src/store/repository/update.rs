@@ -7,7 +7,7 @@
 //! `remove_ticket_from_epic` plus `add_ticket_to_epic` in that order; priority
 //! is a stored change only — Backend Adapters do not consume Priority).
 //!
-//! Title/body names one Item, so the Ticket's own Backend Intent gates it. A
+//! Title/body names one Item, so the Ticket's own Backend Binding gates it. A
 //! membership Mutation names two, so it is emitted only when Ticket and Epic
 //! are backend-bound to the same Backend — the rule Promotion preflight and
 //! `tk block` apply to their own two-endpoint relationships.
@@ -19,7 +19,7 @@
 use rusqlite::{OptionalExtension, params};
 
 use crate::clock::Clock;
-use crate::domain::backend_intent::BackendIntent;
+use crate::domain::backend_binding::BackendBinding;
 use crate::domain::item_class::ItemClass;
 use crate::domain::mutation_payload::{EpicRef, MutationPayload, TitleBody};
 use crate::domain::mutation_type::MutationType;
@@ -88,7 +88,7 @@ pub enum UpdateError {
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
-    BackendIntent(#[from] mutations::BackendIntentError),
+    BackendBinding(#[from] mutations::BackendBindingError),
     #[error(transparent)]
     Mutation(#[from] mutations::AppendError),
 }
@@ -248,7 +248,7 @@ pub fn update_item<C: Clock + ?Sized>(
         &now_iso,
     )?;
 
-    // Backend Intent, not Origin, decides whether the edit is also backend
+    // Backend Binding, not Origin, decides whether the edit is also backend
     // intent (ADR-0036): a title change made between `tk promote` and the next
     // `tk sync` belongs in the Mutation Log, ordered behind the Promotion that
     // will give the Item its backend identity.
@@ -339,9 +339,9 @@ pub fn update_item<C: Clock + ?Sized>(
 /// membership draft (ADR-0035) and `dependency_rule` applies to an edge.
 fn membership_is_backend_intent(
     conn: &rusqlite::Connection,
-    ticket: &BackendIntent,
+    ticket: &BackendBinding,
     epic_id: &str,
-) -> Result<bool, mutations::BackendIntentError> {
+) -> Result<bool, mutations::BackendBindingError> {
     let epic = mutations::resolve_backend_intent(conn, epic_id)?;
     Ok(ticket.backend_kind().is_some() && ticket.backend_kind() == epic.backend_kind())
 }

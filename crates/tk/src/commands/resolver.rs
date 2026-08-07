@@ -4,7 +4,7 @@
 //! then resolve a Display ID or Alias into an internal stable item ID.
 //! This module owns the typed errors that prologue can raise plus the
 //! shared [`CommandError`] builders ([`open_error`], [`storage_error`],
-//! [`backend_intent_error`]); the
+//! [`backend_binding_error`]); the
 //! per-command not-found phrasing is owned by the command itself, inlined into
 //! its own typed error variant.
 
@@ -111,16 +111,16 @@ pub fn storage_error(err: &rusqlite::Error) -> CommandError {
     }
 }
 
-/// Build the [`CommandError`] for a failed Backend Intent read (ADR-0036).
+/// Build the [`CommandError`] for a failed Backend Binding read (ADR-0036).
 ///
-/// Every write path that gates a Mutation on Backend Intent can hit this. Only
+/// Every write path that gates a Mutation on Backend Binding can hit this. Only
 /// the SQLite arm is an ordinary storage fault; a `promote_*` payload that does
 /// not decode, or a backend-Origin Item with no Backend, is Repository Store
 /// corruption and says so.
 #[must_use]
-pub fn backend_intent_error(err: &mutations::BackendIntentError) -> CommandError {
+pub fn backend_binding_error(err: &mutations::BackendBindingError) -> CommandError {
     match err {
-        mutations::BackendIntentError::Sqlite(e) => storage_error(e),
+        mutations::BackendBindingError::Sqlite(e) => storage_error(e),
         corruption => CommandError::failure(format!("Repository Store corruption: {corruption}")),
     }
 }
