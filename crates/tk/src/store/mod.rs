@@ -5,12 +5,16 @@
 //! [`repository`] facade exposing typed item operations
 //! (open / resolve / list / next / show / create / update / status / dependency),
 //! the [`sync`] helpers (Pull merge, Mutation Log decode + state transitions,
-//! Remote read), and the `sql_value` SQLite value mapping for the domain
-//! enums.
+//! Remote read), the [`promotion`] store side of `tk promote` (the preflight
+//! graph read, the one-transaction outbox commit, receipt application turning a
+//! Local Item into a Backend Item in place, and the two post-sync Mutation Log
+//! reads that say whether the operation resolved), and the `sql_value` SQLite
+//! value mapping for the domain enums.
 
 pub mod display_prefix;
 pub mod migrations;
 pub mod mutations;
+pub mod promotion;
 pub mod repository;
 pub mod sequences;
 mod sql_value;

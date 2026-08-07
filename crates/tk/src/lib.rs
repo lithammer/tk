@@ -12,6 +12,8 @@
 //! - [`domain`]: pure domain helpers.
 //! - [`remote`]: Backend Adapter trait + test fake (real adapters in tk-40).
 //! - [`sync`]: backend-blind sync engine (Pull merge + Mutation outbox replay).
+//! - [`promotion`]: Promotion engine (`tk promote` preflight over a store
+//!   snapshot).
 //!
 //! RNG lives in the `rand` crate; `Deps::rng` is a borrowed
 //! `&mut dyn rand::Rng` (the dyn-compatible low-level trait; `RngCore` is
@@ -25,6 +27,7 @@ pub mod domain;
 pub mod git;
 pub mod platform;
 pub mod proc;
+pub mod promotion;
 pub mod remote;
 pub mod render;
 pub mod store;

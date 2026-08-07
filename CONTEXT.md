@@ -198,16 +198,32 @@ not yet received its backend identity. Later backend-applicable changes remain
 ordered behind its **Promotion** in the **Mutation Log**.
 _Avoid_: In-flight Promotion
 
+**Backend Binding**:
+Whether a **Ticket** or **Epic** is bound to a **Backend**: a **Backend Ticket**
+or **Backend Epic** already carries backend identity, a **Pending Promotion**
+will carry one once its **Promotion** applies, and a **Local Ticket** or
+**Local Epic** with no **Promotion** intent is not bound at all. Derived from
+**Origin** and the **Mutation Log** together; never stored as a field.
+_Avoid_: Backend Intent, Backend State, Promotion State
+
+**Promotion Operation**:
+The durable identity of one `tk promote` invocation, shared by every
+**Mutation** that invocation appends to the **Mutation Log**, used to report
+whether the whole operation resolved.
+_Avoid_: Promotion Batch, Promotion Transaction, Promotion Group
+
 **Mutation**:
-A durable local intent to modify backend-backed **tk** domain state through a **Backend**.
+A durable local intent to modify **tk** domain state through a **Backend**. Its
+target is a **Backend Ticket** or **Backend Epic**, or a **Pending Promotion**
+whose **Promotion** the intent is ordered behind.
 _Avoid_: Local Edit, Change, Audit Entry
 
 **Ticket Mutation**:
-A **Mutation** that modifies exactly one **Backend Ticket**.
+A **Mutation** that modifies exactly one **Ticket**.
 _Avoid_: Ticket Change, Change, Audit Entry
 
 **Epic Mutation**:
-A **Mutation** that modifies exactly one **Backend Epic** or its ticket membership.
+A **Mutation** that modifies exactly one **Epic** or its ticket membership.
 _Avoid_: Epic Change, Change, Audit Entry
 
 **Mutation Type**:
@@ -368,6 +384,8 @@ _Avoid_: ticket, tickets
 - A repository may have zero or one **Primary Backend**.
 - A **Ticket** has exactly one **Origin**.
 - An **Epic** has exactly one **Origin**.
+- A **Ticket** or **Epic** has exactly one **Backend Binding**, derived from its
+  **Origin** and the **Mutation Log** rather than stored.
 - A **Local Ticket** is a **Ticket**.
 - A **Backend Ticket** is a **Ticket**.
 - A **Local Epic** is an **Epic**.
@@ -392,8 +410,10 @@ _Avoid_: ticket, tickets
   inferred from the **Display ID** shape.
 - A **Ticket Mutation** is a **Mutation**.
 - An **Epic Mutation** is a **Mutation**.
-- A **Ticket Mutation** modifies exactly one **Backend Ticket**.
-- An **Epic Mutation** modifies exactly one **Backend Epic** or its ticket membership.
+- A **Mutation** targets a **Backend Ticket**, a **Backend Epic**, or a
+  **Pending Promotion**.
+- A **Ticket Mutation** modifies exactly one **Ticket**.
+- An **Epic Mutation** modifies exactly one **Epic** or its ticket membership.
 - Pre-Promotion edits to **Local Tickets** and **Local Epics** are Repository
   Store current-state changes, not **Mutations**.
 - **Promotion** is the boundary where current local state becomes backend
@@ -410,6 +430,7 @@ _Avoid_: ticket, tickets
   State**; the field stays local and is not pushed to the **Backend**.
 - **Promotion** rejects a `triage` **Ticket**, which must be **Accepted**
   first — captured-but-unaccepted work is not pushed to a **Backend**.
+- A **Mutation** belongs to zero or one **Promotion Operation**.
 - A **Mutation** has exactly one **Mutation Type**.
 - The first implementation supports only **V1 Mutation Types**.
 - `update_ticket` and `update_epic` modify title and body only.
@@ -619,3 +640,4 @@ _Avoid_: ticket, tickets
 - The **`tk grep`** matching model — literal substring, regular expression, FTS5 full-text, or Levenshtein/fuzzy — was considered (tk-113) — resolved: **regular expression** by default. Literal is a trap (the default cannot be flipped to regex later without changing the meaning of `.`/`*`/`(`/`|`); regex is a strict superset that degrades to literal for metacharacter-free patterns. FTS5 and fuzzy produce ranked/scored output that cannot inhabit **`tk grep`**'s deterministic line-context block, so both are reserved for future ranked **`tk search`** recall modes (ADR-0026).
 - A relevance/edit-distance ordering for **`tk grep`** was considered — resolved: **`tk grep`** orders matches by creation and never ranks, because ranked output is incompatible with streaming one matched item to stdout at a time and belongs to the **Search** family, not **Grep** (ADR-0026).
 - Mirroring the whole **Backend** into the **Repository Store** on every sync — the original tk-34 model — was considered (tk-34) — resolved: tk is a local-first tracker with **opt-in** **Backend** support. **Backend** issues enter only by **Adopt** (or **Promotion**), and **Backend Pull** refreshes just the **Adopted** non-`done` items; tk neither mirrors nor auto-discovers a **Backend**. Mirroring would import an entire tracker (e.g. a 15k-item Jira project) as `accepted` **Backend Tickets**, swamping **`tk next`**, and a fixed pull cap silently drops items past the cap.
+- Naming the derived bound-to-a-**Backend** state **Backend Intent** was considered — resolved: **Backend Binding**, because CONTEXT.md already uses "backend intent" for what a **Mutation** records. One phrase cannot name both a record and an item's relationship to a **Backend**; "intent" is something written down to be carried out, "binding" is the relationship itself (ADR-0036).

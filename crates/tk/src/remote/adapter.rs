@@ -6,14 +6,17 @@
 //! [`MutationView`], [`ApplyOutcome`] — are pure domain data under
 //! [`crate::domain`].
 //!
-//! The trait takes `&mut self` because the only stateful implementation today
-//! is the test fake (a consumed script queue); real adapters reach the backend
-//! through an injected [`crate::proc::ProcRunner`] and hold no per-call mutable
-//! state, so `&mut self` costs them nothing.
+//! The Pull and Apply methods take `&mut self` because the only stateful
+//! implementation today is the test fake (a consumed script queue); real
+//! adapters reach the backend through an injected
+//! [`crate::proc::ProcRunner`] and hold no per-call mutable state, so
+//! `&mut self` costs them nothing. Capability declaration is static data and
+//! takes `&self`.
 
 use crate::domain::apply_outcome::ApplyOutcome;
 use crate::domain::backend_item_snapshot::BackendItemSnapshot;
 use crate::domain::mutation_view::MutationView;
+use crate::domain::promotion_capability::PromotionCapabilities;
 use crate::proc::ProcError;
 use thiserror::Error;
 
@@ -69,4 +72,14 @@ pub trait Adapter {
         view: &MutationView,
         now: &str,
     ) -> Result<ApplyOutcome, ApplyError>;
+
+    /// The Backend's static Promotion capability declaration (ADR-0036
+    /// "Backend capability is declared per facet and staged"). Preflight
+    /// reads this before any backend call to reject a Promotion the Adapter
+    /// cannot represent.
+    ///
+    /// Declared data, not a backend call: the signature takes `&self` and
+    /// returns the value directly rather than a `Result`, so nothing here
+    /// can fail or spawn a subprocess.
+    fn promotion_capabilities(&self) -> PromotionCapabilities;
 }

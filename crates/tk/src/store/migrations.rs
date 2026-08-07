@@ -50,6 +50,7 @@ const MIGRATION_3_SQL: &str = include_str!("migrations/003_closing_reason.sql");
 const MIGRATION_4_SQL: &str = include_str!("migrations/004_selection_state.sql");
 const MIGRATION_5_SQL: &str = include_str!("migrations/005_relax_priority_for_triage.sql");
 const MIGRATION_6_SQL: &str = include_str!("migrations/006_require_accepted_for_active.sql");
+const MIGRATION_7_SQL: &str = include_str!("migrations/007_promotion_operation.sql");
 
 /// V1 Repository Store schema skeleton.
 pub const MIGRATION_1: Migration = Migration {
@@ -108,6 +109,17 @@ pub const MIGRATION_6: Migration = Migration {
     foreign_keys: ForeignKeys::Off,
 };
 
+/// Adds the nullable `promotion_operation_id` column grouping every Mutation
+/// one `tk promote` invocation appends into a single Promotion Operation
+/// (ADR-0036). A plain `ALTER TABLE ADD COLUMN` with no CHECK — ADR-0036
+/// rejected pairing this with a table rebuild since none is otherwise
+/// required.
+pub const MIGRATION_7: Migration = Migration {
+    version: 7,
+    sql: MIGRATION_7_SQL,
+    foreign_keys: ForeignKeys::On,
+};
+
 /// Ordered migration list applied by [`apply_all`].
 pub const ALL_MIGRATIONS: &[Migration] = &[
     MIGRATION_1,
@@ -116,13 +128,14 @@ pub const ALL_MIGRATIONS: &[Migration] = &[
     MIGRATION_4,
     MIGRATION_5,
     MIGRATION_6,
+    MIGRATION_7,
 ];
 
 /// Highest schema version this binary can apply. Named so future migrations
 /// surface the threshold to `grep` instead of hiding it behind `.last()`.
-/// Adding `MIGRATION_6` is a two-line patch: append to `ALL_MIGRATIONS`, bump
+/// Adding `MIGRATION_7` is a two-line patch: append to `ALL_MIGRATIONS`, bump
 /// this constant, with a debug_assert below catching the drift.
-pub const MAX_KNOWN_VERSION: u32 = MIGRATION_6.version;
+pub const MAX_KNOWN_VERSION: u32 = MIGRATION_7.version;
 
 /// Errors returned while applying migrations.
 ///
@@ -313,7 +326,7 @@ mod tests {
         let mut conn = open_memory();
         apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
 
-        assert_eq!(current_version(&conn).unwrap(), 6);
+        assert_eq!(current_version(&conn).unwrap(), 7);
 
         let app_id: i64 = conn
             .query_row("pragma application_id", [], |r| r.get(0))
@@ -323,7 +336,7 @@ mod tests {
         let user_version: i64 = conn
             .query_row("pragma user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(user_version, 6);
+        assert_eq!(user_version, 7);
     }
 
     #[test]
@@ -335,7 +348,7 @@ mod tests {
         let count: i64 = conn
             .query_row("select count(*) from schema_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(count, 6);
+        assert_eq!(count, 7);
     }
 
     #[test]
@@ -896,7 +909,7 @@ mod tests {
         .unwrap();
 
         apply_all(&mut conn, "2026-05-09T00:00:01.000Z").unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 6);
+        assert_eq!(current_version(&conn).unwrap(), 7);
 
         let (priority, selection, container): (Option<String>, String, Option<String>) = conn
             .query_row(
@@ -919,6 +932,104 @@ mod tests {
         assert!(
             epic_selection.is_none(),
             "Epic stays outside Selection State"
+        );
+    }
+
+    #[test]
+    fn promotion_operation_id_column_exists_after_apply_all() {
+        use crate::store::testing::{
+            FixtureItem, FixtureMutation, insert_fixture_item, insert_fixture_mutation,
+        };
+
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Ticket",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                mutation_type: "update_ticket",
+                item_id: "t1",
+                promotion_operation_id: Some("promo-1"),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        let stored: Option<String> = conn
+            .query_row(
+                "select promotion_operation_id from mutations where sequence = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some("promo-1"));
+    }
+
+    #[test]
+    fn promotion_operation_id_heals_in_on_a_store_frozen_at_v6() {
+        // An older tk binary leaves a store at v6, with Mutations rows that
+        // predate the Promotion Operation column. Upgrading to v7 must add
+        // the column without disturbing those existing rows (migration 007
+        // is a plain ADD COLUMN, not a rebuild).
+        use crate::store::testing::{FixtureItem, insert_fixture_item};
+
+        let mut conn = open_memory();
+        apply_through(&mut conn, 6, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Ticket",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("1"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        // Hand-written insert matching the pre-007 column list: the
+        // production `mutations::append` and `FixtureMutation` helper both
+        // already target the post-007 schema, so a v6-shaped row needs its
+        // own statement here.
+        conn.execute(
+            "insert into mutations(\
+                sequence, mutation_type, item_id, item_class, payload_json, \
+                state, failure_json, created_at, state_changed_at\
+             ) values (1, 'update_ticket', 't1', 'ticket', '{}', 'pending', null, \
+                       '2026-05-09T00:00:00.000Z', '2026-05-09T00:00:00.000Z')",
+            [],
+        )
+        .unwrap();
+
+        apply_all(&mut conn, "2026-05-09T00:00:01.000Z").unwrap();
+
+        assert_eq!(current_version(&conn).unwrap(), 7);
+        let (mutation_type, promotion_operation_id): (String, Option<String>) = conn
+            .query_row(
+                "select mutation_type, promotion_operation_id from mutations where sequence = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            mutation_type, "update_ticket",
+            "the pre-existing row survives the heal"
+        );
+        assert_eq!(
+            promotion_operation_id, None,
+            "the healed column must be selectable and NULL for pre-existing rows"
         );
     }
 
@@ -964,7 +1075,7 @@ mod tests {
             .optional()
             .unwrap();
         assert!(probe.is_none(), "the failed rebuild must leave no trace");
-        assert_eq!(current_version(&conn).unwrap(), 6);
+        assert_eq!(current_version(&conn).unwrap(), 7);
     }
 
     #[test]
@@ -976,7 +1087,7 @@ mod tests {
         // already-current store reproduces the loser's stale-snapshot view.
         let mut conn = open_memory();
         apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 6);
+        assert_eq!(current_version(&conn).unwrap(), 7);
 
         apply_one(&mut conn, &MIGRATION_3, "2026-05-09T00:00:01.000Z")
             .expect("re-applying an already-applied migration must be a clean no-op");

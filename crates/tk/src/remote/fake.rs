@@ -9,6 +9,7 @@ use crate::domain::apply_outcome::ApplyOutcome;
 use crate::domain::backend_item_snapshot::BackendItemSnapshot;
 use crate::domain::mutation_type::MutationType;
 use crate::domain::mutation_view::MutationView;
+use crate::domain::promotion_capability::PromotionCapabilities;
 use crate::proc::ProcError;
 
 use super::adapter::{Adapter, ApplyError, PullError};
@@ -28,8 +29,16 @@ pub enum PullResponse {
 /// Scripted response for one [`Adapter::apply_mutation`] call.
 #[derive(Debug, Clone)]
 pub enum ApplyResponse {
-    /// Mutation accepted — returns [`ApplyOutcome::Accepted`] with an empty Receipt.
+    /// Mutation accepted — returns [`ApplyOutcome::Accepted`] with a plain
+    /// acknowledgement Receipt.
     Success,
+    /// Promotion accepted — returns [`ApplyOutcome::Accepted`] with a Promotion
+    /// Receipt carrying this backend key and Display ID, the identity the
+    /// Adapter owns for the object it created (ADR-0036).
+    PromotionSuccess {
+        backend_key: String,
+        display_id: String,
+    },
     /// Mutation rejected — returns [`ApplyOutcome::Rejected`] carrying this detail.
     RecordedFailure(String),
     /// Environment failure — returns this bare error tag.
@@ -44,6 +53,15 @@ pub struct ApplyCall {
     pub item_id: String,
     /// JSON-stringified payload variant, identical to what the outbox wrote.
     pub payload_text: String,
+    /// Backend identity the engine resolved for this Mutation. Recorded so a
+    /// test can tell a Mutation that saw a preceding Promotion receipt from one
+    /// that was handed a still-Local Item.
+    pub backend_key: Option<String>,
+    /// Backend identity the engine resolved for a Dependency Mutation's
+    /// Blocking Item, recorded for the same reason `backend_key` is: the
+    /// counterpart's Promotion is a separate receipt, applied earlier in the
+    /// same run.
+    pub counterpart_backend_key: Option<String>,
 }
 
 /// Strict, script-queue Backend Adapter for tests.
@@ -61,6 +79,11 @@ pub struct FakeAdapter {
     /// Backend key sets passed to each `fetch_snapshots` call, in order, so
     /// engine tests can assert the Adopted working set the engine derived.
     pub captured_pull_keys: Vec<Vec<String>>,
+    /// This fake's [`Adapter::promotion_capabilities`] return value. Static
+    /// data, not a script entry, so tests set it once via
+    /// [`FakeAdapter::with_capabilities`] instead of queuing a response per
+    /// call.
+    capabilities: PromotionCapabilities,
 }
 
 impl FakeAdapter {
@@ -73,7 +96,18 @@ impl FakeAdapter {
             apply_index: 0,
             captured_applies: Vec::new(),
             captured_pull_keys: Vec::new(),
+            capabilities: PromotionCapabilities::none(),
         }
+    }
+
+    /// Script this fake's [`Adapter::promotion_capabilities`] declaration.
+    /// Defaults to [`PromotionCapabilities::none`] so a test that does not
+    /// call this builds a fake that, like the v1 GitHub Adapter, can promote
+    /// nothing.
+    #[must_use]
+    pub fn with_capabilities(mut self, capabilities: PromotionCapabilities) -> Self {
+        self.capabilities = capabilities;
+        self
     }
 }
 
@@ -108,6 +142,8 @@ impl Adapter for FakeAdapter {
             mutation_type: view.mutation_type,
             item_id: view.item_id.clone(),
             payload_text: view.payload.to_json_string(),
+            backend_key: view.backend_key.clone(),
+            counterpart_backend_key: view.counterpart_backend_key.clone(),
         });
 
         let response = self
@@ -118,19 +154,27 @@ impl Adapter for FakeAdapter {
         self.apply_index += 1;
         match response {
             ApplyResponse::Success => Ok(ApplyOutcome::accepted()),
+            ApplyResponse::PromotionSuccess {
+                backend_key,
+                display_id,
+            } => Ok(ApplyOutcome::promoted(backend_key, display_id)),
             ApplyResponse::RecordedFailure(detail) => Ok(ApplyOutcome::rejected(detail)),
             ApplyResponse::EnvFailure(err) => Err(err),
         }
+    }
+
+    fn promotion_capabilities(&self) -> PromotionCapabilities {
+        self.capabilities
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::apply_outcome::ApplyOutcome;
+    use crate::domain::apply_outcome::{ApplyOutcome, Receipt};
     use crate::domain::item_class::ItemClass;
     use crate::domain::mutation_payload::{
-        DependencyRef, EpicRef, MutationPayload, StatusChange, TitleBody,
+        DependencyRef, EpicRef, MutationPayload, Promotion, StatusChange, TitleBody,
     };
     use crate::domain::status::ItemStatus;
     use crate::domain::ticket_kind::TicketKind;
@@ -245,6 +289,38 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(outcome, ApplyOutcome::Accepted(_)));
+    }
+
+    #[test]
+    fn apply_promotion_success_returns_the_scripted_receipt() {
+        let mut fake = FakeAdapter::new(
+            vec![],
+            vec![ApplyResponse::PromotionSuccess {
+                backend_key: "42".into(),
+                display_id: "gh-42".into(),
+            }],
+        );
+        let outcome = fake
+            .apply_mutation(
+                &view(
+                    1,
+                    MutationType::PromoteTicket,
+                    MutationPayload::Promotion(Promotion {
+                        title: "T".into(),
+                        body: "B".into(),
+                        backend_kind: "github".into(),
+                    }),
+                ),
+                "2026-05-19T00:00:00.000Z",
+            )
+            .unwrap();
+        match outcome {
+            ApplyOutcome::Accepted(Receipt::Promotion(receipt)) => {
+                assert_eq!(receipt.backend_key, "42");
+                assert_eq!(receipt.display_id, "gh-42");
+            }
+            other => panic!("expected a Promotion receipt, got {other:?}"),
+        }
     }
 
     #[test]
@@ -407,5 +483,18 @@ mod tests {
         }
         assert_eq!(fake.apply_index, 2);
         assert_eq!(fake.captured_applies.len(), 2);
+    }
+
+    #[test]
+    fn defaults_to_no_promotion_capabilities() {
+        let fake = FakeAdapter::new(vec![], vec![]);
+        assert_eq!(fake.promotion_capabilities(), PromotionCapabilities::none());
+    }
+
+    #[test]
+    fn with_capabilities_overrides_the_declaration() {
+        let caps = PromotionCapabilities::none().with_item_class(ItemClass::Epic);
+        let fake = FakeAdapter::new(vec![], vec![]).with_capabilities(caps);
+        assert_eq!(fake.promotion_capabilities(), caps);
     }
 }

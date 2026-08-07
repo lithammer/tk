@@ -152,9 +152,8 @@ intentionally held. The view flags are mutually exclusive.
 .B \-\-local
 shows only local items.
 .B \-\-remote
-shows only Backend-backed items. The current binary can read backend-origin
-rows seeded by tests or future sync paths, but it does not promote or pull
-backend items yet.
+shows only Backend-backed items \(em those that entered the Repository
+Store through Adopt or Promotion.
 .PP
 .B \-\-epic
 restricts the listing to Epics and composes with any view or Origin filter.

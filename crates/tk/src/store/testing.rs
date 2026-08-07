@@ -15,6 +15,7 @@
 
 use std::path::{Path, PathBuf};
 
+use rand::SeedableRng;
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
 
@@ -231,6 +232,44 @@ pub fn mutation_count(conn: &Connection) -> rusqlite::Result<i64> {
     conn.query_row("select count(*) from mutations", [], |r| r.get(0))
 }
 
+/// Every Mutation Type in the outbox in Mutation Sequence order — the shape
+/// that shows both which intent a write path appended and that it landed
+/// behind the Mutations already in the log.
+pub fn mutation_types(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare("select mutation_type from mutations order by sequence")?;
+    let rows = stmt.query_map([], |r| r.get(0))?;
+    rows.collect()
+}
+
+/// Give the Item at internal `items.id` `id` a Pending Promotion the way
+/// `tk promote` does: preflight the real Promotion graph and commit the
+/// planner's outbox.
+///
+/// The one helper here that drives production code rather than bypassing it.
+/// The Backend Binding gates (ADR-0036) are validated against Mutation Log rows
+/// `commit_plan` actually wrote, so a change to the Promotion payload
+/// or to what counts as pending breaks the gate tests too.
+pub fn commit_promotion(conn: &mut Connection, id: &str) {
+    use crate::domain::backend_kind::BackendKind;
+    use crate::domain::promotion_capability::PromotionCapabilities;
+
+    let graph =
+        crate::store::promotion::read_graph(conn, id, false).expect("read the Promotion graph");
+    let plan = crate::promotion::plan::plan_promotion(
+        &graph,
+        PromotionCapabilities::all(),
+        BackendKind::Github,
+    )
+    .expect("a promotable fixture");
+    crate::store::promotion::commit_plan(
+        conn,
+        &plan,
+        &mut rand::rngs::StdRng::seed_from_u64(7),
+        "2026-05-09T00:00:00.000Z",
+    )
+    .expect("commit the Promotion outbox");
+}
+
 /// Raw Mutation Log fixture for sync engine and read-side outbox tests.
 ///
 /// Bypasses production `mutations::append` so tests can seed `failed`,
@@ -249,6 +288,10 @@ pub struct FixtureMutation<'a> {
     pub failure_json: Option<&'a str>,
     pub created_at: &'a str,
     pub state_changed_at: &'a str,
+    /// Promotion Operation grouping (ADR-0036). `None` seeds a pre-Promotion
+    /// Mutation; set it to fixture a row belonging to one `tk promote`
+    /// invocation's outbox writes.
+    pub promotion_operation_id: Option<&'a str>,
 }
 
 impl Default for FixtureMutation<'_> {
@@ -263,6 +306,7 @@ impl Default for FixtureMutation<'_> {
             failure_json: None,
             created_at: "2026-05-09T00:00:00.000Z",
             state_changed_at: "2026-05-09T00:00:00.000Z",
+            promotion_operation_id: None,
         }
     }
 }
@@ -274,8 +318,8 @@ pub fn insert_fixture_mutation(
     conn.execute(
         "insert into mutations(\
             sequence, mutation_type, item_id, item_class, payload_json, \
-            state, failure_json, created_at, state_changed_at\
-         ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            state, failure_json, created_at, state_changed_at, promotion_operation_id\
+         ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             mutation.sequence,
             mutation.mutation_type,
@@ -286,6 +330,7 @@ pub fn insert_fixture_mutation(
             mutation.failure_json,
             mutation.created_at,
             mutation.state_changed_at,
+            mutation.promotion_operation_id,
         ],
     )?;
     Ok(())

@@ -10,13 +10,19 @@
 //! `pending` on insert and only the Sync Engine transitions it onwards
 //! (`applied`, `failed`, or `skipped`); writers here never construct any
 //! other state directly.
+//!
+//! The one read here, [`resolve_backend_intent`], answers the question the
+//! outbox itself defines: whether a Local Item is already Pending Promotion
+//! (ADR-0036).
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 
+use crate::domain::backend_binding::BackendBinding;
 use crate::domain::item_class::ItemClass;
-use crate::domain::mutation_payload::MutationPayload;
+use crate::domain::mutation_payload::{MutationPayload, Promotion};
 use crate::domain::mutation_type::MutationType;
+use crate::domain::origin::Origin;
 use crate::store::sequences;
 
 /// Errors returned by [`append`].
@@ -31,6 +37,20 @@ pub enum AppendError {
     Sequence(#[from] sequences::SequenceError),
 }
 
+/// Input for [`append`].
+#[derive(Debug, Clone, Copy)]
+pub struct AppendRequest<'a> {
+    pub mutation_type: MutationType,
+    pub item_id: &'a str,
+    pub item_class: ItemClass,
+    pub payload: &'a MutationPayload,
+    /// Promotion Operation grouping every Mutation one `tk promote`
+    /// invocation appends (ADR-0036). `None` for a Mutation that stands on
+    /// its own.
+    pub promotion_operation_id: Option<&'a str>,
+    pub now_iso: &'a str,
+}
+
 /// Append one Mutation row to the `mutations` outbox.
 ///
 /// `conn` is expected to be inside an active `begin immediate` transaction;
@@ -41,31 +61,97 @@ pub enum AppendError {
 /// Returns the freshly allocated `mutation_seq` so callers that need the
 /// row identifier downstream (e.g. surfacing a pending Mutation count) can
 /// avoid a follow-up `SELECT`.
-pub fn append(
-    conn: &Connection,
-    mutation_type: MutationType,
-    item_id: &str,
-    item_class: ItemClass,
-    payload: &MutationPayload,
-    now_iso: &str,
-) -> Result<i64, AppendError> {
+pub fn append(conn: &Connection, req: AppendRequest<'_>) -> Result<i64, AppendError> {
     let sequence = sequences::next(conn, "mutation_seq")?;
-    let payload_json = payload.to_json_string();
+    let payload_json = req.payload.to_json_string();
     conn.execute(
         "insert into mutations(\
             sequence, mutation_type, item_id, item_class, payload_json, \
-            state, failure_json, created_at, state_changed_at\
-         ) values (?1, ?2, ?3, ?4, ?5, 'pending', null, ?6, ?6)",
+            state, failure_json, created_at, state_changed_at, promotion_operation_id\
+         ) values (?1, ?2, ?3, ?4, ?5, 'pending', null, ?6, ?6, ?7)",
         params![
             sequence,
-            mutation_type.text(),
-            item_id,
-            item_class.text(),
+            req.mutation_type.text(),
+            req.item_id,
+            req.item_class.text(),
             payload_json,
-            now_iso,
+            req.now_iso,
+            req.promotion_operation_id,
         ],
     )?;
     Ok(sequence)
+}
+
+/// Errors returned by [`resolve_backend_intent`].
+#[derive(Debug, Error)]
+pub enum BackendBindingError {
+    /// Underlying SQLite error from the `items` or `mutations` read.
+    #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
+    /// A `promote_*` row's `payload_json` did not decode as a Promotion
+    /// payload. Repository Store corruption, the same fault the sync-side
+    /// decode names.
+    #[error("malformed payload_json: {0}")]
+    PayloadJson(#[from] serde_json::Error),
+    /// An Item with backend Origin carrying no `backend_kind`. The `items`
+    /// Origin CHECK forbids the pair, so this is Repository Store corruption;
+    /// the store layer surfaces it as a typed fault rather than panicking.
+    #[error("item {0} has backend Origin with no backend_kind")]
+    CorruptBackendKind(String),
+}
+
+/// Resolve the Backend Binding of the Item at internal `items.id` `item_id`.
+///
+/// Backend Origin answers from `items` alone. A Local Item is Pending
+/// Promotion when the Mutation Log holds a `promote_ticket` / `promote_epic`
+/// Mutation for it in `pending` or `failed` state — the two states from which
+/// Apply may still run. An `applied` Promotion has already converted the Item
+/// to Backend Origin, and a `skipped` one is abandoned intent, so neither
+/// keeps the Item pending.
+///
+/// The Backend of a Pending Promotion comes from that Mutation's payload, not
+/// from the configured Remote: the target Backend is intent frozen at commit
+/// time, so no Repository Store path that reads this state has to consult
+/// current Remote configuration (ADR-0036 "Promotion Mutations target Local
+/// items").
+///
+/// An `item_id` no `items` row matches is a caller fault, not a domain
+/// outcome, and surfaces as [`BackendBindingError::Sqlite`].
+pub fn resolve_backend_intent(
+    conn: &Connection,
+    item_id: &str,
+) -> Result<BackendBinding, BackendBindingError> {
+    let (origin, backend_kind): (Origin, Option<String>) = conn.query_row(
+        "select origin, backend_kind from items where id = ?1",
+        params![item_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+
+    if origin == Origin::Backend {
+        let backend_kind = backend_kind
+            .ok_or_else(|| BackendBindingError::CorruptBackendKind(item_id.to_string()))?;
+        return Ok(BackendBinding::Backend { backend_kind });
+    }
+
+    let payload_json: Option<String> = conn
+        .query_row(
+            "select payload_json from mutations \
+              where item_id = ?1 \
+                and mutation_type in ('promote_ticket','promote_epic') \
+                and state in ('pending','failed') \
+              order by sequence asc limit 1",
+            params![item_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(payload_json) = payload_json else {
+        return Ok(BackendBinding::Local);
+    };
+
+    let payload: Promotion = serde_json::from_str(&payload_json)?;
+    Ok(BackendBinding::PendingPromotion {
+        backend_kind: payload.backend_kind,
+    })
 }
 
 #[cfg(test)]
@@ -73,7 +159,10 @@ mod tests {
     use super::*;
     use crate::domain::mutation_payload::{DependencyRef, EpicRef, StatusChange, TitleBody};
     use crate::store::migrations;
-    use crate::store::testing::{FixtureItem, insert_fixture_item};
+    use crate::store::testing::{
+        FixtureItem, FixtureMutation, FixtureRemote, insert_fixture_item, insert_fixture_mutation,
+        insert_fixture_remote,
+    };
     use rusqlite::Connection;
 
     fn open_seeded() -> Connection {
@@ -108,28 +197,33 @@ mod tests {
         let tx = conn.unchecked_transaction().unwrap();
         append(
             &tx,
-            MutationType::UpdateTicket,
-            "t1",
-            ItemClass::Ticket,
-            &MutationPayload::UpdateTitleBody(TitleBody {
-                title: "New title".into(),
-                body: "New body".into(),
-            }),
-            "2026-05-09T00:00:00.000Z",
+            AppendRequest {
+                mutation_type: MutationType::UpdateTicket,
+                item_id: "t1",
+                item_class: ItemClass::Ticket,
+                payload: &MutationPayload::UpdateTitleBody(TitleBody {
+                    title: "New title".into(),
+                    body: "New body".into(),
+                }),
+                promotion_operation_id: None,
+                now_iso: "2026-05-09T00:00:00.000Z",
+            },
         )
         .unwrap();
         tx.commit().unwrap();
 
-        let (mtype, item_id, item_class, payload, state, failure): (
+        let (mtype, item_id, item_class, payload, state, failure, promotion_operation_id): (
             String,
             String,
             String,
             String,
             String,
             Option<String>,
+            Option<String>,
         ) = conn
             .query_row(
-                "select mutation_type, item_id, item_class, payload_json, state, failure_json \
+                "select mutation_type, item_id, item_class, payload_json, state, failure_json, \
+                        promotion_operation_id \
                  from mutations where sequence = 1",
                 [],
                 |r| {
@@ -140,6 +234,7 @@ mod tests {
                         r.get(3)?,
                         r.get(4)?,
                         r.get(5)?,
+                        r.get(6)?,
                     ))
                 },
             )
@@ -150,6 +245,40 @@ mod tests {
         assert_eq!(payload, r#"{"title":"New title","body":"New body"}"#);
         assert_eq!(state, "pending");
         assert_eq!(failure, None);
+        assert_eq!(promotion_operation_id, None);
+    }
+
+    #[test]
+    fn append_writes_the_supplied_promotion_operation_id() {
+        let conn = open_seeded();
+        seed_backend_ticket(&conn, "t1", "tk-1", 1);
+
+        let tx = conn.unchecked_transaction().unwrap();
+        append(
+            &tx,
+            AppendRequest {
+                mutation_type: MutationType::UpdateTicket,
+                item_id: "t1",
+                item_class: ItemClass::Ticket,
+                payload: &MutationPayload::UpdateTitleBody(TitleBody {
+                    title: "New title".into(),
+                    body: "New body".into(),
+                }),
+                promotion_operation_id: Some("promo-1"),
+                now_iso: "2026-05-09T00:00:00.000Z",
+            },
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        let stored: Option<String> = conn
+            .query_row(
+                "select promotion_operation_id from mutations where sequence = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some("promo-1"));
     }
 
     #[test]
@@ -160,13 +289,16 @@ mod tests {
         let tx = conn.unchecked_transaction().unwrap();
         append(
             &tx,
-            MutationType::AddTicketToEpic,
-            "t1",
-            ItemClass::Ticket,
-            &MutationPayload::EpicRef(EpicRef {
-                epic_id: "epic-internal-id".into(),
-            }),
-            "2026-05-09T00:00:00.000Z",
+            AppendRequest {
+                mutation_type: MutationType::AddTicketToEpic,
+                item_id: "t1",
+                item_class: ItemClass::Ticket,
+                payload: &MutationPayload::EpicRef(EpicRef {
+                    epic_id: "epic-internal-id".into(),
+                }),
+                promotion_operation_id: None,
+                now_iso: "2026-05-09T00:00:00.000Z",
+            },
         )
         .unwrap();
         tx.commit().unwrap();
@@ -189,13 +321,16 @@ mod tests {
         let tx = conn.unchecked_transaction().unwrap();
         append(
             &tx,
-            MutationType::SetItemStatus,
-            "t1",
-            ItemClass::Ticket,
-            &MutationPayload::ItemStatus(StatusChange {
-                status: "done".into(),
-            }),
-            "2026-05-09T00:00:00.000Z",
+            AppendRequest {
+                mutation_type: MutationType::SetItemStatus,
+                item_id: "t1",
+                item_class: ItemClass::Ticket,
+                payload: &MutationPayload::ItemStatus(StatusChange {
+                    status: "done".into(),
+                }),
+                promotion_operation_id: None,
+                now_iso: "2026-05-09T00:00:00.000Z",
+            },
         )
         .unwrap();
         tx.commit().unwrap();
@@ -218,13 +353,16 @@ mod tests {
         let tx = conn.unchecked_transaction().unwrap();
         append(
             &tx,
-            MutationType::AddDependency,
-            "t1",
-            ItemClass::Ticket,
-            &MutationPayload::DependencyRef(DependencyRef {
-                blocking_id: "blocker-id".into(),
-            }),
-            "2026-05-09T00:00:00.000Z",
+            AppendRequest {
+                mutation_type: MutationType::AddDependency,
+                item_id: "t1",
+                item_class: ItemClass::Ticket,
+                payload: &MutationPayload::DependencyRef(DependencyRef {
+                    blocking_id: "blocker-id".into(),
+                }),
+                promotion_operation_id: None,
+                now_iso: "2026-05-09T00:00:00.000Z",
+            },
         )
         .unwrap();
         tx.commit().unwrap();
@@ -247,38 +385,47 @@ mod tests {
         let tx = conn.unchecked_transaction().unwrap();
         let one = append(
             &tx,
-            MutationType::UpdateTicket,
-            "t1",
-            ItemClass::Ticket,
-            &MutationPayload::UpdateTitleBody(TitleBody {
-                title: "A".into(),
-                body: String::new(),
-            }),
-            "2026-05-09T00:00:00.000Z",
+            AppendRequest {
+                mutation_type: MutationType::UpdateTicket,
+                item_id: "t1",
+                item_class: ItemClass::Ticket,
+                payload: &MutationPayload::UpdateTitleBody(TitleBody {
+                    title: "A".into(),
+                    body: String::new(),
+                }),
+                promotion_operation_id: None,
+                now_iso: "2026-05-09T00:00:00.000Z",
+            },
         )
         .unwrap();
         let two = append(
             &tx,
-            MutationType::UpdateTicket,
-            "t1",
-            ItemClass::Ticket,
-            &MutationPayload::UpdateTitleBody(TitleBody {
-                title: "B".into(),
-                body: String::new(),
-            }),
-            "2026-05-09T00:00:00.000Z",
+            AppendRequest {
+                mutation_type: MutationType::UpdateTicket,
+                item_id: "t1",
+                item_class: ItemClass::Ticket,
+                payload: &MutationPayload::UpdateTitleBody(TitleBody {
+                    title: "B".into(),
+                    body: String::new(),
+                }),
+                promotion_operation_id: None,
+                now_iso: "2026-05-09T00:00:00.000Z",
+            },
         )
         .unwrap();
         let three = append(
             &tx,
-            MutationType::UpdateTicket,
-            "t1",
-            ItemClass::Ticket,
-            &MutationPayload::UpdateTitleBody(TitleBody {
-                title: "C".into(),
-                body: String::new(),
-            }),
-            "2026-05-09T00:00:00.000Z",
+            AppendRequest {
+                mutation_type: MutationType::UpdateTicket,
+                item_id: "t1",
+                item_class: ItemClass::Ticket,
+                payload: &MutationPayload::UpdateTitleBody(TitleBody {
+                    title: "C".into(),
+                    body: String::new(),
+                }),
+                promotion_operation_id: None,
+                now_iso: "2026-05-09T00:00:00.000Z",
+            },
         )
         .unwrap();
         tx.commit().unwrap();
@@ -307,26 +454,32 @@ mod tests {
         let tx = conn.unchecked_transaction().unwrap();
         append(
             &tx,
-            MutationType::UpdateTicket,
-            "t1",
-            ItemClass::Ticket,
-            &MutationPayload::UpdateTitleBody(TitleBody {
-                title: "X".into(),
-                body: String::new(),
-            }),
-            "2026-05-09T00:00:00.000Z",
+            AppendRequest {
+                mutation_type: MutationType::UpdateTicket,
+                item_id: "t1",
+                item_class: ItemClass::Ticket,
+                payload: &MutationPayload::UpdateTitleBody(TitleBody {
+                    title: "X".into(),
+                    body: String::new(),
+                }),
+                promotion_operation_id: None,
+                now_iso: "2026-05-09T00:00:00.000Z",
+            },
         )
         .unwrap();
         append(
             &tx,
-            MutationType::UpdateTicket,
-            "t1",
-            ItemClass::Ticket,
-            &MutationPayload::UpdateTitleBody(TitleBody {
-                title: "Y".into(),
-                body: String::new(),
-            }),
-            "2026-05-09T00:00:00.000Z",
+            AppendRequest {
+                mutation_type: MutationType::UpdateTicket,
+                item_id: "t1",
+                item_class: ItemClass::Ticket,
+                payload: &MutationPayload::UpdateTitleBody(TitleBody {
+                    title: "Y".into(),
+                    body: String::new(),
+                }),
+                promotion_operation_id: None,
+                now_iso: "2026-05-09T00:00:00.000Z",
+            },
         )
         .unwrap();
         tx.commit().unwrap();
@@ -339,5 +492,223 @@ mod tests {
             )
             .unwrap();
         assert_eq!(after, 2);
+    }
+
+    fn seed_local_ticket(conn: &Connection, id: &str, display: &str) {
+        insert_fixture_item(
+            conn,
+            FixtureItem {
+                id,
+                display,
+                title: "Local",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+    }
+
+    fn seed_promotion(conn: &Connection, item_id: &str, state: &str, backend_kind: &str) {
+        let payload = MutationPayload::Promotion(Promotion {
+            title: "Local".into(),
+            body: String::new(),
+            backend_kind: backend_kind.into(),
+        })
+        .to_json_string();
+        insert_fixture_mutation(
+            conn,
+            FixtureMutation {
+                mutation_type: "promote_ticket",
+                item_id,
+                payload_json: &payload,
+                state,
+                failure_json: (state == "failed").then_some(r#"{"detail":"boom"}"#),
+                promotion_operation_id: Some("promo-1"),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_backend_item_carries_the_backend_it_already_belongs_to() {
+        let conn = open_seeded();
+        seed_backend_ticket(&conn, "t1", "tk-1", 1);
+
+        assert_eq!(
+            resolve_backend_intent(&conn, "t1").unwrap(),
+            BackendBinding::Backend {
+                backend_kind: "github".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_local_item_without_a_promotion_has_no_backend_intent() {
+        let conn = open_seeded();
+        seed_local_ticket(&conn, "t1", "tk-1");
+
+        assert_eq!(
+            resolve_backend_intent(&conn, "t1").unwrap(),
+            BackendBinding::Local
+        );
+    }
+
+    #[test]
+    fn a_pending_promotion_takes_its_backend_from_the_payload_not_the_remote() {
+        // The whole point of recording the Backend on the payload (ADR-0036):
+        // resolving Pending Promotion never consults Remote configuration, so a
+        // Remote that disagrees with the frozen intent cannot change the answer.
+        let conn = open_seeded();
+        seed_local_ticket(&conn, "t1", "tk-1");
+        insert_fixture_remote(
+            &conn,
+            FixtureRemote {
+                backend_kind: "jira",
+                ..FixtureRemote::default()
+            },
+        )
+        .unwrap();
+        seed_promotion(&conn, "t1", "pending", "github");
+
+        assert_eq!(
+            resolve_backend_intent(&conn, "t1").unwrap(),
+            BackendBinding::PendingPromotion {
+                backend_kind: "github".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_failed_promotion_still_leaves_the_item_pending_promotion() {
+        let conn = open_seeded();
+        seed_local_ticket(&conn, "t1", "tk-1");
+        seed_promotion(&conn, "t1", "failed", "github");
+
+        assert_eq!(
+            resolve_backend_intent(&conn, "t1").unwrap(),
+            BackendBinding::PendingPromotion {
+                backend_kind: "github".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_resolved_promotion_does_not_make_a_local_item_pending() {
+        // `applied` has already moved its Item to Backend Origin and `skipped`
+        // is abandoned intent; a Local Item behind either is plain Local.
+        for state in ["applied", "skipped"] {
+            let conn = open_seeded();
+            seed_local_ticket(&conn, "t1", "tk-1");
+            seed_promotion(&conn, "t1", state, "github");
+
+            assert_eq!(
+                resolve_backend_intent(&conn, "t1").unwrap(),
+                BackendBinding::Local,
+                "a {state} Promotion is resolved intent"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_promotion_mutation_does_not_make_an_item_pending_promotion() {
+        let conn = open_seeded();
+        seed_local_ticket(&conn, "t1", "tk-1");
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                mutation_type: "update_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"T","body":""}"#,
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_backend_intent(&conn, "t1").unwrap(),
+            BackendBinding::Local
+        );
+    }
+
+    #[test]
+    fn every_promotion_mutation_type_makes_its_item_pending_promotion() {
+        // `resolve_backend_intent`'s `mutation_type in (...)` list is a second
+        // encoding of `MutationType::is_promotion`. A Promotion kind the SQL
+        // does not name resolves as Local, silently reopening every write gate
+        // ADR-0036 put on Backend Binding — so a new kind belongs in that query
+        // (and in the `mutations` CHECK), not in an exemption here.
+        let payload = MutationPayload::Promotion(Promotion {
+            title: "Local".into(),
+            body: String::new(),
+            backend_kind: "github".into(),
+        })
+        .to_json_string();
+
+        for mutation_type in MutationType::ALL.into_iter().filter(|t| t.is_promotion()) {
+            let conn = open_seeded();
+            seed_local_ticket(&conn, "t1", "tk-1");
+            insert_fixture_item(
+                &conn,
+                FixtureItem {
+                    id: "e1",
+                    display: "tk-2",
+                    item_class: "epic",
+                    ticket_kind: None,
+                    priority: None,
+                    title: "Local epic",
+                    created_seq: 2,
+                    ..FixtureItem::default()
+                },
+            )
+            .unwrap();
+            // The `mutations` composite foreign key pins item_class to the
+            // Item's own class, so each Promotion kind needs its own target.
+            let (item_id, item_class) = match mutation_type {
+                MutationType::PromoteEpic => ("e1", "epic"),
+                _ => ("t1", "ticket"),
+            };
+            insert_fixture_mutation(
+                &conn,
+                FixtureMutation {
+                    mutation_type: mutation_type.text(),
+                    item_id,
+                    item_class,
+                    payload_json: &payload,
+                    ..FixtureMutation::default()
+                },
+            )
+            .unwrap();
+
+            assert_eq!(
+                resolve_backend_intent(&conn, item_id).unwrap(),
+                BackendBinding::PendingPromotion {
+                    backend_kind: "github".into()
+                },
+                "{mutation_type} must leave its Item Pending Promotion"
+            );
+        }
+    }
+
+    #[test]
+    fn a_promotion_payload_that_does_not_decode_is_a_typed_fault() {
+        let conn = open_seeded();
+        seed_local_ticket(&conn, "t1", "tk-1");
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                mutation_type: "promote_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"T"}"#,
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        let err = resolve_backend_intent(&conn, "t1").unwrap_err();
+        assert!(
+            matches!(err, BackendBindingError::PayloadJson(_)),
+            "a promote_* row without a Backend is store corruption, got {err:?}"
+        );
     }
 }

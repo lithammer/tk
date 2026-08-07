@@ -1,9 +1,9 @@
 //! Item Status lifecycle write (`tk start` / `tk stop` / `tk done`).
 //!
-//! Backend-origin transitions append a `set_item_status` Mutation in the
-//! same transaction; local-origin transitions only update current state.
-//! Idempotent calls (already at the requested state) succeed without
-//! bumping `updated_at` or writing a Mutation row.
+//! A transition on a backend-bound Item appends a `set_item_status` Mutation
+//! in the same transaction; a Local Item with no Promotion intent only updates
+//! current state. Idempotent calls (already at the requested state) succeed
+//! without bumping `updated_at` or writing a Mutation row.
 //!
 //! ADR-0006 makes `Done` terminal in v1. A pre-read short-circuit refuses
 //! any request that would leave `Done`, returning [`SetStatusError::LockedDone`]
@@ -17,7 +17,6 @@ use crate::clock::Clock;
 use crate::domain::item_class::ItemClass;
 use crate::domain::mutation_payload::{MutationPayload, StatusChange};
 use crate::domain::mutation_type::MutationType;
-use crate::domain::origin::Origin;
 use crate::domain::selection_state::SelectionState;
 use crate::domain::status::ItemStatus;
 use crate::store::mutations;
@@ -81,6 +80,8 @@ pub enum SetStatusError {
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
+    BackendBinding(#[from] mutations::BackendBindingError),
+    #[error(transparent)]
     Mutation(#[from] mutations::AppendError),
 }
 
@@ -95,23 +96,21 @@ pub fn set_item_status<C: Clock + ?Sized>(
 
     let current = tx
         .query_row(
-            "select origin, status, item_class, display_value, title, selection_state \
+            "select status, item_class, display_value, title, selection_state \
                from items where id = ?1",
             params![req.id],
             |row| {
                 Ok((
-                    row.get::<_, Origin>(0)?,
-                    row.get::<_, ItemStatus>(1)?,
-                    row.get::<_, ItemClass>(2)?,
+                    row.get::<_, ItemStatus>(0)?,
+                    row.get::<_, ItemClass>(1)?,
+                    row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, Option<SelectionState>>(5)?,
+                    row.get::<_, Option<SelectionState>>(4)?,
                 ))
             },
         )
         .optional()?;
-    let Some((origin, current_status, item_class, display_id, title, selection_state)) = current
-    else {
+    let Some((current_status, item_class, display_id, title, selection_state)) = current else {
         // No write happened — drop the transaction implicitly.
         return Err(SetStatusError::NotFound);
     };
@@ -158,16 +157,22 @@ pub fn set_item_status<C: Clock + ?Sized>(
         params![req.id, req.status, req.closing_reason, now_iso],
     )?;
 
-    if origin == Origin::Backend {
+    // Backend Binding, not Origin, decides whether the transition is also
+    // backend intent (ADR-0036): a Pending Promotion Item's status change is
+    // ordered behind the Promotion that will give it a backend identity.
+    if mutations::resolve_backend_intent(&tx, req.id)?.is_backend_bound() {
         mutations::append(
             &tx,
-            MutationType::SetItemStatus,
-            req.id,
-            item_class,
-            &MutationPayload::ItemStatus(StatusChange {
-                status: req.status.text().to_owned(),
-            }),
-            &now_iso,
+            mutations::AppendRequest {
+                mutation_type: MutationType::SetItemStatus,
+                item_id: req.id,
+                item_class,
+                payload: &MutationPayload::ItemStatus(StatusChange {
+                    status: req.status.text().to_owned(),
+                }),
+                promotion_operation_id: None,
+                now_iso: &now_iso,
+            },
         )?;
     }
 
@@ -185,7 +190,9 @@ mod tests {
     use super::*;
     use crate::clock::FakeClock;
     use crate::store::migrations;
-    use crate::store::testing::{FixtureItem, insert_fixture_item};
+    use crate::store::testing::{
+        FixtureItem, commit_promotion, insert_fixture_item, mutation_types,
+    };
     use rusqlite::Connection;
 
     fn open_seeded() -> Store {
@@ -302,6 +309,40 @@ mod tests {
             )
             .unwrap();
         assert_eq!(mt, "set_item_status");
+        assert_eq!(payload, r#"{"status":"active"}"#);
+    }
+
+    #[test]
+    fn pending_promotion_transition_appends_set_item_status_behind_the_promotion() {
+        // ADR-0036: `tk start` between `tk promote` and the next `tk sync`
+        // still reaches the Backend, ordered behind the Promotion.
+        let mut store = open_seeded();
+        seed_open_ticket(&store, "t1", "tk-1", 1);
+        commit_promotion(&mut store.conn, "t1");
+
+        set_item_status(
+            &mut store,
+            &clock(),
+            SetStatusRequest {
+                id: "t1",
+                status: ItemStatus::Active,
+                closing_reason: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            mutation_types(&store.conn).unwrap(),
+            vec!["promote_ticket", "set_item_status"]
+        );
+        let payload: String = store
+            .conn
+            .query_row(
+                "select payload_json from mutations where mutation_type = 'set_item_status'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(payload, r#"{"status":"active"}"#);
     }
 

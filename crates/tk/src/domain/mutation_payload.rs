@@ -8,10 +8,10 @@
 //! constraint on the column.
 //!
 //! `Serialize`/`Deserialize` therefore live on the per-variant payload
-//! structs ([`TitleBody`], [`EpicRef`], [`StatusChange`], [`DependencyRef`])
-//! rather than on the outer enum: serializing the enum directly would
-//! produce externally-tagged JSON (`{"UpdateTitleBody":{…}}`) that breaks
-//! the flat row contract.
+//! structs ([`TitleBody`], [`EpicRef`], [`StatusChange`], [`DependencyRef`],
+//! [`Promotion`]) rather than on the outer enum: serializing the enum
+//! directly would produce externally-tagged JSON (`{"UpdateTitleBody":{…}}`)
+//! that breaks the flat row contract.
 
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +30,10 @@ pub enum MutationPayload {
     /// Payload for `add_dependency` and `remove_dependency` — the internal
     /// stable ID of the Blocking Item referenced by the Dependency.
     DependencyRef(DependencyRef),
+    /// Payload for `promote_ticket` and `promote_epic` — the title/body
+    /// snapshot frozen at Promotion commit and the Backend the operation
+    /// targets.
+    Promotion(Promotion),
 }
 
 impl MutationPayload {
@@ -43,6 +47,7 @@ impl MutationPayload {
             Self::EpicRef(v) => serde_json::to_string(v),
             Self::ItemStatus(v) => serde_json::to_string(v),
             Self::DependencyRef(v) => serde_json::to_string(v),
+            Self::Promotion(v) => serde_json::to_string(v),
         }
         .expect("MutationPayload inner structs are infallible serializers")
     }
@@ -76,6 +81,24 @@ pub struct StatusChange {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DependencyRef {
     pub blocking_id: String,
+}
+
+/// Title/body snapshot and target Backend for `promote_ticket` /
+/// `promote_epic`.
+///
+/// `title` and `body` freeze the Local item's state at Promotion commit; a
+/// later edit before Promotion is applied appends an ordinary `update_ticket`
+/// / `update_epic` Mutation instead of changing this snapshot. `backend_kind`
+/// is the storage spelling (matching
+/// [`super::backend_kind::BackendKind::text`]) of the Backend this Promotion
+/// targets. It is recorded here, not read from Remote configuration, so a
+/// later read of an Item's Pending Promotion state uses the Mutation Log
+/// alone (ADR-0036 "Promotion Mutations target Local items").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Promotion {
+    pub title: String,
+    pub body: String,
+    pub backend_kind: String,
 }
 
 #[cfg(test)]
@@ -117,6 +140,29 @@ mod tests {
         })
         .to_json_string();
         assert_eq!(json, r#"{"blocking_id":"blocker-id"}"#);
+    }
+
+    #[test]
+    fn promotion_json_is_flat() {
+        let json = MutationPayload::Promotion(Promotion {
+            title: "T".into(),
+            body: "B".into(),
+            backend_kind: "github".into(),
+        })
+        .to_json_string();
+        assert_eq!(json, r#"{"title":"T","body":"B","backend_kind":"github"}"#);
+    }
+
+    #[test]
+    fn promotion_round_trips_with_free_text() {
+        let original = Promotion {
+            title: "Quote \" and backslash \\ and newline \n inside".into(),
+            body: String::new(),
+            backend_kind: "github".into(),
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: Promotion = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, original);
     }
 
     #[test]

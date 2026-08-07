@@ -151,6 +151,7 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
             id = args.id
         ))),
         Err(update::UpdateError::Sqlite(err)) => Err(resolver::storage_error(&err)),
+        Err(update::UpdateError::BackendBinding(err)) => Err(resolver::backend_binding_error(&err)),
         Err(update::UpdateError::Mutation(err)) => Err(CommandError::failure(format!(
             "failed to append Mutation: {err}"
         ))),
