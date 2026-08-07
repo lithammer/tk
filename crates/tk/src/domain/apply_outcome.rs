@@ -40,12 +40,36 @@ pub enum ApplyOutcome {
 
 /// Adapter-supplied evidence that a Mutation succeeded.
 ///
-/// Intentionally empty today — Promotion grows it with the
-/// backend-assigned identifiers (issue number, Jira key) a successful
-/// `promote_*` Mutation returns. Kept as a struct rather than a unit variant
-/// so that growth is an additive field change, not a variant-shape churn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Receipt {}
+/// The nine idempotent Mutation Types edit an object the backend already has,
+/// so their receipt is a bare [`Receipt::Acknowledged`]. `promote_ticket` and
+/// `promote_epic` create the object, so their receipt carries the identity the
+/// Backend Adapter assigned to it (ADR-0036 "Promotion applies through the
+/// existing Apply seam").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Receipt {
+    /// The backend applied the Mutation; nothing further to record.
+    Acknowledged,
+    /// The backend created the Item's object; its identity replaces the Item's
+    /// Local identity.
+    Promotion(PromotionReceipt),
+}
+
+/// Backend identity a Promotion assigned, as reported by the Backend Adapter.
+///
+/// Both fields are required rather than `Option`, so that a Promotion receipt
+/// carrying no backend key is unrepresentable: that value would mark the
+/// Mutation applied while leaving its Item Local, the state the `items` Origin
+/// CHECK forbids and that every Mutation ordered behind the Promotion depends
+/// on (ADR-0036).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromotionReceipt {
+    /// Backend-native identifier of the created object (GitHub issue number,
+    /// Jira key) — becomes `items.backend_key`.
+    pub backend_key: String,
+    /// Display ID the promoted Item takes on. The outgoing Display ID stays
+    /// resolvable as an Alias.
+    pub display_id: String,
+}
 
 /// Backend Adapter classification of a [`Failure`] (ADR-0016 / CONTEXT.md
 /// Adapter Failure). The snake_case serde spelling is the on-disk contract
@@ -115,10 +139,21 @@ pub struct Failure {
 }
 
 impl ApplyOutcome {
-    /// Convenience constructor for the empty-receipt acceptance case.
+    /// Convenience constructor for the acknowledgement case — every Mutation
+    /// Type except `promote_ticket` / `promote_epic`.
     #[must_use]
     pub fn accepted() -> Self {
-        Self::Accepted(Receipt::default())
+        Self::Accepted(Receipt::Acknowledged)
+    }
+
+    /// Convenience constructor for a Promotion acceptance carrying the backend
+    /// identity the Adapter assigned to the object it created.
+    #[must_use]
+    pub fn promoted(backend_key: impl Into<String>, display_id: impl Into<String>) -> Self {
+        Self::Accepted(Receipt::Promotion(PromotionReceipt {
+            backend_key: backend_key.into(),
+            display_id: display_id.into(),
+        }))
     }
 
     /// Convenience constructor for a rejection carrying `detail`, classified

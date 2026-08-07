@@ -29,8 +29,16 @@ pub enum PullResponse {
 /// Scripted response for one [`Adapter::apply_mutation`] call.
 #[derive(Debug, Clone)]
 pub enum ApplyResponse {
-    /// Mutation accepted — returns [`ApplyOutcome::Accepted`] with an empty Receipt.
+    /// Mutation accepted — returns [`ApplyOutcome::Accepted`] with a plain
+    /// acknowledgement Receipt.
     Success,
+    /// Promotion accepted — returns [`ApplyOutcome::Accepted`] with a Promotion
+    /// Receipt carrying this backend key and Display ID, the identity the
+    /// Adapter owns for the object it created (ADR-0036).
+    PromotionSuccess {
+        backend_key: String,
+        display_id: String,
+    },
     /// Mutation rejected — returns [`ApplyOutcome::Rejected`] carrying this detail.
     RecordedFailure(String),
     /// Environment failure — returns this bare error tag.
@@ -45,6 +53,10 @@ pub struct ApplyCall {
     pub item_id: String,
     /// JSON-stringified payload variant, identical to what the outbox wrote.
     pub payload_text: String,
+    /// Backend identity the engine resolved for this Mutation. Recorded so a
+    /// test can tell a Mutation that saw a preceding Promotion receipt from one
+    /// that was handed a still-Local Item.
+    pub backend_key: Option<String>,
 }
 
 /// Strict, script-queue Backend Adapter for tests.
@@ -125,6 +137,7 @@ impl Adapter for FakeAdapter {
             mutation_type: view.mutation_type,
             item_id: view.item_id.clone(),
             payload_text: view.payload.to_json_string(),
+            backend_key: view.backend_key.clone(),
         });
 
         let response = self
@@ -135,6 +148,10 @@ impl Adapter for FakeAdapter {
         self.apply_index += 1;
         match response {
             ApplyResponse::Success => Ok(ApplyOutcome::accepted()),
+            ApplyResponse::PromotionSuccess {
+                backend_key,
+                display_id,
+            } => Ok(ApplyOutcome::promoted(backend_key, display_id)),
             ApplyResponse::RecordedFailure(detail) => Ok(ApplyOutcome::rejected(detail)),
             ApplyResponse::EnvFailure(err) => Err(err),
         }
@@ -148,10 +165,10 @@ impl Adapter for FakeAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::apply_outcome::ApplyOutcome;
+    use crate::domain::apply_outcome::{ApplyOutcome, Receipt};
     use crate::domain::item_class::ItemClass;
     use crate::domain::mutation_payload::{
-        DependencyRef, EpicRef, MutationPayload, StatusChange, TitleBody,
+        DependencyRef, EpicRef, MutationPayload, Promotion, StatusChange, TitleBody,
     };
     use crate::domain::status::ItemStatus;
     use crate::domain::ticket_kind::TicketKind;
@@ -266,6 +283,38 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(outcome, ApplyOutcome::Accepted(_)));
+    }
+
+    #[test]
+    fn apply_promotion_success_returns_the_scripted_receipt() {
+        let mut fake = FakeAdapter::new(
+            vec![],
+            vec![ApplyResponse::PromotionSuccess {
+                backend_key: "42".into(),
+                display_id: "gh-42".into(),
+            }],
+        );
+        let outcome = fake
+            .apply_mutation(
+                &view(
+                    1,
+                    MutationType::PromoteTicket,
+                    MutationPayload::Promotion(Promotion {
+                        title: "T".into(),
+                        body: "B".into(),
+                        backend_kind: "github".into(),
+                    }),
+                ),
+                "2026-05-19T00:00:00.000Z",
+            )
+            .unwrap();
+        match outcome {
+            ApplyOutcome::Accepted(Receipt::Promotion(receipt)) => {
+                assert_eq!(receipt.backend_key, "42");
+                assert_eq!(receipt.display_id, "gh-42");
+            }
+            other => panic!("expected a Promotion receipt, got {other:?}"),
+        }
     }
 
     #[test]

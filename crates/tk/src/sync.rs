@@ -10,9 +10,10 @@
 //!    captured stderr), which the engine merges via [`merge_backend_snapshots`].
 //!    The merge transaction is skipped when the Pull is empty so an idle sync
 //!    takes no write lock.
-//! 2. Apply loop. [`load_applicable_mutations`] returns pending+failed
-//!    [`MutationView`]s in sequence order. Each is handed to
-//!    [`Adapter::apply_mutation`], then persisted via [`apply_mutation_outcome`].
+//! 2. Apply loop. [`load_applicable_mutations`] decodes the pending+failed
+//!    rows in sequence order; [`resolve_mutation_view`] binds each one's
+//!    backend identity in turn, immediately before it is handed to
+//!    [`Adapter::apply_mutation`] and persisted via [`apply_mutation_outcome`].
 //!    The loop stops at the first [`ApplyOutcome::Rejected`].
 //!
 //! `tk sync --skip <id>` does NOT pass through the engine — the command calls
@@ -29,6 +30,7 @@ use crate::remote::adapter::{Adapter, ApplyError, PullError};
 use crate::store::sync::{
     ApplyMutationOutcomeError, LoadApplicableError, MergeError, active_backend_keys,
     apply_mutation_outcome, load_applicable_mutations, merge_backend_snapshots,
+    resolve_mutation_view,
 };
 
 /// Summary of one sync run for the calling command to render.
@@ -102,9 +104,15 @@ pub fn run_sync(
     // Apply loop. An environment failure from `apply_mutation` bubbles via `?`
     // and leaves the row `pending` (no outcome persisted); a per-Mutation
     // rejection is persisted and stops the loop.
-    let views = load_applicable_mutations(conn)?;
-    for view in &views {
-        let outcome = adapter.apply_mutation(view, now)?;
+    //
+    // Decode is batched (one undecodable row fails the run before any backend
+    // write); backend identity is resolved per Mutation, immediately before
+    // Apply, so a Promotion receipt committed earlier in this run is visible to
+    // the Mutations ordered behind it (ADR-0036).
+    let rows = load_applicable_mutations(conn)?;
+    for row in &rows {
+        let view = resolve_mutation_view(conn, row)?;
+        let outcome = adapter.apply_mutation(&view, now)?;
         apply_mutation_outcome(conn, view.sequence, &outcome, now)?;
         match outcome {
             ApplyOutcome::Accepted(_) => report.applied_count += 1,
@@ -478,6 +486,134 @@ mod tests {
             .query_row("select title from items where id = 't1'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(title, "Local Edit");
+    }
+
+    #[test]
+    fn a_receipt_supplies_the_identity_a_later_mutation_in_the_same_run_needs() {
+        // The point of resolving identity per Mutation (ADR-0036): the
+        // `set_item_status` behind the Promotion targets an Item that was still
+        // Local when the run started, and reaches the backend only because the
+        // Promotion's receipt landed first.
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Local work",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "promote_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
+                state: "pending",
+                promotion_operation_id: Some("op-1"),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 2,
+                mutation_type: "set_item_status",
+                item_id: "t1",
+                payload_json: r#"{"status":"done"}"#,
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        let mut fake = FakeAdapter::new(
+            vec![PullResponse::Snapshots(vec![])],
+            vec![
+                ApplyResponse::PromotionSuccess {
+                    backend_key: "42".into(),
+                    display_id: "gh-42".into(),
+                },
+                ApplyResponse::Success,
+            ],
+        );
+        let report = run(&mut conn, &mut fake).unwrap();
+        assert_eq!(report.applied_count, 2);
+
+        assert_eq!(
+            fake.captured_applies[0].backend_key, None,
+            "the Promotion itself targets a Local Item"
+        );
+        assert_eq!(
+            fake.captured_applies[1].backend_key.as_deref(),
+            Some("42"),
+            "the following Mutation saw the identity the receipt assigned"
+        );
+
+        let (display, origin, key): (String, String, String) = conn
+            .query_row(
+                "select display_value, origin, backend_key from items where id = 't1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(display, "gh-42");
+        assert_eq!(origin, "backend");
+        assert_eq!(key, "42");
+    }
+
+    #[test]
+    fn an_undecodable_applicable_row_fails_the_run_before_any_apply() {
+        // Decode stays batched so a Mutation Log row this build cannot project
+        // stops the run before any backend write, including the applicable rows
+        // ordered ahead of it.
+        let mut conn = open_seeded();
+        backend_ticket(&conn, "t1", "gh-1", "1", 1);
+        seed_remote(&conn);
+        update_ticket_mutation(&conn, 1, "t1", "A");
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 2,
+                mutation_type: "add_external_blocker",
+                item_id: "t1",
+                payload_json: "{}",
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        let mut fake = FakeAdapter::new(vec![PullResponse::Snapshots(vec![])], vec![]);
+        let err = run(&mut conn, &mut fake).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                RunSyncError::Load(LoadApplicableError::PayloadVariantMissing(
+                    crate::domain::mutation_type::MutationType::AddExternalBlocker
+                ))
+            ),
+            "expected the decode to fail the run, got {err:?}"
+        );
+
+        assert!(
+            fake.captured_applies.is_empty(),
+            "no backend write happened"
+        );
+        let pending: i64 = conn
+            .query_row(
+                "select count(*) from mutations where state = 'pending'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending, 2, "both rows still applicable");
     }
 
     #[test]

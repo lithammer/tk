@@ -5,12 +5,13 @@
 //! [`repository`] facade exposing typed item operations
 //! (open / resolve / list / next / show / create / update / status / dependency),
 //! the [`sync`] helpers (Pull merge, Mutation Log decode + state transitions,
-//! Remote read), and the `sql_value` SQLite value mapping for the domain
-//! enums.
+//! Remote read), [`promotion`] receipt application (Local Item → Backend Item
+//! in place), and the `sql_value` SQLite value mapping for the domain enums.
 
 pub mod display_prefix;
 pub mod migrations;
 pub mod mutations;
+pub mod promotion;
 pub mod repository;
 pub mod sequences;
 mod sql_value;
