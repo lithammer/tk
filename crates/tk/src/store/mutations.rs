@@ -632,6 +632,65 @@ mod tests {
     }
 
     #[test]
+    fn every_promotion_mutation_type_makes_its_item_pending_promotion() {
+        // `resolve_backend_intent`'s `mutation_type in (...)` list is a second
+        // encoding of `MutationType::is_promotion`. A Promotion kind the SQL
+        // does not name resolves as Local, silently reopening every write gate
+        // ADR-0036 put on Backend Intent — so a new kind belongs in that query
+        // (and in the `mutations` CHECK), not in an exemption here.
+        let payload = MutationPayload::Promotion(Promotion {
+            title: "Local".into(),
+            body: String::new(),
+            backend_kind: "github".into(),
+        })
+        .to_json_string();
+
+        for mutation_type in MutationType::ALL.into_iter().filter(|t| t.is_promotion()) {
+            let conn = open_seeded();
+            seed_local_ticket(&conn, "t1", "tk-1");
+            insert_fixture_item(
+                &conn,
+                FixtureItem {
+                    id: "e1",
+                    display: "tk-2",
+                    item_class: "epic",
+                    ticket_kind: None,
+                    priority: None,
+                    title: "Local epic",
+                    created_seq: 2,
+                    ..FixtureItem::default()
+                },
+            )
+            .unwrap();
+            // The `mutations` composite foreign key pins item_class to the
+            // Item's own class, so each Promotion kind needs its own target.
+            let (item_id, item_class) = match mutation_type {
+                MutationType::PromoteEpic => ("e1", "epic"),
+                _ => ("t1", "ticket"),
+            };
+            insert_fixture_mutation(
+                &conn,
+                FixtureMutation {
+                    mutation_type: mutation_type.text(),
+                    item_id,
+                    item_class,
+                    payload_json: &payload,
+                    ..FixtureMutation::default()
+                },
+            )
+            .unwrap();
+
+            assert_eq!(
+                resolve_backend_intent(&conn, item_id).unwrap(),
+                BackendIntent::PendingPromotion {
+                    backend_kind: "github".into()
+                },
+                "{mutation_type} must leave its Item Pending Promotion"
+            );
+        }
+    }
+
+    #[test]
     fn a_promotion_payload_that_does_not_decode_is_a_typed_fault() {
         let conn = open_seeded();
         seed_local_ticket(&conn, "t1", "tk-1");

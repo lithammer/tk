@@ -28,6 +28,26 @@ pub enum MutationType {
 }
 
 impl MutationType {
+    /// Every V1 Mutation kind, written out rather than derived for the same
+    /// reason [`text`] is: a caller that has to reason over the whole set —
+    /// checking a stored spelling, or that a rule agrees with the SQL encoding
+    /// it a second time — reads this list instead of maintaining its own.
+    ///
+    /// [`text`]: MutationType::text
+    pub const ALL: [Self; 11] = [
+        Self::UpdateTicket,
+        Self::UpdateEpic,
+        Self::SetItemStatus,
+        Self::AddTicketToEpic,
+        Self::RemoveTicketFromEpic,
+        Self::AddDependency,
+        Self::RemoveDependency,
+        Self::AddExternalBlocker,
+        Self::ResolveExternalBlocker,
+        Self::PromoteTicket,
+        Self::PromoteEpic,
+    ];
+
     /// SQL-compatible text spelling. Matches the
     /// `mutations.mutation_type` CHECK constraint exactly.
     #[must_use]
@@ -44,6 +64,30 @@ impl MutationType {
             Self::ResolveExternalBlocker => "resolve_external_blocker",
             Self::PromoteTicket => "promote_ticket",
             Self::PromoteEpic => "promote_epic",
+        }
+    }
+
+    /// Whether this Mutation creates the backend object rather than editing one
+    /// the Backend already has (ADR-0036).
+    ///
+    /// A Promotion is the Mutation every other Mutation of the same Promotion
+    /// Operation is ordered behind: its receipt carries the identity they
+    /// address, so it cannot be skipped and its acceptance converts the Item.
+    /// Written as an exhaustive match so a third Promotion kind has to answer
+    /// here instead of silently reading as an ordinary Mutation.
+    #[must_use]
+    pub fn is_promotion(self) -> bool {
+        match self {
+            Self::PromoteTicket | Self::PromoteEpic => true,
+            Self::UpdateTicket
+            | Self::UpdateEpic
+            | Self::SetItemStatus
+            | Self::AddTicketToEpic
+            | Self::RemoveTicketFromEpic
+            | Self::AddDependency
+            | Self::RemoveDependency
+            | Self::AddExternalBlocker
+            | Self::ResolveExternalBlocker => false,
         }
     }
 }
@@ -86,25 +130,21 @@ impl FromStr for MutationType {
 mod tests {
     use super::*;
 
-    const ALL: &[MutationType] = &[
-        MutationType::UpdateTicket,
-        MutationType::UpdateEpic,
-        MutationType::SetItemStatus,
-        MutationType::AddTicketToEpic,
-        MutationType::RemoveTicketFromEpic,
-        MutationType::AddDependency,
-        MutationType::RemoveDependency,
-        MutationType::AddExternalBlocker,
-        MutationType::ResolveExternalBlocker,
-        MutationType::PromoteTicket,
-        MutationType::PromoteEpic,
-    ];
-
     #[test]
     fn every_variant_round_trips_through_text_and_from_str() {
-        for t in ALL {
-            assert_eq!(MutationType::from_str(t.text()), Ok(*t));
+        for t in MutationType::ALL {
+            assert_eq!(MutationType::from_str(t.text()), Ok(t));
         }
+    }
+
+    #[test]
+    fn only_the_promote_kinds_are_promotions() {
+        let promotions: Vec<&str> = MutationType::ALL
+            .into_iter()
+            .filter(|t| t.is_promotion())
+            .map(MutationType::text)
+            .collect();
+        assert_eq!(promotions, vec!["promote_ticket", "promote_epic"]);
     }
 
     #[test]

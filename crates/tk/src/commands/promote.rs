@@ -30,9 +30,10 @@ use crate::domain::backend_intent::BackendIntent;
 use crate::domain::backend_kind::BackendKind;
 use crate::domain::dependency_rule::DependencyRejection;
 use crate::domain::item_class::ItemClass;
-use crate::domain::mutation_type::MutationType;
+use crate::domain::mutation_state::MutationState;
 use crate::domain::promotion_graph::{GraphItem, PromotionGraph};
-use crate::promotion::plan::{DependencyRemedy, PromotionFinding, PromotionPlan, plan_promotion};
+use crate::domain::promotion_plan::PromotionPlan;
+use crate::promotion::plan::{DependencyRemedy, PromotionFinding, plan_promotion};
 use crate::remote::adapter::Adapter;
 use crate::remote::factory::{self, OpenError as FactoryOpenError};
 use crate::store::mutations::AppendError;
@@ -100,10 +101,12 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     let Some(mut adapter) = adapter_opt else {
         return Err(no_remote());
     };
-    let backend: BackendKind = remote
-        .backend_kind
-        .parse()
-        .expect("the factory opens an Adapter only for a Backend kind this build knows");
+    // The factory already read and dispatched on this text, so a value that
+    // does not parse means the `remotes` row changed between the two reads —
+    // the same concurrency the `Ok(None)` arm covers, reported the same way.
+    let Ok(backend) = remote.backend_kind.parse::<BackendKind>() else {
+        return Err(no_remote());
+    };
 
     promote(
         deps,
@@ -141,7 +144,7 @@ fn promote(
     let operation_id =
         store_promotion::commit_promotion_plan(store.conn_mut(), &plan, &mut *deps.rng, now)
             .map_err(commit_error)?;
-    if operation_id.is_none() {
+    if plan.is_empty() {
         render_nothing_to_promote(deps.stdout, target_item(&graph));
     }
 
@@ -153,9 +156,16 @@ fn promote(
 
     // An empty plan owns no Mutations to resolve, so re-invoking on work that
     // is already Backend or already Pending Promotion stays an idempotent
-    // success.
+    // success — but only if the drain this invocation ran actually finished.
+    // Reporting Ok while the sync it just ran failed would tell an agent the
+    // Promotion landed when it is still pending.
     let Some(operation_id) = operation_id else {
-        return Ok(Exit::Ok);
+        return match sync_error {
+            Some(err) => Err(CommandError::failure(format!(
+                "nothing to promote, but the sync that followed did not finish\n{err}"
+            ))),
+            None => Ok(Exit::Ok),
+        };
     };
     let unresolved = store_promotion::unresolved_operation_mutations(store.conn(), &operation_id)
         .map_err(|e| resolver::storage_error(&e))?;
@@ -197,12 +207,7 @@ fn capture_display_ids(graph: &PromotionGraph, plan: &PromotionPlan) -> Vec<Capt
     let promoted: HashSet<&str> = plan
         .mutations
         .iter()
-        .filter(|m| {
-            matches!(
-                m.mutation_type,
-                MutationType::PromoteTicket | MutationType::PromoteEpic
-            )
-        })
+        .filter(|m| m.mutation_type.is_promotion())
         .map(|m| m.item_id.as_str())
         .collect();
     graph
@@ -287,20 +292,22 @@ fn unresolved_failure(
                 "the Promotion is committed and remains pending behind Mutation {} ({}) for {}",
                 blocker.sequence, blocker.state, blocker.target_display_id
             ),
-            format!(
-                "Resolve that Mutation — 'tk sync log {}' shows why it stopped — then run 'tk sync' to apply the Promotion.",
-                blocker.sequence
-            ),
+            match blocker.state {
+                MutationState::Failed => format!(
+                    "Resolve that Mutation — 'tk sync log {}' shows why it stopped — then run 'tk sync' to apply the Promotion.",
+                    blocker.sequence
+                ),
+                // Never attempted, so there is nothing recorded against it and
+                // nothing to resolve — see `recovery_guidance`.
+                _ => "Fix the cause above, then run 'tk sync' to apply the Promotion.".to_owned(),
+            },
         ),
         _ => (
             format!(
                 "the Promotion did not finish: Mutation {} ({}) for {} is unresolved",
                 unresolved.sequence, unresolved.state, unresolved.target_display_id
             ),
-            format!(
-                "Inspect it with 'tk sync log {}', then run 'tk sync' to apply the rest of the Promotion.",
-                unresolved.sequence
-            ),
+            recovery_guidance(unresolved),
         ),
     };
     // An environment failure writes no Mutation outcome, so the Mutation Log
@@ -311,6 +318,27 @@ fn unresolved_failure(
         None => String::new(),
     };
     CommandError::failure(format!("{headline}{cause}\n{guidance}"))
+}
+
+/// The next step for a Mutation that stopped the sync, keyed on whether it
+/// carries a recorded failure to read.
+///
+/// A Mutation the engine never resolved is still `pending` with no
+/// `failure_json`: an environment failure writes no outcome (ADR-0009), and a
+/// Mutation ordered behind the stopping point was never attempted. `tk sync
+/// log` on such a row renders no Failure block, so sending the reader there
+/// answers nothing — the cause is the line above. Only a `failed` row has
+/// something recorded for them to inspect.
+fn recovery_guidance(mutation: &MutationStatus) -> String {
+    match mutation.state {
+        MutationState::Failed => format!(
+            "Inspect it with 'tk sync log {}', then run 'tk sync' to apply the rest of the Promotion.",
+            mutation.sequence
+        ),
+        _ => {
+            "Fix the cause above, then run 'tk sync' to apply the rest of the Promotion.".to_owned()
+        }
+    }
 }
 
 /// Refuse the operation with every preflight finding.
@@ -419,6 +447,7 @@ mod tests {
     use super::*;
     use crate::clock::FakeClock;
     use crate::domain::mutation_state::MutationState;
+    use crate::domain::mutation_type::MutationType;
     use crate::domain::promotion_capability::PromotionCapabilities;
     use crate::domain::ticket_kind::TicketKind;
     use crate::proc::{FakeRunner, ProcError, RunOutput};
@@ -538,19 +567,9 @@ mod tests {
         .unwrap();
     }
 
-    fn all_capabilities() -> PromotionCapabilities {
-        PromotionCapabilities::none()
-            .with_item_class(ItemClass::Ticket)
-            .with_item_class(ItemClass::Epic)
-            .with_ticket_kind(TicketKind::Task)
-            .with_ticket_kind(TicketKind::Bug)
-            .with_dependencies()
-            .with_epic_membership()
-    }
-
     fn adapter(applies: Vec<ApplyResponse>) -> FakeAdapter {
         FakeAdapter::new(vec![PullResponse::Snapshots(vec![])], applies)
-            .with_capabilities(all_capabilities())
+            .with_capabilities(PromotionCapabilities::all())
     }
 
     /// Drive `run` and frame any error exactly as the dispatch seam does
@@ -939,6 +958,82 @@ mod tests {
     }
 
     #[test]
+    fn a_dependency_reaches_the_backend_with_both_endpoints_resolved() {
+        // The whole point of ordering item Promotions ahead of the relationship
+        // Mutations that name them, and of resolving backend identity per
+        // Mutation instead of at load time (ADR-0036): by the time
+        // `add_dependency` applies, both endpoints have receipts. Neither half
+        // is covered elsewhere — the plan test asserts order without applying,
+        // and the engine test resolves a target but never a counterpart.
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        local_epic(&conn, "e1", "tk-1", 1);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "c1",
+                display: "tk-2",
+                title: "Blocking child",
+                container_id: Some("e1"),
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "c2",
+                display: "tk-3",
+                title: "Blocked child",
+                container_id: Some("e1"),
+                created_seq: 3,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_dependency(&conn, "c1", "c2").unwrap();
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        let mut st = open_store(&h, &store, &cwd_path);
+        // Three Promotions, then the two memberships and the Dependency.
+        let mut fake = adapter(vec![
+            ApplyResponse::PromotionSuccess {
+                backend_key: "1".into(),
+                display_id: "gh-1".into(),
+            },
+            ApplyResponse::PromotionSuccess {
+                backend_key: "2".into(),
+                display_id: "gh-2".into(),
+            },
+            ApplyResponse::PromotionSuccess {
+                backend_key: "3".into(),
+                display_id: "gh-3".into(),
+            },
+            ApplyResponse::Success,
+            ApplyResponse::Success,
+            ApplyResponse::Success,
+        ]);
+
+        let code = promote_rendered(&mut h, &mut st, &mut fake, "tk-1", true);
+
+        assert_eq!(code, Exit::Ok, "stderr={}", h.err());
+        let dependency = fake
+            .captured_applies
+            .iter()
+            .find(|call| call.mutation_type == MutationType::AddDependency)
+            .expect("the plan queues the Dependency between the two Promotion Children");
+        assert_eq!(
+            (
+                dependency.backend_key.as_deref(),
+                dependency.counterpart_backend_key.as_deref(),
+            ),
+            (Some("3"), Some("2")),
+            "the Blocked Item and its Blocking Item both reach the Adapter addressable"
+        );
+    }
+
+    #[test]
     fn an_already_backend_target_appends_nothing_and_succeeds() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
@@ -968,6 +1063,33 @@ mod tests {
         assert_eq!(mutation_count(&conn).unwrap(), 0);
         // The sync still ran: the Adopted working set's key was pulled.
         assert_eq!(fake.captured_pull_keys, vec![vec!["7".to_string()]]);
+    }
+
+    #[test]
+    fn nothing_to_promote_still_reports_a_drain_that_did_not_finish() {
+        // The empty plan is the re-invocation case, so this run's whole job was
+        // to drain the earlier Promotion. Exiting 0 with an empty stderr would
+        // tell an agent the Promotion landed while it is still pending.
+        let store = TmpStore::new("repo");
+        let mut conn = seed_store(&store);
+        local_ticket(&conn, "t1", "tk-1", 1);
+        commit_promotion(&mut conn, "t1");
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        let mut st = open_store(&h, &store, &cwd_path);
+        let mut fake = adapter(vec![ApplyResponse::EnvFailure(
+            ProcError::ExecutableNotFound,
+        )]);
+
+        let code = promote_rendered(&mut h, &mut st, &mut fake, "tk-1", false);
+
+        assert_eq!(code, Exit::Failure);
+        assert_eq!(h.out(), "Promotion already pending: tk-1\n");
+        assert_eq!(
+            h.err(),
+            "tk promote: nothing to promote, but the sync that followed did not finish\n\
+             executable not found on PATH\n"
+        );
     }
 
     #[test]
@@ -1132,7 +1254,7 @@ mod tests {
             h.err(),
             "tk promote: the Promotion did not finish: Mutation 1 (pending) for tk-1 is unresolved\n\
              Sync stopped: executable not found on PATH\n\
-             Inspect it with 'tk sync log 1', then run 'tk sync' to apply the rest of the Promotion.\n"
+             Fix the cause above, then run 'tk sync' to apply the rest of the Promotion.\n"
         );
         assert_eq!(mutation_count(&conn).unwrap(), 1);
     }

@@ -40,10 +40,10 @@ pub enum ApplyOutcome {
 
 /// Adapter-supplied evidence that a Mutation succeeded.
 ///
-/// The nine idempotent Mutation Types edit an object the backend already has,
-/// so their receipt is a bare [`Receipt::Acknowledged`]. `promote_ticket` and
-/// `promote_epic` create the object, so their receipt carries the identity the
-/// Backend Adapter assigned to it (ADR-0036 "Promotion applies through the
+/// Every Mutation Type except `promote_ticket` / `promote_epic` edits an object
+/// the backend already has, so its receipt is a bare [`Receipt::Acknowledged`].
+/// The two Promotions create the object, so their receipt carries the identity
+/// the Backend Adapter assigned to it (ADR-0036 "Promotion applies through the
 /// existing Apply seam").
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Receipt {

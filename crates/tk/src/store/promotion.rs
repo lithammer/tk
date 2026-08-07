@@ -7,9 +7,9 @@
 //! reasons over them owns every decision.
 //!
 //! [`commit_promotion_plan`] writes the planner's ordered
-//! [`crate::promotion::plan::PromotionPlan`] to the Mutation Log outbox as one
-//! Promotion Operation, in the single local transaction ADR-0035 requires
-//! before any Backend call.
+//! [`crate::domain::promotion_plan::PromotionPlan`] to the Mutation Log outbox
+//! as one Promotion Operation, in the single local transaction ADR-0035
+//! requires before any Backend call.
 //!
 //! [`apply_promotion_receipt`] runs inside the caller's open transaction — it
 //! takes a borrowed connection and neither begins nor commits one — so the
@@ -32,7 +32,7 @@ use crate::domain::apply_outcome::PromotionReceipt;
 use crate::domain::mutation_state::MutationState;
 use crate::domain::origin::Origin;
 use crate::domain::promotion_graph::{GraphDependency, GraphItem, PromotionGraph};
-use crate::promotion::plan::PromotionPlan;
+use crate::domain::promotion_plan::PromotionPlan;
 use crate::store::mutations;
 use crate::store::repository::create::generate_internal_id;
 
@@ -196,8 +196,8 @@ pub enum CommitPlanError {
 ///
 /// An empty plan is a legitimate no-op — re-invoking `tk promote` on work
 /// already Backend or already Pending Promotion appends nothing (see
-/// [`crate::promotion::plan::PromotionPlan::is_empty`]) — and returns `None`
-/// rather than minting an identity that would own zero Mutations.
+/// [`crate::domain::promotion_plan::PromotionPlan::is_empty`]) — and returns
+/// `None` rather than minting an identity that would own zero Mutations.
 pub fn commit_promotion_plan<R: Rng + ?Sized>(
     conn: &mut Connection,
     plan: &PromotionPlan,
@@ -356,8 +356,8 @@ mod tests {
     use crate::domain::item_class::ItemClass;
     use crate::domain::mutation_payload::{MutationPayload, Promotion, TitleBody};
     use crate::domain::mutation_type::MutationType;
+    use crate::domain::promotion_plan::MutationDraft;
     use crate::domain::status::ItemStatus;
-    use crate::promotion::plan::MutationDraft;
     use crate::store::migrations;
     use crate::store::repository::resolve_item_ref;
     use crate::store::testing::{
@@ -844,6 +844,17 @@ mod tests {
         StdRng::seed_from_u64(7)
     }
 
+    /// The `mutation_seq` counter's current value. It lives in `sequences`,
+    /// not in `mutations`, so a rollback has to return it separately from the
+    /// rows an aborted batch wrote.
+    fn mutation_seq(conn: &Connection) -> rusqlite::Result<i64> {
+        conn.query_row(
+            "select value from sequences where name = 'mutation_seq'",
+            [],
+            |r| r.get(0),
+        )
+    }
+
     /// A `promote_ticket` draft naming `item_id`. The payload shape is not
     /// under test here — every draft reuses the same Promotion payload so
     /// the tests can focus on ordering, stamping, and atomicity.
@@ -938,6 +949,7 @@ mod tests {
             mutations: vec![draft("t1"), draft("missing")],
         };
 
+        let before = mutation_seq(&conn).unwrap();
         let err = commit_promotion_plan(&mut conn, &plan, &mut seeded_rng(), NOW).unwrap_err();
 
         assert!(
@@ -951,6 +963,15 @@ mod tests {
             mutation_count(&conn).unwrap(),
             0,
             "the draft that appended before the failure must not survive the rollback"
+        );
+        // The first draft appended before the second failed, consuming a
+        // Mutation Sequence from a different table than the row it wrote. An
+        // empty log alone does not prove that allocation came back; without it
+        // the next `tk promote` would open at a gap.
+        assert_eq!(
+            mutation_seq(&conn).unwrap(),
+            before,
+            "the rollback must return the Mutation Sequence counter too"
         );
     }
 

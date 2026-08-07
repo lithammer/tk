@@ -20,6 +20,7 @@ use crate::domain::mutation_payload::{
 use crate::domain::mutation_type::MutationType;
 use crate::domain::promotion_capability::PromotionCapabilities;
 use crate::domain::promotion_graph::{GraphItem, PromotionGraph};
+use crate::domain::promotion_plan::{MutationDraft, PromotionPlan};
 use crate::domain::selection_state::SelectionState;
 use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
@@ -102,53 +103,17 @@ impl DependencyRemedy {
     }
 }
 
-/// One Mutation the plan will append.
-///
-/// It carries no Promotion Operation: that identity is one per `tk promote`
-/// invocation and the outbox writer stamps it across the whole batch
-/// (ADR-0036).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MutationDraft {
-    pub mutation_type: MutationType,
-    /// Internal stable `items.id` the Mutation targets: the Blocked Item for
-    /// a Dependency, the Ticket for Epic membership.
-    pub item_id: String,
-    pub item_class: ItemClass,
-    pub payload: MutationPayload,
-}
-
-/// The ordered Mutations one `tk promote` invocation commits.
-///
-/// The order is the outbox contract (ADR-0035): item Promotions first, then
-/// the relationship Mutations whose payloads name Items those Promotions
-/// create, then the status pushes. Backend identities resolve as each
-/// Mutation is applied, after the preceding Promotion receipts have assigned
-/// them.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct PromotionPlan {
-    pub mutations: Vec<MutationDraft>,
-}
-
-impl PromotionPlan {
-    /// Whether the operation found nothing to promote. Re-invoking
-    /// `tk promote` on work that is already Backend or already Pending
-    /// Promotion is a success that appends nothing.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.mutations.is_empty()
-    }
-}
-
 /// Sort key for relationship work: the creation order of the first endpoint,
 /// then of the second. Dependencies order by (Blocked, Blocking) and Epic
 /// membership by (Ticket, Epic), so findings and Mutations about the same
 /// pair of Items land together whichever relationship they describe.
 type EndpointOrder = (i64, i64);
 
-/// Both endpoints of every edge, and the containing Epic of every Item in the
-/// snapshot, are present in `PromotionGraph::items` by the snapshot's own
-/// contract. A missing one is a `read_promotion_graph` fault, not user input.
-const GRAPH_IS_CLOSED: &str = "PromotionGraph carries every Item its edges and containers name";
+/// Both endpoints of every edge are present in `PromotionGraph::items` by the
+/// snapshot's own contract — edges are collected from the Items, so neither
+/// endpoint can be one the read never saw. A missing one is a
+/// `read_promotion_graph` fault, not user input.
+const GRAPH_IS_CLOSED: &str = "PromotionGraph carries both endpoints of every edge it names";
 
 /// Preflight a `tk promote` of `graph.target_id` against `backend`, the
 /// Backend the configured Remote names.
@@ -263,7 +228,15 @@ pub fn plan_promotion(
         if !promoted.contains(ticket.id.as_str()) && !promoted.contains(container_id) {
             continue;
         }
-        let epic = *by_id.get(container_id).expect(GRAPH_IS_CLOSED);
+        // A container absent from the snapshot is a torn concurrent edit, not a
+        // graph fault: `read_promotion_graph` collects the item set first and
+        // re-reads each Item's `container_id` second, un-transacted, so a
+        // `tk update --parent` committing in between names an Epic the read
+        // never saw. Nothing can be decided about a membership only half of
+        // which is visible, so it is skipped rather than guessed at.
+        let Some(epic) = by_id.get(container_id).copied() else {
+            continue;
+        };
         // Membership becomes backend intent only when Ticket and Epic are
         // backed by the same Backend after the operation. Mixed-Origin
         // membership stays local and is not a problem.
@@ -488,18 +461,8 @@ mod tests {
         }
     }
 
-    fn all_capabilities() -> PromotionCapabilities {
-        PromotionCapabilities::none()
-            .with_item_class(ItemClass::Ticket)
-            .with_item_class(ItemClass::Epic)
-            .with_ticket_kind(TicketKind::Task)
-            .with_ticket_kind(TicketKind::Bug)
-            .with_dependencies()
-            .with_epic_membership()
-    }
-
     fn plan(graph: &PromotionGraph) -> PromotionPlan {
-        plan_promotion(graph, all_capabilities(), BackendKind::Github).expect("plan")
+        plan_promotion(graph, PromotionCapabilities::all(), BackendKind::Github).expect("plan")
     }
 
     fn findings(
@@ -636,7 +599,7 @@ mod tests {
         );
 
         assert_eq!(
-            findings(&g, all_capabilities()),
+            findings(&g, PromotionCapabilities::all()),
             vec![PromotionFinding::TriageTicket {
                 item: ItemRef {
                     id: "t1".to_owned(),
@@ -742,7 +705,7 @@ mod tests {
         );
 
         assert_eq!(
-            findings(&g, all_capabilities()),
+            findings(&g, PromotionCapabilities::all()),
             vec![PromotionFinding::DependencyRejected {
                 blocked: ItemRef {
                     id: "t1".to_owned(),
@@ -769,7 +732,7 @@ mod tests {
         );
 
         assert!(matches!(
-            findings(&g, all_capabilities()).as_slice(),
+            findings(&g, PromotionCapabilities::all()).as_slice(),
             [PromotionFinding::DependencyRejected {
                 reason: DependencyRejection::BackendKindMismatch,
                 remedy: DependencyRemedy::Unblock,

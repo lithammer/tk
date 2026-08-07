@@ -98,9 +98,8 @@ impl Adapter for GithubAdapter<'_> {
                         "load_applicable_mutations pairs update_ticket with UpdateTitleBody"
                     )
                 };
-                let number = match backend_number(view) {
-                    Ok(n) => n,
-                    Err(rejection) => return Ok(rejection),
+                let Some(number) = backend_number(view) else {
+                    return Ok(target_has_no_backend_identity());
                 };
                 self.run_apply(&[
                     "gh", "issue", "edit", number, "--title", &tb.title, "--body", &tb.body,
@@ -120,9 +119,8 @@ impl Adapter for GithubAdapter<'_> {
                         )));
                     }
                 };
-                let number = match backend_number(view) {
-                    Ok(n) => n,
-                    Err(rejection) => return Ok(rejection),
+                let Some(number) = backend_number(view) else {
+                    return Ok(target_has_no_backend_identity());
                 };
                 self.run_apply(&["gh", "issue", verb, number])
             }
@@ -133,13 +131,11 @@ impl Adapter for GithubAdapter<'_> {
             // adapter requires `gh` >= 2.94.0; an older `gh` rejects the unknown
             // flag and the Mutation fails like any other (no longer no-op).
             MutationType::AddDependency => {
-                let number = match backend_number(view) {
-                    Ok(n) => n,
-                    Err(rejection) => return Ok(rejection),
+                let Some(number) = backend_number(view) else {
+                    return Ok(target_has_no_backend_identity());
                 };
-                let counterpart = match counterpart_number(view) {
-                    Ok(c) => c,
-                    Err(rejection) => return Ok(rejection),
+                let Some(counterpart) = counterpart_number(view) else {
+                    return Ok(blocking_item_has_no_backend_identity());
                 };
                 self.run_apply(&[
                     "gh",
@@ -151,13 +147,11 @@ impl Adapter for GithubAdapter<'_> {
                 ])
             }
             MutationType::RemoveDependency => {
-                let number = match backend_number(view) {
-                    Ok(n) => n,
-                    Err(rejection) => return Ok(rejection),
+                let Some(number) = backend_number(view) else {
+                    return Ok(target_has_no_backend_identity());
                 };
-                let counterpart = match counterpart_number(view) {
-                    Ok(c) => c,
-                    Err(rejection) => return Ok(rejection),
+                let Some(counterpart) = counterpart_number(view) else {
+                    return Ok(blocking_item_has_no_backend_identity());
                 };
                 self.run_apply(&[
                     "gh",
@@ -168,14 +162,14 @@ impl Adapter for GithubAdapter<'_> {
                     counterpart,
                 ])
             }
-            // Epic-membership Apply is deferred to tk-132, Epic creation to
-            // tk-137. GitHub's promotion_capabilities() below declares
+            // No-op Accepted is ADR-0021's shape for a facet GitHub does not
+            // yet sync: Epic-membership Apply is deferred to tk-132 and Epic
+            // creation to tk-137. GitHub's `promotion_capabilities()` declares
             // neither representable, so ADR-0036 preflight refuses any
-            // Promotion that would create a GitHub Backend Epic or
-            // membership in one before either Mutation reaches the outbox —
-            // this arm never sees one naming a real backend parent. No-op
-            // Accepted keeps the queue draining instead of wedging on a
-            // permanent rejection.
+            // Promotion that would create a GitHub Backend Epic or membership
+            // in one before either Mutation reaches the outbox — this arm never
+            // sees one naming a real backend parent. Accepting keeps the queue
+            // draining instead of wedging on a permanent rejection.
             MutationType::UpdateEpic
             | MutationType::AddTicketToEpic
             | MutationType::RemoveTicketFromEpic => Ok(ApplyOutcome::accepted()),
@@ -204,28 +198,36 @@ impl Adapter for GithubAdapter<'_> {
     }
 }
 
-/// The GitHub issue number for a Ticket Mutation, or the rejection to return
-/// when the target Item has no backend identity. A Pending Promotion Item
-/// keeps appending ordinary Mutations behind its Promotion (ADR-0036), so a
-/// Mutation can reach Apply before the receipt that assigns its key. Owning
-/// the rejection here keeps one user-facing wording across every Apply arm.
-fn backend_number(view: &MutationView) -> Result<&str, ApplyOutcome> {
-    view.backend_key.as_deref().ok_or_else(|| {
-        ApplyOutcome::rejected(
-            "the target Item has no backend identity yet; its Promotion has not yet been applied",
-        )
-    })
+/// The GitHub issue number for a Mutation's target Item, absent while that
+/// Item has no backend identity. A Pending Promotion Item keeps appending
+/// ordinary Mutations behind its Promotion (ADR-0036), so a Mutation can reach
+/// Apply before the receipt that assigns its key.
+fn backend_number(view: &MutationView) -> Option<&str> {
+    view.backend_key.as_deref()
 }
 
 /// The GitHub issue number of a dependency Mutation's Blocking Item, resolved
-/// store-side onto `counterpart_backend_key`, or the rejection to return when
-/// that Item's Promotion has not yet been applied (ADR-0036).
-fn counterpart_number(view: &MutationView) -> Result<&str, ApplyOutcome> {
-    view.counterpart_backend_key.as_deref().ok_or_else(|| {
-        ApplyOutcome::rejected(
-            "the Blocking Item has no backend identity yet; its Promotion has not yet been applied",
-        )
-    })
+/// store-side onto `counterpart_backend_key`. Absent for the same reason
+/// [`backend_number`] is.
+fn counterpart_number(view: &MutationView) -> Option<&str> {
+    view.counterpart_backend_key.as_deref()
+}
+
+/// The rejection every Apply arm returns for a target Item whose Promotion has
+/// not yet been applied. One constructor so the wording is identical across
+/// arms and still grep-able as a literal.
+fn target_has_no_backend_identity() -> ApplyOutcome {
+    ApplyOutcome::rejected(
+        "the target Item has no backend identity yet; its Promotion has not yet been applied",
+    )
+}
+
+/// The counterpart of [`target_has_no_backend_identity`], for a dependency
+/// Mutation whose Blocking Item is still unpromoted.
+fn blocking_item_has_no_backend_identity() -> ApplyOutcome {
+    ApplyOutcome::rejected(
+        "the Blocking Item has no backend identity yet; its Promotion has not yet been applied",
+    )
 }
 
 /// Raw `gh issue view --json` shape. Only the fields tk maps are named; serde
@@ -868,7 +870,11 @@ mod tests {
             );
             match adapter.apply_mutation(&v, NOW).unwrap() {
                 ApplyOutcome::Rejected(f) => {
-                    assert!(f.detail.contains("Promotion"), "{}", f.detail);
+                    assert_eq!(
+                        f.detail,
+                        "the GitHub Backend Adapter cannot apply a Promotion in this build",
+                        "{mt}"
+                    );
                 }
                 ApplyOutcome::Accepted(_) => {
                     panic!("{mt}: GitHub declares no Promotion capability");

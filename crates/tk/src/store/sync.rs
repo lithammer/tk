@@ -429,11 +429,7 @@ pub fn apply_mutation_outcome(
 
     match outcome {
         ApplyOutcome::Accepted(receipt) => {
-            let is_promotion = matches!(
-                mutation_type,
-                MutationType::PromoteTicket | MutationType::PromoteEpic
-            );
-            match (is_promotion, receipt) {
+            match (mutation_type.is_promotion(), receipt) {
                 (true, Receipt::Promotion(promotion)) => {
                     // The Backend the Promotion targets is recorded on the
                     // payload rather than read from Remote configuration
@@ -522,8 +518,10 @@ pub enum MarkSkippedError {
     /// or names as a counterpart, an Item whose backend identity only this
     /// Promotion's receipt would assign (ADR-0036 Pending Promotion);
     /// skipping it would leave those Mutations with no key to apply against.
+    ///
     /// Abandoning a Pending Promotion is a broader recovery decision than
-    /// curating one rejected Mutation, so Sync Skip does not attempt it.
+    /// curating one rejected Mutation, and this build offers no way to do it —
+    /// the refusal says so, so a reader stops hunting for the flag.
     #[error("mutation {0} is a Promotion and cannot be skipped")]
     CannotSkipPromotion(i64),
 }
@@ -551,10 +549,7 @@ pub fn mark_mutation_skipped(
     if prior != MutationState::Failed {
         return Err(MarkSkippedError::MutationNotFailed(sequence));
     }
-    if matches!(
-        mutation_type,
-        MutationType::PromoteTicket | MutationType::PromoteEpic
-    ) {
+    if mutation_type.is_promotion() {
         return Err(MarkSkippedError::CannotSkipPromotion(sequence));
     }
 

@@ -5,12 +5,79 @@
 //! Pure domain data: no SQLite, subprocess, or rendering. Preflight reads a
 //! Backend Adapter's [`PromotionCapabilities`] and rejects before any backend
 //! call, so an Adapter never accepts Promotion intent it cannot later apply.
-//! Capability is staged facet by facet as an Adapter earns it — the GitHub
-//! Adapter declares [`PromotionCapabilities::none`] until tk-137 (Task and
-//! Epic creation) and tk-132 (Epic membership) turn facets on.
+//! Capability is staged facet by facet as an Adapter earns it: an Adapter
+//! starts at [`PromotionCapabilities::none`] and declares each facet only once
+//! it can apply the Mutations that facet admits to the outbox.
 
 use super::item_class::ItemClass;
 use super::ticket_kind::TicketKind;
+
+/// Which Item Classes a Backend Adapter can create under Promotion — one field
+/// per [`ItemClass`] variant, selected by matching on the value, so a new
+/// variant is a compile error in both the field list and every `match` here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ItemClasses {
+    ticket: bool,
+    epic: bool,
+}
+
+impl ItemClasses {
+    const NONE: Self = Self {
+        ticket: false,
+        epic: false,
+    };
+    const ALL: Self = Self {
+        ticket: true,
+        epic: true,
+    };
+
+    fn allows(self, class: ItemClass) -> bool {
+        match class {
+            ItemClass::Ticket => self.ticket,
+            ItemClass::Epic => self.epic,
+        }
+    }
+
+    fn slot(&mut self, class: ItemClass) -> &mut bool {
+        match class {
+            ItemClass::Ticket => &mut self.ticket,
+            ItemClass::Epic => &mut self.epic,
+        }
+    }
+}
+
+/// Which Ticket Kinds a Backend Adapter can create under Promotion. Shaped
+/// like [`ItemClasses`], for the same reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TicketKinds {
+    task: bool,
+    bug: bool,
+}
+
+impl TicketKinds {
+    const NONE: Self = Self {
+        task: false,
+        bug: false,
+    };
+    const ALL: Self = Self {
+        task: true,
+        bug: true,
+    };
+
+    fn allows(self, kind: TicketKind) -> bool {
+        match kind {
+            TicketKind::Task => self.task,
+            TicketKind::Bug => self.bug,
+        }
+    }
+
+    fn slot(&mut self, kind: TicketKind) -> &mut bool {
+        match kind {
+            TicketKind::Task => &mut self.task,
+            TicketKind::Bug => &mut self.bug,
+        }
+    }
+}
 
 /// What a Backend Adapter can represent under Promotion, declared per facet:
 /// which Item Classes it can create, which Ticket Kinds it can create,
@@ -19,12 +86,12 @@ use super::ticket_kind::TicketKind;
 ///
 /// Facets are queried by typed value (`can_create_item_class`,
 /// `can_create_ticket_kind`) rather than as a collection callers index
-/// themselves, so a caller asks the typed question directly instead of
-/// reaching into storage.
+/// themselves, so a caller asks the typed question directly and the enum
+/// variant, not an integer, selects the answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PromotionCapabilities {
-    item_classes: [bool; 2],
-    ticket_kinds: [bool; 2],
+    item_classes: ItemClasses,
+    ticket_kinds: TicketKinds,
     dependencies: bool,
     epic_membership: bool,
 }
@@ -35,10 +102,26 @@ impl PromotionCapabilities {
     #[must_use]
     pub fn none() -> Self {
         Self {
-            item_classes: [false, false],
-            ticket_kinds: [false, false],
+            item_classes: ItemClasses::NONE,
+            ticket_kinds: TicketKinds::NONE,
             dependencies: false,
             epic_membership: false,
+        }
+    }
+
+    /// Every facet on — the declaration a test uses when the Backend is not
+    /// what it is exercising.
+    ///
+    /// Built from the fields rather than by chaining `with_*`, so a facet added
+    /// later is a compile error here instead of leaving "everything" quietly
+    /// meaning less than it says.
+    #[must_use]
+    pub fn all() -> Self {
+        Self {
+            item_classes: ItemClasses::ALL,
+            ticket_kinds: TicketKinds::ALL,
+            dependencies: true,
+            epic_membership: true,
         }
     }
 
@@ -46,7 +129,7 @@ impl PromotionCapabilities {
     /// Backend.
     #[must_use]
     pub fn with_item_class(mut self, class: ItemClass) -> Self {
-        self.item_classes[item_class_index(class)] = true;
+        *self.item_classes.slot(class) = true;
         self
     }
 
@@ -54,7 +137,7 @@ impl PromotionCapabilities {
     /// Backend.
     #[must_use]
     pub fn with_ticket_kind(mut self, kind: TicketKind) -> Self {
-        self.ticket_kinds[ticket_kind_index(kind)] = true;
+        *self.ticket_kinds.slot(kind) = true;
         self
     }
 
@@ -75,13 +158,13 @@ impl PromotionCapabilities {
     /// Whether Promotion can create the given Item Class on this Backend.
     #[must_use]
     pub fn can_create_item_class(&self, class: ItemClass) -> bool {
-        self.item_classes[item_class_index(class)]
+        self.item_classes.allows(class)
     }
 
     /// Whether Promotion can create the given Ticket Kind on this Backend.
     #[must_use]
     pub fn can_create_ticket_kind(&self, kind: TicketKind) -> bool {
-        self.ticket_kinds[ticket_kind_index(kind)]
+        self.ticket_kinds.allows(kind)
     }
 
     /// Whether Promotion can represent a Dependency on this Backend.
@@ -94,20 +177,6 @@ impl PromotionCapabilities {
     #[must_use]
     pub fn can_represent_epic_membership(&self) -> bool {
         self.epic_membership
-    }
-}
-
-fn item_class_index(class: ItemClass) -> usize {
-    match class {
-        ItemClass::Ticket => 0,
-        ItemClass::Epic => 1,
-    }
-}
-
-fn ticket_kind_index(kind: TicketKind) -> usize {
-    match kind {
-        TicketKind::Task => 0,
-        TicketKind::Bug => 1,
     }
 }
 
@@ -124,6 +193,17 @@ mod tests {
         assert!(!caps.can_create_ticket_kind(TicketKind::Bug));
         assert!(!caps.can_represent_dependencies());
         assert!(!caps.can_represent_epic_membership());
+    }
+
+    #[test]
+    fn all_declares_every_facet() {
+        let caps = PromotionCapabilities::all();
+        assert!(caps.can_create_item_class(ItemClass::Ticket));
+        assert!(caps.can_create_item_class(ItemClass::Epic));
+        assert!(caps.can_create_ticket_kind(TicketKind::Task));
+        assert!(caps.can_create_ticket_kind(TicketKind::Bug));
+        assert!(caps.can_represent_dependencies());
+        assert!(caps.can_represent_epic_membership());
     }
 
     #[test]

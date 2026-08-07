@@ -544,9 +544,9 @@ mod tests {
 
     #[test]
     fn add_dependency_refuses_a_pending_blocked_item_waiting_on_a_local_blocking_item() {
-        // The gap ADR-0036's gate closes: while the rule read Origin, the
-        // Blocked Item still counted as local and the edge was accepted, so
-        // `tk block` could build a graph the next `tk promote` refuses.
+        // A Pending Promotion Blocked Item is backend-bound (ADR-0036), so the
+        // edge must be refused here: accepting it would let `tk block` build a
+        // graph the next `tk promote` preflight rejects.
         let mut store = open_seeded();
         seed_ticket(&store, "blocked", "tk-1", 1);
         seed_ticket(&store, "blocking", "tk-2", 2);

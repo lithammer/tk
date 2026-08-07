@@ -13,6 +13,12 @@
 //! Promotion (ADR-0036). The store resolves it; the type keeps the vocabulary
 //! out of raw origin/`backend_kind` pairs.
 //!
+//! [`promotion_graph`] and [`promotion_plan`] are the pair of contract types
+//! `tk promote` passes across the store/engine boundary: the
+//! infrastructure-free snapshot `store/` produces and the planner reasons over,
+//! and the ordered Mutations the planner returns for `store/` to commit.
+//! Neither may live inside the engine, which `store/` does not import.
+//!
 //! Two shapes are deliberately not modelled as standalone types here:
 //!
 //! - `Diagnostic` — ADR-0018 folds diagnostics into `Result<T, E>`; captured
@@ -48,6 +54,7 @@ pub mod origin;
 pub mod priority;
 pub mod promotion_capability;
 pub mod promotion_graph;
+pub mod promotion_plan;
 pub mod selection_state;
 pub mod status;
 pub mod ticket_kind;

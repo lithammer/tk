@@ -57,6 +57,11 @@ pub struct ApplyCall {
     /// test can tell a Mutation that saw a preceding Promotion receipt from one
     /// that was handed a still-Local Item.
     pub backend_key: Option<String>,
+    /// Backend identity the engine resolved for a Dependency Mutation's
+    /// Blocking Item, recorded for the same reason `backend_key` is: the
+    /// counterpart's Promotion is a separate receipt, applied earlier in the
+    /// same run.
+    pub counterpart_backend_key: Option<String>,
 }
 
 /// Strict, script-queue Backend Adapter for tests.
@@ -138,6 +143,7 @@ impl Adapter for FakeAdapter {
             item_id: view.item_id.clone(),
             payload_text: view.payload.to_json_string(),
             backend_key: view.backend_key.clone(),
+            counterpart_backend_key: view.counterpart_backend_key.clone(),
         });
 
         let response = self

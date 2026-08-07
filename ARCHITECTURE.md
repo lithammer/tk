@@ -22,7 +22,8 @@ crates/tk/src/
                            types: MutationPayload, MutationView,
                            BackendItemSnapshot, ApplyOutcome, and the
                            Promotion contract types: BackendIntent,
-                           PromotionCapabilities, PromotionGraph)
+                           PromotionCapabilities, PromotionGraph,
+                           PromotionPlan)
   git/                     Git subprocess discovery façade
   proc.rs                  subprocess runner trait and fakes
   promotion/               Promotion engine: the `tk promote` preflight planner
@@ -62,7 +63,10 @@ small boundary module after the second caller proves the shape.
 - `store/` owns Repository Store opening, migrations, current-state reads and
   writes, Display ID / Alias resolution, sequence allocation, and Mutation Log
   persistence. `store/sync.rs` exposes the SQL helpers the sync engine and
-  the `tk sync` / `tk remote` commands compose against.
+  the `tk sync` / `tk remote` commands compose against; `store/promotion.rs`
+  exposes the SQL half of `tk promote` — the preflight graph read, the
+  one-transaction outbox commit, receipt application, and the post-sync
+  Mutation Log reads.
 - `remote/` owns the type-erased Backend Adapter trait (mirroring
   `ProcRunner`), the factory that dispatches by configured backend kind, and
   the FakeAdapter used by engine tests. It imports `store/`, `proc`, and
@@ -71,6 +75,12 @@ small boundary module after the second caller proves the shape.
   store's sync helpers. Single entry point `sync::run_sync`; the engine
   reaches the database only through `store/sync.rs` helpers, never via raw
   SQL.
+- `promotion/` owns the `tk promote` preflight planner. Single entry point
+  `promotion::plan::plan_promotion`, a pure function over the `domain/`
+  Promotion contract types that reaches no database, subprocess, or Backend
+  Adapter. `store/promotion.rs` produces the `PromotionGraph` it consumes and
+  commits the `PromotionPlan` it returns; the dependency runs one way —
+  `store/` does not import `promotion/`.
 - `commands/scope.rs` owns Scope resolution (ADR-0022): the `<epic-id>`
   argument / `TK_SCOPE` precedence and Epic-only validation. `tk next` and
   `tk list` compose it; tk neither stores, infers, nor manages git worktrees.
@@ -131,7 +141,10 @@ Important stable contracts:
   state, JSON payload, and optional Mutation Failure JSON. The persisted
   failure JSON shape is `{"detail": "..."}` ([ADR
   0009](./docs/adr/0009-sync-failure-taxonomy.md)); `tk-11` graduates this
-  into a typed discriminated union.
+  into a typed discriminated union. Migration 007 adds an optional Promotion
+  Operation grouping every Mutation one `tk promote` invocation appended, so
+  the command can ask whether its whole operation resolved ([ADR
+  0036](./docs/adr/0036-promotion-intent-precedes-backend-capability.md)).
 - `remotes` and `sync_cursors` hold the v1 singleton Remote model.
 - `store_config.display_prefix` controls newly generated local Display IDs.
   Custom prefix configuration is tracked by `tk-22`.

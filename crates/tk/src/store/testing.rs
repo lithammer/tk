@@ -251,22 +251,16 @@ pub fn mutation_types(conn: &Connection) -> rusqlite::Result<Vec<String>> {
 /// or to what counts as pending breaks the gate tests too.
 pub fn commit_promotion(conn: &mut Connection, id: &str) {
     use crate::domain::backend_kind::BackendKind;
-    use crate::domain::item_class::ItemClass;
     use crate::domain::promotion_capability::PromotionCapabilities;
-    use crate::domain::ticket_kind::TicketKind;
-
-    let capabilities = PromotionCapabilities::none()
-        .with_item_class(ItemClass::Ticket)
-        .with_item_class(ItemClass::Epic)
-        .with_ticket_kind(TicketKind::Task)
-        .with_ticket_kind(TicketKind::Bug)
-        .with_dependencies()
-        .with_epic_membership();
 
     let graph = crate::store::promotion::read_promotion_graph(conn, id, false)
         .expect("read the Promotion graph");
-    let plan = crate::promotion::plan::plan_promotion(&graph, capabilities, BackendKind::Github)
-        .expect("a promotable fixture");
+    let plan = crate::promotion::plan::plan_promotion(
+        &graph,
+        PromotionCapabilities::all(),
+        BackendKind::Github,
+    )
+    .expect("a promotable fixture");
     crate::store::promotion::commit_promotion_plan(
         conn,
         &plan,

@@ -7,6 +7,11 @@
 //! `remove_ticket_from_epic` plus `add_ticket_to_epic` in that order; priority
 //! is a stored change only — Backend Adapters do not consume Priority).
 //!
+//! Title/body names one Item, so the Ticket's own Backend Intent gates it. A
+//! membership Mutation names two, so it is emitted only when Ticket and Epic
+//! are backend-bound to the same Backend — the rule Promotion preflight and
+//! `tk block` apply to their own two-endpoint relationships.
+//!
 //! `updated_at` is bumped only when at least one column actually changes;
 //! a request whose values all match the stored state commits a no-op
 //! transaction and returns the same snapshot the caller already had.
@@ -14,6 +19,7 @@
 use rusqlite::{OptionalExtension, params};
 
 use crate::clock::Clock;
+use crate::domain::backend_intent::BackendIntent;
 use crate::domain::item_class::ItemClass;
 use crate::domain::mutation_payload::{EpicRef, MutationPayload, TitleBody};
 use crate::domain::mutation_type::MutationType;
@@ -246,8 +252,11 @@ pub fn update_item<C: Clock + ?Sized>(
     // intent (ADR-0036): a title change made between `tk promote` and the next
     // `tk sync` belongs in the Mutation Log, ordered behind the Promotion that
     // will give the Item its backend identity.
-    if mutations::resolve_backend_intent(&tx, req.id)?.is_backend_bound() {
-        if let Some(old_id) = old_epic_id {
+    let intent = mutations::resolve_backend_intent(&tx, req.id)?;
+    if intent.is_backend_bound() {
+        if let Some(old_id) = old_epic_id
+            && membership_is_backend_intent(&tx, &intent, old_id)?
+        {
             mutations::append(
                 &tx,
                 mutations::AppendRequest {
@@ -262,7 +271,9 @@ pub fn update_item<C: Clock + ?Sized>(
                 },
             )?;
         }
-        if let Some(new_id) = new_epic_id {
+        if let Some(new_id) = new_epic_id
+            && membership_is_backend_intent(&tx, &intent, new_id)?
+        {
             mutations::append(
                 &tx,
                 mutations::AppendRequest {
@@ -315,6 +326,24 @@ pub fn update_item<C: Clock + ?Sized>(
         title,
         item_class: req.item_class,
     })
+}
+
+/// Whether an Epic-membership change is backend intent: the Ticket and the
+/// Epic must both be backend-bound, to the *same* Backend.
+///
+/// An `add_ticket_to_epic` / `remove_ticket_from_epic` payload names the Epic,
+/// and nothing resolves a backend identity for it — `resolve_mutation_view`
+/// resolves a counterpart only for a Dependency payload — so a membership
+/// naming a Local Epic would reach the Backend Adapter unaddressable. Both
+/// endpoints are asked about, the same rule Promotion preflight applies to a
+/// membership draft (ADR-0035) and `dependency_rule` applies to an edge.
+fn membership_is_backend_intent(
+    conn: &rusqlite::Connection,
+    ticket: &BackendIntent,
+    epic_id: &str,
+) -> Result<bool, mutations::BackendIntentError> {
+    let epic = mutations::resolve_backend_intent(conn, epic_id)?;
+    Ok(ticket.backend_kind().is_some() && ticket.backend_kind() == epic.backend_kind())
 }
 
 fn write_columns(
@@ -429,6 +458,26 @@ mod tests {
                 ticket_kind: None,
                 priority: None,
                 title: "Epic",
+                created_seq,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+    }
+
+    fn seed_backend_epic(store: &Store, id: &str, display: &str, created_seq: i64) {
+        insert_fixture_item(
+            &store.conn,
+            FixtureItem {
+                id,
+                display,
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                title: "Epic",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some(display),
                 created_seq,
                 ..FixtureItem::default()
             },
@@ -647,8 +696,8 @@ mod tests {
     #[test]
     fn parent_move_emits_remove_then_add_for_backend_ticket() {
         let mut store = open_seeded();
-        seed_epic(&store, "e-old", "tk-1", 1);
-        seed_epic(&store, "e-new", "tk-2", 2);
+        seed_backend_epic(&store, "e-old", "tk-1", 1);
+        seed_backend_epic(&store, "e-new", "tk-2", 2);
         insert_fixture_item(
             &store.conn,
             FixtureItem {
@@ -715,7 +764,7 @@ mod tests {
     #[test]
     fn parent_clear_emits_remove_only() {
         let mut store = open_seeded();
-        seed_epic(&store, "e1", "tk-1", 1);
+        seed_backend_epic(&store, "e1", "tk-1", 1);
         insert_fixture_item(
             &store.conn,
             FixtureItem {
@@ -806,8 +855,8 @@ mod tests {
     #[test]
     fn combined_parent_move_and_title_change_emits_three_mutations_in_order() {
         let mut store = open_seeded();
-        seed_epic(&store, "e-old", "tk-1", 1);
-        seed_epic(&store, "e-new", "tk-2", 2);
+        seed_backend_epic(&store, "e-old", "tk-1", 1);
+        seed_backend_epic(&store, "e-new", "tk-2", 2);
         insert_fixture_item(
             &store.conn,
             FixtureItem {
@@ -853,6 +902,69 @@ mod tests {
                 "add_ticket_to_epic".to_string(),
                 "update_ticket".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn parent_move_into_a_local_epic_emits_no_membership_mutation() {
+        // A membership Mutation names the Epic, and nothing resolves a backend
+        // identity for it, so a Pending Promotion Ticket moved under a Local
+        // Epic would hand the Adapter an unaddressable parent. Promotion
+        // preflight applies the same both-endpoints rule (ADR-0035).
+        let mut store = open_seeded();
+        seed_epic(&store, "e1", "tk-1", 1);
+        seed_local_ticket(&store, "t1", "tk-2", 2);
+        commit_promotion(&mut store.conn, "t1");
+
+        update_item(
+            &mut store,
+            &clock(),
+            UpdateRequest {
+                id: "t1",
+                item_class: ItemClass::Ticket,
+                parent: ParentOp::Set("e1"),
+                ..UpdateRequest::default()
+            },
+        )
+        .unwrap();
+
+        let container_id: Option<String> = store
+            .conn
+            .query_row("select container_id from items where id = 't1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            container_id.as_deref(),
+            Some("e1"),
+            "the move is current state either way"
+        );
+        assert_eq!(mutation_types(&store.conn).unwrap(), vec!["promote_ticket"]);
+    }
+
+    #[test]
+    fn parent_move_emits_membership_when_both_endpoints_share_a_backend() {
+        let mut store = open_seeded();
+        seed_backend_epic(&store, "e1", "gh-1", 1);
+        seed_local_ticket(&store, "t1", "tk-2", 2);
+        commit_promotion(&mut store.conn, "t1");
+
+        update_item(
+            &mut store,
+            &clock(),
+            UpdateRequest {
+                id: "t1",
+                item_class: ItemClass::Ticket,
+                parent: ParentOp::Set("e1"),
+                ..UpdateRequest::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            mutation_types(&store.conn).unwrap(),
+            vec!["promote_ticket", "add_ticket_to_epic"],
+            "the membership is ordered behind the Promotion that addresses the Ticket"
         );
     }
 

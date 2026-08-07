@@ -252,7 +252,7 @@ fn render_skip_error<W: Write + ?Sized>(stderr: &mut W, err: &MarkSkippedError) 
         MarkSkippedError::CannotSkipPromotion(seq) => {
             let _ = writeln!(
                 stderr,
-                "tk sync --skip: Mutation {seq} is a Promotion; skipping it would leave every Mutation queued behind it with no backend identity to apply against"
+                "tk sync --skip: Mutation {seq} is a Promotion; skipping it would leave every Mutation queued behind it with no backend identity to apply against. Abandoning a Pending Promotion is not supported in this build."
             );
         }
         MarkSkippedError::Storage(err) => resolver::storage_error(err).render(stderr, COMMAND),
@@ -281,13 +281,36 @@ fn render_run_sync_error<W: Write + ?Sized>(stderr: &mut W, err: &RunSyncError) 
                 "tk sync: Mutation Log row has an unrecognised mutation kind; this is a Ticket bug — please report it"
             );
         }
+        // The same shape one level down: a Mutation Log row or an Adapter that
+        // contradicts a contract tk owns. Neither is recoverable and both leave
+        // the Mutation applicable, so every later `tk sync` reproduces the
+        // abort — say it is a bug rather than printing the raw fault.
+        RunSyncError::Load(LoadApplicableError::PayloadJson(_))
+        | RunSyncError::Outcome(
+            ApplyMutationOutcomeError::PayloadJson(_)
+            | ApplyMutationOutcomeError::ReceiptShapeMismatch { .. },
+        ) => {
+            let _ = writeln!(
+                stderr,
+                "tk sync: {err}; this is a Ticket bug — please report it"
+            );
+        }
         RunSyncError::Merge(MergeError::Storage(e))
         | RunSyncError::Load(LoadApplicableError::Storage(e))
         | RunSyncError::Outcome(ApplyMutationOutcomeError::Storage(e)) => {
             resolver::storage_error(e).render(stderr, COMMAND);
         }
-        other => {
-            let _ = writeln!(stderr, "tk sync: {other}");
+        // Named exhaustively rather than caught by `_`, so a variant added
+        // later has to choose a line here instead of falling through to the
+        // bare technical one.
+        RunSyncError::Pull(PullError::Env(_))
+        | RunSyncError::Apply(_)
+        | RunSyncError::Merge(MergeError::Sequence(_))
+        | RunSyncError::Outcome(
+            ApplyMutationOutcomeError::MutationNotFound(_)
+            | ApplyMutationOutcomeError::MutationNotApplicable(_),
+        ) => {
+            let _ = writeln!(stderr, "tk sync: {err}");
         }
     }
 }
@@ -335,6 +358,8 @@ fn render_log_detail<W: Write + ?Sized>(stdout: &mut W, detail: &LogDetailRow) {
 mod tests {
     use super::*;
     use crate::clock::FakeClock;
+    use crate::domain::mutation_payload::Promotion;
+    use crate::domain::mutation_type::MutationType;
     use crate::proc::{FakeRunner, RunOutput};
     use crate::render::Styler;
     use crate::store::migrations;
@@ -645,10 +670,11 @@ mod tests {
             },
         );
         assert_eq!(code, Exit::Failure);
-        assert!(
-            String::from_utf8(h.stderr)
-                .unwrap()
-                .contains("Mutation 1 is a Promotion")
+        assert_eq!(
+            String::from_utf8(h.stderr).unwrap(),
+            "tk sync --skip: Mutation 1 is a Promotion; skipping it would leave every Mutation \
+             queued behind it with no backend identity to apply against. Abandoning a Pending \
+             Promotion is not supported in this build.\n"
         );
 
         let conn = Connection::open(store.db_path()).unwrap();
@@ -1017,6 +1043,43 @@ mod tests {
             String::from_utf8(err_out)
                 .unwrap()
                 .contains("unrecognised mutation kind")
+        );
+    }
+
+    #[test]
+    fn render_run_sync_error_names_a_receipt_shape_mismatch_as_a_bug() {
+        // An Adapter that answers a Promotion with a bare acknowledgement has
+        // broken its contract: the Mutation stays applicable, so the user needs
+        // to know retrying will not clear it.
+        let mut err_out = Vec::new();
+        render_run_sync_error(
+            &mut err_out,
+            &RunSyncError::Outcome(ApplyMutationOutcomeError::ReceiptShapeMismatch {
+                sequence: 4,
+                mutation_type: MutationType::PromoteTicket,
+            }),
+        );
+        assert_eq!(
+            String::from_utf8(err_out).unwrap(),
+            "tk sync: mutation 4 of type promote_ticket cannot carry this receipt; \
+             this is a Ticket bug — please report it\n"
+        );
+    }
+
+    #[test]
+    fn render_run_sync_error_names_a_malformed_payload_as_a_bug() {
+        let mut err_out = Vec::new();
+        render_run_sync_error(
+            &mut err_out,
+            &RunSyncError::Outcome(ApplyMutationOutcomeError::PayloadJson(
+                serde_json::from_str::<Promotion>("{}").unwrap_err(),
+            )),
+        );
+        let rendered = String::from_utf8(err_out).unwrap();
+        assert!(
+            rendered.starts_with("tk sync: malformed payload_json: ")
+                && rendered.ends_with("; this is a Ticket bug — please report it\n"),
+            "{rendered}"
         );
     }
 }
