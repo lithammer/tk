@@ -247,38 +247,47 @@ pub fn update_item<C: Clock + ?Sized>(
         if let Some(old_id) = old_epic_id {
             mutations::append(
                 &tx,
-                MutationType::RemoveTicketFromEpic,
-                req.id,
-                req.item_class,
-                &MutationPayload::EpicRef(EpicRef {
-                    epic_id: old_id.to_owned(),
-                }),
-                &now_iso,
+                mutations::AppendRequest {
+                    mutation_type: MutationType::RemoveTicketFromEpic,
+                    item_id: req.id,
+                    item_class: req.item_class,
+                    payload: &MutationPayload::EpicRef(EpicRef {
+                        epic_id: old_id.to_owned(),
+                    }),
+                    promotion_operation_id: None,
+                    now_iso: &now_iso,
+                },
             )?;
         }
         if let Some(new_id) = new_epic_id {
             mutations::append(
                 &tx,
-                MutationType::AddTicketToEpic,
-                req.id,
-                req.item_class,
-                &MutationPayload::EpicRef(EpicRef {
-                    epic_id: new_id.to_owned(),
-                }),
-                &now_iso,
+                mutations::AppendRequest {
+                    mutation_type: MutationType::AddTicketToEpic,
+                    item_id: req.id,
+                    item_class: req.item_class,
+                    payload: &MutationPayload::EpicRef(EpicRef {
+                        epic_id: new_id.to_owned(),
+                    }),
+                    promotion_operation_id: None,
+                    now_iso: &now_iso,
+                },
             )?;
         }
         if title_or_body_changed {
             mutations::append(
                 &tx,
-                req.item_class.update_mutation_type(),
-                req.id,
-                req.item_class,
-                &MutationPayload::UpdateTitleBody(TitleBody {
-                    title: effective_title.to_owned(),
-                    body: effective_body.to_owned(),
-                }),
-                &now_iso,
+                mutations::AppendRequest {
+                    mutation_type: req.item_class.update_mutation_type(),
+                    item_id: req.id,
+                    item_class: req.item_class,
+                    payload: &MutationPayload::UpdateTitleBody(TitleBody {
+                        title: effective_title.to_owned(),
+                        body: effective_body.to_owned(),
+                    }),
+                    promotion_operation_id: None,
+                    now_iso: &now_iso,
+                },
             )?;
         }
     }

@@ -31,6 +31,20 @@ pub enum AppendError {
     Sequence(#[from] sequences::SequenceError),
 }
 
+/// Input for [`append`].
+#[derive(Debug, Clone, Copy)]
+pub struct AppendRequest<'a> {
+    pub mutation_type: MutationType,
+    pub item_id: &'a str,
+    pub item_class: ItemClass,
+    pub payload: &'a MutationPayload,
+    /// Promotion Operation grouping every Mutation one `tk promote`
+    /// invocation appends (ADR-0036). `None` for a Mutation that stands on
+    /// its own.
+    pub promotion_operation_id: Option<&'a str>,
+    pub now_iso: &'a str,
+}
+
 /// Append one Mutation row to the `mutations` outbox.
 ///
 /// `conn` is expected to be inside an active `begin immediate` transaction;
@@ -41,28 +55,22 @@ pub enum AppendError {
 /// Returns the freshly allocated `mutation_seq` so callers that need the
 /// row identifier downstream (e.g. surfacing a pending Mutation count) can
 /// avoid a follow-up `SELECT`.
-pub fn append(
-    conn: &Connection,
-    mutation_type: MutationType,
-    item_id: &str,
-    item_class: ItemClass,
-    payload: &MutationPayload,
-    now_iso: &str,
-) -> Result<i64, AppendError> {
+pub fn append(conn: &Connection, req: AppendRequest<'_>) -> Result<i64, AppendError> {
     let sequence = sequences::next(conn, "mutation_seq")?;
-    let payload_json = payload.to_json_string();
+    let payload_json = req.payload.to_json_string();
     conn.execute(
         "insert into mutations(\
             sequence, mutation_type, item_id, item_class, payload_json, \
-            state, failure_json, created_at, state_changed_at\
-         ) values (?1, ?2, ?3, ?4, ?5, 'pending', null, ?6, ?6)",
+            state, failure_json, created_at, state_changed_at, promotion_operation_id\
+         ) values (?1, ?2, ?3, ?4, ?5, 'pending', null, ?6, ?6, ?7)",
         params![
             sequence,
-            mutation_type.text(),
-            item_id,
-            item_class.text(),
+            req.mutation_type.text(),
+            req.item_id,
+            req.item_class.text(),
             payload_json,
-            now_iso,
+            req.now_iso,
+            req.promotion_operation_id,
         ],
     )?;
     Ok(sequence)
@@ -108,28 +116,33 @@ mod tests {
         let tx = conn.unchecked_transaction().unwrap();
         append(
             &tx,
-            MutationType::UpdateTicket,
-            "t1",
-            ItemClass::Ticket,
-            &MutationPayload::UpdateTitleBody(TitleBody {
-                title: "New title".into(),
-                body: "New body".into(),
-            }),
-            "2026-05-09T00:00:00.000Z",
+            AppendRequest {
+                mutation_type: MutationType::UpdateTicket,
+                item_id: "t1",
+                item_class: ItemClass::Ticket,
+                payload: &MutationPayload::UpdateTitleBody(TitleBody {
+                    title: "New title".into(),
+                    body: "New body".into(),
+                }),
+                promotion_operation_id: None,
+                now_iso: "2026-05-09T00:00:00.000Z",
+            },
         )
         .unwrap();
         tx.commit().unwrap();
 
-        let (mtype, item_id, item_class, payload, state, failure): (
+        let (mtype, item_id, item_class, payload, state, failure, promotion_operation_id): (
             String,
             String,
             String,
             String,
             String,
             Option<String>,
+            Option<String>,
         ) = conn
             .query_row(
-                "select mutation_type, item_id, item_class, payload_json, state, failure_json \
+                "select mutation_type, item_id, item_class, payload_json, state, failure_json, \
+                        promotion_operation_id \
                  from mutations where sequence = 1",
                 [],
                 |r| {
@@ -140,6 +153,7 @@ mod tests {
                         r.get(3)?,
                         r.get(4)?,
                         r.get(5)?,
+                        r.get(6)?,
                     ))
                 },
             )
@@ -150,6 +164,40 @@ mod tests {
         assert_eq!(payload, r#"{"title":"New title","body":"New body"}"#);
         assert_eq!(state, "pending");
         assert_eq!(failure, None);
+        assert_eq!(promotion_operation_id, None);
+    }
+
+    #[test]
+    fn append_writes_the_supplied_promotion_operation_id() {
+        let conn = open_seeded();
+        seed_backend_ticket(&conn, "t1", "tk-1", 1);
+
+        let tx = conn.unchecked_transaction().unwrap();
+        append(
+            &tx,
+            AppendRequest {
+                mutation_type: MutationType::UpdateTicket,
+                item_id: "t1",
+                item_class: ItemClass::Ticket,
+                payload: &MutationPayload::UpdateTitleBody(TitleBody {
+                    title: "New title".into(),
+                    body: "New body".into(),
+                }),
+                promotion_operation_id: Some("promo-1"),
+                now_iso: "2026-05-09T00:00:00.000Z",
+            },
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        let stored: Option<String> = conn
+            .query_row(
+                "select promotion_operation_id from mutations where sequence = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some("promo-1"));
     }
 
     #[test]
@@ -160,13 +208,16 @@ mod tests {
         let tx = conn.unchecked_transaction().unwrap();
         append(
             &tx,
-            MutationType::AddTicketToEpic,
-            "t1",
-            ItemClass::Ticket,
-            &MutationPayload::EpicRef(EpicRef {
-                epic_id: "epic-internal-id".into(),
-            }),
-            "2026-05-09T00:00:00.000Z",
+            AppendRequest {
+                mutation_type: MutationType::AddTicketToEpic,
+                item_id: "t1",
+                item_class: ItemClass::Ticket,
+                payload: &MutationPayload::EpicRef(EpicRef {
+                    epic_id: "epic-internal-id".into(),
+                }),
+                promotion_operation_id: None,
+                now_iso: "2026-05-09T00:00:00.000Z",
+            },
         )
         .unwrap();
         tx.commit().unwrap();
@@ -189,13 +240,16 @@ mod tests {
         let tx = conn.unchecked_transaction().unwrap();
         append(
             &tx,
-            MutationType::SetItemStatus,
-            "t1",
-            ItemClass::Ticket,
-            &MutationPayload::ItemStatus(StatusChange {
-                status: "done".into(),
-            }),
-            "2026-05-09T00:00:00.000Z",
+            AppendRequest {
+                mutation_type: MutationType::SetItemStatus,
+                item_id: "t1",
+                item_class: ItemClass::Ticket,
+                payload: &MutationPayload::ItemStatus(StatusChange {
+                    status: "done".into(),
+                }),
+                promotion_operation_id: None,
+                now_iso: "2026-05-09T00:00:00.000Z",
+            },
         )
         .unwrap();
         tx.commit().unwrap();
@@ -218,13 +272,16 @@ mod tests {
         let tx = conn.unchecked_transaction().unwrap();
         append(
             &tx,
-            MutationType::AddDependency,
-            "t1",
-            ItemClass::Ticket,
-            &MutationPayload::DependencyRef(DependencyRef {
-                blocking_id: "blocker-id".into(),
-            }),
-            "2026-05-09T00:00:00.000Z",
+            AppendRequest {
+                mutation_type: MutationType::AddDependency,
+                item_id: "t1",
+                item_class: ItemClass::Ticket,
+                payload: &MutationPayload::DependencyRef(DependencyRef {
+                    blocking_id: "blocker-id".into(),
+                }),
+                promotion_operation_id: None,
+                now_iso: "2026-05-09T00:00:00.000Z",
+            },
         )
         .unwrap();
         tx.commit().unwrap();
@@ -247,38 +304,47 @@ mod tests {
         let tx = conn.unchecked_transaction().unwrap();
         let one = append(
             &tx,
-            MutationType::UpdateTicket,
-            "t1",
-            ItemClass::Ticket,
-            &MutationPayload::UpdateTitleBody(TitleBody {
-                title: "A".into(),
-                body: String::new(),
-            }),
-            "2026-05-09T00:00:00.000Z",
+            AppendRequest {
+                mutation_type: MutationType::UpdateTicket,
+                item_id: "t1",
+                item_class: ItemClass::Ticket,
+                payload: &MutationPayload::UpdateTitleBody(TitleBody {
+                    title: "A".into(),
+                    body: String::new(),
+                }),
+                promotion_operation_id: None,
+                now_iso: "2026-05-09T00:00:00.000Z",
+            },
         )
         .unwrap();
         let two = append(
             &tx,
-            MutationType::UpdateTicket,
-            "t1",
-            ItemClass::Ticket,
-            &MutationPayload::UpdateTitleBody(TitleBody {
-                title: "B".into(),
-                body: String::new(),
-            }),
-            "2026-05-09T00:00:00.000Z",
+            AppendRequest {
+                mutation_type: MutationType::UpdateTicket,
+                item_id: "t1",
+                item_class: ItemClass::Ticket,
+                payload: &MutationPayload::UpdateTitleBody(TitleBody {
+                    title: "B".into(),
+                    body: String::new(),
+                }),
+                promotion_operation_id: None,
+                now_iso: "2026-05-09T00:00:00.000Z",
+            },
         )
         .unwrap();
         let three = append(
             &tx,
-            MutationType::UpdateTicket,
-            "t1",
-            ItemClass::Ticket,
-            &MutationPayload::UpdateTitleBody(TitleBody {
-                title: "C".into(),
-                body: String::new(),
-            }),
-            "2026-05-09T00:00:00.000Z",
+            AppendRequest {
+                mutation_type: MutationType::UpdateTicket,
+                item_id: "t1",
+                item_class: ItemClass::Ticket,
+                payload: &MutationPayload::UpdateTitleBody(TitleBody {
+                    title: "C".into(),
+                    body: String::new(),
+                }),
+                promotion_operation_id: None,
+                now_iso: "2026-05-09T00:00:00.000Z",
+            },
         )
         .unwrap();
         tx.commit().unwrap();
@@ -307,26 +373,32 @@ mod tests {
         let tx = conn.unchecked_transaction().unwrap();
         append(
             &tx,
-            MutationType::UpdateTicket,
-            "t1",
-            ItemClass::Ticket,
-            &MutationPayload::UpdateTitleBody(TitleBody {
-                title: "X".into(),
-                body: String::new(),
-            }),
-            "2026-05-09T00:00:00.000Z",
+            AppendRequest {
+                mutation_type: MutationType::UpdateTicket,
+                item_id: "t1",
+                item_class: ItemClass::Ticket,
+                payload: &MutationPayload::UpdateTitleBody(TitleBody {
+                    title: "X".into(),
+                    body: String::new(),
+                }),
+                promotion_operation_id: None,
+                now_iso: "2026-05-09T00:00:00.000Z",
+            },
         )
         .unwrap();
         append(
             &tx,
-            MutationType::UpdateTicket,
-            "t1",
-            ItemClass::Ticket,
-            &MutationPayload::UpdateTitleBody(TitleBody {
-                title: "Y".into(),
-                body: String::new(),
-            }),
-            "2026-05-09T00:00:00.000Z",
+            AppendRequest {
+                mutation_type: MutationType::UpdateTicket,
+                item_id: "t1",
+                item_class: ItemClass::Ticket,
+                payload: &MutationPayload::UpdateTitleBody(TitleBody {
+                    title: "Y".into(),
+                    body: String::new(),
+                }),
+                promotion_operation_id: None,
+                now_iso: "2026-05-09T00:00:00.000Z",
+            },
         )
         .unwrap();
         tx.commit().unwrap();

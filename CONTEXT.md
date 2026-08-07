@@ -198,6 +198,12 @@ not yet received its backend identity. Later backend-applicable changes remain
 ordered behind its **Promotion** in the **Mutation Log**.
 _Avoid_: In-flight Promotion
 
+**Promotion Operation**:
+The durable identity of one `tk promote` invocation, shared by every
+**Mutation** that invocation appends to the **Mutation Log**, used to report
+whether the whole operation resolved.
+_Avoid_: Promotion Batch, Promotion Transaction, Promotion Group
+
 **Mutation**:
 A durable local intent to modify backend-backed **tk** domain state through a **Backend**.
 _Avoid_: Local Edit, Change, Audit Entry
@@ -410,6 +416,7 @@ _Avoid_: ticket, tickets
   State**; the field stays local and is not pushed to the **Backend**.
 - **Promotion** rejects a `triage` **Ticket**, which must be **Accepted**
   first — captured-but-unaccepted work is not pushed to a **Backend**.
+- A **Mutation** belongs to zero or one **Promotion Operation**.
 - A **Mutation** has exactly one **Mutation Type**.
 - The first implementation supports only **V1 Mutation Types**.
 - `update_ticket` and `update_epic` modify title and body only.

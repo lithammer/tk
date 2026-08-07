@@ -249,6 +249,10 @@ pub struct FixtureMutation<'a> {
     pub failure_json: Option<&'a str>,
     pub created_at: &'a str,
     pub state_changed_at: &'a str,
+    /// Promotion Operation grouping (ADR-0036). `None` seeds a pre-Promotion
+    /// Mutation; set it to fixture a row belonging to one `tk promote`
+    /// invocation's outbox writes.
+    pub promotion_operation_id: Option<&'a str>,
 }
 
 impl Default for FixtureMutation<'_> {
@@ -263,6 +267,7 @@ impl Default for FixtureMutation<'_> {
             failure_json: None,
             created_at: "2026-05-09T00:00:00.000Z",
             state_changed_at: "2026-05-09T00:00:00.000Z",
+            promotion_operation_id: None,
         }
     }
 }
@@ -274,8 +279,8 @@ pub fn insert_fixture_mutation(
     conn.execute(
         "insert into mutations(\
             sequence, mutation_type, item_id, item_class, payload_json, \
-            state, failure_json, created_at, state_changed_at\
-         ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            state, failure_json, created_at, state_changed_at, promotion_operation_id\
+         ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             mutation.sequence,
             mutation.mutation_type,
@@ -286,6 +291,7 @@ pub fn insert_fixture_mutation(
             mutation.failure_json,
             mutation.created_at,
             mutation.state_changed_at,
+            mutation.promotion_operation_id,
         ],
     )?;
     Ok(())

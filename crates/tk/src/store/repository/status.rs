@@ -161,13 +161,16 @@ pub fn set_item_status<C: Clock + ?Sized>(
     if origin == Origin::Backend {
         mutations::append(
             &tx,
-            MutationType::SetItemStatus,
-            req.id,
-            item_class,
-            &MutationPayload::ItemStatus(StatusChange {
-                status: req.status.text().to_owned(),
-            }),
-            &now_iso,
+            mutations::AppendRequest {
+                mutation_type: MutationType::SetItemStatus,
+                item_id: req.id,
+                item_class,
+                payload: &MutationPayload::ItemStatus(StatusChange {
+                    status: req.status.text().to_owned(),
+                }),
+                promotion_operation_id: None,
+                now_iso: &now_iso,
+            },
         )?;
     }
 

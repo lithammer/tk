@@ -151,13 +151,16 @@ pub fn add_dependency<C: Clock + ?Sized>(
     if !had_edge && same_backend_pair {
         mutations::append(
             &tx,
-            MutationType::AddDependency,
-            edge.blocked_id,
-            info.blocked_class,
-            &MutationPayload::DependencyRef(DependencyRef {
-                blocking_id: edge.blocking_id.to_owned(),
-            }),
-            &now_iso,
+            mutations::AppendRequest {
+                mutation_type: MutationType::AddDependency,
+                item_id: edge.blocked_id,
+                item_class: info.blocked_class,
+                payload: &MutationPayload::DependencyRef(DependencyRef {
+                    blocking_id: edge.blocking_id.to_owned(),
+                }),
+                promotion_operation_id: None,
+                now_iso: &now_iso,
+            },
         )?;
     }
 
@@ -191,13 +194,16 @@ pub fn remove_dependency<C: Clock + ?Sized>(
     if had_edge && same_backend_pair {
         mutations::append(
             &tx,
-            MutationType::RemoveDependency,
-            edge.blocked_id,
-            info.blocked_class,
-            &MutationPayload::DependencyRef(DependencyRef {
-                blocking_id: edge.blocking_id.to_owned(),
-            }),
-            &now_iso,
+            mutations::AppendRequest {
+                mutation_type: MutationType::RemoveDependency,
+                item_id: edge.blocked_id,
+                item_class: info.blocked_class,
+                payload: &MutationPayload::DependencyRef(DependencyRef {
+                    blocking_id: edge.blocking_id.to_owned(),
+                }),
+                promotion_operation_id: None,
+                now_iso: &now_iso,
+            },
         )?;
     }
 
