@@ -34,9 +34,10 @@ no list to bound.
   explicit.
 - **Backend Pull becomes refresh-by-key.** The sync engine derives the active
   Adopted key set (`status in ('open','active')`) and the Backend Adapter
-  fetches exactly those (`gh issue view <n>` per key). `merge_backend_snapshots`
-  is reused unchanged: Adopt drives the insert path (Scenario A), Pull drives
-  the refresh paths (B/C).
+  fetches exactly those (`gh issue view <n>` per key). Adopt receives canonical
+  intake data and inserts a Backend Ticket; Pull receives field-only refreshes
+  and cannot insert or alter Backend identity, Display ID, Origin, or Item
+  Class. Pull collects every refresh before its one merge transaction.
 - **No auto-discovery.** A Backend issue the user has not Adopted never appears
   in tk; discovery stays the Backend's own UI.
 
@@ -56,9 +57,9 @@ no list to bound.
   team project) this is a feature, not a regression; for a small personal repo,
   a future bulk `tk adopt --all-open`-style convenience can adopt many at once
   without a second sync engine.
-- tk-34 is re-scoped to the opt-in adapter: a `fetch_snapshots(keys)` read
-  primitive plus Apply, with no `gh issue list`, no truncation handling, and no
-  since-timestamp watermark.
+- tk-34 is re-scoped to the opt-in adapter: canonical `adopt_ticket(input)`
+  and per-key `refresh_item(key)` read primitives plus Apply, with no `gh issue
+  list`, no truncation handling, and no since-timestamp watermark.
 - A new ticket owns the `tk adopt` command; it depends on tk-34 (the adapter)
   and tk-106 (the configured Remote), mirroring how tk-106 was carved out ahead
   of tk-34.

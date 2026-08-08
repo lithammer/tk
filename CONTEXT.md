@@ -153,7 +153,7 @@ A component that maps between **tk** domain concepts and a specific **Backend**.
 _Avoid_: Facade, Provider, Connector
 
 **Backend Pull**:
-A **Backend Adapter** operation that refreshes the **Adopted** **Backend** items not yet `done`, importing each one's current title, body, and **Item Status**. It refreshes only items tk already tracks; it neither mirrors nor discovers a **Backend**.
+A **Backend Adapter** operation that refreshes the **Adopted** **Backend** items not yet `done`, importing only backend-owned title, body, **Item Status**, and optional **Ticket Kind** fields. It refreshes only items tk already tracks; it neither mirrors, discovers, nor changes their identity, **Origin**, **Display ID**, or **Item Class**.
 _Avoid_: Fetch, Import, Mirror
 
 **Mutation Apply**:
@@ -361,14 +361,15 @@ _Avoid_: ticket, tickets
 - **Remote** is the CLI-facing name for **Backend** configuration.
 - v1 supports zero or one configured **Remote**.
 - **`tk remote`** shows the configured **Remote**.
-- **`tk remote set <kind>`** configures or replaces the **Remote**.
+- **`tk remote set <kind>`** configures an absent **Remote** or leaves the same **Backend** kind unchanged; switching kinds requires **`tk remote clear`** followed by **`tk remote set`**.
 - **`tk remote clear`** removes the configured **Remote** when no pending or failed remote **Mutations** would be orphaned.
 - Configuring or clearing a **Remote** is not a **Mutation** and is never recorded in the **Mutation Log**.
 - **Remote** authentication is delegated to backend-specific external CLIs.
-- A **Backend Adapter** exposes **Backend Pull** and **Mutation Apply** operations.
+- A **Backend Adapter** canonicalizes **Adopt** input, exposes per-item **Backend Pull** refresh, and applies **Mutations**. Adopt receives complete Backend Ticket identity; Pull receives only fields for an already-tracked Item.
 - Sync runs **Backend Pull** before applying pending **Mutations** in v1.
 - **Adopt** and **Promotion** are the two intake directions across the local/**Backend** boundary; both yield a **Backend Ticket**, and tk syncs only items that entered through one of them.
 - tk does not mirror or auto-discover a **Backend**; **Backend Pull** refreshes only the **Adopted** **Backend** items that are not `done`.
+- Retained **Backend** Items and non-terminal **Promotions** use one Backend kind. A Backend read or Promotion commit rechecks the configured **Remote** before writing; if it changed, retry the command.
 - A **Mutation Apply** returns a **Mutation Receipt** or a failure.
 - The sync engine owns mutation ordering, cursors, retries, and failure policy.
 - The sync engine applies pending **Mutations** in global **Mutation Sequence** order in v1.
@@ -621,7 +622,7 @@ _Avoid_: ticket, tickets
 - Checked-in ticket state was considered for portability — resolved: the **Repository Store** is untracked local state by default.
 - "facade", "provider", and "connector" were considered for integrations — resolved: **Backend Adapter** maps domain concepts to a **Backend**.
 - "backend" was considered for the CLI command — resolved: **Remote** is the CLI-facing name for backend configuration.
-- Backend orchestration inside adapters was considered — resolved: the sync engine owns orchestration, and **Backend Adapters** expose **Backend Pull** and **Mutation Apply**.
+- Backend orchestration inside adapters was considered — resolved: the sync engine orchestrates **Backend Pull** and **Mutation Apply**, while **`tk adopt`** owns canonical intake through the **Backend Adapter**.
 - Force sync was considered for conflicts — resolved: v1 does not force-apply conflicting **Mutations**.
 - "memory" and "note" were considered for agent follow-ups — resolved: follow-ups are **Local Tickets**.
 - "publish" and "export" were considered for moving local work to a backend — resolved: **Promotion** converts a **Local Ticket** or **Local Epic** into a backend-backed object.

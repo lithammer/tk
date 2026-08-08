@@ -33,11 +33,11 @@ actually mint backend Display IDs: tk-34 owns the GitHub `gh` namespace, tk-35
 owns the Jira project-key namespace, and each adds the set-time check (which
 physically lives in `tk remote set`) once its namespace contract is real.
 
-Correctness does not depend on the set-time guard. `merge_backend_snapshots`
-already raises `MergeError::DisplayIdCollision` per snapshot during Backend Pull
-(ADR-0010), so a colliding Display ID is caught regardless. The set-time check
-was only fail-fast UX; it is cheap to add later and carries no correctness debt
-in the interim.
+Correctness does not depend on the set-time guard. Canonical Adopt insertion
+raises `DisplayIdCollision` when an Adapter-owned Display ID is already claimed,
+so a colliding Display ID is caught regardless. The set-time check was only
+fail-fast UX; it is cheap to add later and carries no correctness debt in the
+interim.
 
 ## The GitHub repo is resolved from the checkout, not persisted
 
@@ -53,8 +53,8 @@ Persisting it only creates a second copy that can drift from the real remote.
 
 So tk-106 writes `config_json = {}` — recording only that the Primary Backend is
 GitHub — and defers repo resolution to tk-34's adapter, which lets `gh issue`
-resolve the repository from the checkout at Mutation Apply / Backend Pull time
-(no `--repo`). The hard cases — forks whose issues live upstream, multiple
+resolve the repository from the checkout for every Backend operation (no
+`--repo`). The hard cases — forks whose issues live upstream, multiple
 remotes, GitHub Enterprise hosts — are owned by `gh` and persisted in the
 repository's git config via `gh repo set-default`, stable across Workspaces; tk
 neither reimplements nor caches that resolution.
@@ -80,8 +80,8 @@ sync to an arbitrary pinned repo. Accepted: pointing a repository's store at a
   Rejected: the namespace is per-(kind, config) — Jira's prefix is the
   configured project key — so a static kind→prefix map is the wrong model, and
   committing both GitHub's `gh` and a Jira prefix before either adapter exists
-  pre-commits contracts that belong to tk-34 / tk-35. The merge-time
-  `MergeError::DisplayIdCollision` already guarantees correctness.
+  pre-commits contracts that belong to tk-34 / tk-35. Canonical Adopt
+  insertion already guarantees collision correctness.
 - **Store the resolved repo at set time** (`gh repo view` to derive `OWNER/NAME`,
   plus a `<repo>` override and a guarded replace path). Rejected: it caches git
   state that can drift, and drags a set-time `gh` dependency, a repo argument, an
@@ -104,7 +104,7 @@ sync to an arbitrary pinned repo. Accepted: pointing a repository's store at a
   configuration shape.
 - `config_json = {}` is the v1 GitHub Remote contract. Nothing reads the field
   yet, so tk-34 may add fields if it discovers it needs them.
-- `MergeError::DisplayIdCollision` (ADR-0010) is the only Display ID collision
+- Canonical Adopt insertion's Display ID collision check (ADR-0010) is the only
   backstop until an adapter adds a set-time guard.
 - `BackendKind { Github, Jira }` is introduced with `text()` (the SQL spelling
   the `remotes.backend_kind` CHECK stores) and CLI parsing, but no

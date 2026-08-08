@@ -1,13 +1,12 @@
 //! Sync engine orchestration.
 //!
-//! [`run_sync`] is the single entry point for `tk sync` (and, later, the
-//! Promote flow). It composes the backend-blind [`Adapter`] trait with the
+//! [`run_sync`] is the engine entry point shared by `tk sync` and `tk promote`.
+//! It composes the backend-blind [`Adapter`] trait with the
 //! SQL helpers in [`crate::store::sync`]:
 //!
 //! 1. Pull. The engine derives the Adopted working set's active backend keys
-//!    ([`active_backend_keys`]) and [`Adapter::fetch_snapshots`] returns a
-//!    snapshot slice for exactly those (or [`PullError::Failed`] carrying
-//!    captured stderr), which the engine merges via [`merge_backend_snapshots`].
+//!    ([`active_backend_keys`]) and refreshes each through [`Adapter::refresh_item`].
+//!    It collects every result before the single Store merge transaction.
 //!    The merge transaction is skipped when the Pull is empty so an idle sync
 //!    takes no write lock.
 //! 2. Apply loop. [`load_applicable_mutations`] decodes the pending+failed
@@ -26,17 +25,17 @@ use rusqlite::Connection;
 use thiserror::Error;
 
 use crate::domain::apply_outcome::ApplyOutcome;
-use crate::remote::adapter::{Adapter, ApplyError, PullError};
+use crate::remote::adapter::{Adapter, AdapterReadError, ApplyError};
 use crate::store::sync::{
-    ApplyMutationOutcomeError, LoadApplicableError, MergeError, active_backend_keys,
-    apply_mutation_outcome, load_applicable_mutations, merge_backend_snapshots,
+    ApplyMutationOutcomeError, LoadApplicableError, RefreshStoreError, active_backend_keys,
+    apply_mutation_outcome, load_applicable_mutations, merge_backend_refreshes,
     resolve_mutation_view,
 };
 
 /// Summary of one sync run for the calling command to render.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncReport {
-    /// Number of `BackendItemSnapshot`s the adapter returned from Pull.
+    /// Number of Backend Items refreshed during Pull.
     pub pulled_count: usize,
     /// Number of Mutations that transitioned to `applied` during this run.
     pub applied_count: usize,
@@ -56,16 +55,16 @@ pub struct SyncReport {
 /// [`SyncReport::stopped_at_sequence`].
 #[derive(Debug, Error)]
 pub enum RunSyncError {
-    /// Pull failed: adapter unavailable ([`PullError::Env`]) or backend
-    /// rejection ([`PullError::Failed`] carrying captured stderr).
+    /// Pull failed: adapter unavailable ([`AdapterReadError::Env`]) or backend
+    /// rejection ([`AdapterReadError::Failed`] carrying captured stderr).
     #[error(transparent)]
-    Pull(#[from] PullError),
+    Pull(#[from] AdapterReadError),
     /// Apply hit an environment failure (backend CLI missing / spawn failed);
     /// the in-flight Mutation row is left `pending`.
     #[error(transparent)]
     Apply(#[from] ApplyError),
     #[error(transparent)]
-    Merge(#[from] MergeError),
+    Refresh(#[from] RefreshStoreError),
     #[error(transparent)]
     Load(#[from] LoadApplicableError),
     #[error(transparent)]
@@ -74,14 +73,11 @@ pub enum RunSyncError {
 
 /// Run one sync against a configured Adapter.
 ///
-/// `rng` supplies entropy for the internal `items.id` of any backend Item the
-/// Pull discovers (see [`merge_backend_snapshots`]); `now` is the injected
-/// timestamp written to every row this run touches.
+/// `now` is the injected timestamp written to every row this run touches.
 pub fn run_sync(
     conn: &mut Connection,
     adapter: &mut dyn Adapter,
     now: &str,
-    rng: &mut dyn rand::Rng,
 ) -> Result<SyncReport, RunSyncError> {
     let mut report = SyncReport {
         pulled_count: 0,
@@ -93,12 +89,16 @@ pub fn run_sync(
     // and the adapter fetches exactly those (ADR-0034 opt-in refresh-by-key);
     // an empty set means no backend call. A storage fault deriving the keys is
     // a pull-side store error, surfaced through the merge boundary.
-    let keys = active_backend_keys(conn).map_err(MergeError::Storage)?;
-    let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
-    let snapshots = adapter.fetch_snapshots(&key_refs)?;
-    report.pulled_count = snapshots.len();
-    if !snapshots.is_empty() {
-        merge_backend_snapshots(conn, rng, &snapshots, now)?;
+    let kind = adapter.backend_kind();
+    let keys = active_backend_keys(conn, kind)?;
+    let mut refreshes = Vec::with_capacity(keys.len());
+    for key in keys {
+        let refresh = adapter.refresh_item(&key)?;
+        refreshes.push((key, refresh));
+    }
+    report.pulled_count = refreshes.len();
+    if !refreshes.is_empty() {
+        merge_backend_refreshes(conn, kind, &refreshes, now)?;
     }
 
     // Apply loop. An environment failure from `apply_mutation` bubbles via `?`
@@ -129,19 +129,17 @@ pub fn run_sync(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::backend_item_snapshot::BackendItemSnapshot;
-    use crate::domain::item_class::ItemClass;
+    use crate::domain::backend_kind::BackendKind;
+    use crate::domain::backend_operation::BackendItemRefresh;
     use crate::domain::status::ItemStatus;
     use crate::domain::ticket_kind::TicketKind;
     use crate::proc::ProcError;
-    use crate::remote::fake::{ApplyResponse, FakeAdapter, PullResponse};
+    use crate::remote::fake::{ApplyResponse, FakeAdapter, RefreshResponse};
     use crate::store::migrations;
     use crate::store::testing::{
         FixtureItem, FixtureMutation, FixtureRemote, insert_fixture_item, insert_fixture_mutation,
         insert_fixture_remote,
     };
-    use rand::SeedableRng;
-    use rand::rngs::StdRng;
 
     const NOW: &str = "2026-05-19T00:00:00Z";
 
@@ -188,30 +186,28 @@ mod tests {
         .unwrap();
     }
 
-    fn snapshot(backend_key: &str, display_id: &str, title: &str) -> BackendItemSnapshot {
-        BackendItemSnapshot {
-            backend_kind: "github".into(),
-            backend_key: backend_key.into(),
-            display_id: display_id.into(),
-            item_class: ItemClass::Ticket,
+    fn refresh(title: &str) -> RefreshResponse {
+        RefreshResponse::Item(BackendItemRefresh {
             ticket_kind: Some(TicketKind::Task),
             title: title.into(),
             body: String::new(),
             status: ItemStatus::Open,
-            backend_updated_at: NOW.into(),
-        }
+        })
+    }
+
+    fn fake(refreshes: Vec<RefreshResponse>, applies: Vec<ApplyResponse>) -> FakeAdapter {
+        FakeAdapter::directional(vec![], refreshes, applies)
     }
 
     fn run(conn: &mut Connection, fake: &mut FakeAdapter) -> Result<SyncReport, RunSyncError> {
-        let mut rng = StdRng::seed_from_u64(0);
-        run_sync(conn, fake, NOW, &mut rng)
+        run_sync(conn, fake, NOW)
     }
 
     #[test]
     fn empty_queue_and_empty_pull_is_a_noop() {
         let mut conn = open_seeded();
         seed_remote(&conn);
-        let mut fake = FakeAdapter::new(vec![PullResponse::Snapshots(vec![])], vec![]);
+        let mut fake = fake(vec![], vec![]);
 
         let report = run(&mut conn, &mut fake).unwrap();
         assert_eq!(report.pulled_count, 0);
@@ -220,26 +216,105 @@ mod tests {
     }
 
     #[test]
+    fn mixed_backend_cohort_is_rejected_before_any_adapter_call() {
+        let mut conn = open_seeded();
+        backend_ticket(&conn, "t1", "gh-1", "1", 1);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t2",
+                display: "tk-2",
+                title: "Local",
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        seed_remote(&conn);
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "promote_ticket",
+                item_id: "t2",
+                payload_json: r#"{"title":"T","body":"","backend_kind":"jira"}"#,
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        let mut fake = fake(vec![], vec![]);
+
+        let error = run(&mut conn, &mut fake).unwrap_err();
+
+        assert!(matches!(
+            error,
+            RunSyncError::Refresh(RefreshStoreError::BackendCohort(
+                crate::store::sync::BackendCohortError::MultipleBackendKinds
+            ))
+        ));
+        assert!(fake.captured_refresh_keys.is_empty());
+        assert!(fake.captured_applies.is_empty());
+    }
+
+    #[test]
+    fn retained_promotion_for_another_backend_is_rejected_before_any_adapter_call() {
+        let mut conn = open_seeded();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Local",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        seed_remote(&conn);
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "promote_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"T","body":"","backend_kind":"jira"}"#,
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        let mut fake = fake(vec![], vec![]);
+
+        let error = run(&mut conn, &mut fake).unwrap_err();
+
+        assert!(matches!(
+            error,
+            RunSyncError::Refresh(RefreshStoreError::BackendCohort(
+                crate::store::sync::BackendCohortError::BackendKindMismatch {
+                    expected: BackendKind::Github,
+                    retained: BackendKind::Jira,
+                }
+            ))
+        ));
+        assert!(fake.captured_refresh_keys.is_empty());
+        assert!(fake.captured_applies.is_empty());
+    }
+
+    #[test]
     fn pull_refreshes_an_adopted_backend_item() {
         let mut conn = open_seeded();
         backend_ticket(&conn, "t1", "gh-42", "42", 1);
         seed_remote(&conn);
-        let mut fake = FakeAdapter::new(
-            vec![PullResponse::Snapshots(vec![snapshot(
-                "42",
-                "gh-42",
-                "Refreshed",
-            )])],
-            vec![],
-        );
+        let mut fake = fake(vec![refresh("Refreshed")], vec![]);
 
         let report = run(&mut conn, &mut fake).unwrap();
         assert_eq!(report.pulled_count, 1);
 
         // The engine derived the active Adopted key set and asked for exactly it.
-        assert_eq!(fake.captured_pull_keys, vec![vec!["42".to_string()]]);
+        assert_eq!(fake.captured_refresh_keys, vec!["42".to_string()]);
 
-        // Merge scenario C refreshed the known row in place.
+        // The known row was refreshed in place.
         let title: String = conn
             .query_row(
                 "select title from items where backend_key = '42'",
@@ -285,10 +360,10 @@ mod tests {
         .unwrap();
         seed_remote(&conn);
 
-        let mut fake = FakeAdapter::new(vec![PullResponse::Snapshots(vec![])], vec![]);
+        let mut fake = fake(vec![refresh("Old")], vec![]);
         run(&mut conn, &mut fake).unwrap();
 
-        assert_eq!(fake.captured_pull_keys, vec![vec!["1".to_string()]]);
+        assert_eq!(fake.captured_refresh_keys, vec!["1".to_string()]);
     }
 
     #[test]
@@ -298,10 +373,7 @@ mod tests {
         seed_remote(&conn);
         update_ticket_mutation(&conn, 5, "t1", "New");
 
-        let mut fake = FakeAdapter::new(
-            vec![PullResponse::Snapshots(vec![])],
-            vec![ApplyResponse::Success],
-        );
+        let mut fake = fake(vec![refresh("Old")], vec![ApplyResponse::Success]);
         let report = run(&mut conn, &mut fake).unwrap();
         assert_eq!(report.applied_count, 1);
         assert_eq!(report.stopped_at_sequence, None);
@@ -341,8 +413,8 @@ mod tests {
         update_ticket_mutation(&conn, 1, "t1", "A");
         update_ticket_mutation(&conn, 2, "t2", "B");
 
-        let mut fake = FakeAdapter::new(
-            vec![PullResponse::Snapshots(vec![])],
+        let mut fake = fake(
+            vec![refresh("Old 1"), refresh("Old 2")],
             vec![ApplyResponse::RecordedFailure(
                 "HTTP 422: title required".into(),
             )],
@@ -369,7 +441,7 @@ mod tests {
         assert_eq!(state2, "pending", "loop stopped before sequence 2");
 
         // Only one apply consumed.
-        assert_eq!(fake.apply_index, 1);
+        assert_eq!(fake.captured_applies.len(), 1);
     }
 
     #[test]
@@ -379,8 +451,8 @@ mod tests {
         seed_remote(&conn);
         update_ticket_mutation(&conn, 1, "t1", "A");
 
-        let mut fake = FakeAdapter::new(
-            vec![PullResponse::Snapshots(vec![])],
+        let mut fake = fake(
+            vec![refresh("Old")],
             vec![ApplyResponse::EnvFailure(ProcError::ExecutableNotFound)],
         );
         let err = run(&mut conn, &mut fake).unwrap_err();
@@ -398,24 +470,35 @@ mod tests {
     }
 
     #[test]
-    fn pull_recorded_failure_propagates_and_skips_apply() {
+    fn later_refresh_failure_prevents_all_refreshes_from_merging_and_skips_apply() {
         let mut conn = open_seeded();
         backend_ticket(&conn, "t1", "gh-1", "1", 1);
+        backend_ticket(&conn, "t2", "gh-2", "2", 2);
         seed_remote(&conn);
         update_ticket_mutation(&conn, 1, "t1", "A");
 
-        let mut fake = FakeAdapter::new(
-            vec![PullResponse::RecordedFailure("gh: HTTP 502".into())],
+        let mut fake = fake(
+            vec![
+                refresh("Should Not Merge"),
+                RefreshResponse::RecordedFailure("gh: HTTP 502".into()),
+            ],
             vec![],
         );
         let err = run(&mut conn, &mut fake).unwrap_err();
         match err {
-            RunSyncError::Pull(PullError::Failed(detail)) => assert!(detail.contains("HTTP 502")),
+            RunSyncError::Pull(AdapterReadError::Failed(detail)) => {
+                assert!(detail.contains("HTTP 502"));
+            }
             other => panic!("expected Pull(Failed), got {other:?}"),
         }
 
         // Apply never invoked; row still pending.
         assert!(fake.captured_applies.is_empty());
+        assert_eq!(fake.captured_refresh_keys, ["1", "2"]);
+        let title: String = conn
+            .query_row("select title from items where id = 't1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(title, "Old", "the earlier refresh was not merged");
         let state: String = conn
             .query_row("select state from mutations where sequence = 1", [], |r| {
                 r.get(0)
@@ -443,10 +526,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut fake = FakeAdapter::new(
-            vec![PullResponse::Snapshots(vec![])],
-            vec![ApplyResponse::Success],
-        );
+        let mut fake = fake(vec![refresh("Old")], vec![ApplyResponse::Success]);
         let report = run(&mut conn, &mut fake).unwrap();
         assert_eq!(report.applied_count, 1);
 
@@ -462,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    fn pull_snapshot_for_item_with_pending_mutation_is_skipped() {
+    fn pull_refresh_for_item_with_pending_mutation_is_skipped() {
         let mut conn = open_seeded();
         backend_ticket(&conn, "t1", "gh-1", "1", 1);
         seed_remote(&conn);
@@ -471,17 +551,13 @@ mod tests {
             .unwrap();
 
         // Pull returns a stale backend view; apply the in-flight mutation.
-        let mut fake = FakeAdapter::new(
-            vec![PullResponse::Snapshots(vec![snapshot(
-                "1",
-                "gh-1",
-                "Stale Backend View",
-            )])],
+        let mut fake = fake(
+            vec![refresh("Stale Backend View")],
             vec![ApplyResponse::Success],
         );
         run(&mut conn, &mut fake).unwrap();
 
-        // Merge's scenario B shielded the local edit from the stale Pull.
+        // The pending Mutation shielded the local edit from the stale Pull.
         let title: String = conn
             .query_row("select title from items where id = 't1'", [], |r| r.get(0))
             .unwrap();
@@ -533,8 +609,8 @@ mod tests {
         )
         .unwrap();
 
-        let mut fake = FakeAdapter::new(
-            vec![PullResponse::Snapshots(vec![])],
+        let mut fake = fake(
+            vec![],
             vec![
                 ApplyResponse::PromotionSuccess {
                     backend_key: "42".into(),
@@ -590,7 +666,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut fake = FakeAdapter::new(vec![PullResponse::Snapshots(vec![])], vec![]);
+        let mut fake = fake(vec![refresh("Old")], vec![]);
         let err = run(&mut conn, &mut fake).unwrap_err();
         assert!(
             matches!(
@@ -625,8 +701,8 @@ mod tests {
         update_ticket_mutation(&conn, 1, "t1", "A");
         update_ticket_mutation(&conn, 2, "t2", "B");
 
-        let mut fake = FakeAdapter::new(
-            vec![PullResponse::Snapshots(vec![])],
+        let mut fake = fake(
+            vec![refresh("Old 1"), refresh("Old 2")],
             vec![ApplyResponse::Success, ApplyResponse::Success],
         );
         let report = run(&mut conn, &mut fake).unwrap();
@@ -650,6 +726,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(cursor, 2);
-        assert_eq!(fake.apply_index, 2);
+        assert_eq!(fake.captured_applies.len(), 2);
     }
 }

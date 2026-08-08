@@ -7,7 +7,7 @@
 //! checkout's git remote, stable across Workspaces.
 //!
 //! Pull is refresh-by-key: the engine hands the Adopted working set's active
-//! keys to [`GithubAdapter::fetch_snapshots`], which fetches each with one
+//! keys to [`GithubAdapter::refresh_item`], which fetches each with one
 //! `gh issue view`. There is no listing and no discovery (ADR-0034).
 
 use std::path::Path;
@@ -15,8 +15,8 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::domain::apply_outcome::{ApplyOutcome, Failure, FailureClass};
-use crate::domain::backend_item_snapshot::BackendItemSnapshot;
-use crate::domain::item_class::ItemClass;
+use crate::domain::backend_kind::BackendKind;
+use crate::domain::backend_operation::{AdoptedItem, BackendItemRefresh};
 use crate::domain::mutation_payload::MutationPayload;
 use crate::domain::mutation_type::MutationType;
 use crate::domain::mutation_view::MutationView;
@@ -25,12 +25,13 @@ use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
 use crate::proc::{ProcRunner, RunOutput};
 
-use super::adapter::{Adapter, ApplyError, PullError};
+use super::adapter::{Adapter, AdapterReadError, ApplyError};
 
 /// The `--json` field set tk requests from `gh issue view`. `url` is fetched
 /// only for the PR guard (see [`is_pull_request_url`]) and is not stored on the
-/// snapshot; `state` arrives UPPERCASE; `issueType` is an object-or-null.
-const ISSUE_JSON_FIELDS: &str = "number,title,body,state,issueType,updatedAt,url";
+/// directional result; `state` arrives UPPERCASE; `issueType` is an
+/// object-or-null.
+const ISSUE_JSON_FIELDS: &str = "number,title,body,state,issueType,url";
 
 /// GitHub Backend Adapter. Holds the injected runner and the command cwd from
 /// which `gh` resolves the repository (ADR-0033). Stateless beyond those
@@ -68,22 +69,16 @@ impl<'a> GithubAdapter<'a> {
 }
 
 impl Adapter for GithubAdapter<'_> {
-    fn fetch_snapshots(&mut self, keys: &[&str]) -> Result<Vec<BackendItemSnapshot>, PullError> {
-        let mut snapshots = Vec::with_capacity(keys.len());
-        for &key in keys {
-            let output = self.runner.run(
-                &["gh", "issue", "view", key, "--json", ISSUE_JSON_FIELDS],
-                self.cwd,
-            )?;
-            if !output.succeeded() {
-                return Err(PullError::Failed(stderr_string(&output)));
-            }
-            let issue: GhIssue = serde_json::from_slice(&output.stdout).map_err(|e| {
-                PullError::Failed(format!("could not parse gh issue JSON for #{key}: {e}"))
-            })?;
-            snapshots.push(issue.into_snapshot()?);
-        }
-        Ok(snapshots)
+    fn backend_kind(&self) -> BackendKind {
+        BackendKind::Github
+    }
+
+    fn adopt_ticket(&mut self, input: &str) -> Result<AdoptedItem, AdapterReadError> {
+        self.view_issue(input)?.into_adopted_item()
+    }
+
+    fn refresh_item(&mut self, key: &str) -> Result<BackendItemRefresh, AdapterReadError> {
+        self.view_issue(key)?.into_refresh()
     }
 
     fn apply_mutation(
@@ -198,6 +193,22 @@ impl Adapter for GithubAdapter<'_> {
     }
 }
 
+impl GithubAdapter<'_> {
+    /// Fetch and parse one GitHub issue view through the checkout-resolved Remote.
+    fn view_issue(&self, key: &str) -> Result<GhIssue, AdapterReadError> {
+        let output = self.runner.run(
+            &["gh", "issue", "view", key, "--json", ISSUE_JSON_FIELDS],
+            self.cwd,
+        )?;
+        if !output.succeeded() {
+            return Err(AdapterReadError::Failed(stderr_string(&output)));
+        }
+        serde_json::from_slice(&output.stdout).map_err(|e| {
+            AdapterReadError::Failed(format!("could not parse gh issue JSON for #{key}: {e}"))
+        })
+    }
+}
+
 /// The GitHub issue number for a Mutation's target Item, absent while that
 /// Item has no backend identity. A Pending Promotion Item keeps appending
 /// ordinary Mutations behind its Promotion (ADR-0036), so a Mutation can reach
@@ -242,8 +253,6 @@ struct GhIssue {
     state: String,
     #[serde(rename = "issueType")]
     issue_type: Option<GhIssueType>,
-    #[serde(rename = "updatedAt")]
-    updated_at: String,
     /// Canonical issue/PR url; consumed only by the PR guard, never stored.
     url: String,
 }
@@ -255,14 +264,22 @@ struct GhIssueType {
     name: String,
 }
 
+struct NormalizedIssue {
+    backend_key: String,
+    ticket_kind: TicketKind,
+    title: String,
+    body: String,
+    status: ItemStatus,
+}
+
 impl GhIssue {
-    fn into_snapshot(self) -> Result<BackendItemSnapshot, PullError> {
+    fn normalize(self) -> Result<NormalizedIssue, AdapterReadError> {
         // PR guard (ADR-0034): `gh issue view <n>` resolves a pull request too
         // (issue and PR numbers share one sequence) and returns it as an
         // issue-shaped object, so reject when the canonical url is a /pull/<n>
         // path. tk has no PR concept; the user meant an issue.
         if is_pull_request_url(&self.url) {
-            return Err(PullError::Failed(format!(
+            return Err(AdapterReadError::Failed(format!(
                 "#{} is a pull request, not an issue",
                 self.number
             )));
@@ -271,7 +288,7 @@ impl GhIssue {
             "OPEN" => ItemStatus::Open,
             "CLOSED" => ItemStatus::Done,
             other => {
-                return Err(PullError::Failed(format!(
+                return Err(AdapterReadError::Failed(format!(
                     "#{}: unexpected issue state '{other}'",
                     self.number
                 )));
@@ -279,21 +296,39 @@ impl GhIssue {
         };
         // "Bug" → Bug; every other value ("Task", "Feature", org-custom) and a
         // typeless issue → Task, matching the closed two-variant TicketKind
-        // (ADR-0021). Pull-only; `--type` is never written.
+        // (ADR-0021). This read-only mapping never writes `--type`.
         let ticket_kind = match self.issue_type.as_ref().map(|t| t.name.as_str()) {
             Some("Bug") => TicketKind::Bug,
             _ => TicketKind::Task,
         };
-        Ok(BackendItemSnapshot {
-            backend_kind: "github".into(),
+        Ok(NormalizedIssue {
             backend_key: self.number.to_string(),
-            display_id: format!("gh-{}", self.number),
-            item_class: ItemClass::Ticket,
-            ticket_kind: Some(ticket_kind),
+            ticket_kind,
             title: self.title,
             body: self.body,
             status,
-            backend_updated_at: self.updated_at,
+        })
+    }
+
+    fn into_adopted_item(self) -> Result<AdoptedItem, AdapterReadError> {
+        let issue = self.normalize()?;
+        Ok(AdoptedItem {
+            display_id: format!("gh-{}", issue.backend_key),
+            backend_key: issue.backend_key,
+            ticket_kind: issue.ticket_kind,
+            title: issue.title,
+            body: issue.body,
+            status: issue.status,
+        })
+    }
+
+    fn into_refresh(self) -> Result<BackendItemRefresh, AdapterReadError> {
+        let issue = self.normalize()?;
+        Ok(BackendItemRefresh {
+            title: issue.title,
+            body: issue.body,
+            status: issue.status,
+            ticket_kind: Some(issue.ticket_kind),
         })
     }
 }
@@ -340,7 +375,7 @@ fn classify(_exit_code: i32, stderr: &str) -> FailureClass {
 }
 
 /// Trim the captured stderr to a single clean diagnostic line for the failure
-/// detail / `PullError::Failed` payload.
+/// detail / `AdapterReadError::Failed` payload.
 fn stderr_string(output: &RunOutput) -> String {
     String::from_utf8_lossy(&output.stderr).trim().to_string()
 }
@@ -348,6 +383,7 @@ fn stderr_string(output: &RunOutput) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::item_class::ItemClass;
     use crate::domain::mutation_payload::{
         DependencyRef, EpicRef, Promotion, StatusChange, TitleBody,
     };
@@ -418,10 +454,10 @@ mod tests {
         }
     }
 
-    // ---- fetch_snapshots ------------------------------------------------
+    // ---- directional reads ---------------------------------------------
 
     #[test]
-    fn fetch_requests_exact_argv_and_parses_open_issue() {
+    fn adopt_requests_exact_argv_and_parses_canonical_open_issue() {
         let runner = FakeRunner::new();
         runner.expect_exact(
             &["gh", "issue", "view", "42", "--json", ISSUE_JSON_FIELDS],
@@ -434,21 +470,17 @@ mod tests {
         );
         let cwd = cwd();
         let mut adapter = GithubAdapter::new(&runner, &cwd);
-        let snaps = adapter.fetch_snapshots(&["42"]).unwrap();
-        assert_eq!(snaps.len(), 1);
-        let s = &snaps[0];
+        let s = adapter.adopt_ticket("42").unwrap();
         assert_eq!(s.backend_key, "42");
         assert_eq!(s.display_id, "gh-42");
-        assert_eq!(s.item_class, ItemClass::Ticket);
-        assert_eq!(s.ticket_kind, Some(TicketKind::Task));
+        assert_eq!(s.ticket_kind, TicketKind::Task);
         assert_eq!(s.status, ItemStatus::Open);
         assert_eq!(s.title, "T42");
-        assert_eq!(s.backend_updated_at, "2026-06-20T00:00:00Z");
         runner.assert_all_consumed();
     }
 
     #[test]
-    fn fetch_maps_closed_to_done_and_bug_kind() {
+    fn refresh_maps_closed_to_done_and_bug_kind() {
         let runner = FakeRunner::new();
         runner.expect_exact(
             &["gh", "issue", "view", "7", "--json", ISSUE_JSON_FIELDS],
@@ -461,14 +493,14 @@ mod tests {
         );
         let cwd = cwd();
         let mut adapter = GithubAdapter::new(&runner, &cwd);
-        let s = &adapter.fetch_snapshots(&["7"]).unwrap()[0];
+        let s = adapter.refresh_item("7").unwrap();
         assert_eq!(s.status, ItemStatus::Done);
         assert_eq!(s.ticket_kind, Some(TicketKind::Bug));
         runner.assert_all_consumed();
     }
 
     #[test]
-    fn fetch_maps_non_bug_and_null_issue_type_to_task() {
+    fn refresh_maps_non_bug_and_null_issue_type_to_task() {
         for it in ["Feature", "null", "CustomOrgType"] {
             let runner = FakeRunner::new();
             runner.expect_exact(
@@ -482,7 +514,7 @@ mod tests {
             );
             let cwd = cwd();
             let mut adapter = GithubAdapter::new(&runner, &cwd);
-            let s = &adapter.fetch_snapshots(&["1"]).unwrap()[0];
+            let s = adapter.refresh_item("1").unwrap();
             assert_eq!(
                 s.ticket_kind,
                 Some(TicketKind::Task),
@@ -493,7 +525,7 @@ mod tests {
     }
 
     #[test]
-    fn fetch_rejects_a_pull_request() {
+    fn adopt_rejects_a_pull_request() {
         let runner = FakeRunner::new();
         runner.expect_exact(
             &["gh", "issue", "view", "99", "--json", ISSUE_JSON_FIELDS],
@@ -506,15 +538,15 @@ mod tests {
         );
         let cwd = cwd();
         let mut adapter = GithubAdapter::new(&runner, &cwd);
-        match adapter.fetch_snapshots(&["99"]).unwrap_err() {
-            PullError::Failed(d) => assert!(d.contains("#99 is a pull request"), "{d}"),
-            PullError::Env(e) => panic!("expected Failed, got Env({e:?})"),
+        match adapter.adopt_ticket("99").unwrap_err() {
+            AdapterReadError::Failed(d) => assert!(d.contains("#99 is a pull request"), "{d}"),
+            AdapterReadError::Env(e) => panic!("expected Failed, got Env({e:?})"),
         }
         runner.assert_all_consumed();
     }
 
     #[test]
-    fn fetch_non_zero_exit_is_pull_failed_with_stderr() {
+    fn refresh_non_zero_exit_is_pull_failed_with_stderr() {
         // Verbatim not-found stderr observed in the tk-gh-playground spike
         // (docs/spikes/gh-cli-issue-behavior.md).
         let stderr = "GraphQL: Could not resolve to an issue or pull request \
@@ -526,28 +558,28 @@ mod tests {
         );
         let cwd = cwd();
         let mut adapter = GithubAdapter::new(&runner, &cwd);
-        match adapter.fetch_snapshots(&["5"]).unwrap_err() {
-            PullError::Failed(d) => assert_eq!(d, stderr),
-            PullError::Env(e) => panic!("expected Failed, got Env({e:?})"),
+        match adapter.refresh_item("5").unwrap_err() {
+            AdapterReadError::Failed(d) => assert_eq!(d, stderr),
+            AdapterReadError::Env(e) => panic!("expected Failed, got Env({e:?})"),
         }
         runner.assert_all_consumed();
     }
 
     #[test]
-    fn fetch_spawn_failure_is_pull_env() {
+    fn refresh_spawn_failure_is_pull_env() {
         let runner = ErrorInjectingRunner {
             err: ProcError::ExecutableNotFound,
         };
         let cwd = cwd();
         let mut adapter = GithubAdapter::new(&runner, &cwd);
         assert!(matches!(
-            adapter.fetch_snapshots(&["1"]).unwrap_err(),
-            PullError::Env(ProcError::ExecutableNotFound)
+            adapter.refresh_item("1").unwrap_err(),
+            AdapterReadError::Env(ProcError::ExecutableNotFound)
         ));
     }
 
     #[test]
-    fn fetch_loops_each_key_in_order() {
+    fn refresh_calls_are_independent_and_preserve_order() {
         let runner = FakeRunner::new();
         runner.expect_exact(
             &["gh", "issue", "view", "1", "--json", ISSUE_JSON_FIELDS],
@@ -569,23 +601,15 @@ mod tests {
         );
         let cwd = cwd();
         let mut adapter = GithubAdapter::new(&runner, &cwd);
-        let snaps = adapter.fetch_snapshots(&["1", "2"]).unwrap();
-        assert_eq!(snaps.len(), 2);
-        assert_eq!(snaps[0].display_id, "gh-1");
-        assert_eq!(snaps[1].display_id, "gh-2");
+        let first = adapter.refresh_item("1").unwrap();
+        let second = adapter.refresh_item("2").unwrap();
+        assert_eq!(first.status, ItemStatus::Open);
+        assert_eq!(second.status, ItemStatus::Done);
         runner.assert_all_consumed();
     }
 
     #[test]
-    fn fetch_empty_keys_makes_no_call() {
-        let runner = FakeRunner::new(); // no expectations: any call panics
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
-        assert!(adapter.fetch_snapshots(&[]).unwrap().is_empty());
-    }
-
-    #[test]
-    fn fetch_unparseable_json_is_pull_failed() {
+    fn refresh_unparseable_json_is_pull_failed() {
         let runner = FakeRunner::new();
         runner.expect_exact(
             &["gh", "issue", "view", "1", "--json", ISSUE_JSON_FIELDS],
@@ -594,8 +618,8 @@ mod tests {
         let cwd = cwd();
         let mut adapter = GithubAdapter::new(&runner, &cwd);
         assert!(matches!(
-            adapter.fetch_snapshots(&["1"]).unwrap_err(),
-            PullError::Failed(_)
+            adapter.refresh_item("1").unwrap_err(),
+            AdapterReadError::Failed(_)
         ));
         runner.assert_all_consumed();
     }

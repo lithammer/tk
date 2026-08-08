@@ -20,7 +20,7 @@ crates/tk/src/
   commands/                per-command clap-derive Args and handlers
   domain/                  pure domain enums and helpers (incl. sync contract
                            types: MutationPayload, MutationView,
-                           BackendItemSnapshot, ApplyOutcome, and the
+                           directional Backend read contracts, ApplyOutcome, and the
                            Promotion contract types: BackendBinding,
                            PromotionCapabilities, PromotionGraph,
                            PromotionPlan)
@@ -62,11 +62,11 @@ small boundary module after the second caller proves the shape.
   phrasing out of command modules.
 - `store/` owns Repository Store opening, migrations, current-state reads and
   writes, Display ID / Alias resolution, sequence allocation, and Mutation Log
-  persistence. `store/sync.rs` exposes the SQL helpers the sync engine and
-  the `tk sync` / `tk remote` commands compose against; `store/promotion.rs`
-  exposes the SQL half of `tk promote` — the preflight graph read, the
-  one-transaction outbox commit, receipt application, and the post-sync
-  Mutation Log reads.
+  persistence. `store/sync.rs` owns Remote configuration, retained Backend
+  cohort validation, canonical Adopt insertion, Pull refresh, and Mutation Log
+  replay and inspection helpers. `store/promotion.rs` exposes the SQL half of
+  `tk promote` — the preflight graph read, the one-transaction outbox commit,
+  receipt application, and the post-sync Mutation Log reads.
 - `remote/` owns the type-erased Backend Adapter trait (mirroring
   `ProcRunner`), the factory that dispatches by configured backend kind, and
   the FakeAdapter used by engine tests. It imports `store/`, `proc`, and

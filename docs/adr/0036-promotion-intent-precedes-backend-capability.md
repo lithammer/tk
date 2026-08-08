@@ -24,11 +24,12 @@ The Promotion payload records the Backend the operation targets, alongside the
 title and body snapshot. Resolving the Pending Promotion state then reads the
 Mutation Log alone, and no Repository Store write path consults Remote
 configuration to decide whether two Dependency endpoints share a Backend. This
-is load-bearing rather than tidy: nothing below the command layer prevents a
-store from holding `github` Items under a `jira` Remote. `remotes.backend_kind`
-admits both, `items.backend_kind` carries no CHECK, and `clear_remote` leaves
-Backend Items intact. The only guard is a usage error in `tk remote set`, which
-the Jira adapter (tk-35) removes.
+is load-bearing rather than tidy: a Repository Store retains one Backend kind
+across Backend Items and non-terminal Promotions. `tk remote set` checks that
+cohort under its write transaction, and Backend read and Promotion commit
+transactions recheck the configured Remote after their Backend/preflight work.
+Clearing and restoring the same kind remains valid because repository
+resolution belongs to the Adapter.
 
 ### Backend capability is declared per facet and staged
 

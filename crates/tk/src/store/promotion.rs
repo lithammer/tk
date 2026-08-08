@@ -29,6 +29,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 
 use crate::domain::apply_outcome::PromotionReceipt;
+use crate::domain::backend_kind::BackendKind;
 use crate::domain::mutation_state::MutationState;
 use crate::domain::origin::Origin;
 use crate::domain::promotion_graph::{GraphDependency, GraphItem, PromotionGraph};
@@ -179,6 +180,14 @@ pub enum CommitPlanError {
     /// Underlying error from appending one draft to the outbox.
     #[error(transparent)]
     Append(#[from] mutations::AppendError),
+    #[error(transparent)]
+    BackendCohort(#[from] crate::store::sync::BackendCohortError),
+    /// The configured Remote changed after Promotion preflight.
+    #[error("Remote changed while preparing the Promotion; retry the command")]
+    RemoteChanged {
+        expected: BackendKind,
+        actual: Option<BackendKind>,
+    },
 }
 
 /// Commit `plan` to the Mutation Log outbox as one Promotion Operation, in
@@ -201,6 +210,7 @@ pub enum CommitPlanError {
 pub fn commit_plan<R: Rng + ?Sized>(
     conn: &mut Connection,
     plan: &PromotionPlan,
+    expected_kind: BackendKind,
     rng: &mut R,
     now: &str,
 ) -> Result<Option<String>, CommitPlanError> {
@@ -210,6 +220,21 @@ pub fn commit_plan<R: Rng + ?Sized>(
 
     let operation_id = generate_internal_id(rng);
     let tx = crate::store::write_transaction(conn)?;
+    let actual: Option<String> = tx
+        .query_row(
+            "select backend_kind from remotes where name = 'primary'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let actual = actual.and_then(|kind| kind.parse().ok());
+    if actual != Some(expected_kind) {
+        return Err(CommitPlanError::RemoteChanged {
+            expected: expected_kind,
+            actual,
+        });
+    }
+    crate::store::sync::ensure_backend_cohort(&tx, expected_kind)?;
     for draft in &plan.mutations {
         mutations::append(
             &tx,
@@ -375,6 +400,7 @@ mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("pragma foreign_keys = on").unwrap();
         migrations::apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        crate::store::sync::set_remote(&mut conn, BackendKind::Github, "{}", NOW).unwrap();
         conn
     }
 
@@ -911,14 +937,92 @@ mod tests {
     fn commit_promotion_plan_on_an_empty_plan_mints_no_operation() {
         let mut conn = open_seeded();
 
-        let result =
-            commit_plan(&mut conn, &PromotionPlan::default(), &mut seeded_rng(), NOW).unwrap();
+        let result = commit_plan(
+            &mut conn,
+            &PromotionPlan::default(),
+            BackendKind::Github,
+            &mut seeded_rng(),
+            NOW,
+        )
+        .unwrap();
 
         assert_eq!(
             result, None,
             "re-invoking promote on already-resolved work must not mint an operation that owns no Mutations"
         );
         assert_eq!(mutation_count(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn commit_promotion_plan_refuses_when_the_remote_changed_after_planning() {
+        let mut conn = open_seeded();
+        seed_ticket(&conn, "t1", "tk-1", 1);
+        let plan = PromotionPlan {
+            mutations: vec![draft("t1")],
+        };
+        crate::store::sync::clear_remote(&mut conn).unwrap();
+
+        let error = commit_plan(
+            &mut conn,
+            &plan,
+            BackendKind::Github,
+            &mut seeded_rng(),
+            NOW,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CommitPlanError::RemoteChanged {
+                expected: BackendKind::Github,
+                actual: None,
+            }
+        ));
+        assert_eq!(mutation_count(&conn).unwrap(), 0);
+        assert_eq!(mutation_seq(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn commit_promotion_plan_refuses_a_different_retained_backend_kind() {
+        let mut conn = open_seeded();
+        seed_ticket(&conn, "t1", "tk-1", 1);
+        seed_ticket(&conn, "t2", "tk-2", 2);
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "promote_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"T","body":"","backend_kind":"jira"}"#,
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        let plan = PromotionPlan {
+            mutations: vec![draft("t2")],
+        };
+
+        let error = commit_plan(
+            &mut conn,
+            &plan,
+            BackendKind::Github,
+            &mut seeded_rng(),
+            NOW,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CommitPlanError::BackendCohort(
+                crate::store::sync::BackendCohortError::BackendKindMismatch {
+                    expected: BackendKind::Github,
+                    retained: BackendKind::Jira,
+                }
+            )
+        ));
+        assert_eq!(mutation_count(&conn).unwrap(), 1);
+        assert_eq!(mutation_seq(&conn).unwrap(), 0);
     }
 
     #[test]
@@ -933,7 +1037,14 @@ mod tests {
             mutations: vec![draft("t3"), draft("t1"), draft("t2")],
         };
 
-        commit_plan(&mut conn, &plan, &mut seeded_rng(), NOW).unwrap();
+        commit_plan(
+            &mut conn,
+            &plan,
+            BackendKind::Github,
+            &mut seeded_rng(),
+            NOW,
+        )
+        .unwrap();
 
         let mut stmt = conn
             .prepare("select item_id from mutations order by sequence")
@@ -955,9 +1066,15 @@ mod tests {
             mutations: vec![draft("t1"), draft("t2")],
         };
 
-        let operation_id = commit_plan(&mut conn, &plan, &mut seeded_rng(), NOW)
-            .unwrap()
-            .expect("a non-empty plan mints an operation");
+        let operation_id = commit_plan(
+            &mut conn,
+            &plan,
+            BackendKind::Github,
+            &mut seeded_rng(),
+            NOW,
+        )
+        .unwrap()
+        .expect("a non-empty plan mints an operation");
 
         let mut stmt = conn
             .prepare("select promotion_operation_id from mutations order by sequence")
@@ -985,7 +1102,14 @@ mod tests {
         };
 
         let before = mutation_seq(&conn).unwrap();
-        let err = commit_plan(&mut conn, &plan, &mut seeded_rng(), NOW).unwrap_err();
+        let err = commit_plan(
+            &mut conn,
+            &plan,
+            BackendKind::Github,
+            &mut seeded_rng(),
+            NOW,
+        )
+        .unwrap_err();
 
         assert!(
             matches!(
@@ -1040,7 +1164,14 @@ mod tests {
         let plan = PromotionPlan {
             mutations: vec![draft("t2")],
         };
-        commit_plan(&mut conn, &plan, &mut seeded_rng(), NOW).unwrap();
+        commit_plan(
+            &mut conn,
+            &plan,
+            BackendKind::Github,
+            &mut seeded_rng(),
+            NOW,
+        )
+        .unwrap();
 
         let (sequence, promotion_operation_id, mutation_type): (i64, Option<String>, String) = conn
             .query_row(

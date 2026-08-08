@@ -2,27 +2,28 @@
 //!
 //! - `tk remote set github` records that the Primary Backend is GitHub
 //!   (`config_json = {}`). The GitHub repository is not stored; the Backend
-//!   Adapter resolves it from the checkout at sync time (ADR-0033). The command
-//!   takes no repo argument and is idempotent.
+//!   Adapter resolves it from the checkout for each Backend operation
+//!   (ADR-0033). The command takes no repo argument and is idempotent.
 //! - `tk remote set jira` is refused in v1 — `jira` parses to a real
 //!   [`BackendKind`] but no Jira Backend Adapter exists yet (Usage, exit 2).
 //! - `tk remote clear` removes the Remote only when no pending or failed
 //!   Mutations would be orphaned (CONTEXT.md).
 //! - bare `tk remote` shows the configured kind.
 //!
-//! Born on the ADR-0032 diagnostics seam: [`run`] returns
-//! `Result<Exit, CommandError>` and the dispatch seam frames `tk remote:
-//! <body>`. The verbatim message bodies live in each typed error's `#[error]`.
+//! Per ADR-0032, [`run`] returns `Result<Exit, CommandError>` and the dispatch
+//! seam frames failures as `tk remote: <body>`. Verbatim message bodies live
+//! in each typed error's `#[error]`.
 
 use clap::{Args as ClapArgs, Subcommand};
 
 use crate::cli::{CommandError, Deps, Exit};
 use crate::commands::resolver;
 use crate::domain::backend_kind::BackendKind;
-use crate::store::sync::{self as store_sync, ClearRemoteError, SetRemoteOutcome};
+use crate::store::sync::{
+    self as store_sync, BackendCohortError, ClearRemoteError, SetRemoteError, SetRemoteOutcome,
+};
 
-/// Flags for `tk remote`. Absent a subcommand the command shows the configured
-/// Remote, mirroring `tk sync`'s bare-invocation shape.
+/// Flags for `tk remote`; absent a subcommand, the command shows the Remote.
 #[derive(Debug, ClapArgs)]
 pub struct Args {
     #[command(subcommand)]
@@ -62,8 +63,8 @@ fn run_set(deps: &mut Deps<'_>, raw_kind: &str) -> Result<Exit, CommandError> {
         .map_err(|err| resolver::open_error(&err))?;
     let now = deps.clock.now_iso();
 
-    // A v1 GitHub Remote stores an empty config: the repository is resolved from
-    // the checkout at sync time, not persisted (ADR-0033).
+    // A v1 GitHub Remote stores an empty config: the Adapter resolves the
+    // repository from the checkout for each Backend operation (ADR-0033).
     match store_sync::set_remote(store.conn_mut(), kind, "{}", &now) {
         Ok(SetRemoteOutcome::Created) => {
             let _ = writeln!(deps.stdout, "Configured Remote: {kind}");
@@ -73,7 +74,11 @@ fn run_set(deps: &mut Deps<'_>, raw_kind: &str) -> Result<Exit, CommandError> {
             let _ = writeln!(deps.stdout, "Remote already configured: {kind}");
             Ok(Exit::Ok)
         }
-        Err(err) => Err(resolver::storage_error(&err)),
+        Err(
+            SetRemoteError::Storage(err)
+            | SetRemoteError::BackendCohort(BackendCohortError::Storage(err)),
+        ) => Err(resolver::storage_error(&err)),
+        Err(other) => Err(CommandError::failure(other)),
     }
 }
 
@@ -116,8 +121,7 @@ fn run_show(deps: &mut Deps<'_>) -> Result<Exit, CommandError> {
             let _ = writeln!(deps.stdout, "Remote: {}", remote.backend_kind);
             Ok(Exit::Ok)
         }
-        // A query result, not a failure: empty stdout line at exit 0, mirroring
-        // `tk sync log`'s empty message.
+        // An absent Remote is a query result, not a failure.
         Ok(None) => {
             let _ = writeln!(deps.stdout, "No Remote configured.");
             Ok(Exit::Ok)

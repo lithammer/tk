@@ -2,7 +2,7 @@
 //!
 //! The schema-determined value types: Priority, ItemStatus, SelectionState,
 //! TicketKind, ItemClass, Origin, MutationType, MutationState,
-//! MutationPayload, MutationView, BackendItemSnapshot, BackendBinding, and
+//! MutationPayload, MutationView, Backend Adapter read contracts, BackendBinding, and
 //! PromotionCapabilities. Each one is pinned by an existing SQL CHECK
 //! constraint or by an ADR — the shape exists independently of any future
 //! Backend Adapter — so the rest of the codebase uses typed values instead of
@@ -42,8 +42,8 @@
 
 pub mod apply_outcome;
 pub mod backend_binding;
-pub mod backend_item_snapshot;
 pub mod backend_kind;
+pub mod backend_operation;
 pub mod dependency_rule;
 pub mod item_class;
 pub mod mutation_payload;

@@ -261,9 +261,17 @@ pub fn commit_promotion(conn: &mut Connection, id: &str) {
         BackendKind::Github,
     )
     .expect("a promotable fixture");
+    if crate::store::sync::get_remote(conn)
+        .expect("read fixture Remote")
+        .is_none()
+    {
+        crate::store::sync::set_remote(conn, BackendKind::Github, "{}", "2026-05-09T00:00:00.000Z")
+            .expect("configure fixture Remote");
+    }
     crate::store::promotion::commit_plan(
         conn,
         &plan,
+        BackendKind::Github,
         &mut rand::rngs::StdRng::seed_from_u64(7),
         "2026-05-09T00:00:00.000Z",
     )

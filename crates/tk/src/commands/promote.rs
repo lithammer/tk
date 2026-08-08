@@ -15,9 +15,8 @@
 //! Display ID in place and keeps the outgoing one as an Alias, so re-resolving
 //! what was captured before sync is what yields the old-to-new mapping.
 //!
-//! Born on the ADR-0032 diagnostics seam: [`run`] returns
-//! `Result<Exit, CommandError>` and the dispatch seam frames `tk promote:
-//! <body>`. The shared failure bodies match `tk sync` byte-for-byte.
+//! Per ADR-0032, [`run`] returns `Result<Exit, CommandError>` and the dispatch
+//! seam frames failures as `tk promote: <body>`.
 
 use std::collections::HashSet;
 use std::io::Write;
@@ -41,7 +40,7 @@ use crate::store::promotion::{
     self as store_promotion, CommitPlanError, MutationSummary, ReadGraphError,
 };
 use crate::store::repository::{ResolvedItemRefWithDisplay, Store};
-use crate::store::sync as store_sync;
+use crate::store::sync::BackendCohortError;
 use crate::sync::{self, RunSyncError};
 
 /// Flags for `tk promote`.
@@ -81,32 +80,15 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         )));
     }
 
-    // The configured Remote names the Backend the whole operation targets, and
-    // preflight judges the plan against that Backend's Adapter capabilities —
-    // so a store with no Remote reports that, rather than findings it has no
-    // basis to compute.
-    let Some(remote) =
-        store_sync::get_remote(store.conn()).map_err(|e| resolver::storage_error(&e))?
-    else {
-        return Err(no_remote());
-    };
-
     let adapter_opt = match factory::open_configured(store.conn(), deps.runner, deps.cwd) {
         Ok(adapter) => adapter,
         Err(err @ FactoryOpenError::NotImplemented) => return Err(CommandError::failure(err)),
         Err(FactoryOpenError::Storage(err)) => return Err(resolver::storage_error(&err)),
     };
-    // `get_remote` already proved a Remote exists; `Ok(None)` here is only a
-    // concurrent `tk remote clear` between the two reads. Treat it as no Remote.
     let Some(mut adapter) = adapter_opt else {
         return Err(no_remote());
     };
-    // The factory already read and dispatched on this text, so a value that
-    // does not parse means the `remotes` row changed between the two reads —
-    // the same concurrency the `Ok(None)` arm covers, reported the same way.
-    let Ok(backend) = remote.backend_kind.parse::<BackendKind>() else {
-        return Err(no_remote());
-    };
+    let backend = adapter.backend_kind();
 
     promote(
         deps,
@@ -141,15 +123,16 @@ fn promote(
         .map_err(|findings| refusal(&target.display_id, &findings, backend))?;
 
     let captured = capture_display_ids(&graph, &plan);
-    let operation_id = store_promotion::commit_plan(store.conn_mut(), &plan, &mut *deps.rng, now)
-        .map_err(commit_error)?;
+    let operation_id =
+        store_promotion::commit_plan(store.conn_mut(), &plan, backend, &mut *deps.rng, now)
+            .map_err(commit_error)?;
     if plan.is_empty() {
         render_nothing_to_promote(deps.stdout, target_item(&graph));
     }
 
     // Sync runs even when nothing was appended: an earlier invocation's
     // Promotion may still be pending, and this is the drain that applies it.
-    let sync_error = sync::run_sync(store.conn_mut(), adapter, now, &mut *deps.rng).err();
+    let sync_error = sync::run_sync(store.conn_mut(), adapter, now).err();
 
     render_mappings(deps.stdout, store, &captured)?;
 
@@ -409,9 +392,7 @@ fn render_finding(finding: &PromotionFinding, backend: BackendKind) -> String {
     }
 }
 
-/// The no-Remote diagnostic, shared by the `get_remote` and (defensive)
-/// `open_configured` arms. The body matches `tk sync`'s verbatim; it is re-typed
-/// here rather than shared as a constant so the literal stays grep-able.
+/// The no-Remote diagnostic for both configuration lookup paths.
 fn no_remote() -> CommandError {
     CommandError::failure("no Remote configured; run 'tk remote set <kind>' first")
 }
@@ -425,10 +406,18 @@ fn read_graph_error(err: ReadGraphError) -> CommandError {
 
 fn commit_error(err: CommitPlanError) -> CommandError {
     match err {
-        CommitPlanError::Storage(e) | CommitPlanError::Append(AppendError::Sqlite(e)) => {
+        CommitPlanError::Storage(e)
+        | CommitPlanError::Append(AppendError::Sqlite(e))
+        | CommitPlanError::BackendCohort(BackendCohortError::Storage(e)) => {
             resolver::storage_error(&e)
         }
         CommitPlanError::Append(e @ AppendError::Sequence(_)) => {
+            CommandError::failure(format!("Repository Store corruption: {e}"))
+        }
+        CommitPlanError::RemoteChanged { .. } => CommandError::failure(
+            "the configured Remote changed while preparing the Promotion; retry 'tk promote'",
+        ),
+        CommitPlanError::BackendCohort(e) => {
             CommandError::failure(format!("Repository Store corruption: {e}"))
         }
     }
@@ -444,7 +433,7 @@ mod tests {
     use crate::domain::ticket_kind::TicketKind;
     use crate::proc::{FakeRunner, ProcError, RunOutput};
     use crate::promotion::plan::ItemRef;
-    use crate::remote::fake::{ApplyResponse, FakeAdapter, PullResponse};
+    use crate::remote::fake::{ApplyResponse, FakeAdapter, RefreshResponse};
     use crate::render::Styler;
     use crate::store::migrations;
     use crate::store::testing::{
@@ -560,8 +549,24 @@ mod tests {
     }
 
     fn adapter(applies: Vec<ApplyResponse>) -> FakeAdapter {
-        FakeAdapter::new(vec![PullResponse::Snapshots(vec![])], applies)
+        FakeAdapter::directional(vec![], vec![], applies)
             .with_capabilities(PromotionCapabilities::all())
+    }
+
+    fn adapter_with_refresh(applies: Vec<ApplyResponse>) -> FakeAdapter {
+        FakeAdapter::directional(
+            vec![],
+            vec![RefreshResponse::Item(
+                crate::domain::backend_operation::BackendItemRefresh {
+                    title: "Adopted".into(),
+                    body: String::new(),
+                    status: crate::domain::status::ItemStatus::Open,
+                    ticket_kind: Some(TicketKind::Task),
+                },
+            )],
+            applies,
+        )
+        .with_capabilities(PromotionCapabilities::all())
     }
 
     /// Drive `run` and frame any error exactly as the dispatch seam does
@@ -1044,7 +1049,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         let mut st = open_store(&h, &store, &cwd_path);
-        let mut fake = adapter(vec![]);
+        let mut fake = adapter_with_refresh(vec![]);
 
         let code = promote_rendered(&mut h, &mut st, &mut fake, "gh-7", false);
 
@@ -1052,7 +1057,7 @@ mod tests {
         assert_eq!(h.out(), "Already promoted: gh-7\n");
         assert_eq!(mutation_count(&conn).unwrap(), 0);
         // The sync still ran: the Adopted working set's key was pulled.
-        assert_eq!(fake.captured_pull_keys, vec![vec!["7".to_string()]]);
+        assert_eq!(fake.captured_refresh_keys, vec!["7".to_string()]);
     }
 
     #[test]
@@ -1197,7 +1202,8 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         let mut st = open_store(&h, &store, &cwd_path);
-        let mut fake = adapter(vec![ApplyResponse::RecordedFailure("HTTP 403".into())]);
+        let mut fake =
+            adapter_with_refresh(vec![ApplyResponse::RecordedFailure("HTTP 403".into())]);
 
         let code = promote_rendered(&mut h, &mut st, &mut fake, "tk-1", false);
 
@@ -1276,14 +1282,13 @@ mod tests {
         let mut st = open_store(&h, &store, &cwd_path);
         // Dependencies are the only facet this Backend cannot represent, so the
         // rejected edge is the finding, not a capability complaint.
-        let mut fake = FakeAdapter::new(vec![PullResponse::Snapshots(vec![])], vec![])
-            .with_capabilities(
-                PromotionCapabilities::none()
-                    .with_item_class(ItemClass::Ticket)
-                    .with_item_class(ItemClass::Epic)
-                    .with_ticket_kind(TicketKind::Task)
-                    .with_epic_membership(),
-            );
+        let mut fake = FakeAdapter::directional(vec![], vec![], vec![]).with_capabilities(
+            PromotionCapabilities::none()
+                .with_item_class(ItemClass::Ticket)
+                .with_item_class(ItemClass::Epic)
+                .with_ticket_kind(TicketKind::Task)
+                .with_epic_membership(),
+        );
 
         let code = promote_rendered(&mut h, &mut st, &mut fake, "tk-1", true);
 
@@ -1300,7 +1305,9 @@ mod tests {
             "a refused preflight writes nothing"
         );
         assert!(
-            fake.captured_pull_keys.is_empty(),
+            fake.captured_adopt_inputs.is_empty()
+                && fake.captured_refresh_keys.is_empty()
+                && fake.captured_applies.is_empty(),
             "a refused preflight calls no Backend"
         );
     }
