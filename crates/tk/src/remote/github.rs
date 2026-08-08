@@ -423,7 +423,7 @@ mod tests {
     #[test]
     fn fetch_requests_exact_argv_and_parses_open_issue() {
         let runner = FakeRunner::new();
-        runner.expect(
+        runner.expect_exact(
             &["gh", "issue", "view", "42", "--json", ISSUE_JSON_FIELDS],
             ok(&issue_json(
                 42,
@@ -444,13 +444,14 @@ mod tests {
         assert_eq!(s.status, ItemStatus::Open);
         assert_eq!(s.title, "T42");
         assert_eq!(s.backend_updated_at, "2026-06-20T00:00:00Z");
+        runner.assert_all_consumed();
     }
 
     #[test]
     fn fetch_maps_closed_to_done_and_bug_kind() {
         let runner = FakeRunner::new();
-        runner.expect(
-            &["gh", "issue", "view", "7"],
+        runner.expect_exact(
+            &["gh", "issue", "view", "7", "--json", ISSUE_JSON_FIELDS],
             ok(&issue_json(
                 7,
                 "CLOSED",
@@ -463,14 +464,15 @@ mod tests {
         let s = &adapter.fetch_snapshots(&["7"]).unwrap()[0];
         assert_eq!(s.status, ItemStatus::Done);
         assert_eq!(s.ticket_kind, Some(TicketKind::Bug));
+        runner.assert_all_consumed();
     }
 
     #[test]
     fn fetch_maps_non_bug_and_null_issue_type_to_task() {
         for it in ["Feature", "null", "CustomOrgType"] {
             let runner = FakeRunner::new();
-            runner.expect(
-                &["gh", "issue", "view", "1"],
+            runner.expect_exact(
+                &["gh", "issue", "view", "1", "--json", ISSUE_JSON_FIELDS],
                 ok(&issue_json(
                     1,
                     "OPEN",
@@ -486,14 +488,15 @@ mod tests {
                 Some(TicketKind::Task),
                 "issueType {it} → Task"
             );
+            runner.assert_all_consumed();
         }
     }
 
     #[test]
     fn fetch_rejects_a_pull_request() {
         let runner = FakeRunner::new();
-        runner.expect(
-            &["gh", "issue", "view", "99"],
+        runner.expect_exact(
+            &["gh", "issue", "view", "99", "--json", ISSUE_JSON_FIELDS],
             ok(&issue_json(
                 99,
                 "OPEN",
@@ -507,6 +510,7 @@ mod tests {
             PullError::Failed(d) => assert!(d.contains("#99 is a pull request"), "{d}"),
             PullError::Env(e) => panic!("expected Failed, got Env({e:?})"),
         }
+        runner.assert_all_consumed();
     }
 
     #[test]
@@ -516,13 +520,17 @@ mod tests {
         let stderr = "GraphQL: Could not resolve to an issue or pull request \
                       with the number of 5. (repository.issue)";
         let runner = FakeRunner::new();
-        runner.expect(&["gh", "issue", "view", "5"], fail(1, stderr));
+        runner.expect_exact(
+            &["gh", "issue", "view", "5", "--json", ISSUE_JSON_FIELDS],
+            fail(1, stderr),
+        );
         let cwd = cwd();
         let mut adapter = GithubAdapter::new(&runner, &cwd);
         match adapter.fetch_snapshots(&["5"]).unwrap_err() {
             PullError::Failed(d) => assert_eq!(d, stderr),
             PullError::Env(e) => panic!("expected Failed, got Env({e:?})"),
         }
+        runner.assert_all_consumed();
     }
 
     #[test]
@@ -541,8 +549,8 @@ mod tests {
     #[test]
     fn fetch_loops_each_key_in_order() {
         let runner = FakeRunner::new();
-        runner.expect(
-            &["gh", "issue", "view", "1"],
+        runner.expect_exact(
+            &["gh", "issue", "view", "1", "--json", ISSUE_JSON_FIELDS],
             ok(&issue_json(
                 1,
                 "OPEN",
@@ -550,8 +558,8 @@ mod tests {
                 "https://github.com/o/r/issues/1",
             )),
         );
-        runner.expect(
-            &["gh", "issue", "view", "2"],
+        runner.expect_exact(
+            &["gh", "issue", "view", "2", "--json", ISSUE_JSON_FIELDS],
             ok(&issue_json(
                 2,
                 "CLOSED",
@@ -565,6 +573,7 @@ mod tests {
         assert_eq!(snaps.len(), 2);
         assert_eq!(snaps[0].display_id, "gh-1");
         assert_eq!(snaps[1].display_id, "gh-2");
+        runner.assert_all_consumed();
     }
 
     #[test]
@@ -578,13 +587,17 @@ mod tests {
     #[test]
     fn fetch_unparseable_json_is_pull_failed() {
         let runner = FakeRunner::new();
-        runner.expect(&["gh", "issue", "view", "1"], ok("not json"));
+        runner.expect_exact(
+            &["gh", "issue", "view", "1", "--json", ISSUE_JSON_FIELDS],
+            ok("not json"),
+        );
         let cwd = cwd();
         let mut adapter = GithubAdapter::new(&runner, &cwd);
         assert!(matches!(
             adapter.fetch_snapshots(&["1"]).unwrap_err(),
             PullError::Failed(_)
         ));
+        runner.assert_all_consumed();
     }
 
     // ---- apply_mutation -------------------------------------------------
@@ -592,7 +605,7 @@ mod tests {
     #[test]
     fn apply_update_ticket_edits_title_and_body() {
         let runner = FakeRunner::new();
-        runner.expect(
+        runner.expect_exact(
             &[
                 "gh", "issue", "edit", "42", "--title", "New", "--body", "Body",
             ],
@@ -612,12 +625,13 @@ mod tests {
             adapter.apply_mutation(&v, NOW).unwrap(),
             ApplyOutcome::Accepted(_)
         ));
+        runner.assert_all_consumed();
     }
 
     #[test]
     fn apply_set_status_done_closes() {
         let runner = FakeRunner::new();
-        runner.expect(&["gh", "issue", "close", "42"], ok(""));
+        runner.expect_exact(&["gh", "issue", "close", "42"], ok(""));
         let cwd = cwd();
         let mut adapter = GithubAdapter::new(&runner, &cwd);
         let v = view(
@@ -631,13 +645,14 @@ mod tests {
             adapter.apply_mutation(&v, NOW).unwrap(),
             ApplyOutcome::Accepted(_)
         ));
+        runner.assert_all_consumed();
     }
 
     #[test]
     fn apply_set_status_open_or_active_reopens() {
         for status in ["open", "active"] {
             let runner = FakeRunner::new();
-            runner.expect(&["gh", "issue", "reopen", "42"], ok(""));
+            runner.expect_exact(&["gh", "issue", "reopen", "42"], ok(""));
             let cwd = cwd();
             let mut adapter = GithubAdapter::new(&runner, &cwd);
             let v = view(
@@ -654,6 +669,7 @@ mod tests {
                 ),
                 "{status}"
             );
+            runner.assert_all_consumed();
         }
     }
 
@@ -662,7 +678,7 @@ mod tests {
         // gh's idempotent "already closed" no-op exits 0 but prints to stderr.
         // Success is judged by exit code, so this must be Accepted, not rejected.
         let runner = FakeRunner::new();
-        runner.expect(
+        runner.expect_exact(
             &["gh", "issue", "close", "42"],
             RunOutput {
                 exit_code: 0,
@@ -683,12 +699,13 @@ mod tests {
             adapter.apply_mutation(&v, NOW).unwrap(),
             ApplyOutcome::Accepted(_)
         ));
+        runner.assert_all_consumed();
     }
 
     #[test]
     fn apply_non_zero_is_classified_rejection() {
         let runner = FakeRunner::new();
-        runner.expect(
+        runner.expect_exact(
             &["gh", "issue", "edit", "42", "--title", "T", "--body", ""],
             fail(1, "HTTP 422: Validation Failed"),
         );
@@ -710,6 +727,7 @@ mod tests {
             }
             ApplyOutcome::Accepted(_) => panic!("expected rejection"),
         }
+        runner.assert_all_consumed();
     }
 
     #[test]
@@ -776,7 +794,7 @@ mod tests {
     #[test]
     fn apply_add_dependency_edits_blocked_by() {
         let runner = FakeRunner::new();
-        runner.expect(
+        runner.expect_exact(
             &["gh", "issue", "edit", "5", "--add-blocked-by", "9"],
             ok(""),
         );
@@ -787,12 +805,13 @@ mod tests {
             adapter.apply_mutation(&v, NOW).unwrap(),
             ApplyOutcome::Accepted(_)
         ));
+        runner.assert_all_consumed();
     }
 
     #[test]
     fn apply_remove_dependency_edits_remove_blocked_by() {
         let runner = FakeRunner::new();
-        runner.expect(
+        runner.expect_exact(
             &["gh", "issue", "edit", "5", "--remove-blocked-by", "9"],
             ok(""),
         );
@@ -803,6 +822,7 @@ mod tests {
             adapter.apply_mutation(&v, NOW).unwrap(),
             ApplyOutcome::Accepted(_)
         ));
+        runner.assert_all_consumed();
     }
 
     #[test]
@@ -810,7 +830,7 @@ mod tests {
         // The idempotent re-link no-op: gh may print to stderr yet exit 0.
         // Success is judged by exit code, so this must read as Accepted.
         let runner = FakeRunner::new();
-        runner.expect(
+        runner.expect_exact(
             &["gh", "issue", "edit", "5", "--add-blocked-by", "9"],
             RunOutput {
                 exit_code: 0,
@@ -825,6 +845,7 @@ mod tests {
             adapter.apply_mutation(&v, NOW).unwrap(),
             ApplyOutcome::Accepted(_)
         ));
+        runner.assert_all_consumed();
     }
 
     #[test]
@@ -832,7 +853,7 @@ mod tests {
         // A stale gh (< 2.94.0) rejects the unknown flag; the Mutation fails
         // like any other (no longer no-op-Accepted) and the queue wedges.
         let runner = FakeRunner::new();
-        runner.expect(
+        runner.expect_exact(
             &["gh", "issue", "edit", "5", "--add-blocked-by", "9"],
             fail(1, "unknown flag: --add-blocked-by"),
         );
@@ -846,6 +867,7 @@ mod tests {
             }
             ApplyOutcome::Accepted(_) => panic!("stale gh must reject, not no-op"),
         }
+        runner.assert_all_consumed();
     }
 
     // ---- Promotion -------------------------------------------------------
