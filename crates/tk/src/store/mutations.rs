@@ -11,7 +11,7 @@
 //! (`applied`, `failed`, or `skipped`); writers here never construct any
 //! other state directly.
 //!
-//! The one read here, [`resolve_backend_intent`], answers the question the
+//! The one read here, [`resolve_backend_binding`], answers the question the
 //! outbox itself defines: whether a Local Item is already Pending Promotion
 //! (ADR-0036).
 
@@ -82,7 +82,7 @@ pub fn append(conn: &Connection, req: AppendRequest<'_>) -> Result<i64, AppendEr
     Ok(sequence)
 }
 
-/// Errors returned by [`resolve_backend_intent`].
+/// Errors returned by [`resolve_backend_binding`].
 #[derive(Debug, Error)]
 pub enum BackendBindingError {
     /// Underlying SQLite error from the `items` or `mutations` read.
@@ -117,7 +117,7 @@ pub enum BackendBindingError {
 ///
 /// An `item_id` no `items` row matches is a caller fault, not a domain
 /// outcome, and surfaces as [`BackendBindingError::Sqlite`].
-pub fn resolve_backend_intent(
+pub fn resolve_backend_binding(
     conn: &Connection,
     item_id: &str,
 ) -> Result<BackendBinding, BackendBindingError> {
@@ -536,7 +536,7 @@ mod tests {
         seed_backend_ticket(&conn, "t1", "tk-1", 1);
 
         assert_eq!(
-            resolve_backend_intent(&conn, "t1").unwrap(),
+            resolve_backend_binding(&conn, "t1").unwrap(),
             BackendBinding::Backend {
                 backend_kind: "github".into()
             }
@@ -544,12 +544,12 @@ mod tests {
     }
 
     #[test]
-    fn a_local_item_without_a_promotion_has_no_backend_intent() {
+    fn a_local_item_without_a_promotion_has_no_backend_binding() {
         let conn = open_seeded();
         seed_local_ticket(&conn, "t1", "tk-1");
 
         assert_eq!(
-            resolve_backend_intent(&conn, "t1").unwrap(),
+            resolve_backend_binding(&conn, "t1").unwrap(),
             BackendBinding::Local
         );
     }
@@ -572,7 +572,7 @@ mod tests {
         seed_promotion(&conn, "t1", "pending", "github");
 
         assert_eq!(
-            resolve_backend_intent(&conn, "t1").unwrap(),
+            resolve_backend_binding(&conn, "t1").unwrap(),
             BackendBinding::PendingPromotion {
                 backend_kind: "github".into()
             }
@@ -586,7 +586,7 @@ mod tests {
         seed_promotion(&conn, "t1", "failed", "github");
 
         assert_eq!(
-            resolve_backend_intent(&conn, "t1").unwrap(),
+            resolve_backend_binding(&conn, "t1").unwrap(),
             BackendBinding::PendingPromotion {
                 backend_kind: "github".into()
             }
@@ -603,7 +603,7 @@ mod tests {
             seed_promotion(&conn, "t1", state, "github");
 
             assert_eq!(
-                resolve_backend_intent(&conn, "t1").unwrap(),
+                resolve_backend_binding(&conn, "t1").unwrap(),
                 BackendBinding::Local,
                 "a {state} Promotion is resolved intent"
             );
@@ -626,14 +626,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            resolve_backend_intent(&conn, "t1").unwrap(),
+            resolve_backend_binding(&conn, "t1").unwrap(),
             BackendBinding::Local
         );
     }
 
     #[test]
     fn every_promotion_mutation_type_makes_its_item_pending_promotion() {
-        // `resolve_backend_intent`'s `mutation_type in (...)` list is a second
+        // `resolve_backend_binding`'s `mutation_type in (...)` list is a second
         // encoding of `MutationType::is_promotion`. A Promotion kind the SQL
         // does not name resolves as Local, silently reopening every write gate
         // ADR-0036 put on Backend Binding — so a new kind belongs in that query
@@ -681,7 +681,7 @@ mod tests {
             .unwrap();
 
             assert_eq!(
-                resolve_backend_intent(&conn, item_id).unwrap(),
+                resolve_backend_binding(&conn, item_id).unwrap(),
                 BackendBinding::PendingPromotion {
                     backend_kind: "github".into()
                 },
@@ -705,7 +705,7 @@ mod tests {
         )
         .unwrap();
 
-        let err = resolve_backend_intent(&conn, "t1").unwrap_err();
+        let err = resolve_backend_binding(&conn, "t1").unwrap_err();
         assert!(
             matches!(err, BackendBindingError::PayloadJson(_)),
             "a promote_* row without a Backend is store corruption, got {err:?}"

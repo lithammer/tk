@@ -872,7 +872,7 @@ fn promote_reports_every_preflight_finding_at_once() {
     tk promote: cannot promote project-1:
       project-1: the github Backend cannot create Epics under Promotion.
       project-2: the github Backend cannot create Tickets under Promotion.
-      project-3 is in triage; run 'tk accept project-3 --priority <Pn>' before promoting it.
+      project-3 is in triage; run 'tk accept project-3 --priority P0..P4' before promoting it.
       project-3: the github Backend cannot create Tickets under Promotion.
       project-2 belongs to Epic project-1, and the github Backend cannot represent Epic membership under Promotion.
       project-2 would be backend-backed while its Blocking Item project-4 stays local. Promote project-4 in the same operation, or run 'tk unblock project-2 project-4' to drop the Dependency.

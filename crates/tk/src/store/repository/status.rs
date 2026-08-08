@@ -160,7 +160,7 @@ pub fn set_item_status<C: Clock + ?Sized>(
     // Backend Binding, not Origin, decides whether the transition is also
     // backend intent (ADR-0036): a Pending Promotion Item's status change is
     // ordered behind the Promotion that will give it a backend identity.
-    if mutations::resolve_backend_intent(&tx, req.id)?.is_backend_bound() {
+    if mutations::resolve_backend_binding(&tx, req.id)?.is_backend_bound() {
         mutations::append(
             &tx,
             mutations::AppendRequest {

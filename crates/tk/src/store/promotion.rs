@@ -145,7 +145,7 @@ pub fn read_graph(
 }
 
 fn read_graph_item(conn: &Connection, id: &str) -> Result<GraphItem, ReadGraphError> {
-    let backend_binding = mutations::resolve_backend_intent(conn, id)?;
+    let backend_binding = mutations::resolve_backend_binding(conn, id)?;
     let item = conn.query_row(
         "select display_value, item_class, ticket_kind, selection_state, status, \
                 title, body, created_seq, container_id \
@@ -489,6 +489,39 @@ mod tests {
     }
 
     #[test]
+    fn an_accepted_ticket_stays_accepted_through_promotion() {
+        // Both Selection States a Ticket may carry into Promotion survive it
+        // (CONTEXT.md Promotion); `parked` is covered above, and `accepted` is
+        // the one the default path takes.
+        let mut conn = open_seeded();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Local work",
+                selection_state: Some("accepted"),
+                priority: Some("P2"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+
+        promote(&mut conn, "t1", &receipt("42", "gh-42")).unwrap();
+
+        let (selection, priority): (String, String) = conn
+            .query_row(
+                "select selection_state, priority from items where id = 't1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(selection, "accepted");
+        assert_eq!(priority, "P2");
+    }
+
+    #[test]
     fn a_display_id_another_item_claims_is_refused_and_rolls_back() {
         let mut conn = open_seeded();
         local_ticket(&conn, "t1", "tk-1");
@@ -786,7 +819,7 @@ mod tests {
     }
 
     #[test]
-    fn every_item_carries_its_backend_intent() {
+    fn every_item_carries_its_backend_binding() {
         let conn = open_seeded();
         seed_epic(&conn, "epic", "tk-1", 1);
         seed_child(&conn, "plain-local", "tk-2", "epic", 2);
