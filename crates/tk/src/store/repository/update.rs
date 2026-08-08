@@ -252,7 +252,7 @@ pub fn update_item<C: Clock + ?Sized>(
     // intent (ADR-0036): a title change made between `tk promote` and the next
     // `tk sync` belongs in the Mutation Log, ordered behind the Promotion that
     // will give the Item its backend identity.
-    let intent = mutations::resolve_backend_intent(&tx, req.id)?;
+    let intent = mutations::resolve_backend_binding(&tx, req.id)?;
     if intent.is_backend_bound() {
         if let Some(old_id) = old_epic_id
             && membership_is_backend_intent(&tx, &intent, old_id)?
@@ -342,7 +342,7 @@ fn membership_is_backend_intent(
     ticket: &BackendBinding,
     epic_id: &str,
 ) -> Result<bool, mutations::BackendBindingError> {
-    let epic = mutations::resolve_backend_intent(conn, epic_id)?;
+    let epic = mutations::resolve_backend_binding(conn, epic_id)?;
     Ok(ticket.backend_kind().is_some() && ticket.backend_kind() == epic.backend_kind())
 }
 

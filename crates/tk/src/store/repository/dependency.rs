@@ -250,8 +250,8 @@ fn classify_edge(
     conn: &Connection,
     edge: DependencyEdge<'_>,
 ) -> Result<DependencyClassification, mutations::BackendBindingError> {
-    let blocked = mutations::resolve_backend_intent(conn, edge.blocked_id)?;
-    let blocking = mutations::resolve_backend_intent(conn, edge.blocking_id)?;
+    let blocked = mutations::resolve_backend_binding(conn, edge.blocked_id)?;
+    let blocking = mutations::resolve_backend_binding(conn, edge.blocking_id)?;
     Ok(dependency_rule::classify(&blocked, &blocking))
 }
 

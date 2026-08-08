@@ -145,7 +145,7 @@ pub fn read_graph(
 }
 
 fn read_graph_item(conn: &Connection, id: &str) -> Result<GraphItem, ReadGraphError> {
-    let backend_binding = mutations::resolve_backend_intent(conn, id)?;
+    let backend_binding = mutations::resolve_backend_binding(conn, id)?;
     let item = conn.query_row(
         "select display_value, item_class, ticket_kind, selection_state, status, \
                 title, body, created_seq, container_id \
@@ -819,7 +819,7 @@ mod tests {
     }
 
     #[test]
-    fn every_item_carries_its_backend_intent() {
+    fn every_item_carries_its_backend_binding() {
         let conn = open_seeded();
         seed_epic(&conn, "epic", "tk-1", 1);
         seed_child(&conn, "plain-local", "tk-2", "epic", 2);
