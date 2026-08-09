@@ -832,36 +832,6 @@ mod tests {
         }
     }
 
-    struct ErrorOnCallRunner {
-        fallback: FakeRunner,
-        error_call: usize,
-        error: ProcError,
-        calls: std::cell::Cell<usize>,
-    }
-
-    impl ErrorOnCallRunner {
-        fn new(error_call: usize, error: ProcError) -> Self {
-            Self {
-                fallback: FakeRunner::new(),
-                error_call,
-                error,
-                calls: std::cell::Cell::new(0),
-            }
-        }
-    }
-
-    impl ProcRunner for ErrorOnCallRunner {
-        fn run(&self, argv: &[&str], cwd: &Path) -> Result<RunOutput, ProcError> {
-            let call = self.calls.get() + 1;
-            self.calls.set(call);
-            if call == self.error_call {
-                Err(self.error)
-            } else {
-                self.fallback.run(argv, cwd)
-            }
-        }
-    }
-
     #[test]
     fn process_error_wording_preserves_spawn_bytes_and_names_unobserved_outcomes() {
         assert_eq!(
@@ -1482,12 +1452,16 @@ mod tests {
         let stage_name = predict_stage_name(0);
         let stage_path = target_dir.join(&stage_name);
 
-        let runner = ErrorOnCallRunner::new(2, ProcError::OutcomeUnobserved);
-        runner.fallback.expect_writing(
+        let runner = FakeRunner::new();
+        runner.expect_writing(
             &["curl"],
             ok_status_only(200),
             stage_path.clone(),
             b"new-bytes".to_vec(),
+        );
+        runner.expect_error(
+            &[stage_path.to_str().unwrap(), "--version"],
+            ProcError::OutcomeUnobserved,
         );
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -1518,7 +1492,7 @@ mod tests {
         assert!(stdout.is_empty());
         assert!(!stage_path.exists());
         assert!(!target_dir.join("tk").exists());
-        runner.fallback.assert_all_consumed();
+        runner.assert_all_consumed();
     }
 
     #[test]
@@ -1686,20 +1660,24 @@ mod tests {
         let stage_path = target_dir.join(&stage_name);
         let target_path = target_dir.join("tk");
 
-        let runner = ErrorOnCallRunner::new(3, ProcError::OutcomeUnobserved);
-        runner.fallback.expect_writing(
+        let runner = FakeRunner::new();
+        runner.expect_writing(
             &["curl"],
             ok_status_only(200),
             stage_path.clone(),
             b"new-bytes".to_vec(),
         );
-        runner.fallback.expect(
+        runner.expect(
             &[stage_path.to_str().unwrap(), "--version"],
             RunOutput {
                 exit_code: 0,
                 stdout: b"tk v0.6.0 (x86_64-linux-musl)\n".to_vec(),
                 stderr: Vec::new(),
             },
+        );
+        runner.expect_error(
+            &[target_path.to_str().unwrap(), "manpage", "--install"],
+            ProcError::OutcomeUnobserved,
         );
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -1732,7 +1710,7 @@ mod tests {
             "tk self-update: updated to v0.6.0\n"
         );
         assert_eq!(fs::read(&target_path).unwrap(), b"new-bytes");
-        runner.fallback.assert_all_consumed();
+        runner.assert_all_consumed();
     }
 
     #[test]

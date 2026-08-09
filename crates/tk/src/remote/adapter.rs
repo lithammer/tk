@@ -63,11 +63,7 @@ pub trait Adapter {
     /// Apply one non-Promotion Mutation to an existing Backend object.
     ///
     /// Environment failures arrive through the [`ApplyError`] error arm.
-    fn apply_edit(
-        &mut self,
-        edit: &BackendEdit,
-        now: &str,
-    ) -> Result<BackendEditOutcome, ApplyError>;
+    fn apply_edit(&mut self, edit: &BackendEdit) -> Result<BackendEditOutcome, ApplyError>;
 
     /// Apply one Promotion by creating a new Backend object.
     ///
@@ -75,7 +71,7 @@ pub trait Adapter {
     /// and an indeterminate result. Creation exposes no error arm because the
     /// Adapter owns the effect-certainty classification, including whether a
     /// runner error proves the process never started.
-    fn create_item(&mut self, create: &BackendCreate, now: &str) -> BackendCreateOutcome;
+    fn create_item(&mut self, create: &BackendCreate) -> BackendCreateOutcome;
 
     /// The Backend's static Promotion capability declaration (ADR-0036
     /// "Backend capability is declared per facet and staged"). Preflight

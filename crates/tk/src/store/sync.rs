@@ -18,7 +18,7 @@ use thiserror::Error;
 
 use crate::domain::backend_kind::BackendKind;
 use crate::domain::backend_operation::{
-    AdoptedItem, BackendCreate, BackendEdit, BackendItemIdentity, BackendItemRefresh,
+    AdoptedItem, BackendCreate, BackendEdit, BackendItemAddress, BackendItemRefresh,
     BackendOperation,
 };
 use crate::domain::backend_outcome::{
@@ -123,7 +123,7 @@ pub fn adopt_backend_ticket(
     ensure_adopt_available(&tx)?;
     ensure_adopt_remote(&tx, expected_kind)?;
     ensure_backend_cohort(&tx, expected_kind)?;
-    if let Some(row) = find_backend_item_in(&tx, expected_kind, &adopted.backend_key)? {
+    if let Some(row) = find_backend_item(&tx, expected_kind, &adopted.backend_key)? {
         return Ok(AdoptOutcome::AlreadyExists(row));
     }
     let id = generate_internal_id(rng);
@@ -250,13 +250,20 @@ pub struct ApplicableMutationRow {
     pub payload: MutationPayload,
 }
 
+/// Store-owned Mutation metadata paired with one Adapter-facing operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutationDelivery {
+    pub sequence: i64,
+    pub operation: BackendOperation,
+}
+
 /// Decode the typed Mutation Log entries the engine should (re)apply.
 ///
 /// Returns `state in ('pending','failed')` rows in `sequence` order. Decode
 /// stays batched so one undecodable row fails the run before any backend write;
 /// a single query is a consistent snapshot, and `sequences::next` allocates
 /// inside `begin immediate`, so sequence order and commit order agree and rows
-/// committed after this query are simply absent.
+/// committed after this query are absent.
 pub fn load_applicable_mutations(
     conn: &Connection,
 ) -> Result<Vec<ApplicableMutationRow>, LoadApplicableError> {
@@ -305,166 +312,151 @@ pub fn load_applicable_mutations(
 /// is invoked.
 pub fn resolve_backend_operation(
     conn: &Connection,
-    row: &ApplicableMutationRow,
-) -> Result<BackendOperation, LoadApplicableError> {
-    let sequence = row.sequence;
-    let item_id = row.item_id.clone();
-    let target = || backend_identity(conn, &row.item_id, row.mutation_type);
+    row: ApplicableMutationRow,
+) -> Result<MutationDelivery, LoadApplicableError> {
+    let ApplicableMutationRow {
+        sequence,
+        mutation_type,
+        item_id,
+        item_class,
+        payload,
+    } = row;
+    let target = || backend_address(conn, &item_id, mutation_type);
     let shape_error = || LoadApplicableError::OperationShapeMismatch {
-        mutation_type: row.mutation_type,
-        item_class: row.item_class,
+        mutation_type,
+        item_class,
     };
 
-    let operation = match (row.mutation_type, &row.payload) {
+    let operation = match (mutation_type, payload) {
         (MutationType::UpdateTicket, MutationPayload::UpdateTitleBody(snapshot)) => {
-            if row.item_class != ItemClass::Ticket {
+            if item_class != ItemClass::Ticket {
                 return Err(shape_error());
             }
             BackendOperation::Edit(BackendEdit::UpdateTicket {
-                sequence,
-                item_id,
                 ticket: target()?,
-                snapshot: snapshot.clone(),
+                snapshot,
             })
         }
         (MutationType::UpdateEpic, MutationPayload::UpdateTitleBody(snapshot)) => {
-            if row.item_class != ItemClass::Epic {
+            if item_class != ItemClass::Epic {
                 return Err(shape_error());
             }
             BackendOperation::Edit(BackendEdit::UpdateEpic {
-                sequence,
-                item_id,
                 epic: target()?,
-                snapshot: snapshot.clone(),
+                snapshot,
             })
         }
         (MutationType::SetItemStatus, MutationPayload::ItemStatus(change)) => {
             BackendOperation::Edit(BackendEdit::SetItemStatus {
-                sequence,
-                item_id,
                 item: target()?,
-                change: change.clone(),
+                change,
             })
         }
         (MutationType::AddDependency, MutationPayload::DependencyRef(dependency)) => {
             BackendOperation::Edit(BackendEdit::AddDependency {
-                sequence,
-                item_id,
                 blocked: target()?,
-                blocking: backend_identity(conn, &dependency.blocking_id, row.mutation_type)?,
+                blocking: backend_address(conn, &dependency.blocking_id, mutation_type)?,
             })
         }
         (MutationType::RemoveDependency, MutationPayload::DependencyRef(dependency)) => {
             BackendOperation::Edit(BackendEdit::RemoveDependency {
-                sequence,
-                item_id,
                 blocked: target()?,
-                blocking: backend_identity(conn, &dependency.blocking_id, row.mutation_type)?,
+                blocking: backend_address(conn, &dependency.blocking_id, mutation_type)?,
             })
         }
         (MutationType::AddTicketToEpic, MutationPayload::EpicRef(reference)) => {
-            if row.item_class != ItemClass::Ticket {
+            if item_class != ItemClass::Ticket {
                 return Err(shape_error());
             }
             BackendOperation::Edit(BackendEdit::AddTicketToEpic {
-                sequence,
-                item_id,
                 ticket: target()?,
-                epic: backend_identity_of_class(
+                epic: backend_address_of_class(
                     conn,
                     &reference.epic_id,
-                    row.mutation_type,
+                    mutation_type,
                     ItemClass::Epic,
                 )?,
             })
         }
         (MutationType::RemoveTicketFromEpic, MutationPayload::EpicRef(reference)) => {
-            if row.item_class != ItemClass::Ticket {
+            if item_class != ItemClass::Ticket {
                 return Err(shape_error());
             }
             BackendOperation::Edit(BackendEdit::RemoveTicketFromEpic {
-                sequence,
-                item_id,
                 ticket: target()?,
-                epic: backend_identity_of_class(
+                epic: backend_address_of_class(
                     conn,
                     &reference.epic_id,
-                    row.mutation_type,
+                    mutation_type,
                     ItemClass::Epic,
                 )?,
             })
         }
         (MutationType::PromoteTicket, MutationPayload::Promotion(promotion)) => {
-            if row.item_class != ItemClass::Ticket {
+            if item_class != ItemClass::Ticket {
                 return Err(shape_error());
             }
+            let Promotion { title, body, .. } = promotion;
             BackendOperation::Create(BackendCreate::Ticket {
-                sequence,
-                item_id,
-                promotion: promotion.clone(),
+                snapshot: TitleBody { title, body },
             })
         }
         (MutationType::PromoteEpic, MutationPayload::Promotion(promotion)) => {
-            if row.item_class != ItemClass::Epic {
+            if item_class != ItemClass::Epic {
                 return Err(shape_error());
             }
+            let Promotion { title, body, .. } = promotion;
             BackendOperation::Create(BackendCreate::Epic {
-                sequence,
-                item_id,
-                promotion: promotion.clone(),
+                snapshot: TitleBody { title, body },
             })
         }
         (MutationType::AddExternalBlocker | MutationType::ResolveExternalBlocker, _) => {
-            return Err(LoadApplicableError::PayloadVariantMissing(
-                row.mutation_type,
-            ));
+            return Err(LoadApplicableError::PayloadVariantMissing(mutation_type));
         }
         _ => return Err(shape_error()),
     };
 
-    Ok(operation)
-}
-
-fn backend_identity(
-    conn: &Connection,
-    item_id: &str,
-    mutation_type: MutationType,
-) -> Result<BackendItemIdentity, LoadApplicableError> {
-    let identity = conn
-        .query_row(
-            "select backend_key, display_value from items where id = ?1",
-            params![item_id],
-            |r| {
-                let backend_key: Option<String> = r.get(0)?;
-                let display_id: String = r.get(1)?;
-                Ok(backend_key.map(|backend_key| BackendItemIdentity {
-                    backend_key,
-                    display_id,
-                }))
-            },
-        )
-        .optional()?
-        .flatten();
-    identity.ok_or_else(|| LoadApplicableError::MissingBackendIdentity {
-        mutation_type,
-        item_id: item_id.to_owned(),
+    Ok(MutationDelivery {
+        sequence,
+        operation,
     })
 }
 
-fn backend_identity_of_class(
+fn backend_address(
+    conn: &Connection,
+    item_id: &str,
+    mutation_type: MutationType,
+) -> Result<BackendItemAddress, LoadApplicableError> {
+    let backend_key = conn
+        .query_row(
+            "select backend_key from items where id = ?1",
+            params![item_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    backend_key
+        .map(|backend_key| BackendItemAddress { backend_key })
+        .ok_or_else(|| LoadApplicableError::MissingBackendIdentity {
+            mutation_type,
+            item_id: item_id.to_owned(),
+        })
+}
+
+fn backend_address_of_class(
     conn: &Connection,
     item_id: &str,
     mutation_type: MutationType,
     expected: ItemClass,
-) -> Result<BackendItemIdentity, LoadApplicableError> {
-    let actual: Option<ItemClass> = conn
+) -> Result<BackendItemAddress, LoadApplicableError> {
+    let row: Option<(ItemClass, Option<String>)> = conn
         .query_row(
-            "select item_class from items where id = ?1",
+            "select item_class, backend_key from items where id = ?1",
             params![item_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    let actual = actual.ok_or_else(|| LoadApplicableError::MissingBackendIdentity {
+    let (actual, backend_key) = row.ok_or_else(|| LoadApplicableError::MissingBackendIdentity {
         mutation_type,
         item_id: item_id.to_owned(),
     })?;
@@ -476,7 +468,12 @@ fn backend_identity_of_class(
             actual,
         });
     }
-    backend_identity(conn, item_id, mutation_type)
+    backend_key
+        .map(|backend_key| BackendItemAddress { backend_key })
+        .ok_or_else(|| LoadApplicableError::MissingBackendIdentity {
+            mutation_type,
+            item_id: item_id.to_owned(),
+        })
 }
 
 /// Decode a `payload_json` text column into the [`MutationPayload`] variant the
@@ -553,7 +550,7 @@ pub fn persist_edit_outcome(
     if let Some(applying) = applying_mutation_sequence(&tx)? {
         return Err(PersistMutationOutcomeError::ApplyingMutation(applying));
     }
-    let (prior, mutation_type, _, _) = applicable_outcome_row(&tx, sequence)?;
+    let (_, mutation_type) = applicable_outcome_row(&tx, sequence)?;
     if mutation_type.is_promotion() {
         return Err(PersistMutationOutcomeError::OperationShapeMismatch {
             sequence,
@@ -563,9 +560,7 @@ pub fn persist_edit_outcome(
 
     match outcome {
         BackendEditOutcome::Acknowledged => persist_applied(&tx, sequence, now)?,
-        BackendEditOutcome::Rejected(failure) => {
-            persist_failure(&tx, sequence, prior, failure, now)?;
-        }
+        BackendEditOutcome::Rejected(failure) => persist_failed(&tx, sequence, failure, now)?,
     }
 
     tx.commit()?;
@@ -667,13 +662,13 @@ pub fn begin_create(
 fn applicable_outcome_row(
     conn: &Connection,
     sequence: i64,
-) -> Result<(MutationState, MutationType, String, String), PersistMutationOutcomeError> {
+) -> Result<(MutationState, MutationType), PersistMutationOutcomeError> {
     let row = conn
         .query_row(
-            "select state, mutation_type, item_id, payload_json \
+            "select state, mutation_type \
                from mutations where sequence = ?1",
             params![sequence],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
     let row = row.ok_or(PersistMutationOutcomeError::MutationNotFound(sequence))?;
@@ -691,32 +686,6 @@ fn persist_applied(conn: &Connection, sequence: i64, now: &str) -> rusqlite::Res
         params![sequence, now],
     )?;
     advance_sync_cursor(conn, sequence, now)
-}
-
-fn persist_failure(
-    conn: &Connection,
-    sequence: i64,
-    prior: MutationState,
-    failure: &Failure,
-    now: &str,
-) -> rusqlite::Result<()> {
-    let failure_json = serde_json::to_string(failure).expect("Failure serializes infallibly");
-    if prior == MutationState::Pending {
-        conn.execute(
-            "update mutations \
-                set state = 'failed', failure_json = ?2, state_changed_at = ?3 \
-              where sequence = ?1",
-            params![sequence, failure_json, now],
-        )?;
-    } else {
-        conn.execute(
-            "update mutations \
-                set failure_json = ?2, state_changed_at = ?3 \
-              where sequence = ?1",
-            params![sequence, failure_json, now],
-        )?;
-    }
-    Ok(())
 }
 
 fn persist_failed(
@@ -890,14 +859,6 @@ pub fn find_backend_item(
     backend_kind: BackendKind,
     backend_key: &str,
 ) -> rusqlite::Result<Option<BackendItemRow>> {
-    find_backend_item_in(conn, backend_kind, backend_key)
-}
-
-fn find_backend_item_in(
-    conn: &Connection,
-    backend_kind: BackendKind,
-    backend_key: &str,
-) -> rusqlite::Result<Option<BackendItemRow>> {
     conn.query_row(
         "select display_value, ticket_kind, priority, status, title \
            from items where backend_kind = ?1 and backend_key = ?2",
@@ -936,11 +897,11 @@ pub fn active_backend_keys(
     ensure_backend_cohort(conn, expected_kind)?;
     let mut stmt = conn.prepare(
         "select backend_key from items \
-          where origin = 'backend' and backend_key is not null \
+          where backend_kind = ?1 and backend_key is not null \
             and status in ('open', 'active') \
           order by created_seq asc",
     )?;
-    let mut rows = stmt.query([])?;
+    let mut rows = stmt.query([expected_kind.text()])?;
     let mut keys = Vec::new();
     while let Some(row) = rows.next()? {
         keys.push(row.get(0)?);
@@ -1028,11 +989,11 @@ pub(crate) fn ensure_backend_cohort(
 fn retained_backend_kinds(conn: &Connection) -> Result<Vec<BackendKind>, BackendCohortError> {
     let mut stmt = conn.prepare(
         "select distinct backend_kind from ( \
-           select backend_kind from items where origin = 'backend' \
+           select backend_kind from items where backend_kind is not null \
            union all \
            select json_extract(payload_json, '$.backend_kind') from mutations \
              where mutation_type in ('promote_ticket', 'promote_epic') \
-               and state not in ('applied', 'skipped') \
+               and state in ('pending', 'failed', 'applying') \
          ) where backend_kind is not null",
     )?;
     let texts = stmt
@@ -1048,7 +1009,7 @@ fn retained_backend_kinds(conn: &Connection) -> Result<Vec<BackendKind>, Backend
     Ok(kinds)
 }
 
-fn configured_remote_kind(conn: &Connection) -> rusqlite::Result<Option<BackendKind>> {
+pub(crate) fn configured_remote_kind(conn: &Connection) -> rusqlite::Result<Option<BackendKind>> {
     let actual = conn
         .query_row(
             "select backend_kind from remotes where name = 'primary'",
@@ -1636,6 +1597,7 @@ mod directional_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::backend_operation::BackendItemIdentity;
     use crate::domain::status::ItemStatus;
     use crate::domain::ticket_kind::TicketKind;
     use crate::store::migrations;
@@ -2187,14 +2149,14 @@ mod tests {
         .unwrap();
 
         let rows = load_applicable_mutations(&conn).unwrap();
-        let BackendOperation::Edit(edit) = resolve_backend_operation(&conn, &rows[0]).unwrap()
-        else {
+        let resolved = resolve_backend_operation(&conn, rows.into_iter().next().unwrap()).unwrap();
+        assert_eq!(resolved.sequence, 1);
+        let BackendOperation::Edit(edit) = resolved.operation else {
             panic!("ordinary Mutation must resolve as an edit")
         };
-        let BackendEdit::SetItemStatus { sequence, item, .. } = edit else {
+        let BackendEdit::SetItemStatus { item, .. } = edit else {
             panic!("expected status edit")
         };
-        assert_eq!(sequence, 1);
         assert_eq!(item.backend_key, "1");
     }
 
@@ -2228,20 +2190,21 @@ mod tests {
         .unwrap();
 
         let rows = load_applicable_mutations(&conn).unwrap();
-        let BackendOperation::Create(create) = resolve_backend_operation(&conn, &rows[0]).unwrap()
-        else {
+        let resolved = resolve_backend_operation(&conn, rows.into_iter().next().unwrap()).unwrap();
+        assert_eq!(resolved.sequence, 1);
+        let BackendOperation::Create(create) = resolved.operation else {
             panic!("Promotion must resolve as creation")
         };
-        assert_eq!(create.sequence(), 1);
-        assert_eq!(create.mutation_type(), MutationType::PromoteTicket);
-        assert_eq!(create.promotion().title, "T");
+        let BackendCreate::Ticket { snapshot } = create else {
+            panic!("expected Ticket creation")
+        };
+        assert_eq!(snapshot.title, "T");
     }
 
     #[test]
-    fn resolve_operation_resolves_dependency_counterpart_backend_key() {
+    fn resolve_dependency_addresses_both_backend_items() {
         // A dependency Mutation's payload stores the Blocking Item's internal
-        // id; resolution must turn it into that item's backend_key so the
-        // adapter can reach the backend.
+        // id; delivery needs both backend keys.
         let conn = open_seeded();
         backend_ticket(&conn, "blocked", "gh-5", "5", 1);
         backend_ticket(&conn, "blocking", "gh-9", "9", 2);
@@ -2259,8 +2222,8 @@ mod tests {
         .unwrap();
 
         let rows = load_applicable_mutations(&conn).unwrap();
-        let BackendOperation::Edit(edit) = resolve_backend_operation(&conn, &rows[0]).unwrap()
-        else {
+        let resolved = resolve_backend_operation(&conn, rows.into_iter().next().unwrap()).unwrap();
+        let BackendOperation::Edit(edit) = resolved.operation else {
             panic!("Dependency must resolve as an edit")
         };
         let BackendEdit::AddDependency {
@@ -2308,7 +2271,9 @@ mod tests {
 
         let rows = load_applicable_mutations(&conn).unwrap();
         let BackendOperation::Edit(BackendEdit::AddTicketToEpic { ticket, epic, .. }) =
-            resolve_backend_operation(&conn, &rows[0]).unwrap()
+            resolve_backend_operation(&conn, rows.into_iter().next().unwrap())
+                .unwrap()
+                .operation
         else {
             panic!("expected Epic membership edit")
         };
@@ -2335,7 +2300,7 @@ mod tests {
 
         let rows = load_applicable_mutations(&conn).unwrap();
         assert!(matches!(
-            resolve_backend_operation(&conn, &rows[0]),
+            resolve_backend_operation(&conn, rows.into_iter().next().unwrap()),
             Err(LoadApplicableError::CounterpartClassMismatch {
                 mutation_type: MutationType::AddTicketToEpic,
                 ref item_id,
@@ -2377,7 +2342,7 @@ mod tests {
         };
 
         assert!(matches!(
-            resolve_backend_operation(&conn, &row),
+            resolve_backend_operation(&conn, row),
             Err(LoadApplicableError::OperationShapeMismatch {
                 mutation_type: MutationType::UpdateTicket,
                 item_class: ItemClass::Epic,
@@ -2415,7 +2380,7 @@ mod tests {
 
         let rows = load_applicable_mutations(&conn).unwrap();
         assert!(matches!(
-            resolve_backend_operation(&conn, &rows[0]),
+            resolve_backend_operation(&conn, rows.into_iter().next().unwrap()),
             Err(LoadApplicableError::MissingBackendIdentity {
                 mutation_type: MutationType::AddDependency,
                 ref item_id,
@@ -2467,8 +2432,8 @@ mod tests {
         .unwrap();
         tx.commit().unwrap();
 
-        let BackendOperation::Edit(edit) = resolve_backend_operation(&conn, &rows[0]).unwrap()
-        else {
+        let resolved = resolve_backend_operation(&conn, rows.into_iter().next().unwrap()).unwrap();
+        let BackendOperation::Edit(edit) = resolved.operation else {
             panic!("ordinary Mutation must resolve as an edit")
         };
         let BackendEdit::SetItemStatus { item, .. } = edit else {

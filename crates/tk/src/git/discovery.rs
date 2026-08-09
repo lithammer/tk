@@ -136,7 +136,7 @@ pub fn render_failure<W: Write + ?Sized>(stderr: &mut W, command: &str, err: &Di
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proc::{ErrorInjectingRunner, FakeRunner, ProcError, RunOutput};
+    use crate::proc::{FakeRunner, ProcError, RunOutput};
     use std::path::PathBuf;
 
     fn cwd() -> PathBuf {
@@ -243,35 +243,35 @@ mod tests {
 
     #[test]
     fn maps_executable_not_found_to_git_missing() {
-        let runner = ErrorInjectingRunner {
-            err: ProcError::ExecutableNotFound,
-        };
+        let runner = FakeRunner::new();
+        runner.expect_error(&["git", "rev-parse"], ProcError::ExecutableNotFound);
         assert!(matches!(
             discover_paths(&runner, &cwd()),
             Err(DiscoveryError::GitMissing)
         ));
+        runner.assert_all_consumed();
     }
 
     #[test]
     fn maps_spawn_failed_to_spawn_failed() {
-        let runner = ErrorInjectingRunner {
-            err: ProcError::SpawnFailed,
-        };
+        let runner = FakeRunner::new();
+        runner.expect_error(&["git", "rev-parse"], ProcError::SpawnFailed);
         assert!(matches!(
             discover_paths(&runner, &cwd()),
             Err(DiscoveryError::SpawnFailed)
         ));
+        runner.assert_all_consumed();
     }
 
     #[test]
     fn maps_unobserved_outcome_without_calling_it_a_spawn_failure() {
-        let runner = ErrorInjectingRunner {
-            err: ProcError::OutcomeUnobserved,
-        };
+        let runner = FakeRunner::new();
+        runner.expect_error(&["git", "rev-parse"], ProcError::OutcomeUnobserved);
         assert!(matches!(
             discover_paths(&runner, &cwd()),
             Err(DiscoveryError::OutcomeUnobserved)
         ));
+        runner.assert_all_consumed();
     }
 
     #[test]

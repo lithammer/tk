@@ -120,12 +120,12 @@ pub fn run_sync(
     // Apply, so a Promotion receipt committed earlier in this run is visible to
     // the Mutations ordered behind it (ADR-0036).
     let rows = load_applicable_mutations(conn)?;
-    for row in &rows {
-        let operation = resolve_backend_operation(conn, row)?;
-        match operation {
+    for row in rows {
+        let resolved = resolve_backend_operation(conn, row)?;
+        let sequence = resolved.sequence;
+        match resolved.operation {
             BackendOperation::Edit(edit) => {
-                let sequence = edit.sequence();
-                let outcome = adapter.apply_edit(&edit, now)?;
+                let outcome = adapter.apply_edit(&edit)?;
                 persist_edit_outcome(conn, sequence, &outcome, now)?;
                 match outcome {
                     BackendEditOutcome::Acknowledged => report.applied_count += 1,
@@ -136,9 +136,8 @@ pub fn run_sync(
                 }
             }
             BackendOperation::Create(create) => {
-                let sequence = create.sequence();
                 begin_create(conn, sequence, now)?;
-                let outcome = adapter.create_item(&create, now);
+                let outcome = adapter.create_item(&create);
                 persist_create_outcome(conn, sequence, &outcome, now)?;
                 match outcome {
                     BackendCreateOutcome::Created(_) => report.applied_count += 1,
@@ -161,10 +160,10 @@ pub fn run_sync(
 mod tests {
     use super::*;
     use crate::domain::backend_kind::BackendKind;
-    use crate::domain::backend_operation::{BackendEdit, BackendItemRefresh};
+    use crate::domain::backend_operation::{BackendCreate, BackendEdit, BackendItemRefresh};
     use crate::domain::status::ItemStatus;
     use crate::domain::ticket_kind::TicketKind;
-    use crate::proc::{ProcError, ProcRunner, RunOutput};
+    use crate::proc::{FakeRunner, ProcError};
     use crate::remote::fake::{CreateResponse, EditResponse, FakeAdapter, RefreshResponse};
     use crate::remote::github::GithubAdapter;
     use crate::store::migrations;
@@ -172,8 +171,6 @@ mod tests {
         FixtureItem, FixtureMutation, FixtureRemote, insert_fixture_item, insert_fixture_mutation,
         insert_fixture_remote,
     };
-    use std::cell::Cell;
-    use std::path::Path;
 
     const NOW: &str = "2026-05-19T00:00:00Z";
 
@@ -230,7 +227,9 @@ mod tests {
     }
 
     fn fake(refreshes: Vec<RefreshResponse>, edits: Vec<EditResponse>) -> FakeAdapter {
-        FakeAdapter::directional(vec![], refreshes, edits, vec![])
+        FakeAdapter::new()
+            .with_refreshes(refreshes)
+            .with_edits(edits)
     }
 
     fn fake_with_create(
@@ -238,23 +237,15 @@ mod tests {
         edits: Vec<EditResponse>,
         creates: Vec<CreateResponse>,
     ) -> FakeAdapter {
-        FakeAdapter::directional(vec![], refreshes, edits, creates)
+        FakeAdapter::new()
+            .with_refreshes(refreshes)
+            .with_edits(edits)
+            .with_creates(creates)
     }
 
     fn run(conn: &mut Connection, fake: &mut FakeAdapter) -> Result<SyncReport, RunSyncError> {
         let workflow = RemoteWorkflowGuard::for_test();
         run_sync(conn, fake, &workflow, NOW)
-    }
-
-    struct OutcomeUnobservedRunner {
-        calls: Cell<usize>,
-    }
-
-    impl ProcRunner for OutcomeUnobservedRunner {
-        fn run(&self, _argv: &[&str], _cwd: &Path) -> Result<RunOutput, ProcError> {
-            self.calls.set(self.calls.get() + 1);
-            Err(ProcError::OutcomeUnobserved)
-        }
     }
 
     #[test]
@@ -490,7 +481,6 @@ mod tests {
 
         // Fake saw the decoded payload.
         assert_eq!(fake.captured_edits.len(), 1);
-        assert_eq!(fake.captured_edits[0].sequence(), 5);
         let BackendEdit::UpdateTicket { snapshot, .. } = &fake.captured_edits[0] else {
             panic!("expected ticket update")
         };
@@ -649,9 +639,19 @@ mod tests {
             },
         )
         .unwrap();
-        let runner = OutcomeUnobservedRunner {
-            calls: Cell::new(0),
-        };
+        let runner = FakeRunner::new();
+        runner.expect_exact_error(
+            &[
+                "gh",
+                "issue",
+                "create",
+                "--title",
+                "Local work",
+                "--body",
+                "",
+            ],
+            ProcError::OutcomeUnobserved,
+        );
         let cwd = std::env::current_dir().unwrap();
         let mut adapter = GithubAdapter::new(&runner, &cwd);
         let workflow = RemoteWorkflowGuard::for_test();
@@ -669,13 +669,13 @@ mod tests {
             .unwrap();
         assert_eq!(state, "applying");
         assert!(failure.contains("outcome is unknown"), "{failure}");
-        assert_eq!(runner.calls.get(), 1);
+        runner.assert_all_consumed();
 
         assert!(matches!(
             run_sync(&mut conn, &mut adapter, &workflow, NOW),
             Err(RunSyncError::ApplyingMutation(1))
         ));
-        assert_eq!(runner.calls.get(), 1, "automatic sync must not replay it");
+        runner.assert_all_consumed();
     }
 
     #[test]
@@ -829,11 +829,10 @@ mod tests {
         let report = run(&mut conn, &mut fake).unwrap();
         assert_eq!(report.applied_count, 2);
 
-        assert_eq!(
-            fake.captured_creates[0].sequence(),
-            1,
-            "the Promotion was delivered through creation"
-        );
+        assert!(matches!(
+            fake.captured_creates[0],
+            BackendCreate::Ticket { .. }
+        ));
         let BackendEdit::SetItemStatus { item, .. } = &fake.captured_edits[0] else {
             panic!("expected status edit")
         };

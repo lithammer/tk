@@ -144,12 +144,10 @@ impl ArgvExpectation {
 #[derive(Debug, Clone)]
 struct ExpectedCall {
     argv: ArgvExpectation,
-    output: RunOutput,
-    /// Optional file write performed before the call returns. Models
-    /// commands that drop bytes to disk as a side effect — currently
-    /// `curl -o <stage_path>` in [`crate::commands::self_update`] — so the
-    /// in-process FakeRunner stays a sufficient seam without mutating PATH
-    /// or shelling out to a real shim.
+    output: Result<RunOutput, ProcError>,
+    /// Optional file write performed before the call returns. This models a
+    /// subprocess that writes a file without mutating PATH or using a shell
+    /// shim in tests.
     side_effect_write: Option<(PathBuf, Vec<u8>)>,
 }
 
@@ -178,7 +176,11 @@ impl FakeRunner {
 
     /// Queue a scripted response matched against an argv prefix.
     pub fn expect_prefix(&self, argv_prefix: &[&str], output: RunOutput) {
-        self.queue(ArgvExpectation::Prefix(strings(argv_prefix)), output, None);
+        self.queue(
+            ArgvExpectation::Prefix(strings(argv_prefix)),
+            Ok(output),
+            None,
+        );
     }
 
     /// Queue a scripted response that requires an exact argv match.
@@ -186,7 +188,21 @@ impl FakeRunner {
     /// Calls are consumed in FIFO order. Differing and trailing arguments
     /// reject the expectation.
     pub fn expect_exact(&self, argv: &[&str], output: RunOutput) {
-        self.queue(ArgvExpectation::Exact(strings(argv)), output, None);
+        self.queue(ArgvExpectation::Exact(strings(argv)), Ok(output), None);
+    }
+
+    /// Queue a scripted process error matched against an argv prefix.
+    pub fn expect_error(&self, argv_prefix: &[&str], error: ProcError) {
+        self.queue(
+            ArgvExpectation::Prefix(strings(argv_prefix)),
+            Err(error),
+            None,
+        );
+    }
+
+    /// Queue a scripted process error that requires an exact argv match.
+    pub fn expect_exact_error(&self, argv: &[&str], error: ProcError) {
+        self.queue(ArgvExpectation::Exact(strings(argv)), Err(error), None);
     }
 
     /// Queue a prefix-matched response that writes `body` to `path` before
@@ -202,7 +218,7 @@ impl FakeRunner {
     ) {
         self.queue(
             ArgvExpectation::Prefix(strings(argv_prefix)),
-            output,
+            Ok(output),
             Some((path, body)),
         );
     }
@@ -222,7 +238,7 @@ impl FakeRunner {
     fn queue(
         &self,
         argv: ArgvExpectation,
-        output: RunOutput,
+        output: Result<RunOutput, ProcError>,
         side_effect_write: Option<(PathBuf, Vec<u8>)>,
     ) {
         self.calls.borrow_mut().push_back(ExpectedCall {
@@ -231,10 +247,6 @@ impl FakeRunner {
             side_effect_write,
         });
     }
-}
-
-fn strings(argv: &[&str]) -> Vec<String> {
-    argv.iter().map(|s| (*s).to_string()).collect()
 }
 
 impl Default for FakeRunner {
@@ -266,20 +278,12 @@ impl ProcRunner for FakeRunner {
                 panic!("FakeRunner side-effect write to {}: {err}", path.display())
             });
         }
-        Ok(expected.output)
+        expected.output
     }
 }
 
-/// Test runner that returns a single pre-configured error on every call.
-/// Used to cover process-certainty error arms without spawning a child.
-pub struct ErrorInjectingRunner {
-    pub err: ProcError,
-}
-
-impl ProcRunner for ErrorInjectingRunner {
-    fn run(&self, _argv: &[&str], _cwd: &Path) -> Result<RunOutput, ProcError> {
-        Err(self.err)
-    }
+fn strings(argv: &[&str]) -> Vec<String> {
+    argv.iter().map(|s| (*s).to_string()).collect()
 }
 
 #[cfg(test)]

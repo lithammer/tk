@@ -225,14 +225,7 @@ pub fn commit_plan<R: Rng + ?Sized>(
     }
 
     let operation_id = generate_internal_id(rng);
-    let actual: Option<String> = tx
-        .query_row(
-            "select backend_kind from remotes where name = 'primary'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let actual = actual.and_then(|kind| kind.parse().ok());
+    let actual = crate::store::sync::configured_remote_kind(&tx)?;
     if actual != Some(expected_kind) {
         return Err(CommitPlanError::RemoteChanged {
             expected: expected_kind,
@@ -313,10 +306,7 @@ pub fn apply_receipt(
     Ok(())
 }
 
-/// One Mutation Log entry as `tk promote`'s post-sync report names it: the
-/// Mutation Sequence the user hands to `tk sync log`, the state that says
-/// whether it was rejected or simply never reached, and the Display ID of the
-/// Item it targets.
+/// Mutation Log fields needed by Promotion's post-sync report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MutationSummary {
     pub sequence: i64,

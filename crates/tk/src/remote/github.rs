@@ -47,7 +47,112 @@ impl<'a> GithubAdapter<'a> {
     pub fn new(runner: &'a dyn ProcRunner, cwd: &'a Path) -> Self {
         Self { runner, cwd }
     }
+}
 
+impl Adapter for GithubAdapter<'_> {
+    fn backend_kind(&self) -> BackendKind {
+        BackendKind::Github
+    }
+
+    fn adopt_ticket(&mut self, input: &str) -> Result<AdoptedItem, AdapterReadError> {
+        self.view_issue(input)?.into_adopted_item()
+    }
+
+    fn refresh_item(&mut self, key: &str) -> Result<BackendItemRefresh, AdapterReadError> {
+        self.view_issue(key)?.into_refresh()
+    }
+
+    fn apply_edit(&mut self, edit: &BackendEdit) -> Result<BackendEditOutcome, ApplyError> {
+        match edit {
+            BackendEdit::UpdateTicket {
+                ticket: item,
+                snapshot,
+            }
+            | BackendEdit::UpdateEpic {
+                epic: item,
+                snapshot,
+            } => self.run_edit(&[
+                "gh",
+                "issue",
+                "edit",
+                &item.backend_key,
+                "--title",
+                &snapshot.title,
+                "--body",
+                &snapshot.body,
+            ]),
+            BackendEdit::SetItemStatus { item, change, .. } => {
+                // done is terminal (ADR-0006), so reopen-from-done never occurs.
+                let verb = match change.status.as_str() {
+                    "done" => "close",
+                    "open" | "active" => "reopen",
+                    other => {
+                        return Ok(BackendEditOutcome::rejected(format!(
+                            "unexpected target status '{other}'"
+                        )));
+                    }
+                };
+                self.run_edit(&["gh", "issue", verb, &item.backend_key])
+            }
+            // Dependency sync (ADR-0021, tk-107): the blocked issue is the
+            // Mutation's item; `--add-blocked-by`/`--remove-blocked-by` take the
+            // blocking issue's number, resolved store-side onto the operation's
+            // counterpart identity. Native `gh issue edit` flags, so the
+            // adapter requires `gh` >= 2.94.0; an older `gh` rejects the unknown
+            // flag and the Mutation fails.
+            BackendEdit::AddDependency {
+                blocked, blocking, ..
+            } => self.run_edit(&[
+                "gh",
+                "issue",
+                "edit",
+                &blocked.backend_key,
+                "--add-blocked-by",
+                &blocking.backend_key,
+            ]),
+            BackendEdit::RemoveDependency {
+                blocked, blocking, ..
+            } => self.run_edit(&[
+                "gh",
+                "issue",
+                "edit",
+                &blocked.backend_key,
+                "--remove-blocked-by",
+                &blocking.backend_key,
+            ]),
+            BackendEdit::AddTicketToEpic { ticket, epic, .. } => self.run_edit(&[
+                "gh",
+                "issue",
+                "edit",
+                &ticket.backend_key,
+                "--parent",
+                &epic.backend_key,
+            ]),
+            BackendEdit::RemoveTicketFromEpic { ticket, .. } => self.run_edit(&[
+                "gh",
+                "issue",
+                "edit",
+                &ticket.backend_key,
+                "--remove-parent",
+            ]),
+        }
+    }
+
+    fn create_item(&mut self, create: &BackendCreate) -> BackendCreateOutcome {
+        self.create_issue(create)
+    }
+
+    fn promotion_capabilities(&self) -> PromotionCapabilities {
+        PromotionCapabilities::none()
+            .with_item_class(crate::domain::item_class::ItemClass::Ticket)
+            .with_item_class(crate::domain::item_class::ItemClass::Epic)
+            .with_ticket_kind(TicketKind::Task)
+            .with_dependencies()
+            .with_epic_membership()
+    }
+}
+
+impl GithubAdapter<'_> {
     /// Run one edit `gh` invocation and map its outcome. Success is judged by
     /// **exit code 0**, never by stderr emptiness: `gh issue close`/`reopen`
     /// print an informational "is already closed/open" line to stderr on their
@@ -74,16 +179,18 @@ impl<'a> GithubAdapter<'a> {
     /// applied later through the relationship Mutations ordered behind their
     /// Promotions. The receipt is authoritative even when `gh` exits non-zero.
     fn create_issue(&self, create: &BackendCreate) -> BackendCreateOutcome {
-        let promotion = create.promotion();
+        let snapshot = match create {
+            BackendCreate::Ticket { snapshot } | BackendCreate::Epic { snapshot } => snapshot,
+        };
         let output = match self.runner.run(
             &[
                 "gh",
                 "issue",
                 "create",
                 "--title",
-                &promotion.title,
+                &snapshot.title,
                 "--body",
-                &promotion.body,
+                &snapshot.body,
             ],
             self.cwd,
         ) {
@@ -124,121 +231,7 @@ impl<'a> GithubAdapter<'a> {
             BackendCreateOutcome::Indeterminate(failure)
         }
     }
-}
 
-impl Adapter for GithubAdapter<'_> {
-    fn backend_kind(&self) -> BackendKind {
-        BackendKind::Github
-    }
-
-    fn adopt_ticket(&mut self, input: &str) -> Result<AdoptedItem, AdapterReadError> {
-        self.view_issue(input)?.into_adopted_item()
-    }
-
-    fn refresh_item(&mut self, key: &str) -> Result<BackendItemRefresh, AdapterReadError> {
-        self.view_issue(key)?.into_refresh()
-    }
-
-    fn apply_edit(
-        &mut self,
-        edit: &BackendEdit,
-        _now: &str,
-    ) -> Result<BackendEditOutcome, ApplyError> {
-        match edit {
-            BackendEdit::UpdateTicket {
-                ticket, snapshot, ..
-            } => self.run_edit(&[
-                "gh",
-                "issue",
-                "edit",
-                &ticket.backend_key,
-                "--title",
-                &snapshot.title,
-                "--body",
-                &snapshot.body,
-            ]),
-            BackendEdit::UpdateEpic { epic, snapshot, .. } => self.run_edit(&[
-                "gh",
-                "issue",
-                "edit",
-                &epic.backend_key,
-                "--title",
-                &snapshot.title,
-                "--body",
-                &snapshot.body,
-            ]),
-            BackendEdit::SetItemStatus { item, change, .. } => {
-                // done is terminal (ADR-0006), so reopen-from-done never occurs.
-                let verb = match change.status.as_str() {
-                    "done" => "close",
-                    "open" | "active" => "reopen",
-                    other => {
-                        return Ok(BackendEditOutcome::rejected(format!(
-                            "unexpected target status '{other}'"
-                        )));
-                    }
-                };
-                self.run_edit(&["gh", "issue", verb, &item.backend_key])
-            }
-            // Dependency sync (ADR-0021, tk-107): the blocked issue is the
-            // Mutation's item; `--add-blocked-by`/`--remove-blocked-by` take the
-            // blocking issue's number, resolved store-side onto the operation's
-            // counterpart identity. Native `gh issue edit` flags, so the
-            // adapter requires `gh` >= 2.94.0; an older `gh` rejects the unknown
-            // flag and the Mutation fails like any other (no longer no-op).
-            BackendEdit::AddDependency {
-                blocked, blocking, ..
-            } => self.run_edit(&[
-                "gh",
-                "issue",
-                "edit",
-                &blocked.backend_key,
-                "--add-blocked-by",
-                &blocking.backend_key,
-            ]),
-            BackendEdit::RemoveDependency {
-                blocked, blocking, ..
-            } => self.run_edit(&[
-                "gh",
-                "issue",
-                "edit",
-                &blocked.backend_key,
-                "--remove-blocked-by",
-                &blocking.backend_key,
-            ]),
-            BackendEdit::AddTicketToEpic { ticket, epic, .. } => self.run_edit(&[
-                "gh",
-                "issue",
-                "edit",
-                &ticket.backend_key,
-                "--parent",
-                &epic.backend_key,
-            ]),
-            BackendEdit::RemoveTicketFromEpic { ticket, .. } => self.run_edit(&[
-                "gh",
-                "issue",
-                "edit",
-                &ticket.backend_key,
-                "--remove-parent",
-            ]),
-        }
-    }
-
-    fn create_item(&mut self, create: &BackendCreate, _now: &str) -> BackendCreateOutcome {
-        self.create_issue(create)
-    }
-
-    fn promotion_capabilities(&self) -> PromotionCapabilities {
-        PromotionCapabilities::none()
-            .with_item_class(crate::domain::item_class::ItemClass::Ticket)
-            .with_item_class(crate::domain::item_class::ItemClass::Epic)
-            .with_ticket_kind(TicketKind::Task)
-            .with_dependencies()
-            .with_epic_membership()
-    }
-}
-
-impl GithubAdapter<'_> {
     /// Fetch and parse one GitHub issue view through the checkout-resolved Remote.
     fn view_issue(&self, key: &str) -> Result<GhIssue, AdapterReadError> {
         let output = self.runner.run(
@@ -277,7 +270,7 @@ struct GhIssueType {
     name: String,
 }
 
-struct NormalizedIssue {
+struct IssueFields {
     backend_key: String,
     ticket_kind: TicketKind,
     title: String,
@@ -286,7 +279,7 @@ struct NormalizedIssue {
 }
 
 impl GhIssue {
-    fn normalize(self) -> Result<NormalizedIssue, AdapterReadError> {
+    fn into_fields(self) -> Result<IssueFields, AdapterReadError> {
         // PR guard (ADR-0034): `gh issue view <n>` resolves a pull request too
         // (issue and PR numbers share one sequence) and returns it as an
         // issue-shaped object, so reject when the canonical url is a /pull/<n>
@@ -314,7 +307,7 @@ impl GhIssue {
             Some("Bug") => TicketKind::Bug,
             _ => TicketKind::Task,
         };
-        Ok(NormalizedIssue {
+        Ok(IssueFields {
             backend_key: self.number.to_string(),
             ticket_kind,
             title: self.title,
@@ -324,7 +317,7 @@ impl GhIssue {
     }
 
     fn into_adopted_item(self) -> Result<AdoptedItem, AdapterReadError> {
-        let issue = self.normalize()?;
+        let issue = self.into_fields()?;
         Ok(AdoptedItem {
             display_id: format!("gh-{}", issue.backend_key),
             backend_key: issue.backend_key,
@@ -336,7 +329,7 @@ impl GhIssue {
     }
 
     fn into_refresh(self) -> Result<BackendItemRefresh, AdapterReadError> {
-        let issue = self.normalize()?;
+        let issue = self.into_fields()?;
         Ok(BackendItemRefresh {
             title: issue.title,
             body: issue.body,
@@ -452,15 +445,12 @@ fn stderr_string(output: &RunOutput) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::backend_operation::BackendItemAddress;
     use crate::domain::item_class::ItemClass;
-    use crate::domain::mutation_payload::{
-        EpicRef, MutationPayload, Promotion, StatusChange, TitleBody,
-    };
+    use crate::domain::mutation_payload::{EpicRef, MutationPayload, StatusChange, TitleBody};
     use crate::domain::mutation_type::MutationType;
-    use crate::proc::{ErrorInjectingRunner, FakeRunner, ProcError, RunOutput};
+    use crate::proc::{FakeRunner, ProcError, RunOutput};
     use std::path::PathBuf;
-
-    const NOW: &str = "2026-06-20T00:00:00Z";
 
     fn cwd() -> PathBuf {
         std::env::current_dir().unwrap()
@@ -496,97 +486,77 @@ mod tests {
     }
 
     fn edit(mt: MutationType, payload: MutationPayload, key: Option<&str>) -> BackendEdit {
-        let target = identity(key.expect("adapter tests provide a target identity"));
+        let target = address(key.expect("adapter tests provide a target identity"));
         match (mt, payload) {
             (MutationType::UpdateTicket, MutationPayload::UpdateTitleBody(snapshot)) => {
                 BackendEdit::UpdateTicket {
-                    sequence: 1,
-                    item_id: "t1".into(),
                     ticket: target,
                     snapshot,
                 }
             }
             (MutationType::UpdateEpic, MutationPayload::UpdateTitleBody(snapshot)) => {
                 BackendEdit::UpdateEpic {
-                    sequence: 1,
-                    item_id: "t1".into(),
                     epic: target,
                     snapshot,
                 }
             }
             (MutationType::SetItemStatus, MutationPayload::ItemStatus(change)) => {
                 BackendEdit::SetItemStatus {
-                    sequence: 1,
-                    item_id: "t1".into(),
                     item: target,
                     change,
                 }
             }
             (MutationType::AddTicketToEpic, MutationPayload::EpicRef(_)) => {
                 BackendEdit::AddTicketToEpic {
-                    sequence: 1,
-                    item_id: "t1".into(),
                     ticket: target,
-                    epic: identity("9"),
+                    epic: address("9"),
                 }
             }
             (MutationType::RemoveTicketFromEpic, MutationPayload::EpicRef(_)) => {
                 BackendEdit::RemoveTicketFromEpic {
-                    sequence: 1,
-                    item_id: "t1".into(),
                     ticket: target,
-                    epic: identity("9"),
+                    epic: address("9"),
                 }
             }
             other => panic!("unsupported test edit: {other:?}"),
         }
     }
 
-    fn identity(key: &str) -> crate::domain::backend_operation::BackendItemIdentity {
-        crate::domain::backend_operation::BackendItemIdentity {
+    fn address(key: &str) -> BackendItemAddress {
+        BackendItemAddress {
+            backend_key: key.into(),
+        }
+    }
+
+    fn identity(key: &str) -> BackendItemIdentity {
+        BackendItemIdentity {
             backend_key: key.into(),
             display_id: format!("gh-{key}"),
         }
     }
 
-    /// A dependency Mutation `view`, carrying the Blocking Item's resolved
-    /// backend number on `counterpart_backend_key` (the store-side resolution
-    /// the adapter relies on).
     fn dep_edit(mt: MutationType, blocked: &str, blocking: &str) -> BackendEdit {
         match mt {
             MutationType::AddDependency => BackendEdit::AddDependency {
-                sequence: 1,
-                item_id: "t1".into(),
-                blocked: identity(blocked),
-                blocking: identity(blocking),
+                blocked: address(blocked),
+                blocking: address(blocking),
             },
             MutationType::RemoveDependency => BackendEdit::RemoveDependency {
-                sequence: 1,
-                item_id: "t1".into(),
-                blocked: identity(blocked),
-                blocking: identity(blocking),
+                blocked: address(blocked),
+                blocking: address(blocking),
             },
             _ => panic!("not a dependency edit"),
         }
     }
 
     fn create(mt: MutationType, title: &str, body: &str) -> BackendCreate {
-        let promotion = Promotion {
+        let snapshot = TitleBody {
             title: title.into(),
             body: body.into(),
-            backend_kind: "github".into(),
         };
         match mt {
-            MutationType::PromoteTicket => BackendCreate::Ticket {
-                sequence: 1,
-                item_id: "t1".into(),
-                promotion,
-            },
-            MutationType::PromoteEpic => BackendCreate::Epic {
-                sequence: 1,
-                item_id: "e1".into(),
-                promotion,
-            },
+            MutationType::PromoteTicket => BackendCreate::Ticket { snapshot },
+            MutationType::PromoteEpic => BackendCreate::Epic { snapshot },
             _ => panic!("not a Promotion Mutation Type"),
         }
     }
@@ -704,15 +674,18 @@ mod tests {
 
     #[test]
     fn refresh_spawn_failure_is_pull_env() {
-        let runner = ErrorInjectingRunner {
-            err: ProcError::ExecutableNotFound,
-        };
+        let runner = FakeRunner::new();
+        runner.expect_exact_error(
+            &["gh", "issue", "view", "1", "--json", ISSUE_JSON_FIELDS],
+            ProcError::ExecutableNotFound,
+        );
         let cwd = cwd();
         let mut adapter = GithubAdapter::new(&runner, &cwd);
         assert!(matches!(
             adapter.refresh_item("1").unwrap_err(),
             AdapterReadError::Env(ProcError::ExecutableNotFound)
         ));
+        runner.assert_all_consumed();
     }
 
     #[test]
@@ -783,7 +756,7 @@ mod tests {
             Some("42"),
         );
         assert!(matches!(
-            adapter.apply_edit(&v, NOW).unwrap(),
+            adapter.apply_edit(&v).unwrap(),
             BackendEditOutcome::Acknowledged
         ));
         runner.assert_all_consumed();
@@ -803,7 +776,7 @@ mod tests {
             Some("42"),
         );
         assert!(matches!(
-            adapter.apply_edit(&v, NOW).unwrap(),
+            adapter.apply_edit(&v).unwrap(),
             BackendEditOutcome::Acknowledged
         ));
         runner.assert_all_consumed();
@@ -825,7 +798,7 @@ mod tests {
             );
             assert!(
                 matches!(
-                    adapter.apply_edit(&v, NOW).unwrap(),
+                    adapter.apply_edit(&v).unwrap(),
                     BackendEditOutcome::Acknowledged
                 ),
                 "{status}"
@@ -857,7 +830,7 @@ mod tests {
             Some("42"),
         );
         assert!(matches!(
-            adapter.apply_edit(&v, NOW).unwrap(),
+            adapter.apply_edit(&v).unwrap(),
             BackendEditOutcome::Acknowledged
         ));
         runner.assert_all_consumed();
@@ -880,7 +853,7 @@ mod tests {
             }),
             Some("42"),
         );
-        match adapter.apply_edit(&v, NOW).unwrap() {
+        match adapter.apply_edit(&v).unwrap() {
             BackendEditOutcome::Rejected(f) => {
                 assert_eq!(f.class, FailureClass::Validation);
                 assert!(f.detail.contains("Validation Failed"));
@@ -893,9 +866,8 @@ mod tests {
 
     #[test]
     fn apply_spawn_failure_is_apply_error() {
-        let runner = ErrorInjectingRunner {
-            err: ProcError::SpawnFailed,
-        };
+        let runner = FakeRunner::new();
+        runner.expect_exact_error(&["gh", "issue", "close", "42"], ProcError::SpawnFailed);
         let cwd = cwd();
         let mut adapter = GithubAdapter::new(&runner, &cwd);
         let v = edit(
@@ -906,9 +878,10 @@ mod tests {
             Some("42"),
         );
         assert!(matches!(
-            adapter.apply_edit(&v, NOW),
+            adapter.apply_edit(&v),
             Err(ProcError::SpawnFailed)
         ));
+        runner.assert_all_consumed();
     }
 
     #[test]
@@ -931,7 +904,7 @@ mod tests {
             Some("42"),
         );
         assert_eq!(
-            adapter.apply_edit(&edit, NOW).unwrap(),
+            adapter.apply_edit(&edit).unwrap(),
             BackendEditOutcome::Acknowledged
         );
         runner.assert_all_consumed();
@@ -951,7 +924,7 @@ mod tests {
             Some("42"),
         );
         assert_eq!(
-            adapter.apply_edit(&edit, NOW).unwrap(),
+            adapter.apply_edit(&edit).unwrap(),
             BackendEditOutcome::Acknowledged
         );
         runner.assert_all_consumed();
@@ -978,7 +951,7 @@ mod tests {
             Some("42"),
         );
         assert_eq!(
-            adapter.apply_edit(&edit, NOW).unwrap(),
+            adapter.apply_edit(&edit).unwrap(),
             BackendEditOutcome::Acknowledged
         );
         runner.assert_all_consumed();
@@ -998,7 +971,7 @@ mod tests {
             Some("42"),
         );
         assert_eq!(
-            adapter.apply_edit(&edit, NOW).unwrap(),
+            adapter.apply_edit(&edit).unwrap(),
             BackendEditOutcome::Acknowledged
         );
         runner.assert_all_consumed();
@@ -1020,7 +993,7 @@ mod tests {
             }),
             Some("42"),
         );
-        match adapter.apply_edit(&edit, NOW).unwrap() {
+        match adapter.apply_edit(&edit).unwrap() {
             BackendEditOutcome::Rejected(failure) => {
                 assert_eq!(failure.class, FailureClass::Validation);
                 assert_eq!(failure.detail, "HTTP 422: parent must be an issue");
@@ -1033,9 +1006,11 @@ mod tests {
 
     #[test]
     fn apply_epic_membership_spawn_failure_is_apply_error() {
-        let runner = ErrorInjectingRunner {
-            err: ProcError::SpawnFailed,
-        };
+        let runner = FakeRunner::new();
+        runner.expect_exact_error(
+            &["gh", "issue", "edit", "42", "--remove-parent"],
+            ProcError::SpawnFailed,
+        );
         let cwd = cwd();
         let mut adapter = GithubAdapter::new(&runner, &cwd);
         let edit = edit(
@@ -1046,9 +1021,10 @@ mod tests {
             Some("42"),
         );
         assert!(matches!(
-            adapter.apply_edit(&edit, NOW),
+            adapter.apply_edit(&edit),
             Err(ProcError::SpawnFailed)
         ));
+        runner.assert_all_consumed();
     }
 
     #[test]
@@ -1062,7 +1038,7 @@ mod tests {
         let mut adapter = GithubAdapter::new(&runner, &cwd);
         let v = dep_edit(MutationType::AddDependency, "5", "9");
         assert!(matches!(
-            adapter.apply_edit(&v, NOW).unwrap(),
+            adapter.apply_edit(&v).unwrap(),
             BackendEditOutcome::Acknowledged
         ));
         runner.assert_all_consumed();
@@ -1079,7 +1055,7 @@ mod tests {
         let mut adapter = GithubAdapter::new(&runner, &cwd);
         let v = dep_edit(MutationType::RemoveDependency, "5", "9");
         assert!(matches!(
-            adapter.apply_edit(&v, NOW).unwrap(),
+            adapter.apply_edit(&v).unwrap(),
             BackendEditOutcome::Acknowledged
         ));
         runner.assert_all_consumed();
@@ -1102,7 +1078,7 @@ mod tests {
         let mut adapter = GithubAdapter::new(&runner, &cwd);
         let v = dep_edit(MutationType::AddDependency, "5", "9");
         assert!(matches!(
-            adapter.apply_edit(&v, NOW).unwrap(),
+            adapter.apply_edit(&v).unwrap(),
             BackendEditOutcome::Acknowledged
         ));
         runner.assert_all_consumed();
@@ -1110,8 +1086,7 @@ mod tests {
 
     #[test]
     fn apply_dependency_non_zero_is_classified_rejection() {
-        // A stale gh (< 2.94.0) rejects the unknown flag; the Mutation fails
-        // like any other (no longer no-op-Acknowledged) and the queue wedges.
+        // A stale gh (< 2.94.0) rejects the unknown flag, so the queue stops.
         let runner = FakeRunner::new();
         runner.expect_exact(
             &["gh", "issue", "edit", "5", "--add-blocked-by", "9"],
@@ -1120,7 +1095,7 @@ mod tests {
         let cwd = cwd();
         let mut adapter = GithubAdapter::new(&runner, &cwd);
         let v = dep_edit(MutationType::AddDependency, "5", "9");
-        match adapter.apply_edit(&v, NOW).unwrap() {
+        match adapter.apply_edit(&v).unwrap() {
             BackendEditOutcome::Rejected(f) => {
                 assert!(f.detail.contains("unknown flag"), "{}", f.detail);
                 assert_eq!(f.class, FailureClass::Unknown);
@@ -1142,7 +1117,7 @@ mod tests {
             );
             let cwd = cwd();
             let mut adapter = GithubAdapter::new(&runner, &cwd);
-            let outcome = adapter.create_item(&create(mt, "T", "Body"), NOW);
+            let outcome = adapter.create_item(&create(mt, "T", "Body"));
             let BackendCreateOutcome::Created(identity) = outcome else {
                 panic!("{mt}: expected a confirmed receipt, got {outcome:?}");
             };
@@ -1167,7 +1142,7 @@ mod tests {
         let mut adapter = GithubAdapter::new(&runner, &cwd);
 
         assert_eq!(
-            adapter.create_item(&create(MutationType::PromoteTicket, "T", "B"), NOW),
+            adapter.create_item(&create(MutationType::PromoteTicket, "T", "B")),
             BackendCreateOutcome::Created(identity("7"))
         );
         runner.assert_all_consumed();
@@ -1185,7 +1160,7 @@ mod tests {
             let mut adapter = GithubAdapter::new(&runner, &cwd);
 
             let BackendCreateOutcome::Indeterminate(failure) =
-                adapter.create_item(&create(MutationType::PromoteTicket, "T", "B"), NOW)
+                adapter.create_item(&create(MutationType::PromoteTicket, "T", "B"))
             else {
                 panic!("{stdout:?}: missing receipt must be indeterminate");
             };
@@ -1211,7 +1186,7 @@ mod tests {
             let mut adapter = GithubAdapter::new(&runner, &cwd);
 
             let BackendCreateOutcome::Indeterminate(failure) =
-                adapter.create_item(&create(MutationType::PromoteTicket, "T", "B"), NOW)
+                adapter.create_item(&create(MutationType::PromoteTicket, "T", "B"))
             else {
                 panic!("{stderr}: completed nonzero is not certified no-effect");
             };
@@ -1235,7 +1210,7 @@ mod tests {
             let mut adapter = GithubAdapter::new(&runner, &cwd);
 
             let BackendCreateOutcome::Rejected(failure) =
-                adapter.create_item(&create(MutationType::PromoteTicket, "T", "B"), NOW)
+                adapter.create_item(&create(MutationType::PromoteTicket, "T", "B"))
             else {
                 panic!("authentication was rejected before creation");
             };
@@ -1248,36 +1223,44 @@ mod tests {
     #[test]
     fn pre_spawn_process_failures_are_certified_no_effect() {
         for err in [ProcError::ExecutableNotFound, ProcError::SpawnFailed] {
-            let runner = ErrorInjectingRunner { err };
+            let runner = FakeRunner::new();
+            runner.expect_exact_error(
+                &["gh", "issue", "create", "--title", "T", "--body", "B"],
+                err,
+            );
             let cwd = cwd();
             let mut adapter = GithubAdapter::new(&runner, &cwd);
 
             let BackendCreateOutcome::Rejected(failure) =
-                adapter.create_item(&create(MutationType::PromoteTicket, "T", "B"), NOW)
+                adapter.create_item(&create(MutationType::PromoteTicket, "T", "B"))
             else {
                 panic!("a pre-spawn error cannot create an issue");
             };
             assert!(failure.detail.starts_with("gh issue create did not start:"));
             assert_eq!(failure.class, FailureClass::Unknown);
+            runner.assert_all_consumed();
         }
     }
 
     #[test]
     fn post_spawn_process_failure_is_indeterminate() {
-        let runner = ErrorInjectingRunner {
-            err: ProcError::OutcomeUnobserved,
-        };
+        let runner = FakeRunner::new();
+        runner.expect_exact_error(
+            &["gh", "issue", "create", "--title", "T", "--body", "B"],
+            ProcError::OutcomeUnobserved,
+        );
         let cwd = cwd();
         let mut adapter = GithubAdapter::new(&runner, &cwd);
 
         let BackendCreateOutcome::Indeterminate(failure) =
-            adapter.create_item(&create(MutationType::PromoteTicket, "T", "B"), NOW)
+            adapter.create_item(&create(MutationType::PromoteTicket, "T", "B"))
         else {
             panic!("a started process may already have created an issue");
         };
         assert!(failure.detail.contains("started"));
         assert!(failure.detail.contains("outcome is unknown"));
         assert_eq!(failure.class, FailureClass::Unknown);
+        runner.assert_all_consumed();
     }
 
     #[test]

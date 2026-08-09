@@ -26,8 +26,8 @@
 //! - `MutationFailure` — the persisted record is [`backend_outcome::Failure`]
 //!   rather than a second wrapper with the same fields.
 //!
-//! [`backend_outcome`] carries the directional write-result shapes (ADR-0009
-//! taxonomy); the sync engine is the consumer ADR-0018 deferred them for.
+//! [`backend_outcome`] carries the directional write results defined by
+//! ADR-0009 and used by the sync engine.
 //!
 //! [`dependency_rule`] is the one behaviour rather than a value type: what a
 //! Dependency edge means for the Mutation Log (ADR-0035). It sits here because

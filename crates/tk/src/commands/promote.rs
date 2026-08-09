@@ -134,30 +134,24 @@ fn promote(
 
     // Sync runs even when nothing was appended: an earlier invocation's
     // Promotion may still be pending, and this is the drain that applies it.
-    let (sync_report, sync_error) = match sync::run_sync(store.conn_mut(), adapter, workflow, now) {
-        Ok(report) => (Some(report), None),
-        Err(err) => (None, Some(err)),
-    };
+    let sync_result = sync::run_sync(store.conn_mut(), adapter, workflow, now);
 
     render_mappings(deps.stdout, store, &captured)?;
 
     // An empty plan owns no Mutations to resolve, so re-invoking on work that
     // is already Backend or already Pending Promotion stays an idempotent
     // success — but only if the drain this invocation ran actually finished.
-    // Reporting Ok while the sync it just ran failed would tell an agent the
-    // Promotion landed when it is still pending.
+    // Reporting Ok while sync failed would claim the Promotion landed while it
+    // remains pending.
     let Some(operation_id) = operation_id else {
-        return match (
-            sync_report.and_then(|report| report.stopped_at_sequence),
-            sync_error,
-        ) {
-            (_, Some(err)) => Err(CommandError::failure(format!(
+        return match sync_stop(&sync_result) {
+            Some(SyncStop::Error(err)) => Err(CommandError::failure(format!(
                 "nothing to promote, but the sync that followed did not finish\n{err}"
             ))),
-            (Some(sequence), None) => Err(CommandError::failure(format!(
+            Some(SyncStop::RejectedMutation(sequence)) => Err(CommandError::failure(format!(
                 "nothing to promote, but the sync that followed stopped at Mutation {sequence}"
             ))),
-            (None, None) => Ok(Exit::Ok),
+            None => Ok(Exit::Ok),
         };
     };
     let unresolved = store_promotion::unresolved_in_operation(store.conn(), &operation_id)
@@ -166,9 +160,12 @@ fn promote(
         // Every Mutation of this Promotion Operation resolved; a failure later
         // in the same run belongs to the rest of the outbox, not to the
         // Promotion, but it still leaves the sync unfinished.
-        return match sync_error {
-            Some(err) => Err(CommandError::failure(format!(
+        return match sync_stop(&sync_result) {
+            Some(SyncStop::Error(err)) => Err(CommandError::failure(format!(
                 "the Promotion applied, but the sync that followed it did not finish\n{err}"
+            ))),
+            Some(SyncStop::RejectedMutation(sequence)) => Err(CommandError::failure(format!(
+                "the Promotion applied, but the sync that followed stopped at Mutation {sequence}"
             ))),
             None => Ok(Exit::Ok),
         };
@@ -178,8 +175,20 @@ fn promote(
     Err(unresolved_failure(
         blocker.as_ref(),
         first_unresolved,
-        sync_error.as_ref(),
+        sync_result.as_ref().err(),
     ))
+}
+
+enum SyncStop<'a> {
+    Error(&'a RunSyncError),
+    RejectedMutation(i64),
+}
+
+fn sync_stop(result: &Result<sync::SyncReport, RunSyncError>) -> Option<SyncStop<'_>> {
+    match result {
+        Err(error) => Some(SyncStop::Error(error)),
+        Ok(report) => report.stopped_at_sequence.map(SyncStop::RejectedMutation),
+    }
 }
 
 /// An Item's Display ID as it stood before sync, with the Item Class the
@@ -270,10 +279,9 @@ fn render_nothing_to_promote<W: Write + ?Sized>(stdout: &mut W, target: &GraphIt
 
 /// Diagnose a Promotion Operation with Mutations left unresolved.
 ///
-/// The comparison against the earliest still-applicable Mutation is the point:
-/// a Mutation ahead of the operation in the Mutation Log is a queueing fact —
-/// the Promotion is durable and applies once that Mutation clears — while one of
-/// the operation's own Mutations is the Promotion itself not landing.
+/// A Mutation ahead of the operation means the Promotion is durably queued and
+/// can apply after that Mutation clears. An unresolved Mutation owned by the
+/// operation means the Promotion itself did not land.
 fn unresolved_failure(
     blocker: Option<&MutationSummary>,
     unresolved: &MutationSummary,
@@ -447,7 +455,6 @@ mod tests {
     use crate::clock::FakeClock;
     use crate::domain::backend_operation::BackendEdit;
     use crate::domain::mutation_state::MutationState;
-    use crate::domain::mutation_type::MutationType;
     use crate::domain::promotion_capability::PromotionCapabilities;
     use crate::domain::ticket_kind::TicketKind;
     use crate::proc::{FakeRunner, RunOutput};
@@ -568,25 +575,25 @@ mod tests {
     }
 
     fn adapter(edits: Vec<EditResponse>, creates: Vec<CreateResponse>) -> FakeAdapter {
-        FakeAdapter::directional(vec![], vec![], edits, creates)
+        FakeAdapter::new()
+            .with_edits(edits)
+            .with_creates(creates)
             .with_capabilities(PromotionCapabilities::all())
     }
 
     fn adapter_with_refresh(edits: Vec<EditResponse>, creates: Vec<CreateResponse>) -> FakeAdapter {
-        FakeAdapter::directional(
-            vec![],
-            vec![RefreshResponse::Item(
+        FakeAdapter::new()
+            .with_refreshes(vec![RefreshResponse::Item(
                 crate::domain::backend_operation::BackendItemRefresh {
                     title: "Adopted".into(),
                     body: String::new(),
                     status: crate::domain::status::ItemStatus::Open,
                     ticket_kind: Some(TicketKind::Task),
                 },
-            )],
-            edits,
-            creates,
-        )
-        .with_capabilities(PromotionCapabilities::all())
+            )])
+            .with_edits(edits)
+            .with_creates(creates)
+            .with_capabilities(PromotionCapabilities::all())
     }
 
     /// Drive `run` and frame any error exactly as the dispatch seam does
@@ -1094,12 +1101,8 @@ mod tests {
 
     #[test]
     fn a_dependency_reaches_the_backend_with_both_endpoints_resolved() {
-        // The whole point of ordering item Promotions ahead of the relationship
-        // Mutations that name them, and of resolving backend identity per
-        // Mutation instead of at load time (ADR-0036): by the time
-        // `add_dependency` applies, both endpoints have receipts. Neither half
-        // is covered elsewhere — the plan test asserts order without applying,
-        // and the engine test resolves a target but never a counterpart.
+        // ADR-0036 requires both Promotion receipts before relationship
+        // delivery; otherwise the Dependency cannot be addressed.
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         local_epic(&conn, "e1", "tk-1", 1);
@@ -1160,7 +1163,7 @@ mod tests {
         let dependency = fake
             .captured_edits
             .iter()
-            .find(|call| call.mutation_type() == MutationType::AddDependency)
+            .find(|call| matches!(call, BackendEdit::AddDependency { .. }))
             .expect("the plan queues the Dependency between the two Promotion Children");
         let BackendEdit::AddDependency {
             blocked, blocking, ..
@@ -1465,7 +1468,7 @@ mod tests {
         let mut st = open_store(&h, &store, &cwd_path);
         // Dependencies are the only facet this Backend cannot represent, so the
         // rejected edge is the finding, not a capability complaint.
-        let mut fake = FakeAdapter::directional(vec![], vec![], vec![], vec![]).with_capabilities(
+        let mut fake = FakeAdapter::new().with_capabilities(
             PromotionCapabilities::none()
                 .with_item_class(ItemClass::Ticket)
                 .with_item_class(ItemClass::Epic)

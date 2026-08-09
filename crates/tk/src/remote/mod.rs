@@ -12,4 +12,4 @@ pub mod factory;
 pub mod github;
 
 #[cfg(test)]
-pub mod fake;
+pub(crate) mod fake;

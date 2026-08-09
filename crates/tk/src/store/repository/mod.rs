@@ -133,6 +133,16 @@ impl Store {
     }
 }
 
+#[cfg(test)]
+impl Store {
+    pub(crate) fn for_test(conn: Connection) -> Self {
+        Self {
+            conn,
+            tk_dir: PathBuf::new(),
+        }
+    }
+}
+
 /// Why [`open_existing`] could not return an opened [`Store`].
 ///
 /// One enum for every non-success path: the expected refusals (no store yet,

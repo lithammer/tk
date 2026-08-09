@@ -265,10 +265,7 @@ mod tests {
             [],
         )
         .unwrap();
-        Store {
-            conn,
-            tk_dir: std::path::PathBuf::new(),
-        }
+        Store::for_test(conn)
     }
 
     fn fixed_rng() -> StdRng {

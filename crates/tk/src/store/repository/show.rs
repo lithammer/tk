@@ -254,10 +254,7 @@ mod tests {
         let mut conn = Connection::open_in_memory().expect("open :memory:");
         conn.execute_batch("pragma foreign_keys = on").unwrap();
         migrations::apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        Store {
-            conn,
-            tk_dir: std::path::PathBuf::new(),
-        }
+        Store::for_test(conn)
     }
 
     fn seed_ticket(store: &Store, id: &str, display: &str, title: &str, created_seq: i64) {
