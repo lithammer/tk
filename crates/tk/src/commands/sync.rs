@@ -2,14 +2,14 @@
 //!
 //! `tk sync` opens the configured Backend Adapter via
 //! [`crate::remote::factory::open_configured`] and drives the backend-blind
-//! engine ([`crate::sync::run_sync`]). Until real adapters land (tk-40) a
-//! configured Remote returns `NotImplemented`, so the engine is reached only
-//! through the engine's own tests; this command's report rendering is unit-
-//! tested directly against a synthetic [`SyncReport`].
+//! engine ([`crate::sync::run_sync`]). The GitHub Adapter refreshes the adopted
+//! working set before the engine applies queued Mutations; unsupported Backend
+//! kinds fail while opening the Adapter.
 //!
-//! `tk sync --skip <id>` curates a failed Mutation. The skip commits BEFORE the
-//! adapter is opened so a broken / unimplemented Remote cannot block an
-//! operator from abandoning a Mutation the backend already rejected.
+//! `tk sync --skip <id>` curates a failed Mutation under the repository's
+//! Remote workflow guard. The skip commits BEFORE the adapter is opened so a
+//! broken / unimplemented Remote cannot block an operator from abandoning a
+//! Mutation the backend already rejected.
 //!
 //! `tk sync log` reads the Mutation Log through [`crate::store::sync`]; it
 //! needs no adapter and is exercised end-to-end here.
@@ -20,12 +20,12 @@ use clap::{Args as ClapArgs, Subcommand};
 
 use crate::cli::{Deps, Exit};
 use crate::commands::resolver;
-use crate::domain::apply_outcome::FailureClass;
-use crate::remote::adapter::PullError;
+use crate::domain::backend_outcome::FailureClass;
+use crate::remote::adapter::AdapterReadError;
 use crate::remote::factory::{self, OpenError as FactoryOpenError};
 use crate::store::sync::{
-    self as store_sync, ApplyMutationOutcomeError, LoadApplicableError, LogDetailRow, LogError,
-    LogListFilter, LogListRow, MarkSkippedError, MergeError,
+    self as store_sync, BackendCohortError, LoadApplicableError, LogDetailRow, LogError,
+    LogListFilter, LogListRow, MarkSkippedError, PersistMutationOutcomeError, RefreshStoreError,
 };
 use crate::sync::{self, RunSyncError, SyncReport};
 
@@ -44,12 +44,13 @@ pub struct Args {
 
 #[derive(Debug, Subcommand)]
 pub enum Sub {
-    /// Inspect pending, failed, and skipped Mutations.
+    /// Inspect pending, failed, applying, and skipped Mutations.
     Log(LogArgs),
 }
 
 /// Flags for `tk sync log`. The three state flags are a filter; if more than
-/// one is given, precedence is pending → failed → skipped.
+/// one is given, precedence is pending → failed → skipped. Applying Mutations
+/// appear in the default view.
 #[derive(Debug, ClapArgs)]
 pub struct LogArgs {
     /// Only pending Mutations.
@@ -80,7 +81,6 @@ fn run_sync(deps: Deps<'_>, skip: Option<i64>) -> Exit {
         runner,
         clock,
         cwd,
-        rng,
         ..
     } = deps;
 
@@ -93,10 +93,19 @@ fn run_sync(deps: Deps<'_>, skip: Option<i64>) -> Exit {
     };
     let now = clock.now_iso();
 
+    let workflow = match store.lock_remote_workflow() {
+        Ok(guard) => guard,
+        Err(err) => {
+            let _ = writeln!(stderr, "tk sync: {err}");
+            return Exit::Failure;
+        }
+    };
+
     // Commit the skip before opening the adapter: a broken or unimplemented
     // Remote must not block an operator from abandoning a failed Mutation.
     if let Some(seq) = skip {
-        if let Err(err) = store_sync::mark_mutation_skipped(store.conn_mut(), seq, &now) {
+        if let Err(err) = store_sync::mark_mutation_skipped(store.conn_mut(), &workflow, seq, &now)
+        {
             render_skip_error(stderr, &err);
             return Exit::Failure;
         }
@@ -124,7 +133,7 @@ fn run_sync(deps: Deps<'_>, skip: Option<i64>) -> Exit {
         return Exit::Failure;
     };
 
-    let report = match sync::run_sync(store.conn_mut(), &mut *adapter, &now, rng) {
+    let report = match sync::run_sync(store.conn_mut(), &mut *adapter, &workflow, &now) {
         Ok(report) => report,
         Err(err) => {
             render_run_sync_error(stderr, &err);
@@ -132,7 +141,11 @@ fn run_sync(deps: Deps<'_>, skip: Option<i64>) -> Exit {
         }
     };
     render_sync_report(stdout, &report, skip);
-    Exit::Ok
+    if report.stopped_at_sequence.is_some() {
+        Exit::Failure
+    } else {
+        Exit::Ok
+    }
 }
 
 fn run_log(deps: Deps<'_>, args: LogArgs) -> Exit {
@@ -263,14 +276,8 @@ fn render_skip_error<W: Write + ?Sized>(stderr: &mut W, err: &MarkSkippedError) 
 /// environment failures fall through to the generic frame.
 fn render_run_sync_error<W: Write + ?Sized>(stderr: &mut W, err: &RunSyncError) {
     match err {
-        RunSyncError::Pull(PullError::Failed(detail)) => {
+        RunSyncError::Pull(AdapterReadError::Failed(detail)) => {
             let _ = writeln!(stderr, "tk sync: {detail}");
-        }
-        RunSyncError::Merge(MergeError::DisplayIdCollision(id)) => {
-            let _ = writeln!(
-                stderr,
-                "tk sync: Display ID '{id}' already claimed by an existing Item"
-            );
         }
         RunSyncError::Load(
             LoadApplicableError::UnknownMutationType(_)
@@ -285,32 +292,70 @@ fn render_run_sync_error<W: Write + ?Sized>(stderr: &mut W, err: &RunSyncError) 
         // contradicts a contract tk owns. Neither is recoverable and both leave
         // the Mutation applicable, so every later `tk sync` reproduces the
         // abort — say it is a bug rather than printing the raw fault.
-        RunSyncError::Load(LoadApplicableError::PayloadJson(_))
+        RunSyncError::Load(
+            LoadApplicableError::PayloadJson(_)
+            | LoadApplicableError::OperationShapeMismatch { .. }
+            | LoadApplicableError::MissingBackendIdentity { .. }
+            | LoadApplicableError::CounterpartClassMismatch { .. },
+        )
         | RunSyncError::Outcome(
-            ApplyMutationOutcomeError::PayloadJson(_)
-            | ApplyMutationOutcomeError::ReceiptShapeMismatch { .. },
+            PersistMutationOutcomeError::PayloadJson(_)
+            | PersistMutationOutcomeError::OperationShapeMismatch { .. },
         ) => {
             let _ = writeln!(
                 stderr,
                 "tk sync: {err}; this is a Ticket bug — please report it"
             );
         }
-        RunSyncError::Merge(MergeError::Storage(e))
+        RunSyncError::Refresh(
+            RefreshStoreError::Storage(e)
+            | RefreshStoreError::BackendCohort(BackendCohortError::Storage(e)),
+        )
         | RunSyncError::Load(LoadApplicableError::Storage(e))
-        | RunSyncError::Outcome(ApplyMutationOutcomeError::Storage(e)) => {
+        | RunSyncError::Outcome(PersistMutationOutcomeError::Storage(e)) => {
             resolver::storage_error(e).render(stderr, COMMAND);
+        }
+        RunSyncError::CreatedIdentityNotStored { sequence, .. } => {
+            let _ = writeln!(stderr, "tk sync: {err}");
+            let _ = writeln!(
+                stderr,
+                "Mutation {sequence} remains applying; do not retry automatic sync until its Backend identity is reconciled"
+            );
         }
         // Named exhaustively rather than caught by `_`, so a variant added
         // later has to choose a line here instead of falling through to the
         // bare technical one.
-        RunSyncError::Pull(PullError::Env(_))
+        RunSyncError::Pull(AdapterReadError::Env(_))
         | RunSyncError::Apply(_)
-        | RunSyncError::Merge(MergeError::Sequence(_))
         | RunSyncError::Outcome(
-            ApplyMutationOutcomeError::MutationNotFound(_)
-            | ApplyMutationOutcomeError::MutationNotApplicable(_),
+            PersistMutationOutcomeError::MutationNotFound(_)
+            | PersistMutationOutcomeError::MutationNotApplicable(_),
         ) => {
             let _ = writeln!(stderr, "tk sync: {err}");
+        }
+        RunSyncError::ApplyingMutation(sequence)
+        | RunSyncError::Refresh(RefreshStoreError::ApplyingMutation(sequence))
+        | RunSyncError::Outcome(PersistMutationOutcomeError::ApplyingMutation(sequence)) => {
+            let _ = writeln!(
+                stderr,
+                "tk sync: Mutation {sequence} has an indeterminate Backend creation outcome; automatic sync is blocked until it is reconciled"
+            );
+        }
+        RunSyncError::Refresh(RefreshStoreError::RemoteChanged { .. }) => {
+            let _ = writeln!(
+                stderr,
+                "tk sync: the configured Remote changed while contacting the Backend; retry 'tk sync'"
+            );
+        }
+        RunSyncError::Refresh(RefreshStoreError::BackendCohort(
+            BackendCohortError::MultipleBackendKinds
+            | BackendCohortError::UnknownBackendKind(_)
+            | BackendCohortError::BackendKindMismatch { .. },
+        )) => {
+            let _ = writeln!(
+                stderr,
+                "tk sync: {err}; this is a Repository Store invariant failure"
+            );
         }
     }
 }
@@ -358,9 +403,11 @@ fn render_log_detail<W: Write + ?Sized>(stdout: &mut W, detail: &LogDetailRow) {
 mod tests {
     use super::*;
     use crate::clock::FakeClock;
+    use crate::domain::backend_kind::BackendKind;
+    use crate::domain::backend_operation::BackendItemIdentity;
     use crate::domain::mutation_payload::Promotion;
     use crate::domain::mutation_type::MutationType;
-    use crate::proc::{FakeRunner, RunOutput};
+    use crate::proc::{FakeRunner, ProcError, RunOutput};
     use crate::render::Styler;
     use crate::store::migrations;
     use crate::store::testing::{
@@ -514,10 +561,80 @@ mod tests {
     }
 
     #[test]
+    fn sync_exits_failure_when_creation_never_started() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Local work",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "promote_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
+                state: "pending",
+                promotion_operation_id: Some("op-1"),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        h.runner.expect_exact_error(
+            &[
+                "gh",
+                "issue",
+                "create",
+                "--title",
+                "Local work",
+                "--body",
+                "",
+            ],
+            ProcError::ExecutableNotFound,
+        );
+
+        let code = run(
+            h.deps(),
+            Args {
+                subcommand: None,
+                skip: None,
+            },
+        );
+
+        assert_eq!(code, Exit::Failure);
+        assert_eq!(
+            String::from_utf8(h.stdout).unwrap(),
+            "Sync complete: 0 pulled, 0 applied, stopped at 1.\n"
+        );
+        let state: String = Connection::open(store.db_path())
+            .unwrap()
+            .query_row(
+                "select state from mutations where sequence = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "failed");
+    }
+
+    #[test]
     fn sync_github_drives_gh_through_the_factory() {
         // End-to-end wiring: command -> factory -> real GithubAdapter -> gh via
         // the same FakeRunner. An Adopted item with a pending update_ticket
-        // refreshes (scenario B shields the edit) then applies through gh.
+        // refreshes without overwriting the pending edit, then applies through gh.
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_remote(
@@ -627,6 +744,65 @@ mod tests {
             })
             .unwrap();
         assert_eq!(state, "skipped", "skip committed before the no-remote exit");
+    }
+
+    #[test]
+    fn sync_skip_reports_a_busy_remote_workflow_guard() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        backend_ticket(&conn, "t1", "tk-1", "1", 1);
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "update_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"A","body":""}"#,
+                state: "failed",
+                failure_json: Some(r#"{"detail":"rejected"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let holder_runner = FakeRunner::new();
+        holder_runner.expect(
+            &["git", "rev-parse"],
+            RunOutput {
+                exit_code: 0,
+                stdout: store.git_rev_parse_stdout(),
+                stderr: Vec::new(),
+            },
+        );
+        let clock = FakeClock::new(1_778_284_800_000);
+        let first = resolver::open_for_command(&holder_runner, &cwd_path, &clock).unwrap();
+        let first_guard = first.lock_remote_workflow().unwrap();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let exit = run(
+            h.deps(),
+            Args {
+                subcommand: None,
+                skip: Some(1),
+            },
+        );
+        assert_eq!(exit, Exit::Failure);
+        assert_eq!(
+            String::from_utf8(h.stderr).unwrap(),
+            "tk sync: another remote-changing command is running; retry when it finishes\n"
+        );
+        let state: String = first
+            .conn()
+            .query_row(
+                "select state from mutations where sequence = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "failed");
+        drop(first_guard);
     }
 
     #[test]
@@ -968,7 +1144,7 @@ mod tests {
         );
     }
 
-    // ---- report / error rendering (engine unreachable via factory) ------
+    // ---- report / error rendering ---------------------------------------
 
     #[test]
     fn render_report_includes_skipped_and_stopped_clauses() {
@@ -1011,7 +1187,7 @@ mod tests {
         let mut err_out = Vec::new();
         render_run_sync_error(
             &mut err_out,
-            &RunSyncError::Pull(PullError::Failed("gh: HTTP 502".into())),
+            &RunSyncError::Pull(AdapterReadError::Failed("gh: HTTP 502".into())),
         );
         assert_eq!(
             String::from_utf8(err_out).unwrap(),
@@ -1020,15 +1196,35 @@ mod tests {
     }
 
     #[test]
-    fn render_run_sync_error_renders_display_id_collision() {
+    fn render_run_sync_error_renders_remote_change_retry_guidance() {
         let mut err_out = Vec::new();
         render_run_sync_error(
             &mut err_out,
-            &RunSyncError::Merge(MergeError::DisplayIdCollision("gh-1".into())),
+            &RunSyncError::Refresh(RefreshStoreError::RemoteChanged {
+                expected: BackendKind::Github,
+                actual: Some(BackendKind::Jira),
+            }),
         );
         assert_eq!(
             String::from_utf8(err_out).unwrap(),
-            "tk sync: Display ID 'gh-1' already claimed by an existing Item\n"
+            "tk sync: the configured Remote changed while contacting the Backend; \
+             retry 'tk sync'\n"
+        );
+    }
+
+    #[test]
+    fn render_run_sync_error_renders_unknown_backend_cohort_as_an_invariant_failure() {
+        let mut err_out = Vec::new();
+        render_run_sync_error(
+            &mut err_out,
+            &RunSyncError::Refresh(RefreshStoreError::BackendCohort(
+                BackendCohortError::UnknownBackendKind("gitlab".into()),
+            )),
+        );
+        assert_eq!(
+            String::from_utf8(err_out).unwrap(),
+            "tk sync: Repository Store contains unknown Backend kind 'gitlab'; \
+             this is a Repository Store invariant failure\n"
         );
     }
 
@@ -1047,14 +1243,14 @@ mod tests {
     }
 
     #[test]
-    fn render_run_sync_error_names_a_receipt_shape_mismatch_as_a_bug() {
+    fn render_run_sync_error_names_an_outcome_boundary_mismatch_as_a_bug() {
         // An Adapter that answers a Promotion with a bare acknowledgement has
         // broken its contract: the Mutation stays applicable, so the user needs
         // to know retrying will not clear it.
         let mut err_out = Vec::new();
         render_run_sync_error(
             &mut err_out,
-            &RunSyncError::Outcome(ApplyMutationOutcomeError::ReceiptShapeMismatch {
+            &RunSyncError::Outcome(PersistMutationOutcomeError::OperationShapeMismatch {
                 sequence: 4,
                 mutation_type: MutationType::PromoteTicket,
             }),
@@ -1071,7 +1267,7 @@ mod tests {
         let mut err_out = Vec::new();
         render_run_sync_error(
             &mut err_out,
-            &RunSyncError::Outcome(ApplyMutationOutcomeError::PayloadJson(
+            &RunSyncError::Outcome(PersistMutationOutcomeError::PayloadJson(
                 serde_json::from_str::<Promotion>("{}").unwrap_err(),
             )),
         );
@@ -1081,5 +1277,38 @@ mod tests {
                 && rendered.ends_with("; this is a Ticket bug — please report it\n"),
             "{rendered}"
         );
+    }
+
+    #[test]
+    fn render_run_sync_error_blocks_retry_after_indeterminate_creation() {
+        let mut stderr = Vec::new();
+
+        render_run_sync_error(&mut stderr, &RunSyncError::ApplyingMutation(7));
+
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            "tk sync: Mutation 7 has an indeterminate Backend creation outcome; automatic sync is blocked until it is reconciled\n"
+        );
+    }
+
+    #[test]
+    fn render_run_sync_error_preserves_an_unstored_created_identity() {
+        let mut stderr = Vec::new();
+        let error = RunSyncError::CreatedIdentityNotStored {
+            sequence: 7,
+            identity: BackendItemIdentity {
+                display_id: "gh-42".into(),
+                backend_key: "https://github.com/o/r/issues/42".into(),
+            },
+            source: PersistMutationOutcomeError::MutationNotFound(7),
+        };
+
+        render_run_sync_error(&mut stderr, &error);
+
+        let rendered = String::from_utf8(stderr).unwrap();
+        assert!(rendered.contains("gh-42"));
+        assert!(rendered.contains("https://github.com/o/r/issues/42"));
+        assert!(rendered.contains("remains applying"));
+        assert!(rendered.contains("do not retry"));
     }
 }

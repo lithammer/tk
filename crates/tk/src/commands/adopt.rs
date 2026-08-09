@@ -4,32 +4,31 @@
 //! `tk adopt <key>` eagerly fetches the single issue named by `<key>` through
 //! the configured Backend Adapter and inserts it as an `accepted` Backend
 //! Ticket (Display ID `gh-<n>` for GitHub). It is the inverse intake direction
-//! to Promotion and, like Backend Pull's insert path, is a current-state
-//! insert: it records **no** Mutation.
+//! to Promotion and records the Backend's current state without a Mutation.
 //!
 //! `<key>` is the backend-native identifier (a bare issue number for GitHub),
 //! passed to the adapter verbatim — tk does not normalise URLs or `#`-prefixes,
-//! because the already-adopted pre-check is an exact `backend_key` match and
-//! the command itself is backend-agnostic (the adapter interprets the key).
+//! because the command is backend-agnostic and the Adapter owns
+//! canonicalization. The Store checks canonical Backend identity under the
+//! insertion transaction.
 //!
-//! Born on the ADR-0032 diagnostics seam: [`run`] returns
-//! `Result<Exit, CommandError>` and the dispatch seam frames `tk adopt:
-//! <body>`. The shared failure bodies match `tk sync` byte-for-byte.
+//! Per ADR-0032, [`run`] returns `Result<Exit, CommandError>` and the dispatch
+//! seam frames failures as `tk adopt: <body>`.
 
 use clap::Args as ClapArgs;
 
 use crate::cli::{CommandError, Deps, Exit};
 use crate::commands::resolver;
-use crate::remote::adapter::PullError;
+use crate::remote::adapter::AdapterReadError;
 use crate::remote::factory::{self, OpenError as FactoryOpenError};
-use crate::store::sync::{self as store_sync, MergeError};
+use crate::store::sync::{self as store_sync, AdoptOutcome, AdoptStoreError, BackendCohortError};
 
 /// Flags for `tk adopt`.
 #[derive(Debug, ClapArgs)]
 pub struct Args {
     /// Backend-native key of the issue to adopt (a bare issue number for
     /// GitHub). Passed to the Backend Adapter verbatim — tk does not normalise
-    /// URLs or `#`-prefixes (the already-adopted pre-check is an exact match).
+    /// URLs or `#`-prefixes before Adapter canonicalization.
     #[arg(value_name = "KEY")]
     pub key: String,
 }
@@ -38,23 +37,20 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
         .map_err(|err| resolver::open_error(&err))?;
     let now = deps.clock.now_iso();
+    let _workflow = store
+        .lock_remote_workflow()
+        .map_err(CommandError::failure)?;
+    store_sync::ensure_adopt_available(store.conn()).map_err(adopt_store_error)?;
 
-    // The configured Remote names the Backend whose key namespace `<key>` and
-    // the pre-check live in. No Remote → the same guidance `tk sync` gives.
-    let Some(remote) =
-        store_sync::get_remote(store.conn()).map_err(|e| resolver::storage_error(&e))?
+    let Some(expected) = store_sync::configured_remote_kind(store.conn())
+        .map_err(|err| resolver::storage_error(&err))?
     else {
         return Err(no_remote());
     };
-
-    // Idempotent pre-check (mirrors `tk remote set`): if this exact backend key
-    // is already adopted, report it and exit 0 WITHOUT a backend call. Adopt is
-    // intake, not refresh — re-pulling an Adopted issue is `tk sync`'s job.
-    if let Some(existing) =
-        store_sync::find_backend_item(store.conn(), &remote.backend_kind, &args.key)
-            .map_err(|e| resolver::storage_error(&e))?
+    if let Some(row) = store_sync::find_adopted_ticket(store.conn(), expected, &args.key)
+        .map_err(adopt_store_error)?
     {
-        let _ = writeln!(deps.stdout, "Already adopted: {}", existing.display_id);
+        let _ = writeln!(deps.stdout, "Already adopted: {}", row.display_id);
         return Ok(Exit::Ok);
     }
 
@@ -63,84 +59,95 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         Err(err @ FactoryOpenError::NotImplemented) => return Err(CommandError::failure(err)),
         Err(FactoryOpenError::Storage(err)) => return Err(resolver::storage_error(&err)),
     };
-    // `get_remote` already proved a Remote exists; `Ok(None)` here is only a
-    // concurrent `tk remote clear` between the two reads. Treat it as no Remote.
     let Some(mut adapter) = adapter_opt else {
         return Err(no_remote());
     };
 
-    // Eagerly fetch the single issue. Pull is all-or-nothing (ADR-0034): a
-    // non-existent issue or a PR (tk-34's guard) surfaces verbatim.
-    let snapshots = adapter
-        .fetch_snapshots(&[args.key.as_str()])
-        .map_err(pull_error)?;
+    // Canonicalize the single issue through its Backend Adapter. Adopt does not
+    // trust raw input for idempotence because Backends may accept aliases.
+    // A non-existent issue or a PR (tk-34's guard) surfaces verbatim.
+    let adopted = adapter
+        .adopt_ticket(&args.key)
+        .map_err(adapter_read_error)?;
 
-    // Scenario-A insert via the shared merge; `DisplayIdCollision` is the
-    // uniqueness backstop (ADR-0010). No Mutation is recorded — Adopt is a
-    // current-state insert, like Backend Pull's insert path.
-    store_sync::merge_backend_snapshots(store.conn_mut(), &mut *deps.rng, &snapshots, &now)
-        .map_err(merge_error)?;
+    debug_assert_eq!(adapter.backend_kind(), expected);
+    let outcome = store_sync::adopt_backend_ticket(
+        store.conn_mut(),
+        expected,
+        &mut *deps.rng,
+        &adopted,
+        &now,
+    )
+    .map_err(adopt_store_error)?;
+    let stored = match outcome {
+        AdoptOutcome::Inserted(row) => row,
+        AdoptOutcome::AlreadyExists(row) => {
+            let _ = writeln!(deps.stdout, "Already adopted: {}", row.display_id);
+            return Ok(Exit::Ok);
+        }
+    };
 
-    // Render from the stored row, not the snapshot: the snapshot carries no
-    // Priority, and reading back what merge persisted keeps the displayed
-    // Priority honest as backend-Priority mapping arrives (Jira). The fetch
-    // returns one snapshot per requested key, so its identity addresses the
-    // row merge just wrote.
-    let snap = snapshots
-        .first()
-        .expect("fetch_snapshots returns one snapshot per requested key");
-    let adopted =
-        store_sync::find_backend_item(store.conn(), &snap.backend_kind, &snap.backend_key)
-            .map_err(|e| resolver::storage_error(&e))?
-            .expect("the Backend item merge just wrote is present in the store");
-
-    // Mirror `tk add`'s created-item block. The Status line carries the
-    // allow-closed signal: a closed issue is adopted as a `done` Backend Ticket
+    // The Status line carries the allow-closed signal: a closed issue is
+    // adopted as a `done` Backend Ticket
     // (held out of `tk next`/`tk list` and never refreshed), so `Status: done`
     // is how Adopt avoids silently inserting an inert Ticket.
     let _ = writeln!(
         deps.stdout,
         "Adopted Ticket: {} - {}",
-        adopted.display_id, adopted.title
+        stored.display_id, stored.title
     );
-    if let Some(kind) = adopted.ticket_kind {
+    if let Some(kind) = stored.ticket_kind {
         let _ = writeln!(deps.stdout, "Kind: {kind}");
     }
-    if let Some(priority) = adopted.priority {
+    if let Some(priority) = stored.priority {
         let _ = writeln!(deps.stdout, "Priority: {priority}");
     }
-    let _ = writeln!(deps.stdout, "Status: {}", adopted.status);
+    let _ = writeln!(deps.stdout, "Status: {}", stored.status);
     Ok(Exit::Ok)
 }
 
-/// The no-Remote diagnostic, shared by the `get_remote` and (defensive)
-/// `open_configured` arms. The body matches `tk sync`'s verbatim; it is re-typed
-/// here rather than shared as a constant so the literal stays grep-able.
+/// The no-Remote diagnostic returned when the Adapter factory finds none.
 fn no_remote() -> CommandError {
     CommandError::failure("no Remote configured; run 'tk remote set <kind>' first")
 }
 
-/// Map a [`PullError`] to a seam-framed failure. Both arms surface the adapter's
-/// own body — `Failed` carries the backend CLI's stderr (or the adapter's PR /
-/// parse diagnostic) verbatim; `Env` is the bare runner failure — matching the
-/// bodies `tk sync` renders.
-fn pull_error(err: PullError) -> CommandError {
+/// Map an [`AdapterReadError`] to a seam-framed failure.
+///
+/// Both arms preserve the Adapter boundary's body: `Failed` carries the
+/// Backend CLI stderr or Adapter validation diagnostic, while `Env` carries
+/// the subprocess environment failure.
+fn adapter_read_error(err: AdapterReadError) -> CommandError {
     match err {
-        PullError::Failed(detail) => CommandError::failure(detail),
-        PullError::Env(e) => CommandError::failure(e),
+        AdapterReadError::Failed(detail) => CommandError::failure(detail),
+        AdapterReadError::Env(e) => CommandError::failure(e),
     }
 }
 
-/// Map a [`MergeError`] to a seam-framed failure, matching `tk sync`'s bodies.
-fn merge_error(err: MergeError) -> CommandError {
+/// Map an [`AdoptStoreError`] to a seam-framed failure.
+fn adopt_store_error(err: AdoptStoreError) -> CommandError {
     match err {
-        MergeError::DisplayIdCollision(id) => CommandError::failure(format!(
+        AdoptStoreError::DisplayIdCollision(id) => CommandError::failure(format!(
             "Display ID '{id}' already claimed by an existing Item"
         )),
-        MergeError::Storage(e) => resolver::storage_error(&e),
-        MergeError::Sequence(e) => {
+        AdoptStoreError::BackendItemIsEpic(id) => {
+            CommandError::failure(format!("{id} is a Backend Epic, not a Ticket"))
+        }
+        AdoptStoreError::RemoteChanged { .. } => CommandError::failure(
+            "the configured Remote changed while contacting the Backend; retry 'tk adopt'",
+        ),
+        AdoptStoreError::Storage(e)
+        | AdoptStoreError::BackendCohort(BackendCohortError::Storage(e)) => {
+            resolver::storage_error(&e)
+        }
+        AdoptStoreError::Sequence(e) => {
             CommandError::failure(format!("Repository Store corruption: {e}"))
         }
+        AdoptStoreError::BackendCohort(other) => {
+            CommandError::failure(format!("Repository Store corruption: {other}"))
+        }
+        AdoptStoreError::ApplyingMutation(sequence) => CommandError::failure(format!(
+            "Mutation {sequence} has an indeterminate Backend creation outcome; resolve it before adopting another Item"
+        )),
     }
 }
 
@@ -152,7 +159,8 @@ mod tests {
     use crate::render::Styler;
     use crate::store::migrations;
     use crate::store::testing::{
-        FixtureItem, FixtureRemote, TmpStore, insert_fixture_item, insert_fixture_remote,
+        FixtureItem, FixtureMutation, FixtureRemote, TmpStore, insert_fixture_item,
+        insert_fixture_mutation, insert_fixture_remote,
     };
     use rand::SeedableRng;
     use rand::rngs::StdRng;
@@ -276,7 +284,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
         h.runner.expect(
-            &["gh", "issue", "view", "42"],
+            &["gh", "issue", "view", "https://github.com/o/r/issues/42"],
             ok(&issue_json(
                 42,
                 "OPEN",
@@ -285,7 +293,7 @@ mod tests {
             )),
         );
 
-        let code = run_rendered(&mut h, "42");
+        let code = run_rendered(&mut h, "https://github.com/o/r/issues/42");
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert_eq!(code, Exit::Ok, "stderr={:?}", String::from_utf8(h.stderr));
         assert!(
@@ -304,13 +312,56 @@ mod tests {
         assert_eq!(mutations, 0, "Adopt records no Mutation");
         let (origin, selection): (String, String) = conn
             .query_row(
-                "select origin, selection_state from items where backend_key = '42'",
+                "select origin, selection_state from items \
+                  where backend_key = 'https://github.com/o/r/issues/42'",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
         assert_eq!(origin, "backend");
         assert_eq!(selection, "accepted");
+    }
+
+    #[test]
+    fn applying_creation_blocks_adopt_before_the_backend_read() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Local work",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 9,
+                mutation_type: "promote_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
+                state: "applying",
+                promotion_operation_id: Some("op-1"),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+
+        let code = run_rendered(&mut h, "42");
+
+        assert_eq!(code, Exit::Failure);
+        assert_eq!(
+            String::from_utf8(h.stderr).unwrap(),
+            "tk adopt: Mutation 9 has an indeterminate Backend creation outcome; resolve it before adopting another Item\n"
+        );
     }
 
     #[test]
@@ -345,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn already_adopted_is_idempotent_and_makes_no_backend_call() {
+    fn already_adopted_canonical_url_returns_without_a_backend_call() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
@@ -356,7 +407,7 @@ mod tests {
                 display: "gh-42",
                 origin: "backend",
                 backend_kind: Some("github"),
-                backend_key: Some("42"),
+                backend_key: Some("https://github.com/o/r/issues/42"),
                 title: "Already here",
                 ..FixtureItem::default()
             },
@@ -364,15 +415,80 @@ mod tests {
         .unwrap();
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        // Only the discovery call is queued: a `gh` call would exhaust the
-        // FakeRunner and panic, proving the pre-check short-circuits before it.
         expect_git(&h, &store);
-
-        let code = run_rendered(&mut h, "42");
+        let code = run_rendered(&mut h, "https://github.com/o/r/issues/42");
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert_eq!(code, Exit::Ok, "stderr={:?}", String::from_utf8(h.stderr));
         assert!(stdout.contains("Already adopted: gh-42"), "{stdout}");
         assert!(!stdout.contains("Adopted Ticket:"), "{stdout}");
+        let title: String = conn
+            .query_row("select title from items where id = 'abc'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(title, "Already here");
+        let item_count: i64 = conn
+            .query_row("select count(*) from items", [], |row| row.get(0))
+            .unwrap();
+        let created_sequence: i64 = conn
+            .query_row(
+                "select value from sequences where name = 'item_created_seq'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!((item_count, created_sequence), (1, 0));
+    }
+
+    #[test]
+    fn adopting_the_issue_backing_an_epic_is_not_ticket_success() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "epic",
+                display: "gh-5",
+                item_class: "epic",
+                ticket_kind: None,
+                selection_state: None,
+                priority: None,
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("https://github.com/o/r/issues/5"),
+                title: "Roadmap",
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        h.runner.expect_exact(
+            &[
+                "gh",
+                "issue",
+                "view",
+                "5",
+                "--json",
+                "number,title,body,state,issueType,url",
+            ],
+            ok(&issue_json(
+                5,
+                "OPEN",
+                "null",
+                "https://github.com/o/r/issues/5",
+            )),
+        );
+
+        let code = run_rendered(&mut h, "5");
+
+        assert_eq!(code, Exit::Failure);
+        assert_eq!(
+            String::from_utf8(h.stderr).unwrap(),
+            "tk adopt: gh-5 is a Backend Epic, not a Ticket\n"
+        );
     }
 
     #[test]
@@ -475,8 +591,8 @@ mod tests {
         let conn = seed_store(&store);
         insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
         // A local Item already owns the `gh-42` Display ID the adapter would
-        // mint for issue 42. The pre-check (keyed on backend identity) misses
-        // it, so the merge's `item_ids` insert is the backstop.
+        // mint for issue 42. The transactional canonical-identity lookup finds
+        // no Backend Item, so the `item_ids` insert is the collision backstop.
         insert_fixture_item(
             &conn,
             FixtureItem {
@@ -510,15 +626,15 @@ mod tests {
     }
 
     #[test]
-    fn pull_error_maps_both_arms_to_their_bodies() {
+    fn adapter_read_error_maps_both_arms_to_their_bodies() {
         // Failed carries the adapter body verbatim; Env is the bare runner
         // failure — both framed `tk adopt:` by the seam.
-        let failed = pull_error(PullError::Failed("HTTP 502".into()));
+        let failed = adapter_read_error(AdapterReadError::Failed("HTTP 502".into()));
         let mut out = Vec::new();
         failed.render(&mut out, "adopt");
         assert_eq!(String::from_utf8(out).unwrap(), "tk adopt: HTTP 502\n");
 
-        let env = pull_error(PullError::Env(ProcError::ExecutableNotFound));
+        let env = adapter_read_error(AdapterReadError::Env(ProcError::ExecutableNotFound));
         let mut out = Vec::new();
         env.render(&mut out, "adopt");
         assert_eq!(

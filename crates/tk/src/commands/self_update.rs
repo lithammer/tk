@@ -22,6 +22,7 @@ use thiserror::Error;
 
 use crate::cli::{CommandError, Deps, Exit};
 use crate::platform;
+use crate::proc::ProcError;
 
 /// Sentinel for non-release builds. The dev refusal in [`run_with`]
 /// compares against this constant; `build.rs` injects the real release
@@ -466,9 +467,7 @@ fn perform_update(
         Ok(o) => o,
         Err(err) => {
             let _ = fs::remove_file(&stage_path);
-            return Err(CommandError::failure(format!(
-                "staged binary smoke check failed: spawn failed ({err})"
-            )));
+            return Err(CommandError::failure(smoke_process_error(err)));
         }
     };
     if smoke.exit_code != 0 {
@@ -522,9 +521,7 @@ fn perform_update(
     let manpage = match runner.run(&manpage_argv, cwd) {
         Ok(o) => o,
         Err(err) => {
-            return Err(CommandError::failure(format!(
-                "manpage update failed; run `tk manpage --install` to retry: spawn failed: {err}"
-            )));
+            return Err(CommandError::failure(manpage_process_error(err)));
         }
     };
     if manpage.exit_code != 0 {
@@ -537,6 +534,26 @@ fn perform_update(
         return Err(forwarding(body, &manpage.stderr));
     }
     Ok(Exit::Ok)
+}
+
+fn smoke_process_error(err: ProcError) -> String {
+    match err {
+        ProcError::ExecutableNotFound | ProcError::SpawnFailed => {
+            format!("staged binary smoke check failed: spawn failed ({err})")
+        }
+        ProcError::OutcomeUnobserved => format!("staged binary smoke check failed: {err}"),
+    }
+}
+
+fn manpage_process_error(err: ProcError) -> String {
+    match err {
+        ProcError::ExecutableNotFound | ProcError::SpawnFailed => format!(
+            "manpage update failed; run `tk manpage --install` to retry: spawn failed: {err}"
+        ),
+        ProcError::OutcomeUnobserved => {
+            format!("manpage update failed; run `tk manpage --install` to retry: {err}")
+        }
+    }
 }
 
 /// Build a [`CommandError::Failure`] whose frame is `body` and whose forwarded
@@ -749,7 +766,7 @@ fn render_stage_name<R: Rng + ?Sized>(rng: &mut R) -> String {
 mod tests {
     use super::*;
     use crate::clock::FakeClock;
-    use crate::proc::{FakeRunner, RunOutput};
+    use crate::proc::{FakeRunner, ProcRunner, RunOutput};
     use crate::render::Styler;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
@@ -760,7 +777,7 @@ mod tests {
         stdout: &'a mut Vec<u8>,
         stderr: &'a mut Vec<u8>,
         stdin: &'a mut std::io::Cursor<Vec<u8>>,
-        runner: &'a FakeRunner,
+        runner: &'a dyn ProcRunner,
         clock: &'a FakeClock,
         rng: &'a mut StdRng,
         cwd: &'a Path,
@@ -813,6 +830,34 @@ mod tests {
             stdout: bytes,
             stderr: Vec::new(),
         }
+    }
+
+    #[test]
+    fn process_error_wording_preserves_spawn_bytes_and_names_unobserved_outcomes() {
+        assert_eq!(
+            smoke_process_error(ProcError::ExecutableNotFound),
+            "staged binary smoke check failed: spawn failed (executable not found on PATH)"
+        );
+        assert_eq!(
+            smoke_process_error(ProcError::SpawnFailed),
+            "staged binary smoke check failed: spawn failed (failed to spawn child process)"
+        );
+        assert_eq!(
+            smoke_process_error(ProcError::OutcomeUnobserved),
+            "staged binary smoke check failed: child process started but its outcome could not be observed"
+        );
+        assert_eq!(
+            manpage_process_error(ProcError::ExecutableNotFound),
+            "manpage update failed; run `tk manpage --install` to retry: spawn failed: executable not found on PATH"
+        );
+        assert_eq!(
+            manpage_process_error(ProcError::SpawnFailed),
+            "manpage update failed; run `tk manpage --install` to retry: spawn failed: failed to spawn child process"
+        );
+        assert_eq!(
+            manpage_process_error(ProcError::OutcomeUnobserved),
+            "manpage update failed; run `tk manpage --install` to retry: child process started but its outcome could not be observed"
+        );
     }
 
     #[test]
@@ -1401,6 +1446,56 @@ mod tests {
     }
 
     #[test]
+    fn perform_update_smoke_unobserved_outcome_is_not_called_a_spawn_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target_dir = tmp.path();
+        let stage_name = predict_stage_name(0);
+        let stage_path = target_dir.join(&stage_name);
+
+        let runner = FakeRunner::new();
+        runner.expect_writing(
+            &["curl"],
+            ok_status_only(200),
+            stage_path.clone(),
+            b"new-bytes".to_vec(),
+        );
+        runner.expect_error(
+            &[stage_path.to_str().unwrap(), "--version"],
+            ProcError::OutcomeUnobserved,
+        );
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let clock = FakeClock::new(0);
+        let mut rng = StdRng::seed_from_u64(0);
+        let cwd = std::env::current_dir().unwrap();
+        let deps = make_deps(
+            &mut stdout,
+            &mut stderr,
+            &mut stdin,
+            &runner,
+            &clock,
+            &mut rng,
+            &cwd,
+        );
+
+        let code = rendered(
+            perform_update(deps, target_dir, "tk", TEST_TRIPLE, "v0.6.0"),
+            &mut stderr,
+        );
+
+        assert_eq!(code, Exit::Failure);
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            "tk self-update: staged binary smoke check failed: child process started but its outcome could not be observed\n"
+        );
+        assert!(stdout.is_empty());
+        assert!(!stage_path.exists());
+        assert!(!target_dir.join("tk").exists());
+        runner.assert_all_consumed();
+    }
+
+    #[test]
     fn perform_update_smoke_version_mismatch_leaves_target_untouched() {
         let tmp = tempfile::tempdir().unwrap();
         let target_dir = tmp.path();
@@ -1555,6 +1650,67 @@ mod tests {
         assert!(s.contains("manpage update failed"));
         assert!(s.contains("exit 1"));
         assert!(s.contains("tk manpage: install failed at /some/path"));
+    }
+
+    #[test]
+    fn perform_update_manpage_unobserved_outcome_is_not_called_a_spawn_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target_dir = tmp.path();
+        let stage_name = predict_stage_name(0);
+        let stage_path = target_dir.join(&stage_name);
+        let target_path = target_dir.join("tk");
+
+        let runner = FakeRunner::new();
+        runner.expect_writing(
+            &["curl"],
+            ok_status_only(200),
+            stage_path.clone(),
+            b"new-bytes".to_vec(),
+        );
+        runner.expect(
+            &[stage_path.to_str().unwrap(), "--version"],
+            RunOutput {
+                exit_code: 0,
+                stdout: b"tk v0.6.0 (x86_64-linux-musl)\n".to_vec(),
+                stderr: Vec::new(),
+            },
+        );
+        runner.expect_error(
+            &[target_path.to_str().unwrap(), "manpage", "--install"],
+            ProcError::OutcomeUnobserved,
+        );
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let clock = FakeClock::new(0);
+        let mut rng = StdRng::seed_from_u64(0);
+        let cwd = std::env::current_dir().unwrap();
+        let deps = make_deps(
+            &mut stdout,
+            &mut stderr,
+            &mut stdin,
+            &runner,
+            &clock,
+            &mut rng,
+            &cwd,
+        );
+
+        let code = rendered(
+            perform_update(deps, target_dir, "tk", TEST_TRIPLE, "v0.6.0"),
+            &mut stderr,
+        );
+
+        assert_eq!(code, Exit::Failure);
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            "tk self-update: manpage update failed; run `tk manpage --install` to retry: child process started but its outcome could not be observed\n"
+        );
+        assert_eq!(
+            String::from_utf8(stdout).unwrap(),
+            "tk self-update: updated to v0.6.0\n"
+        );
+        assert_eq!(fs::read(&target_path).unwrap(), b"new-bytes");
+        runner.assert_all_consumed();
     }
 
     #[test]

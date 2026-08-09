@@ -7,8 +7,9 @@
 //! `tk init` only spawns `git rev-parse`, but the trait must already be shaped
 //! correctly for downstream callers (see [`crate::git::discovery`]).
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use thiserror::Error;
 
@@ -44,6 +45,10 @@ pub enum ProcError {
     /// (permissions, fork failure, …).
     #[error("failed to spawn child process")]
     SpawnFailed,
+    /// The child started, but tk could not wait for it or capture its output.
+    /// The external effect is therefore unknown.
+    #[error("child process started but its outcome could not be observed")]
+    OutcomeUnobserved,
 }
 
 /// Common subprocess seam. Implementations decide whether to spawn a real
@@ -78,14 +83,20 @@ impl ProcRunner for RealRunner {
         let (program, rest) = argv
             .split_first()
             .expect("ProcRunner contract: argv must contain at least the program");
-        let output = Command::new(program)
+        let child = Command::new(program)
             .args(rest)
             .current_dir(cwd)
-            .output()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|err| match err.kind() {
                 std::io::ErrorKind::NotFound => ProcError::ExecutableNotFound,
                 _ => ProcError::SpawnFailed,
             })?;
+        let output = child
+            .wait_with_output()
+            .map_err(|_| ProcError::OutcomeUnobserved)?;
         Ok(RunOutput {
             exit_code: output.status.code().unwrap_or(255),
             stdout: output.stdout,
@@ -96,45 +107,105 @@ impl ProcRunner for RealRunner {
 
 // ---- Fakes ---------------------------------------------------------------
 
+#[derive(Debug, Clone)]
+enum ArgvExpectation {
+    Prefix(Vec<String>),
+    Exact(Vec<String>),
+}
+
+impl ArgvExpectation {
+    fn matches(&self, actual: &[&str]) -> bool {
+        match self {
+            Self::Prefix(expected) => {
+                expected.iter().zip(actual).all(|(a, b)| a == b) && actual.len() >= expected.len()
+            }
+            Self::Exact(expected) => expected
+                .iter()
+                .map(String::as_str)
+                .eq(actual.iter().copied()),
+        }
+    }
+
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Prefix(_) => "prefix",
+            Self::Exact(_) => "exact argv",
+        }
+    }
+
+    fn argv(&self) -> &[String] {
+        match self {
+            Self::Prefix(argv) | Self::Exact(argv) => argv,
+        }
+    }
+}
+
 /// One scripted invocation expected by [`FakeRunner`].
 #[derive(Debug, Clone)]
-pub struct FakeCall {
-    /// Argv prefix that must match (e.g. `["git", "rev-parse"]`). Extra args
-    /// beyond the prefix are allowed.
-    pub argv_prefix: Vec<String>,
-    pub output: RunOutput,
-    /// Optional file write performed before the call returns. Models
-    /// commands that drop bytes to disk as a side effect — currently
-    /// `curl -o <stage_path>` in [`crate::commands::self_update`] — so the
-    /// in-process FakeRunner stays a sufficient seam without mutating PATH
-    /// or shelling out to a real shim.
-    pub side_effect_write: Option<(PathBuf, Vec<u8>)>,
+struct ExpectedCall {
+    argv: ArgvExpectation,
+    output: Result<RunOutput, ProcError>,
+    /// Optional file write performed before the call returns. This models a
+    /// subprocess that writes a file without mutating PATH or using a shell
+    /// shim in tests.
+    side_effect_write: Option<(PathBuf, Vec<u8>)>,
 }
 
 /// Strict subprocess fake: an unmatched call panics so a regression that
 /// changes argv shape fails loudly during tests.
 pub struct FakeRunner {
-    calls: std::cell::RefCell<Vec<FakeCall>>,
+    calls: std::cell::RefCell<VecDeque<ExpectedCall>>,
 }
 
 impl FakeRunner {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            calls: std::cell::RefCell::new(Vec::new()),
+            calls: std::cell::RefCell::new(VecDeque::new()),
         }
     }
 
-    /// Queue a scripted response. Calls are consumed in FIFO order.
+    /// Queue a scripted response matched against an argv prefix.
+    ///
+    /// Calls are consumed in FIFO order; arguments after `argv_prefix` are
+    /// accepted. Use [`Self::expect_exact`] when the command shape is part of
+    /// the behavior under test.
     pub fn expect(&self, argv_prefix: &[&str], output: RunOutput) {
-        self.calls.borrow_mut().push(FakeCall {
-            argv_prefix: argv_prefix.iter().map(|s| (*s).to_string()).collect(),
-            output,
-            side_effect_write: None,
-        });
+        self.expect_prefix(argv_prefix, output);
     }
 
-    /// Queue a scripted response that also writes `body` to `path` before
+    /// Queue a scripted response matched against an argv prefix.
+    pub fn expect_prefix(&self, argv_prefix: &[&str], output: RunOutput) {
+        self.queue(
+            ArgvExpectation::Prefix(strings(argv_prefix)),
+            Ok(output),
+            None,
+        );
+    }
+
+    /// Queue a scripted response that requires an exact argv match.
+    ///
+    /// Calls are consumed in FIFO order. Differing and trailing arguments
+    /// reject the expectation.
+    pub fn expect_exact(&self, argv: &[&str], output: RunOutput) {
+        self.queue(ArgvExpectation::Exact(strings(argv)), Ok(output), None);
+    }
+
+    /// Queue a scripted process error matched against an argv prefix.
+    pub fn expect_error(&self, argv_prefix: &[&str], error: ProcError) {
+        self.queue(
+            ArgvExpectation::Prefix(strings(argv_prefix)),
+            Err(error),
+            None,
+        );
+    }
+
+    /// Queue a scripted process error that requires an exact argv match.
+    pub fn expect_exact_error(&self, argv: &[&str], error: ProcError) {
+        self.queue(ArgvExpectation::Exact(strings(argv)), Err(error), None);
+    }
+
+    /// Queue a prefix-matched response that writes `body` to `path` before
     /// returning. Models `curl -o <stage_path>` so [`crate::commands::self_update`]
     /// tests can exercise stage → smoke → rename end-to-end without a real
     /// curl binary on PATH.
@@ -145,10 +216,35 @@ impl FakeRunner {
         path: PathBuf,
         body: Vec<u8>,
     ) {
-        self.calls.borrow_mut().push(FakeCall {
-            argv_prefix: argv_prefix.iter().map(|s| (*s).to_string()).collect(),
+        self.queue(
+            ArgvExpectation::Prefix(strings(argv_prefix)),
+            Ok(output),
+            Some((path, body)),
+        );
+    }
+
+    /// Panic unless every scripted subprocess call has been consumed.
+    ///
+    /// Tests can use this to make omitted calls visible without relying on a
+    /// `Drop` assertion that would change existing prefix-based fixtures.
+    pub fn assert_all_consumed(&self) {
+        let calls = self.calls.borrow();
+        assert!(
+            calls.is_empty(),
+            "FakeRunner: unconsumed subprocess expectations: {calls:?}"
+        );
+    }
+
+    fn queue(
+        &self,
+        argv: ArgvExpectation,
+        output: Result<RunOutput, ProcError>,
+        side_effect_write: Option<(PathBuf, Vec<u8>)>,
+    ) {
+        self.calls.borrow_mut().push_back(ExpectedCall {
+            argv,
             output,
-            side_effect_write: Some((path, body)),
+            side_effect_write,
         });
     }
 }
@@ -166,16 +262,15 @@ impl ProcRunner for FakeRunner {
             !calls.is_empty(),
             "FakeRunner: unexpected subprocess call: {argv:?}"
         );
-        let expected = calls.remove(0);
-        let matches = expected
-            .argv_prefix
-            .iter()
-            .zip(argv.iter())
-            .all(|(a, b)| a == b);
+        let expected = calls
+            .pop_front()
+            .expect("FakeRunner checked that the queue is non-empty");
+        let matches = expected.argv.matches(argv);
         assert!(
-            matches && argv.len() >= expected.argv_prefix.len(),
-            "FakeRunner: argv mismatch.\n  expected prefix: {:?}\n  actual: {:?}",
-            expected.argv_prefix,
+            matches,
+            "FakeRunner: argv mismatch.\n  expected {:?}: {:?}\n  actual: {:?}",
+            expected.argv.kind(),
+            expected.argv.argv(),
             argv
         );
         if let Some((ref path, ref body)) = expected.side_effect_write {
@@ -183,18 +278,99 @@ impl ProcRunner for FakeRunner {
                 panic!("FakeRunner side-effect write to {}: {err}", path.display())
             });
         }
-        Ok(expected.output)
+        expected.output
     }
 }
 
-/// Test runner that returns a single pre-configured error on every call.
-/// Used to cover the `ExecutableNotFound` / `SpawnFailed` discovery arms.
-pub struct ErrorInjectingRunner {
-    pub err: ProcError,
+fn strings(argv: &[&str]) -> Vec<String> {
+    argv.iter().map(|s| (*s).to_string()).collect()
 }
 
-impl ProcRunner for ErrorInjectingRunner {
-    fn run(&self, _argv: &[&str], _cwd: &Path) -> Result<RunOutput, ProcError> {
-        Err(self.err)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn output(stdout: &str) -> RunOutput {
+        RunOutput {
+            exit_code: 0,
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn exact_expectation_accepts_matching_argv() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(&["git", "status", "--short"], output("ok"));
+
+        let result = runner
+            .run(&["git", "status", "--short"], Path::new("."))
+            .unwrap();
+
+        assert_eq!(result.stdout, b"ok");
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    #[should_panic(expected = "expected \"exact argv\"")]
+    fn exact_expectation_rejects_trailing_arguments() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(&["git", "status"], output("ok"));
+
+        let _ = runner.run(&["git", "status", "--short"], Path::new("."));
+    }
+
+    #[test]
+    #[should_panic(expected = "expected \"exact argv\"")]
+    fn exact_expectation_rejects_differing_arguments() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(&["git", "status"], output("ok"));
+
+        let _ = runner.run(&["git", "log"], Path::new("."));
+    }
+
+    #[test]
+    #[should_panic(expected = "expected \"exact argv\"")]
+    fn exact_expectation_rejects_missing_arguments() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(&["git", "status", "--short"], output("ok"));
+
+        let _ = runner.run(&["git", "status"], Path::new("."));
+    }
+
+    #[test]
+    fn prefix_expectation_accepts_trailing_arguments() {
+        let runner = FakeRunner::new();
+        runner.expect_prefix(&["git", "status"], output("ok"));
+
+        let result = runner
+            .run(&["git", "status", "--short"], Path::new("."))
+            .unwrap();
+
+        assert_eq!(result.stdout, b"ok");
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn expectations_are_consumed_in_fifo_order() {
+        let runner = FakeRunner::new();
+        runner.expect_prefix(&["git"], output("first"));
+        runner.expect_exact(&["git", "rev-parse"], output("second"));
+
+        let first = runner.run(&["git", "status"], Path::new(".")).unwrap();
+        let second = runner.run(&["git", "rev-parse"], Path::new(".")).unwrap();
+
+        assert_eq!(first.stdout, b"first");
+        assert_eq!(second.stdout, b"second");
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    #[should_panic(expected = "unconsumed subprocess expectations")]
+    fn assert_all_consumed_rejects_unconsumed_exact_expectations() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(&["git", "status"], output("ok"));
+
+        runner.assert_all_consumed();
     }
 }

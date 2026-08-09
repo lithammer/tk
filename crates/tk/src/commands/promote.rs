@@ -15,9 +15,8 @@
 //! Display ID in place and keeps the outgoing one as an Alias, so re-resolving
 //! what was captured before sync is what yields the old-to-new mapping.
 //!
-//! Born on the ADR-0032 diagnostics seam: [`run`] returns
-//! `Result<Exit, CommandError>` and the dispatch seam frames `tk promote:
-//! <body>`. The shared failure bodies match `tk sync` byte-for-byte.
+//! Per ADR-0032, [`run`] returns `Result<Exit, CommandError>` and the dispatch
+//! seam frames failures as `tk promote: <body>`.
 
 use std::collections::HashSet;
 use std::io::Write;
@@ -40,8 +39,9 @@ use crate::store::mutations::AppendError;
 use crate::store::promotion::{
     self as store_promotion, CommitPlanError, MutationSummary, ReadGraphError,
 };
+use crate::store::repository::RemoteWorkflowGuard;
 use crate::store::repository::{ResolvedItemRefWithDisplay, Store};
-use crate::store::sync as store_sync;
+use crate::store::sync::BackendCohortError;
 use crate::sync::{self, RunSyncError};
 
 /// Flags for `tk promote`.
@@ -60,6 +60,9 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
         .map_err(|err| resolver::open_error(&err))?;
     let now = deps.clock.now_iso();
+    let workflow = store
+        .lock_remote_workflow()
+        .map_err(CommandError::failure)?;
 
     let target = match resolver::resolve_with_display(&store, &args.id) {
         Ok(r) => r,
@@ -81,38 +84,19 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         )));
     }
 
-    // The configured Remote names the Backend the whole operation targets, and
-    // preflight judges the plan against that Backend's Adapter capabilities —
-    // so a store with no Remote reports that, rather than findings it has no
-    // basis to compute.
-    let Some(remote) =
-        store_sync::get_remote(store.conn()).map_err(|e| resolver::storage_error(&e))?
-    else {
-        return Err(no_remote());
-    };
-
     let adapter_opt = match factory::open_configured(store.conn(), deps.runner, deps.cwd) {
         Ok(adapter) => adapter,
         Err(err @ FactoryOpenError::NotImplemented) => return Err(CommandError::failure(err)),
         Err(FactoryOpenError::Storage(err)) => return Err(resolver::storage_error(&err)),
     };
-    // `get_remote` already proved a Remote exists; `Ok(None)` here is only a
-    // concurrent `tk remote clear` between the two reads. Treat it as no Remote.
     let Some(mut adapter) = adapter_opt else {
         return Err(no_remote());
     };
-    // The factory already read and dispatched on this text, so a value that
-    // does not parse means the `remotes` row changed between the two reads —
-    // the same concurrency the `Ok(None)` arm covers, reported the same way.
-    let Ok(backend) = remote.backend_kind.parse::<BackendKind>() else {
-        return Err(no_remote());
-    };
-
     promote(
         deps,
         &mut store,
         &mut *adapter,
-        backend,
+        &workflow,
         &target,
         args.children,
         &now,
@@ -122,46 +106,50 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
 /// Preflight, commit, sync, report — the operation itself, once the Repository
 /// Store and the Backend Adapter are open.
 ///
-/// Split from [`run`] at the Adapter seam because the v1 GitHub Adapter
-/// declares no Promotion capability (ADR-0036): against a real Remote the
-/// planner refuses before this function reaches a Backend call, so the paths
-/// past preflight are exercised with a scripted Adapter.
+/// Split from [`run`] at the Adapter seam so the Promotion transaction and
+/// recovery paths can be exercised with a scripted Adapter independently of
+/// the concrete GitHub subprocess mapping.
 fn promote(
     deps: &mut Deps<'_>,
     store: &mut Store,
     adapter: &mut dyn Adapter,
-    backend: BackendKind,
+    workflow: &RemoteWorkflowGuard,
     target: &ResolvedItemRefWithDisplay,
     children: bool,
     now: &str,
 ) -> Result<Exit, CommandError> {
+    let backend = adapter.backend_kind();
     let graph = store_promotion::read_graph(store.conn(), &target.id, children)
         .map_err(read_graph_error)?;
     let plan = plan_promotion(&graph, adapter.promotion_capabilities(), backend)
         .map_err(|findings| refusal(&target.display_id, &findings, backend))?;
 
     let captured = capture_display_ids(&graph, &plan);
-    let operation_id = store_promotion::commit_plan(store.conn_mut(), &plan, &mut *deps.rng, now)
-        .map_err(commit_error)?;
+    let operation_id =
+        store_promotion::commit_plan(store.conn_mut(), &plan, backend, &mut *deps.rng, now)
+            .map_err(commit_error)?;
     if plan.is_empty() {
         render_nothing_to_promote(deps.stdout, target_item(&graph));
     }
 
     // Sync runs even when nothing was appended: an earlier invocation's
     // Promotion may still be pending, and this is the drain that applies it.
-    let sync_error = sync::run_sync(store.conn_mut(), adapter, now, &mut *deps.rng).err();
+    let sync_result = sync::run_sync(store.conn_mut(), adapter, workflow, now);
 
     render_mappings(deps.stdout, store, &captured)?;
 
     // An empty plan owns no Mutations to resolve, so re-invoking on work that
     // is already Backend or already Pending Promotion stays an idempotent
     // success — but only if the drain this invocation ran actually finished.
-    // Reporting Ok while the sync it just ran failed would tell an agent the
-    // Promotion landed when it is still pending.
+    // Reporting Ok while sync failed would claim the Promotion landed while it
+    // remains pending.
     let Some(operation_id) = operation_id else {
-        return match sync_error {
-            Some(err) => Err(CommandError::failure(format!(
+        return match sync_stop(&sync_result) {
+            Some(SyncStop::Error(err)) => Err(CommandError::failure(format!(
                 "nothing to promote, but the sync that followed did not finish\n{err}"
+            ))),
+            Some(SyncStop::RejectedMutation(sequence)) => Err(CommandError::failure(format!(
+                "nothing to promote, but the sync that followed stopped at Mutation {sequence}"
             ))),
             None => Ok(Exit::Ok),
         };
@@ -172,9 +160,12 @@ fn promote(
         // Every Mutation of this Promotion Operation resolved; a failure later
         // in the same run belongs to the rest of the outbox, not to the
         // Promotion, but it still leaves the sync unfinished.
-        return match sync_error {
-            Some(err) => Err(CommandError::failure(format!(
+        return match sync_stop(&sync_result) {
+            Some(SyncStop::Error(err)) => Err(CommandError::failure(format!(
                 "the Promotion applied, but the sync that followed it did not finish\n{err}"
+            ))),
+            Some(SyncStop::RejectedMutation(sequence)) => Err(CommandError::failure(format!(
+                "the Promotion applied, but the sync that followed stopped at Mutation {sequence}"
             ))),
             None => Ok(Exit::Ok),
         };
@@ -184,8 +175,20 @@ fn promote(
     Err(unresolved_failure(
         blocker.as_ref(),
         first_unresolved,
-        sync_error.as_ref(),
+        sync_result.as_ref().err(),
     ))
+}
+
+enum SyncStop<'a> {
+    Error(&'a RunSyncError),
+    RejectedMutation(i64),
+}
+
+fn sync_stop(result: &Result<sync::SyncReport, RunSyncError>) -> Option<SyncStop<'_>> {
+    match result {
+        Err(error) => Some(SyncStop::Error(error)),
+        Ok(report) => report.stopped_at_sequence.map(SyncStop::RejectedMutation),
+    }
 }
 
 /// An Item's Display ID as it stood before sync, with the Item Class the
@@ -276,10 +279,9 @@ fn render_nothing_to_promote<W: Write + ?Sized>(stdout: &mut W, target: &GraphIt
 
 /// Diagnose a Promotion Operation with Mutations left unresolved.
 ///
-/// The comparison against the earliest still-applicable Mutation is the point:
-/// a Mutation ahead of the operation in the Mutation Log is a queueing fact —
-/// the Promotion is durable and applies once that Mutation clears — while one of
-/// the operation's own Mutations is the Promotion itself not landing.
+/// A Mutation ahead of the operation means the Promotion is durably queued and
+/// can apply after that Mutation clears. An unresolved Mutation owned by the
+/// operation means the Promotion itself did not land.
 fn unresolved_failure(
     blocker: Option<&MutationSummary>,
     unresolved: &MutationSummary,
@@ -309,9 +311,8 @@ fn unresolved_failure(
             recovery_guidance(unresolved),
         ),
     };
-    // An environment failure writes no Mutation outcome, so the Mutation Log
-    // alone says where the operation stands; the adapter's own words say why it
-    // stopped there.
+    // A typed sync error says why the engine stopped; the Mutation Log says
+    // what durable state the Promotion reached.
     let cause = match sync_error {
         Some(err) => format!("\nSync stopped: {err}"),
         None => String::new(),
@@ -327,11 +328,16 @@ fn unresolved_failure(
 /// Mutation ordered behind the stopping point was never attempted. `tk sync
 /// log` on such a row renders no Failure block, so sending the reader there
 /// answers nothing — the cause is the line above. Only a `failed` row has
-/// something recorded for them to inspect.
+/// something recorded for them to inspect. An `applying` row must not be sent
+/// back through automatic sync because its creation may already have succeeded.
 fn recovery_guidance(mutation: &MutationSummary) -> String {
     match mutation.state {
         MutationState::Failed => format!(
             "Inspect it with 'tk sync log {}', then run 'tk sync' to apply the rest of the Promotion.",
+            mutation.sequence
+        ),
+        MutationState::Applying => format!(
+            "Inspect it with 'tk sync log {}'; do not run 'tk sync' while it remains applying.",
             mutation.sequence
         ),
         _ => {
@@ -409,9 +415,7 @@ fn render_finding(finding: &PromotionFinding, backend: BackendKind) -> String {
     }
 }
 
-/// The no-Remote diagnostic, shared by the `get_remote` and (defensive)
-/// `open_configured` arms. The body matches `tk sync`'s verbatim; it is re-typed
-/// here rather than shared as a constant so the literal stays grep-able.
+/// The no-Remote diagnostic for both configuration lookup paths.
 fn no_remote() -> CommandError {
     CommandError::failure("no Remote configured; run 'tk remote set <kind>' first")
 }
@@ -425,12 +429,23 @@ fn read_graph_error(err: ReadGraphError) -> CommandError {
 
 fn commit_error(err: CommitPlanError) -> CommandError {
     match err {
-        CommitPlanError::Storage(e) | CommitPlanError::Append(AppendError::Sqlite(e)) => {
+        CommitPlanError::Storage(e)
+        | CommitPlanError::Append(AppendError::Sqlite(e))
+        | CommitPlanError::BackendCohort(BackendCohortError::Storage(e)) => {
             resolver::storage_error(&e)
         }
         CommitPlanError::Append(e @ AppendError::Sequence(_)) => {
             CommandError::failure(format!("Repository Store corruption: {e}"))
         }
+        CommitPlanError::RemoteChanged { .. } => CommandError::failure(
+            "the configured Remote changed while preparing the Promotion; retry 'tk promote'",
+        ),
+        CommitPlanError::BackendCohort(e) => {
+            CommandError::failure(format!("Repository Store corruption: {e}"))
+        }
+        CommitPlanError::ApplyingMutation(sequence) => CommandError::failure(format!(
+            "Mutation {sequence} has an indeterminate Backend creation outcome; resolve it before starting another Promotion"
+        )),
     }
 }
 
@@ -438,13 +453,13 @@ fn commit_error(err: CommitPlanError) -> CommandError {
 mod tests {
     use super::*;
     use crate::clock::FakeClock;
+    use crate::domain::backend_operation::BackendEdit;
     use crate::domain::mutation_state::MutationState;
-    use crate::domain::mutation_type::MutationType;
     use crate::domain::promotion_capability::PromotionCapabilities;
     use crate::domain::ticket_kind::TicketKind;
-    use crate::proc::{FakeRunner, ProcError, RunOutput};
+    use crate::proc::{FakeRunner, RunOutput};
     use crate::promotion::plan::ItemRef;
-    use crate::remote::fake::{ApplyResponse, FakeAdapter, PullResponse};
+    use crate::remote::fake::{CreateResponse, EditResponse, FakeAdapter, RefreshResponse};
     use crate::render::Styler;
     use crate::store::migrations;
     use crate::store::testing::{
@@ -559,8 +574,25 @@ mod tests {
         .unwrap();
     }
 
-    fn adapter(applies: Vec<ApplyResponse>) -> FakeAdapter {
-        FakeAdapter::new(vec![PullResponse::Snapshots(vec![])], applies)
+    fn adapter(edits: Vec<EditResponse>, creates: Vec<CreateResponse>) -> FakeAdapter {
+        FakeAdapter::new()
+            .with_edits(edits)
+            .with_creates(creates)
+            .with_capabilities(PromotionCapabilities::all())
+    }
+
+    fn adapter_with_refresh(edits: Vec<EditResponse>, creates: Vec<CreateResponse>) -> FakeAdapter {
+        FakeAdapter::new()
+            .with_refreshes(vec![RefreshResponse::Item(
+                crate::domain::backend_operation::BackendItemRefresh {
+                    title: "Adopted".into(),
+                    body: String::new(),
+                    status: crate::domain::status::ItemStatus::Open,
+                    ticket_kind: Some(TicketKind::Task),
+                },
+            )])
+            .with_edits(edits)
+            .with_creates(creates)
             .with_capabilities(PromotionCapabilities::all())
     }
 
@@ -599,17 +631,10 @@ mod tests {
         children: bool,
     ) -> Exit {
         let target = resolver::resolve_with_display(store, id).expect("the target resolves");
+        let workflow = store.lock_remote_workflow().unwrap();
         let mut deps = h.deps();
         let now = deps.clock.now_iso();
-        match promote(
-            &mut deps,
-            store,
-            fake,
-            BackendKind::Github,
-            &target,
-            children,
-            &now,
-        ) {
+        match promote(&mut deps, store, fake, &workflow, &target, children, &now) {
             Ok(exit) => exit,
             Err(err) => {
                 let exit = err.exit();
@@ -724,30 +749,159 @@ mod tests {
     }
 
     #[test]
-    fn a_github_remote_refuses_before_any_backend_call() {
-        // The v1 GitHub Adapter declares no Promotion capability (ADR-0036), so
-        // preflight refuses. Only the git discovery call is queued: a `gh` call
-        // would exhaust the FakeRunner and panic.
+    fn github_capabilities_leave_only_real_aggregate_preflight_findings() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        local_epic(&conn, "e1", "tk-1", 1);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "c1",
+                display: "tk-2",
+                title: "Build the child",
+                container_id: Some("e1"),
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "c2",
+                display: "tk-3",
+                title: "Captured idea",
+                priority: None,
+                container_id: Some("e1"),
+                selection_state: Some("triage"),
+                created_seq: 3,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        local_ticket(&conn, "outside", "tk-4", 4);
+        insert_dependency(&conn, "outside", "c1").unwrap();
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+
+        let code = run_rendered(&mut h, "tk-1", true);
+
+        assert_eq!(code, Exit::Failure);
+        assert_eq!(
+            h.err(),
+            "tk promote: cannot promote tk-1:\n  \
+             tk-3 is in triage; run 'tk accept tk-3 --priority P0..P4' before promoting it.\n  \
+             tk-2 would be backend-backed while its Blocking Item tk-4 stays local. \
+             Promote tk-4 in the same operation, or run 'tk unblock tk-2 tk-4' to drop the Dependency.\n"
+        );
+        assert_eq!(mutation_count(&conn).unwrap(), 0);
+        h.runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn a_github_remote_promotes_a_task_through_the_real_adapter() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         local_ticket(&conn, "t1", "tk-1", 1);
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
+        h.runner.expect_exact(
+            &[
+                "gh",
+                "issue",
+                "create",
+                "--title",
+                "Local work",
+                "--body",
+                "",
+            ],
+            RunOutput {
+                exit_code: 0,
+                stdout: b"https://github.com/o/r/issues/42\n".to_vec(),
+                stderr: Vec::new(),
+            },
+        );
 
         let code = run_rendered(&mut h, "tk-1", false);
 
-        assert_eq!(code, Exit::Failure);
-        assert!(
-            h.err().contains("tk promote: cannot promote tk-1:"),
-            "{}",
-            h.err()
+        assert_eq!(code, Exit::Ok, "{}", h.err());
+        assert_eq!(h.out(), "Promoted Ticket: tk-1 -> gh-42\n");
+        assert_eq!(item_state(&conn, "t1"), ("gh-42".into(), "backend".into()));
+        h.runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn a_github_remote_promotes_an_epic_and_child_with_membership() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        local_epic(&conn, "e1", "tk-1", 1);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "c1",
+                display: "tk-2",
+                title: "Child",
+                container_id: Some("e1"),
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        h.runner.expect_exact(
+            &[
+                "gh",
+                "issue",
+                "create",
+                "--title",
+                "Local epic",
+                "--body",
+                "",
+            ],
+            RunOutput {
+                exit_code: 0,
+                stdout: b"https://github.com/o/r/issues/1\n".to_vec(),
+                stderr: Vec::new(),
+            },
         );
+        h.runner.expect_exact(
+            &["gh", "issue", "create", "--title", "Child", "--body", ""],
+            RunOutput {
+                exit_code: 0,
+                stdout: b"https://github.com/o/r/issues/2\n".to_vec(),
+                stderr: Vec::new(),
+            },
+        );
+        h.runner.expect_exact(
+            &[
+                "gh",
+                "issue",
+                "edit",
+                "https://github.com/o/r/issues/2",
+                "--parent",
+                "https://github.com/o/r/issues/1",
+            ],
+            RunOutput {
+                exit_code: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            },
+        );
+
+        let code = run_rendered(&mut h, "tk-1", true);
+
+        assert_eq!(code, Exit::Ok, "{}", h.err());
         assert_eq!(
-            mutation_count(&conn).unwrap(),
-            0,
-            "a refused preflight leaves the outbox empty"
+            h.out(),
+            "Promoted Epic: tk-1 -> gh-1\nPromoted Ticket: tk-2 -> gh-2\n"
         );
+        assert_eq!(item_state(&conn, "e1"), ("gh-1".into(), "backend".into()));
+        assert_eq!(item_state(&conn, "c1"), ("gh-2".into(), "backend".into()));
+        h.runner.assert_all_consumed();
     }
 
     // ---- finding rendering ----------------------------------------------
@@ -885,10 +1039,13 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         let mut st = open_store(&h, &store, &cwd_path);
-        let mut fake = adapter(vec![ApplyResponse::PromotionSuccess {
-            backend_key: "42".into(),
-            display_id: "gh-42".into(),
-        }]);
+        let mut fake = adapter(
+            vec![],
+            vec![CreateResponse::Created {
+                backend_key: "42".into(),
+                display_id: "gh-42".into(),
+            }],
+        );
 
         let code = promote_rendered(&mut h, &mut st, &mut fake, "tk-1", false);
 
@@ -924,17 +1081,19 @@ mod tests {
         let mut h = Harness::new(&cwd_path);
         let mut st = open_store(&h, &store, &cwd_path);
         // Promotions first, then the membership the operation makes intent.
-        let mut fake = adapter(vec![
-            ApplyResponse::PromotionSuccess {
-                backend_key: "1".into(),
-                display_id: "gh-1".into(),
-            },
-            ApplyResponse::PromotionSuccess {
-                backend_key: "2".into(),
-                display_id: "gh-2".into(),
-            },
-            ApplyResponse::Success,
-        ]);
+        let mut fake = adapter(
+            vec![EditResponse::Success],
+            vec![
+                CreateResponse::Created {
+                    backend_key: "1".into(),
+                    display_id: "gh-1".into(),
+                },
+                CreateResponse::Created {
+                    backend_key: "2".into(),
+                    display_id: "gh-2".into(),
+                },
+            ],
+        );
 
         let code = promote_rendered(&mut h, &mut st, &mut fake, "tk-1", true);
 
@@ -949,12 +1108,8 @@ mod tests {
 
     #[test]
     fn a_dependency_reaches_the_backend_with_both_endpoints_resolved() {
-        // The whole point of ordering item Promotions ahead of the relationship
-        // Mutations that name them, and of resolving backend identity per
-        // Mutation instead of at load time (ADR-0036): by the time
-        // `add_dependency` applies, both endpoints have receipts. Neither half
-        // is covered elsewhere — the plan test asserts order without applying,
-        // and the engine test resolves a target but never a counterpart.
+        // ADR-0036 requires both Promotion receipts before relationship
+        // delivery; otherwise the Dependency cannot be addressed.
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         local_epic(&conn, "e1", "tk-1", 1);
@@ -987,39 +1142,45 @@ mod tests {
         let mut h = Harness::new(&cwd_path);
         let mut st = open_store(&h, &store, &cwd_path);
         // Three Promotions, then the two memberships and the Dependency.
-        let mut fake = adapter(vec![
-            ApplyResponse::PromotionSuccess {
-                backend_key: "1".into(),
-                display_id: "gh-1".into(),
-            },
-            ApplyResponse::PromotionSuccess {
-                backend_key: "2".into(),
-                display_id: "gh-2".into(),
-            },
-            ApplyResponse::PromotionSuccess {
-                backend_key: "3".into(),
-                display_id: "gh-3".into(),
-            },
-            ApplyResponse::Success,
-            ApplyResponse::Success,
-            ApplyResponse::Success,
-        ]);
+        let mut fake = adapter(
+            vec![
+                EditResponse::Success,
+                EditResponse::Success,
+                EditResponse::Success,
+            ],
+            vec![
+                CreateResponse::Created {
+                    backend_key: "1".into(),
+                    display_id: "gh-1".into(),
+                },
+                CreateResponse::Created {
+                    backend_key: "2".into(),
+                    display_id: "gh-2".into(),
+                },
+                CreateResponse::Created {
+                    backend_key: "3".into(),
+                    display_id: "gh-3".into(),
+                },
+            ],
+        );
 
         let code = promote_rendered(&mut h, &mut st, &mut fake, "tk-1", true);
 
         assert_eq!(code, Exit::Ok, "stderr={}", h.err());
         let dependency = fake
-            .captured_applies
+            .captured_edits
             .iter()
-            .find(|call| call.mutation_type == MutationType::AddDependency)
+            .find(|call| matches!(call, BackendEdit::AddDependency { .. }))
             .expect("the plan queues the Dependency between the two Promotion Children");
+        let BackendEdit::AddDependency {
+            blocked, blocking, ..
+        } = dependency
+        else {
+            unreachable!()
+        };
         assert_eq!(
-            (
-                dependency.backend_key.as_deref(),
-                dependency.counterpart_backend_key.as_deref(),
-            ),
-            (Some("3"), Some("2")),
-            "the Blocked Item and its Blocking Item both reach the Adapter addressable"
+            (blocked.backend_key.as_str(), blocking.backend_key.as_str()),
+            ("3", "2")
         );
     }
 
@@ -1044,7 +1205,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         let mut st = open_store(&h, &store, &cwd_path);
-        let mut fake = adapter(vec![]);
+        let mut fake = adapter_with_refresh(vec![], vec![]);
 
         let code = promote_rendered(&mut h, &mut st, &mut fake, "gh-7", false);
 
@@ -1052,7 +1213,7 @@ mod tests {
         assert_eq!(h.out(), "Already promoted: gh-7\n");
         assert_eq!(mutation_count(&conn).unwrap(), 0);
         // The sync still ran: the Adopted working set's key was pulled.
-        assert_eq!(fake.captured_pull_keys, vec![vec!["7".to_string()]]);
+        assert_eq!(fake.captured_refresh_keys, vec!["7".to_string()]);
     }
 
     #[test]
@@ -1067,9 +1228,12 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         let mut st = open_store(&h, &store, &cwd_path);
-        let mut fake = adapter(vec![ApplyResponse::EnvFailure(
-            ProcError::ExecutableNotFound,
-        )]);
+        let mut fake = adapter(
+            vec![],
+            vec![CreateResponse::Rejected(
+                "executable not found on PATH".into(),
+            )],
+        );
 
         let code = promote_rendered(&mut h, &mut st, &mut fake, "tk-1", false);
 
@@ -1077,8 +1241,7 @@ mod tests {
         assert_eq!(h.out(), "Promotion already pending: tk-1\n");
         assert_eq!(
             h.err(),
-            "tk promote: nothing to promote, but the sync that followed did not finish\n\
-             executable not found on PATH\n"
+            "tk promote: nothing to promote, but the sync that followed stopped at Mutation 1\n"
         );
     }
 
@@ -1091,10 +1254,13 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         let mut st = open_store(&h, &store, &cwd_path);
-        let mut fake = adapter(vec![ApplyResponse::PromotionSuccess {
-            backend_key: "42".into(),
-            display_id: "gh-42".into(),
-        }]);
+        let mut fake = adapter(
+            vec![],
+            vec![CreateResponse::Created {
+                backend_key: "42".into(),
+                display_id: "gh-42".into(),
+            }],
+        );
 
         let code = promote_rendered(&mut h, &mut st, &mut fake, "tk-1", false);
 
@@ -1132,13 +1298,16 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         let mut st = open_store(&h, &store, &cwd_path);
-        let mut fake = adapter(vec![
-            ApplyResponse::PromotionSuccess {
-                backend_key: "1".into(),
-                display_id: "gh-1".into(),
-            },
-            ApplyResponse::RecordedFailure("HTTP 422: title required".into()),
-        ]);
+        let mut fake = adapter(
+            vec![],
+            vec![
+                CreateResponse::Created {
+                    backend_key: "1".into(),
+                    display_id: "gh-1".into(),
+                },
+                CreateResponse::Rejected("HTTP 422: title required".into()),
+            ],
+        );
 
         let code = promote_rendered(&mut h, &mut st, &mut fake, "tk-1", true);
 
@@ -1152,6 +1321,33 @@ mod tests {
             h.err(),
             "tk promote: the Promotion did not finish: Mutation 2 (failed) for tk-2 is unresolved\n\
              Inspect it with 'tk sync log 2', then run 'tk sync' to apply the rest of the Promotion.\n"
+        );
+    }
+
+    #[test]
+    fn an_indeterminate_creation_warns_not_to_retry_sync() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        local_ticket(&conn, "t1", "tk-1", 1);
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        let mut st = open_store(&h, &store, &cwd_path);
+        let mut fake = adapter(
+            vec![],
+            vec![CreateResponse::Indeterminate(
+                "request outcome unknown".into(),
+            )],
+        );
+
+        let code = promote_rendered(&mut h, &mut st, &mut fake, "tk-1", false);
+
+        assert_eq!(code, Exit::Failure);
+        assert_eq!(h.out(), "");
+        assert_eq!(
+            h.err(),
+            "tk promote: the Promotion did not finish: Mutation 1 (applying) for tk-1 is unresolved\n\
+             Sync stopped: Mutation 1 has an indeterminate Backend creation outcome\n\
+             Inspect it with 'tk sync log 1'; do not run 'tk sync' while it remains applying.\n"
         );
     }
 
@@ -1197,7 +1393,10 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         let mut st = open_store(&h, &store, &cwd_path);
-        let mut fake = adapter(vec![ApplyResponse::RecordedFailure("HTTP 403".into())]);
+        let mut fake = adapter_with_refresh(
+            vec![EditResponse::RecordedFailure("HTTP 403".into())],
+            vec![],
+        );
 
         let code = promote_rendered(&mut h, &mut st, &mut fake, "tk-1", false);
 
@@ -1224,27 +1423,27 @@ mod tests {
     }
 
     #[test]
-    fn a_sync_environment_failure_reports_where_the_promotion_stands() {
-        // Apply writes no outcome on an environment failure, so the sequence
-        // comes from the Mutation Log and the cause from the adapter.
+    fn a_certified_creation_rejection_reports_where_the_promotion_stands() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         local_ticket(&conn, "t1", "tk-1", 1);
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         let mut st = open_store(&h, &store, &cwd_path);
-        let mut fake = adapter(vec![ApplyResponse::EnvFailure(
-            ProcError::ExecutableNotFound,
-        )]);
+        let mut fake = adapter(
+            vec![],
+            vec![CreateResponse::Rejected(
+                "executable not found on PATH".into(),
+            )],
+        );
 
         let code = promote_rendered(&mut h, &mut st, &mut fake, "tk-1", false);
 
         assert_eq!(code, Exit::Failure);
         assert_eq!(
             h.err(),
-            "tk promote: the Promotion did not finish: Mutation 1 (pending) for tk-1 is unresolved\n\
-             Sync stopped: executable not found on PATH\n\
-             Fix the cause above, then run 'tk sync' to apply the rest of the Promotion.\n"
+            "tk promote: the Promotion did not finish: Mutation 1 (failed) for tk-1 is unresolved\n\
+             Inspect it with 'tk sync log 1', then run 'tk sync' to apply the rest of the Promotion.\n"
         );
         assert_eq!(mutation_count(&conn).unwrap(), 1);
     }
@@ -1276,14 +1475,13 @@ mod tests {
         let mut st = open_store(&h, &store, &cwd_path);
         // Dependencies are the only facet this Backend cannot represent, so the
         // rejected edge is the finding, not a capability complaint.
-        let mut fake = FakeAdapter::new(vec![PullResponse::Snapshots(vec![])], vec![])
-            .with_capabilities(
-                PromotionCapabilities::none()
-                    .with_item_class(ItemClass::Ticket)
-                    .with_item_class(ItemClass::Epic)
-                    .with_ticket_kind(TicketKind::Task)
-                    .with_epic_membership(),
-            );
+        let mut fake = FakeAdapter::new().with_capabilities(
+            PromotionCapabilities::none()
+                .with_item_class(ItemClass::Ticket)
+                .with_item_class(ItemClass::Epic)
+                .with_ticket_kind(TicketKind::Task)
+                .with_epic_membership(),
+        );
 
         let code = promote_rendered(&mut h, &mut st, &mut fake, "tk-1", true);
 
@@ -1300,7 +1498,10 @@ mod tests {
             "a refused preflight writes nothing"
         );
         assert!(
-            fake.captured_pull_keys.is_empty(),
+            fake.captured_adopt_inputs.is_empty()
+                && fake.captured_refresh_keys.is_empty()
+                && fake.captured_edits.is_empty()
+                && fake.captured_creates.is_empty(),
             "a refused preflight calls no Backend"
         );
     }

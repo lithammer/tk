@@ -12,7 +12,7 @@ Run `tk prime` after compaction, clear, or a new agent session.
 - Use `tk next` to choose agent work.
 - Scope `tk next` / `tk list` to an Epic with `tk next <epic-id>` / `tk list <epic-id>` or the `TK_SCOPE` environment variable; absent a Scope they cover the whole store.
 - Scope is not an implicit item target; pass explicit Display IDs to item commands.
-- Use `tk sync log` to inspect pending, failed, skipped, and applied Mutations.
+- Use `tk sync log` to inspect pending, failed, applying, skipped, and applied Mutations.
 - Do not run `git push` unless the user explicitly asks for it.
 
 ## Session Start

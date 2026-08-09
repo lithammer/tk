@@ -2,83 +2,84 @@
 //!
 //! Each script entry is consumed in order; an exhausted script panics so a
 //! test that forgot to declare an interaction fails loudly instead of getting
-//! a silent default. Responses own their data, so `apply_mutation` records
-//! calls by cloning into [`FakeAdapter::captured_applies`].
+//! a silent default. Script responses are moved from their queues; captured
+//! calls own the input fields needed for assertions.
 
-use crate::domain::apply_outcome::ApplyOutcome;
-use crate::domain::backend_item_snapshot::BackendItemSnapshot;
-use crate::domain::mutation_type::MutationType;
-use crate::domain::mutation_view::MutationView;
+use std::collections::VecDeque;
+
+use crate::domain::backend_kind::BackendKind;
+use crate::domain::backend_operation::{
+    AdoptedItem, BackendCreate, BackendEdit, BackendItemIdentity, BackendItemRefresh,
+};
+use crate::domain::backend_outcome::{BackendCreateOutcome, BackendEditOutcome};
 use crate::domain::promotion_capability::PromotionCapabilities;
 use crate::proc::ProcError;
 
-use super::adapter::{Adapter, ApplyError, PullError};
+use super::adapter::{Adapter, AdapterReadError, ApplyError};
 
-/// Scripted response for one [`Adapter::fetch_snapshots`] call.
-#[derive(Debug, Clone)]
-pub enum PullResponse {
-    /// Success — the fake returns this snapshot list.
-    Snapshots(Vec<BackendItemSnapshot>),
-    /// Adapter-level rejection — returns [`PullError::Failed`] carrying this
-    /// detail.
+/// Scripted response for one [`Adapter::adopt_ticket`] call.
+#[derive(Debug)]
+pub enum AdoptResponse {
+    /// Success — the fake returns this canonical Ticket.
+    Item(AdoptedItem),
+    /// Environment failure — returns this bare error tag.
+    EnvFailure(ProcError),
+}
+
+/// Scripted response for one [`Adapter::refresh_item`] call.
+#[derive(Debug)]
+pub enum RefreshResponse {
+    /// Success — the fake returns backend-owned fields for this key.
+    Item(BackendItemRefresh),
+    /// Adapter-level rejection with this detail.
     RecordedFailure(String),
     /// Environment failure — returns this bare error tag.
     EnvFailure(ProcError),
 }
 
-/// Scripted response for one [`Adapter::apply_mutation`] call.
-#[derive(Debug, Clone)]
-pub enum ApplyResponse {
-    /// Mutation accepted — returns [`ApplyOutcome::Accepted`] with a plain
-    /// acknowledgement Receipt.
+/// Scripted response for one [`Adapter::apply_edit`] call.
+#[derive(Debug)]
+pub enum EditResponse {
+    /// The Backend acknowledges the edit.
     Success,
-    /// Promotion accepted — returns [`ApplyOutcome::Accepted`] with a Promotion
-    /// Receipt carrying this backend key and Display ID, the identity the
-    /// Adapter owns for the object it created (ADR-0036).
-    PromotionSuccess {
+    /// The Backend rejects the edit.
+    RecordedFailure(String),
+    /// Environment failure — returns this bare error tag.
+    EnvFailure(ProcError),
+}
+
+/// Scripted response for one [`Adapter::create_item`] call.
+#[derive(Debug)]
+pub enum CreateResponse {
+    /// Creation succeeded with this canonical Backend identity.
+    Created {
         backend_key: String,
         display_id: String,
     },
-    /// Mutation rejected — returns [`ApplyOutcome::Rejected`] carrying this detail.
-    RecordedFailure(String),
-    /// Environment failure — returns this bare error tag.
-    EnvFailure(ProcError),
-}
-
-/// Recorded `apply_mutation` invocation captured for test assertions.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ApplyCall {
-    pub sequence: i64,
-    pub mutation_type: MutationType,
-    pub item_id: String,
-    /// JSON-stringified payload variant, identical to what the outbox wrote.
-    pub payload_text: String,
-    /// Backend identity the engine resolved for this Mutation. Recorded so a
-    /// test can tell a Mutation that saw a preceding Promotion receipt from one
-    /// that was handed a still-Local Item.
-    pub backend_key: Option<String>,
-    /// Backend identity the engine resolved for a Dependency Mutation's
-    /// Blocking Item, recorded for the same reason `backend_key` is: the
-    /// counterpart's Promotion is a separate receipt, applied earlier in the
-    /// same run.
-    pub counterpart_backend_key: Option<String>,
+    /// Creation is certified to have had no effect.
+    Rejected(String),
+    /// The Backend may have created the object despite the failure.
+    Indeterminate(String),
 }
 
 /// Strict, script-queue Backend Adapter for tests.
 ///
-/// `pull_script` and `apply_script` are consumed in order. Overflowing either
-/// panics; the panic surfaces a test that under-declared its interactions.
+/// Each directional script is consumed in order. Overflowing any script panics
+/// so a test that under-declared its interactions fails loudly.
 pub struct FakeAdapter {
-    pull_script: Vec<PullResponse>,
-    apply_script: Vec<ApplyResponse>,
-    pub pull_index: usize,
-    pub apply_index: usize,
-    /// Recorded apply invocations in call order — populated on every path,
+    adopt_script: VecDeque<AdoptResponse>,
+    refresh_script: VecDeque<RefreshResponse>,
+    edit_script: VecDeque<EditResponse>,
+    create_script: VecDeque<CreateResponse>,
+    /// Recorded edit invocations in call order — populated on every path,
     /// including rejection and environment failure.
-    pub captured_applies: Vec<ApplyCall>,
-    /// Backend key sets passed to each `fetch_snapshots` call, in order, so
-    /// engine tests can assert the Adopted working set the engine derived.
-    pub captured_pull_keys: Vec<Vec<String>>,
+    pub captured_edits: Vec<BackendEdit>,
+    /// Recorded creation invocations in call order.
+    pub captured_creates: Vec<BackendCreate>,
+    /// Inputs passed to `adopt_ticket`, in call order.
+    pub captured_adopt_inputs: Vec<String>,
+    /// Backend keys passed to `refresh_item`, in call order.
+    pub captured_refresh_keys: Vec<String>,
     /// This fake's [`Adapter::promotion_capabilities`] return value. Static
     /// data, not a script entry, so tests set it once via
     /// [`FakeAdapter::with_capabilities`] instead of queuing a response per
@@ -88,22 +89,47 @@ pub struct FakeAdapter {
 
 impl FakeAdapter {
     #[must_use]
-    pub fn new(pull_script: Vec<PullResponse>, apply_script: Vec<ApplyResponse>) -> Self {
+    pub fn new() -> Self {
         Self {
-            pull_script,
-            apply_script,
-            pull_index: 0,
-            apply_index: 0,
-            captured_applies: Vec::new(),
-            captured_pull_keys: Vec::new(),
+            adopt_script: VecDeque::new(),
+            refresh_script: VecDeque::new(),
+            edit_script: VecDeque::new(),
+            create_script: VecDeque::new(),
+            captured_edits: Vec::new(),
+            captured_creates: Vec::new(),
+            captured_adopt_inputs: Vec::new(),
+            captured_refresh_keys: Vec::new(),
             capabilities: PromotionCapabilities::none(),
         }
     }
 
+    #[must_use]
+    pub fn with_adopts(mut self, script: Vec<AdoptResponse>) -> Self {
+        self.adopt_script = script.into();
+        self
+    }
+
+    #[must_use]
+    pub fn with_refreshes(mut self, script: Vec<RefreshResponse>) -> Self {
+        self.refresh_script = script.into();
+        self
+    }
+
+    #[must_use]
+    pub fn with_edits(mut self, script: Vec<EditResponse>) -> Self {
+        self.edit_script = script.into();
+        self
+    }
+
+    #[must_use]
+    pub fn with_creates(mut self, script: Vec<CreateResponse>) -> Self {
+        self.create_script = script.into();
+        self
+    }
+
     /// Script this fake's [`Adapter::promotion_capabilities`] declaration.
-    /// Defaults to [`PromotionCapabilities::none`] so a test that does not
-    /// call this builds a fake that, like the v1 GitHub Adapter, can promote
-    /// nothing.
+    /// Defaults to [`PromotionCapabilities::none`] so each test opts into the
+    /// exact Promotion facets it exercises.
     #[must_use]
     pub fn with_capabilities(mut self, capabilities: PromotionCapabilities) -> Self {
         self.capabilities = capabilities;
@@ -111,55 +137,74 @@ impl FakeAdapter {
     }
 }
 
+impl Default for FakeAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Adapter for FakeAdapter {
-    fn fetch_snapshots(&mut self, keys: &[&str]) -> Result<Vec<BackendItemSnapshot>, PullError> {
-        // Record the requested key set so engine tests can assert the Adopted
-        // working set the engine derived; the scripted response is independent.
-        self.captured_pull_keys
-            .push(keys.iter().map(|k| (*k).to_string()).collect());
+    fn backend_kind(&self) -> BackendKind {
+        BackendKind::Github
+    }
+
+    fn adopt_ticket(&mut self, input: &str) -> Result<AdoptedItem, AdapterReadError> {
+        self.captured_adopt_inputs.push(input.to_string());
         let response = self
-            .pull_script
-            .get(self.pull_index)
-            .expect("FakeAdapter: pull script exhausted")
-            .clone();
-        self.pull_index += 1;
+            .adopt_script
+            .pop_front()
+            .expect("FakeAdapter: adopt script exhausted");
         match response {
-            PullResponse::Snapshots(s) => Ok(s),
-            PullResponse::RecordedFailure(detail) => Err(PullError::Failed(detail)),
-            PullResponse::EnvFailure(err) => Err(PullError::Env(err)),
+            AdoptResponse::Item(item) => Ok(item),
+            AdoptResponse::EnvFailure(err) => Err(AdapterReadError::Env(err)),
         }
     }
 
-    fn apply_mutation(
-        &mut self,
-        view: &MutationView,
-        _now: &str,
-    ) -> Result<ApplyOutcome, ApplyError> {
+    fn refresh_item(&mut self, key: &str) -> Result<BackendItemRefresh, AdapterReadError> {
+        self.captured_refresh_keys.push(key.to_string());
+        let response = self
+            .refresh_script
+            .pop_front()
+            .expect("FakeAdapter: refresh script exhausted");
+        match response {
+            RefreshResponse::Item(item) => Ok(item),
+            RefreshResponse::RecordedFailure(detail) => Err(AdapterReadError::Failed(detail)),
+            RefreshResponse::EnvFailure(err) => Err(AdapterReadError::Env(err)),
+        }
+    }
+
+    fn apply_edit(&mut self, edit: &BackendEdit) -> Result<BackendEditOutcome, ApplyError> {
         // Record before consulting the script so the rejection and env-failure
-        // paths still leave evidence in `captured_applies`.
-        self.captured_applies.push(ApplyCall {
-            sequence: view.sequence,
-            mutation_type: view.mutation_type,
-            item_id: view.item_id.clone(),
-            payload_text: view.payload.to_json_string(),
-            backend_key: view.backend_key.clone(),
-            counterpart_backend_key: view.counterpart_backend_key.clone(),
-        });
+        // paths still leave evidence in `captured_edits`.
+        self.captured_edits.push(edit.clone());
 
         let response = self
-            .apply_script
-            .get(self.apply_index)
-            .expect("FakeAdapter: apply script exhausted")
-            .clone();
-        self.apply_index += 1;
+            .edit_script
+            .pop_front()
+            .expect("FakeAdapter: edit script exhausted");
         match response {
-            ApplyResponse::Success => Ok(ApplyOutcome::accepted()),
-            ApplyResponse::PromotionSuccess {
+            EditResponse::Success => Ok(BackendEditOutcome::Acknowledged),
+            EditResponse::RecordedFailure(detail) => Ok(BackendEditOutcome::rejected(detail)),
+            EditResponse::EnvFailure(err) => Err(err),
+        }
+    }
+
+    fn create_item(&mut self, create: &BackendCreate) -> BackendCreateOutcome {
+        self.captured_creates.push(create.clone());
+        let response = self
+            .create_script
+            .pop_front()
+            .expect("FakeAdapter: create script exhausted");
+        match response {
+            CreateResponse::Created {
                 backend_key,
                 display_id,
-            } => Ok(ApplyOutcome::promoted(backend_key, display_id)),
-            ApplyResponse::RecordedFailure(detail) => Ok(ApplyOutcome::rejected(detail)),
-            ApplyResponse::EnvFailure(err) => Err(err),
+            } => BackendCreateOutcome::Created(BackendItemIdentity {
+                backend_key,
+                display_id,
+            }),
+            CreateResponse::Rejected(detail) => BackendCreateOutcome::rejected(detail),
+            CreateResponse::Indeterminate(detail) => BackendCreateOutcome::indeterminate(detail),
         }
     }
 
@@ -171,330 +216,183 @@ impl Adapter for FakeAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::apply_outcome::{ApplyOutcome, Receipt};
+    use crate::domain::backend_operation::BackendItemAddress;
     use crate::domain::item_class::ItemClass;
-    use crate::domain::mutation_payload::{
-        DependencyRef, EpicRef, MutationPayload, Promotion, StatusChange, TitleBody,
-    };
+    use crate::domain::mutation_payload::TitleBody;
     use crate::domain::status::ItemStatus;
     use crate::domain::ticket_kind::TicketKind;
 
-    fn snapshot(backend_key: &str, display_id: &str, class: ItemClass) -> BackendItemSnapshot {
-        BackendItemSnapshot {
-            backend_kind: "github".into(),
+    fn adopted_item(backend_key: &str, display_id: &str) -> AdoptedItem {
+        AdoptedItem {
             backend_key: backend_key.into(),
             display_id: display_id.into(),
-            item_class: class,
-            ticket_kind: if class == ItemClass::Ticket {
-                Some(TicketKind::Task)
-            } else {
-                None
-            },
+            ticket_kind: TicketKind::Task,
             title: "Title".into(),
             body: "Body".into(),
             status: ItemStatus::Open,
-            backend_updated_at: "2026-05-19T00:00:00Z".into(),
         }
     }
 
-    fn view(sequence: i64, mutation_type: MutationType, payload: MutationPayload) -> MutationView {
-        MutationView {
-            sequence,
-            mutation_type,
-            item_id: "t1".into(),
-            item_class: ItemClass::Ticket,
-            payload,
-            backend_kind: Some("github".into()),
-            backend_key: Some("1".into()),
-            counterpart_backend_key: None,
+    fn refresh(title: &str) -> BackendItemRefresh {
+        BackendItemRefresh {
+            title: title.into(),
+            body: "Body".into(),
+            status: ItemStatus::Open,
+            ticket_kind: Some(TicketKind::Task),
+        }
+    }
+
+    fn edit() -> BackendEdit {
+        BackendEdit::UpdateTicket {
+            ticket: BackendItemAddress {
+                backend_key: "1".into(),
+            },
+            snapshot: TitleBody {
+                title: "T".into(),
+                body: "B".into(),
+            },
+        }
+    }
+
+    fn create() -> BackendCreate {
+        BackendCreate::Ticket {
+            snapshot: TitleBody {
+                title: "T".into(),
+                body: "B".into(),
+            },
         }
     }
 
     #[test]
-    fn pull_returns_scripted_snapshots() {
-        let mut fake = FakeAdapter::new(
-            vec![PullResponse::Snapshots(vec![
-                snapshot("1", "gh-1", ItemClass::Ticket),
-                snapshot("2", "gh-2", ItemClass::Epic),
-            ])],
-            vec![],
-        );
-        let got = fake.fetch_snapshots(&[]).unwrap();
-        assert_eq!(got.len(), 2);
-        assert_eq!(got[0].display_id, "gh-1");
-        assert_eq!(got[0].ticket_kind, Some(TicketKind::Task));
-        assert_eq!(got[1].item_class, ItemClass::Epic);
-        assert_eq!(got[1].ticket_kind, None);
+    fn adopt_returns_scripted_item_and_captures_input() {
+        let mut fake =
+            FakeAdapter::new().with_adopts(vec![AdoptResponse::Item(adopted_item("1", "gh-1"))]);
+        let got = fake.adopt_ticket("owner/repo#1").unwrap();
+        assert_eq!(got.display_id, "gh-1");
+        assert_eq!(got.ticket_kind, TicketKind::Task);
+        assert_eq!(fake.captured_adopt_inputs, ["owner/repo#1"]);
     }
 
     #[test]
-    fn pull_returns_empty_snapshot_list() {
-        let mut fake = FakeAdapter::new(vec![PullResponse::Snapshots(vec![])], vec![]);
-        assert!(fake.fetch_snapshots(&[]).unwrap().is_empty());
+    fn refresh_returns_scripted_fields_and_captures_key() {
+        let mut fake =
+            FakeAdapter::new().with_refreshes(vec![RefreshResponse::Item(refresh("Refreshed"))]);
+        let got = fake.refresh_item("42").unwrap();
+        assert_eq!(got.title, "Refreshed");
+        assert_eq!(got.ticket_kind, Some(TicketKind::Task));
+        assert_eq!(fake.captured_refresh_keys, ["42"]);
     }
 
     #[test]
-    fn pull_recorded_failure_returns_failed_with_detail() {
-        let mut fake = FakeAdapter::new(
-            vec![PullResponse::RecordedFailure("gh: HTTP 502".into())],
-            vec![],
-        );
-        let err = fake.fetch_snapshots(&[]).unwrap_err();
+    fn refresh_recorded_failure_returns_failed_with_detail() {
+        let mut fake = FakeAdapter::new().with_refreshes(vec![RefreshResponse::RecordedFailure(
+            "gh: HTTP 502".into(),
+        )]);
+        let err = fake.refresh_item("42").unwrap_err();
         match err {
-            PullError::Failed(detail) => assert!(detail.contains("HTTP 502")),
-            PullError::Env(e) => panic!("expected Failed, got Env({e:?})"),
+            AdapterReadError::Failed(detail) => assert!(detail.contains("HTTP 502")),
+            AdapterReadError::Env(e) => panic!("expected Failed, got Env({e:?})"),
         }
     }
 
     #[test]
-    fn pull_env_failure_returns_bare_error() {
-        let mut fake = FakeAdapter::new(
-            vec![PullResponse::EnvFailure(ProcError::ExecutableNotFound)],
-            vec![],
-        );
+    fn adopt_env_failure_returns_bare_error() {
+        let mut fake = FakeAdapter::new().with_adopts(vec![AdoptResponse::EnvFailure(
+            ProcError::ExecutableNotFound,
+        )]);
         assert!(matches!(
-            fake.fetch_snapshots(&[]).unwrap_err(),
-            PullError::Env(ProcError::ExecutableNotFound)
+            fake.adopt_ticket("1").unwrap_err(),
+            AdapterReadError::Env(ProcError::ExecutableNotFound)
         ));
     }
 
     #[test]
-    fn pull_advances_script_across_calls() {
-        let mut fake = FakeAdapter::new(
-            vec![
-                PullResponse::Snapshots(vec![snapshot("1", "gh-1", ItemClass::Ticket)]),
-                PullResponse::EnvFailure(ProcError::ExecutableNotFound),
-            ],
-            vec![],
-        );
-        assert_eq!(fake.fetch_snapshots(&[]).unwrap().len(), 1);
-        assert!(fake.fetch_snapshots(&[]).is_err());
-        assert_eq!(fake.pull_index, 2);
+    fn refresh_advances_script_across_calls() {
+        let mut fake = FakeAdapter::new().with_refreshes(vec![
+            RefreshResponse::Item(refresh("First")),
+            RefreshResponse::EnvFailure(ProcError::ExecutableNotFound),
+        ]);
+        assert_eq!(fake.refresh_item("1").unwrap().title, "First");
+        assert!(fake.refresh_item("2").is_err());
+        assert_eq!(fake.captured_refresh_keys.len(), 2);
     }
 
     #[test]
-    fn apply_success_returns_success_outcome() {
-        let mut fake = FakeAdapter::new(vec![], vec![ApplyResponse::Success]);
-        let outcome = fake
-            .apply_mutation(
-                &view(
-                    1,
-                    MutationType::UpdateTicket,
-                    MutationPayload::UpdateTitleBody(TitleBody {
-                        title: "T".into(),
-                        body: "B".into(),
-                    }),
-                ),
-                "2026-05-19T00:00:00.000Z",
-            )
-            .unwrap();
-        assert!(matches!(outcome, ApplyOutcome::Accepted(_)));
+    fn edit_success_returns_acknowledgement_and_captures_the_call() {
+        let mut fake = FakeAdapter::new().with_edits(vec![EditResponse::Success]);
+        let outcome = fake.apply_edit(&edit()).unwrap();
+        assert_eq!(outcome, BackendEditOutcome::Acknowledged);
+        let BackendEdit::UpdateTicket {
+            ticket, snapshot, ..
+        } = &fake.captured_edits[0]
+        else {
+            panic!("expected ticket update")
+        };
+        assert_eq!(ticket.backend_key, "1");
+        assert_eq!(snapshot.title, "T");
     }
 
     #[test]
-    fn apply_promotion_success_returns_the_scripted_receipt() {
-        let mut fake = FakeAdapter::new(
-            vec![],
-            vec![ApplyResponse::PromotionSuccess {
-                backend_key: "42".into(),
-                display_id: "gh-42".into(),
-            }],
-        );
-        let outcome = fake
-            .apply_mutation(
-                &view(
-                    1,
-                    MutationType::PromoteTicket,
-                    MutationPayload::Promotion(Promotion {
-                        title: "T".into(),
-                        body: "B".into(),
-                        backend_kind: "github".into(),
-                    }),
-                ),
-                "2026-05-19T00:00:00.000Z",
-            )
-            .unwrap();
-        match outcome {
-            ApplyOutcome::Accepted(Receipt::Promotion(receipt)) => {
-                assert_eq!(receipt.backend_key, "42");
-                assert_eq!(receipt.display_id, "gh-42");
-            }
-            other => panic!("expected a Promotion receipt, got {other:?}"),
-        }
+    fn create_success_returns_the_scripted_identity() {
+        let mut fake = FakeAdapter::new().with_creates(vec![CreateResponse::Created {
+            backend_key: "42".into(),
+            display_id: "gh-42".into(),
+        }]);
+        let outcome = fake.create_item(&create());
+        let BackendCreateOutcome::Created(identity) = outcome else {
+            panic!("expected created identity")
+        };
+        assert_eq!(identity.backend_key, "42");
+        assert_eq!(identity.display_id, "gh-42");
+        assert!(matches!(
+            fake.captured_creates[0],
+            BackendCreate::Ticket { .. }
+        ));
     }
 
     #[test]
-    fn apply_records_call_with_payload() {
-        let mut fake = FakeAdapter::new(vec![], vec![ApplyResponse::Success]);
-        fake.apply_mutation(
-            &view(
-                7,
-                MutationType::UpdateTicket,
-                MutationPayload::UpdateTitleBody(TitleBody {
-                    title: "T".into(),
-                    body: "B".into(),
-                }),
-            ),
-            "2026-05-19T00:00:00.000Z",
-        )
-        .unwrap();
-        assert_eq!(fake.captured_applies.len(), 1);
-        let recorded = &fake.captured_applies[0];
-        assert_eq!(recorded.sequence, 7);
-        assert_eq!(recorded.mutation_type, MutationType::UpdateTicket);
-        assert_eq!(recorded.item_id, "t1");
-        assert!(recorded.payload_text.contains(r#""title":"T""#));
-        assert!(recorded.payload_text.contains(r#""body":"B""#));
-    }
-
-    #[test]
-    fn apply_recorded_failure_returns_failure_outcome() {
-        let mut fake = FakeAdapter::new(
-            vec![],
-            vec![ApplyResponse::RecordedFailure(
-                "validation: title required".into(),
-            )],
-        );
-        let outcome = fake
-            .apply_mutation(
-                &view(
-                    3,
-                    MutationType::SetItemStatus,
-                    MutationPayload::ItemStatus(StatusChange {
-                        status: "done".into(),
-                    }),
-                ),
-                "2026-05-19T00:00:00.000Z",
-            )
-            .unwrap();
-        match outcome {
-            ApplyOutcome::Rejected(f) => assert_eq!(f.detail, "validation: title required"),
-            ApplyOutcome::Accepted(_) => panic!("expected Failure"),
-        }
-        // Rejection still records evidence.
-        assert_eq!(fake.captured_applies.len(), 1);
-        assert_eq!(fake.captured_applies[0].sequence, 3);
-    }
-
-    #[test]
-    fn apply_env_failure_returns_bare_error_and_records_call() {
-        let mut fake = FakeAdapter::new(
-            vec![],
-            vec![ApplyResponse::EnvFailure(ProcError::SpawnFailed)],
-        );
-        let err = fake.apply_mutation(
-            &view(
-                1,
-                MutationType::UpdateTicket,
-                MutationPayload::UpdateTitleBody(TitleBody {
-                    title: "T".into(),
-                    body: "B".into(),
-                }),
-            ),
-            "2026-05-19T00:00:00.000Z",
-        );
+    fn edit_rejection_and_environment_failure_remain_distinct() {
+        let mut fake = FakeAdapter::new().with_edits(vec![
+            EditResponse::RecordedFailure("validation: title required".into()),
+            EditResponse::EnvFailure(ProcError::SpawnFailed),
+        ]);
+        let outcome = fake.apply_edit(&edit()).unwrap();
+        let BackendEditOutcome::Rejected(failure) = outcome else {
+            panic!("expected rejection")
+        };
+        assert_eq!(failure.detail, "validation: title required");
+        let err = fake.apply_edit(&edit());
         assert!(matches!(err, Err(ProcError::SpawnFailed)));
-        // env-failure path still records evidence.
-        assert_eq!(fake.captured_applies.len(), 1);
-        assert_eq!(fake.captured_applies[0].sequence, 1);
+        assert_eq!(fake.captured_edits.len(), 2);
     }
 
     #[test]
-    fn apply_records_epic_ref_payload_as_json() {
-        let mut fake = FakeAdapter::new(vec![], vec![ApplyResponse::Success]);
-        fake.apply_mutation(
-            &view(
-                2,
-                MutationType::AddTicketToEpic,
-                MutationPayload::EpicRef(EpicRef {
-                    epic_id: "e-internal".into(),
-                }),
-            ),
-            "2026-05-19T00:00:00.000Z",
-        )
-        .unwrap();
-        assert!(
-            fake.captured_applies[0]
-                .payload_text
-                .contains(r#""epic_id":"e-internal""#)
-        );
-    }
-
-    #[test]
-    fn apply_records_dependency_ref_payload_as_json() {
-        let mut fake = FakeAdapter::new(vec![], vec![ApplyResponse::Success]);
-        fake.apply_mutation(
-            &view(
-                4,
-                MutationType::AddDependency,
-                MutationPayload::DependencyRef(DependencyRef {
-                    blocking_id: "b-internal".into(),
-                }),
-            ),
-            "2026-05-19T00:00:00.000Z",
-        )
-        .unwrap();
-        assert!(
-            fake.captured_applies[0]
-                .payload_text
-                .contains(r#""blocking_id":"b-internal""#)
-        );
-    }
-
-    #[test]
-    fn apply_advances_script_across_calls() {
-        let mut fake = FakeAdapter::new(
-            vec![],
-            vec![
-                ApplyResponse::Success,
-                ApplyResponse::RecordedFailure("second call failed".into()),
-            ],
-        );
-        let first = fake
-            .apply_mutation(
-                &view(
-                    1,
-                    MutationType::UpdateTicket,
-                    MutationPayload::UpdateTitleBody(TitleBody {
-                        title: "A".into(),
-                        body: String::new(),
-                    }),
-                ),
-                "2026-05-19T00:00:00.000Z",
-            )
-            .unwrap();
-        assert!(matches!(first, ApplyOutcome::Accepted(_)));
-        let second = fake
-            .apply_mutation(
-                &view(
-                    2,
-                    MutationType::UpdateTicket,
-                    MutationPayload::UpdateTitleBody(TitleBody {
-                        title: "B".into(),
-                        body: String::new(),
-                    }),
-                ),
-                "2026-05-19T00:00:00.000Z",
-            )
-            .unwrap();
-        match second {
-            ApplyOutcome::Rejected(f) => assert_eq!(f.detail, "second call failed"),
-            ApplyOutcome::Accepted(_) => panic!("expected Failure"),
-        }
-        assert_eq!(fake.apply_index, 2);
-        assert_eq!(fake.captured_applies.len(), 2);
+    fn creation_scripts_all_three_certainty_outcomes() {
+        let mut fake = FakeAdapter::new().with_creates(vec![
+            CreateResponse::Rejected("preflight validation".into()),
+            CreateResponse::Indeterminate("connection lost".into()),
+        ]);
+        assert!(matches!(
+            fake.create_item(&create()),
+            BackendCreateOutcome::Rejected(_)
+        ));
+        assert!(matches!(
+            fake.create_item(&create()),
+            BackendCreateOutcome::Indeterminate(_)
+        ));
+        assert_eq!(fake.captured_creates.len(), 2);
     }
 
     #[test]
     fn defaults_to_no_promotion_capabilities() {
-        let fake = FakeAdapter::new(vec![], vec![]);
+        let fake = FakeAdapter::new();
         assert_eq!(fake.promotion_capabilities(), PromotionCapabilities::none());
     }
 
     #[test]
     fn with_capabilities_overrides_the_declaration() {
         let caps = PromotionCapabilities::none().with_item_class(ItemClass::Epic);
-        let fake = FakeAdapter::new(vec![], vec![]).with_capabilities(caps);
+        let fake = FakeAdapter::new().with_capabilities(caps);
         assert_eq!(fake.promotion_capabilities(), caps);
     }
 }

@@ -1,10 +1,10 @@
-# The v1 GitHub Backend Adapter syncs item fields, not relationships
+# The v1 GitHub Backend Adapter syncs fields and pushes relationships
 
 The v1 GitHub Backend Adapter (tk-34) maps item *fields* between tk and a
 GitHub repository through the `gh issue` subcommands:
 
-- title and body — bidirectional (`gh issue edit`, from `update_ticket`; read
-  back on Pull),
+- title and body — bidirectional for Backend Tickets and Backend Epics (`gh
+  issue edit`, from `update_ticket` / `update_epic`; read back on Pull),
 - Item Status as a two-state axis — `done` ↔ CLOSED (`gh issue close`),
   `open`/`active` ↔ OPEN (`gh issue reopen`) — bidirectional,
 - Ticket Kind — Pull-only: the `issueType` `--json` field maps to
@@ -12,18 +12,17 @@ GitHub repository through the `gh issue` subcommands:
   `"Feature"`, org-custom types, and a typeless issue — → `Task`, matching the
   closed two-variant `TicketKind`). No Mutation changes a Ticket's Kind, so
   there is nothing to push; `--type` is never written in v1,
-- the issue itself (`gh issue list --state all` → `BackendItemSnapshot`).
+- the issue refresh (`gh issue view <n>` → `BackendItemRefresh`).
 
-It does **not** sync Dependencies or Epic membership. Those Mutations are
-still emitted for same-Backend item pairs (`add_dependency`,
-`remove_ticket_from_epic`, …) and still reach the adapter, so the adapter
-returns a no-op `ApplyOutcome::Accepted` for them: it records that the
-Mutation was handled without driving any `gh` call. The local Dependency
-edge and Epic membership already live in the Repository Store and keep
-driving `tk next` and the read views; there is simply no backend action to
-take in v1.
+Dependencies and Epic membership are push-only. `add_dependency` and
+`remove_dependency` edit the blocked issue's dependency edge.
+`add_ticket_to_epic` sets the Ticket's parent; `remove_ticket_from_epic`
+removes the Ticket from the expected Epic's sub-issue list. Backend Pull does
+not reconcile either relationship from GitHub. The local edge or membership
+in the Repository Store remains authoritative for tk's read views and
+`tk next`.
 
-## This is a scope choice, not a capability gap
+## Relationship deferral was a scope choice, not a capability gap
 
 `gh` 2.94.0 (cli/cli#13057, "Add Issues 2.0 support") makes every
 relationship first-class in `gh issue` — no raw `gh api` required:
@@ -31,44 +30,42 @@ relationship first-class in `gh issue` — no raw `gh api` required:
 - Dependencies — `gh issue edit --add-blocked-by`/`--remove-blocked-by`
   (and `--add-blocking`/`--remove-blocking`), read back via the
   `blockedBy`/`blocking` `--json` fields.
-- Sub-issues / Epic membership — `gh issue edit --parent`/`--remove-parent`/
+- Sub-issues / Epic membership — `gh issue edit --parent`/
   `--add-sub-issue`/`--remove-sub-issue`, read back via `parent`/`subIssues`.
 
-The deferral therefore rests on scope, not capability:
+The original deferral rested on scope, not capability:
 
 1. **Slice size.** tk-34 is already sizable and blocked on tk-106
    (`tk remote set`); widening it to a second sync axis — two more Apply arms
    plus the relationship fields on Pull — is held out so the first adapter
-   ships bounded. Dependency sync is now cheap and symmetric (native push
-   *and* read-back), so deferring it front-loads no technical risk; it is
-   purely a question of where the line falls. tk-107 owns it.
-2. **Epics are unreachable pre-Promote.** Sub-issues map to Epic membership,
-   but no GitHub Backend Epic can exist in v1 — Promotion is not implemented,
-   Pull hardcodes `item_class:Ticket`, and `gh issue create` is out of scope —
-   so there is no parent number to point `--parent` at. Sub-issue sync is
-   gated on the Promote slice regardless of `gh`'s capabilities.
+   ships bounded. The native CLI makes both push and read-back possible, so
+   deferring it front-loads no technical risk; it is purely a question of
+   where the line falls. tk-107 owns it.
+2. **Epics were unreachable pre-Promote.** Sub-issues map to Epic membership,
+   but no GitHub Backend Epic existed before the Promotion slice, so there was
+   no parent number for `--parent`. Sub-issue sync was therefore gated on
+   Promotion regardless of `gh`'s capabilities.
 
 ## Considered Options
 
 - **Fold dependency sync into tk-34 now.** Rejected: it adds a second sync
   axis (two Apply arms, the `blockedBy`/`blocking` Pull fields) to a slice
-  already blocked and sizable. The native flags make it cheap and symmetric,
-  so it defers without technical risk — the only cost is the backfill debt
-  below.
+  already blocked and sizable. The native relationship surface makes both
+  directions possible, so it defers without technical risk — the only cost is
+  the backfill debt below.
 - **Reject relationship Mutations.** Rejected: the v1 sync engine stops at
-  the first `ApplyOutcome::Rejected`, so a single `tk block` between two
+  the first `BackendEditOutcome::Rejected`, so a single `tk block` between two
   GitHub Tickets would wedge the whole Mutation queue until `tk sync --skip`.
-  No-op-`Accepted` keeps the queue draining.
+  No-op-`Acknowledged` keeps the queue draining.
 
 ## Consequences
 
-- Relationship intent is not reflected on GitHub in v1, and Dependency
-  Mutations no-op-`Accepted` before relationship sync lands are already
-  `applied` — they will not auto-replay when tk-107 ships. A future slice
-  decides whether to backfill.
-- The relationship surface — dependencies, and sub-issues once Promote lands —
-  is tracked by tk-107, now via the native `gh issue` flags above rather than
-  raw `gh api`.
+- Relationship Mutations no-op-`Acknowledged` before their real Apply arms
+  landed are already `applied` and do not auto-replay. A future slice decides
+  whether to backfill them.
+- Dependency and Epic-membership Apply use the native `gh issue` flags above
+  rather than raw `gh api`. Backend Pull does not read either relationship;
+  reconciliation remains a separate concern.
 - `active` has no GitHub representation; Pull normalises it toward `open`.
   The resulting clobber of a locally-`active` Ticket is a defect tracked by
   tk-108. Remote reopens of an item already imported as `done` remain
@@ -93,10 +90,11 @@ The deferral therefore rests on scope, not capability:
 - (tk-107, 2026-06) Dependency sync lands, **push-only**. Apply for
   `add_dependency` / `remove_dependency` drives the native `gh issue edit
   --add-blocked-by` / `--remove-blocked-by` flags (`gh` ≥ 2.94.0), replacing
-  their no-op-Accepted arms. The Mutation sits on the blocked item
-  (`backend_key`); the blocking item's number is resolved from its internal
-  `items.id` at Mutation-load time onto `MutationView.counterpart_backend_key`,
-  so the adapter stays store-free. Three consequences worth recording:
+  their no-op-Acknowledged arms. The Mutation sits on the blocked item
+  identity; the blocking item's identity is resolved from its internal
+  `items.id` immediately before delivery, and both endpoints ride the typed
+  `BackendEdit::AddDependency`, so the adapter stays store-free. Three
+  consequences worth recording:
   - **Title/body/status round-trip; dependencies do not.** Backend Pull does
     not reconstruct Dependency edges in v1 — relationship sync is one
     directional (local intent → GitHub). Read-back is deferred to its own
@@ -105,14 +103,31 @@ The deferral therefore rests on scope, not capability:
     round-trip, and an edge to an un-Adopted issue has no local item to point
     at. This asymmetry is the deliberate v1 shape, not an oversight.
   - **Dependencies become ordinary wedge-on-`Rejected` Mutations.** This ADR's
-    earlier "no-op-Accepted keeps the queue draining" rationale was a
+    earlier "no-op-Acknowledged keeps the queue draining" rationale was a
     workaround for having no real apply; now that one exists, a failed
     dependency Apply stops the Apply loop at its `sequence` like any
     `update_ticket`, recovered by fixing the cause or `tk sync --skip`. No
-    backfill of dependency Mutations that no-op-Accepted before this slice.
-  - **Sub-issue / Epic-membership sync stays deferred and splits to a
-    Promote-gated ticket.** No GitHub Backend Epic can exist pre-Promotion
-    (Pull hardcodes `item_class: Ticket`, `tk adopt` inserts Tickets), so
-    `add_ticket_to_epic` is unreachable; its arm stays no-op-Accepted. It will
-    reuse the same `counterpart_backend_key` resolution (`EpicRef` → parent
-    number) once backend Epics are real.
+    backfill of dependency Mutations that no-op-Acknowledged before this slice.
+  - **Sub-issue / Epic-membership sync stayed deferred to Promotion.** No
+    GitHub Backend Epic could exist pre-Promotion (`tk adopt` inserts Tickets),
+    so `add_ticket_to_epic` remained unreachable and no-op-Acknowledged while
+    no real parent identity existed.
+- (tk-132, 2026-08) Epic field and membership Apply lands, **push-only**.
+  `update_epic` uses the same title/body edit contract as `update_ticket`.
+  `add_ticket_to_epic` sets the Ticket's parent with `gh issue edit --parent`;
+  `remove_ticket_from_epic` edits the expected Epic with `--remove-sub-issue`
+  instead of detaching whichever parent the Ticket happens to have. Both
+  identities are resolved in the Repository Store and ride the typed
+  `BackendEdit`, keeping the adapter store-free. Backend Pull remains
+  field-only and does not reconcile parent or sub-issue data.
+- (tk-137, 2026-08) GitHub Promotion lands. Task Tickets and Epics share the
+  typeless `gh issue create --title ... --body ...` surface; no `--type` or
+  relationship flag rides creation. The Adapter declares Ticket, Epic, Task,
+  Dependency, and Epic-membership capabilities together, because the latter
+  two already have real Apply arms. Bug remains unsupported. A trustworthy
+  issue URL is the creation receipt; completed results without one are
+  indeterminate except for the observed initial 401/bad-credentials frame.
+  Backend Pull remains field-only, so relationship reconciliation is still
+  out of scope.
+  Adopt and Promotion retain the canonical issue URL as the GitHub backend key;
+  future view/edit/relationship calls therefore stay pinned to that repository.

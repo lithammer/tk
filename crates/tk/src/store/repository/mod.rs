@@ -21,7 +21,8 @@
 // owned-by-value (`String`/`Vec`) params elsewhere.
 #![allow(clippy::needless_pass_by_value)]
 
-use std::path::Path;
+use std::fs::{File, OpenOptions};
+use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use thiserror::Error;
@@ -51,6 +52,45 @@ pub mod update;
 /// borrow-checked operation calls.
 pub struct Store {
     pub(crate) conn: Connection,
+    tk_dir: PathBuf,
+}
+
+/// Exclusive ownership of one repository's remote-changing workflow.
+///
+/// The lock is held by the open file description and therefore releases on
+/// drop, including process termination. The lock file itself is stable state:
+/// tk opens it in place and never deletes, truncates, or replaces it.
+#[must_use]
+pub struct RemoteWorkflowGuard {
+    _file: File,
+}
+
+#[cfg(test)]
+impl RemoteWorkflowGuard {
+    pub(crate) fn for_test() -> Self {
+        let file = tempfile::tempfile().expect("create test Remote workflow lock");
+        file.lock().expect("lock test Remote workflow file");
+        Self { _file: file }
+    }
+}
+
+/// Failure to open or exclusively lock a repository's remote workflow file.
+#[derive(Debug, Error)]
+pub enum RemoteWorkflowLockError {
+    #[error("failed to open Remote workflow lock at '{}': {source}", path.display())]
+    Open {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to acquire Remote workflow lock at '{}': {source}", path.display())]
+    Lock {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("another remote-changing command is running; retry when it finishes")]
+    Busy,
 }
 
 impl Store {
@@ -69,6 +109,46 @@ impl Store {
     /// `Connection::transaction` and for migrations.
     pub fn conn_mut(&mut self) -> &mut Connection {
         &mut self.conn
+    }
+
+    /// Serialize this repository's remote-changing workflows.
+    ///
+    /// The guard must span Backend access and the corresponding Repository
+    /// Store mutation. Durable `applying` checks remain the crash-recovery
+    /// barrier; this process lock prevents two live tk processes from both
+    /// passing the check before either records its transition.
+    pub fn lock_remote_workflow(&self) -> Result<RemoteWorkflowGuard, RemoteWorkflowLockError> {
+        let path = self.tk_dir.join("remote.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|source| RemoteWorkflowLockError::Open {
+                path: path.clone(),
+                source,
+            })?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(RemoteWorkflowLockError::Busy);
+            }
+            Err(std::fs::TryLockError::Error(source)) => {
+                return Err(RemoteWorkflowLockError::Lock { path, source });
+            }
+        }
+        Ok(RemoteWorkflowGuard { _file: file })
+    }
+}
+
+#[cfg(test)]
+impl Store {
+    pub(crate) fn for_test(conn: Connection) -> Self {
+        Self {
+            conn,
+            tk_dir: PathBuf::new(),
+        }
     }
 }
 
@@ -160,7 +240,10 @@ pub fn open_existing<R: ProcRunner + ?Sized>(
         migrations::apply_all(&mut conn, &clock.now_iso()).map_err(OpenError::from)?;
     }
 
-    Ok(Store { conn })
+    Ok(Store {
+        conn,
+        tk_dir: paths.git_common_dir.join("tk"),
+    })
 }
 
 impl From<migrations::ApplyError> for OpenError {
@@ -543,6 +626,55 @@ mod tests {
             .query_row("pragma foreign_keys", [], |r| r.get(0))
             .unwrap();
         assert_eq!(fk, 1);
+    }
+
+    #[test]
+    fn remote_workflow_lock_excludes_other_handles_until_guard_drop() {
+        let store = TmpStore::new("repo");
+        seed_tk_db(&store);
+        let runner = fake_runner_for(&store);
+        let opened = open_existing(&runner, &cwd(), &fixed_clock()).unwrap();
+        let guard = opened.lock_remote_workflow().unwrap();
+        let lock_path = store.tk_dir().join("remote.lock");
+        let contender = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+
+        assert!(contender.try_lock().is_err());
+        drop(guard);
+        contender.try_lock().unwrap();
+        drop(contender);
+        assert!(lock_path.exists(), "the stable lock inode must be reused");
+    }
+
+    #[test]
+    fn remote_workflow_lock_reports_contention_and_succeeds_after_drop() {
+        let store = TmpStore::new("repo");
+        seed_tk_db(&store);
+        let first = open_existing(&fake_runner_for(&store), &cwd(), &fixed_clock()).unwrap();
+        let second = open_existing(&fake_runner_for(&store), &cwd(), &fixed_clock()).unwrap();
+        let first_guard = first.lock_remote_workflow().unwrap();
+        assert!(matches!(
+            second.lock_remote_workflow(),
+            Err(RemoteWorkflowLockError::Busy)
+        ));
+        drop(first_guard);
+        let _second_guard = second.lock_remote_workflow().unwrap();
+    }
+
+    #[test]
+    fn remote_workflow_lock_open_failure_is_typed_and_fail_closed() {
+        let store = TmpStore::new("repo");
+        seed_tk_db(&store);
+        std::fs::create_dir(store.tk_dir().join("remote.lock")).unwrap();
+        let opened = open_existing(&fake_runner_for(&store), &cwd(), &fixed_clock()).unwrap();
+
+        assert!(matches!(
+            opened.lock_remote_workflow(),
+            Err(RemoteWorkflowLockError::Open { .. })
+        ));
     }
 
     #[test]

@@ -265,7 +265,7 @@ mod tests {
             [],
         )
         .unwrap();
-        Store { conn }
+        Store::for_test(conn)
     }
 
     fn fixed_rng() -> StdRng {

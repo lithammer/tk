@@ -40,6 +40,9 @@ pub enum DiscoveryError {
     /// Spawning `git` failed for a reason other than a missing binary.
     #[error("failed to invoke git")]
     SpawnFailed,
+    /// `git` started, but its exit status or output could not be observed.
+    #[error("git started but its outcome could not be observed")]
+    OutcomeUnobserved,
     /// `git rev-parse` exited non-zero. `Some` carries git's trimmed stderr,
     /// rendered verbatim; `None` (git failed silently) renders the default
     /// not-in-repo line.
@@ -68,6 +71,7 @@ pub fn discover_paths<R: ProcRunner + ?Sized>(
         Ok(out) => out,
         Err(ProcError::ExecutableNotFound) => return Err(DiscoveryError::GitMissing),
         Err(ProcError::SpawnFailed) => return Err(DiscoveryError::SpawnFailed),
+        Err(ProcError::OutcomeUnobserved) => return Err(DiscoveryError::OutcomeUnobserved),
     };
 
     if !out.succeeded() {
@@ -132,7 +136,7 @@ pub fn render_failure<W: Write + ?Sized>(stderr: &mut W, command: &str, err: &Di
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proc::{ErrorInjectingRunner, FakeRunner, ProcError, RunOutput};
+    use crate::proc::{FakeRunner, ProcError, RunOutput};
     use std::path::PathBuf;
 
     fn cwd() -> PathBuf {
@@ -239,24 +243,35 @@ mod tests {
 
     #[test]
     fn maps_executable_not_found_to_git_missing() {
-        let runner = ErrorInjectingRunner {
-            err: ProcError::ExecutableNotFound,
-        };
+        let runner = FakeRunner::new();
+        runner.expect_error(&["git", "rev-parse"], ProcError::ExecutableNotFound);
         assert!(matches!(
             discover_paths(&runner, &cwd()),
             Err(DiscoveryError::GitMissing)
         ));
+        runner.assert_all_consumed();
     }
 
     #[test]
     fn maps_spawn_failed_to_spawn_failed() {
-        let runner = ErrorInjectingRunner {
-            err: ProcError::SpawnFailed,
-        };
+        let runner = FakeRunner::new();
+        runner.expect_error(&["git", "rev-parse"], ProcError::SpawnFailed);
         assert!(matches!(
             discover_paths(&runner, &cwd()),
             Err(DiscoveryError::SpawnFailed)
         ));
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn maps_unobserved_outcome_without_calling_it_a_spawn_failure() {
+        let runner = FakeRunner::new();
+        runner.expect_error(&["git", "rev-parse"], ProcError::OutcomeUnobserved);
+        assert!(matches!(
+            discover_paths(&runner, &cwd()),
+            Err(DiscoveryError::OutcomeUnobserved)
+        ));
+        runner.assert_all_consumed();
     }
 
     #[test]
@@ -273,6 +288,13 @@ mod tests {
         assert_eq!(
             std::str::from_utf8(&buf).unwrap(),
             "tk add: failed to invoke git\n"
+        );
+
+        let mut buf = Vec::new();
+        render_failure(&mut buf, "show", &DiscoveryError::OutcomeUnobserved);
+        assert_eq!(
+            std::str::from_utf8(&buf).unwrap(),
+            "tk show: git started but its outcome could not be observed\n"
         );
 
         let mut buf = Vec::new();
