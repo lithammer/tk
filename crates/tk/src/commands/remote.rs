@@ -62,6 +62,9 @@ fn run_set(deps: &mut Deps<'_>, raw_kind: &str) -> Result<Exit, CommandError> {
     let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
         .map_err(|err| resolver::open_error(&err))?;
     let now = deps.clock.now_iso();
+    let _workflow = store
+        .lock_remote_workflow()
+        .map_err(CommandError::failure)?;
 
     // A v1 GitHub Remote stores an empty config: the Adapter resolves the
     // repository from the checkout for each Backend operation (ADR-0033).
@@ -98,6 +101,9 @@ fn parse_set_kind(raw: &str) -> Result<BackendKind, CommandError> {
 fn run_clear(deps: &mut Deps<'_>) -> Result<Exit, CommandError> {
     let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
         .map_err(|err| resolver::open_error(&err))?;
+    let _workflow = store
+        .lock_remote_workflow()
+        .map_err(CommandError::failure)?;
     match store_sync::clear_remote(store.conn_mut()) {
         Ok(()) => {
             let _ = writeln!(deps.stdout, "Cleared the configured Remote.");

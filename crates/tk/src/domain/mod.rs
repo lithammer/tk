@@ -2,7 +2,7 @@
 //!
 //! The schema-determined value types: Priority, ItemStatus, SelectionState,
 //! TicketKind, ItemClass, Origin, MutationType, MutationState,
-//! MutationPayload, MutationView, Backend Adapter read contracts, BackendBinding, and
+//! MutationPayload, Backend Adapter operation contracts, BackendBinding, and
 //! PromotionCapabilities. Each one is pinned by an existing SQL CHECK
 //! constraint or by an ADR — the shape exists independently of any future
 //! Backend Adapter — so the rest of the codebase uses typed values instead of
@@ -23,14 +23,11 @@
 //!
 //! - `Diagnostic` — ADR-0018 folds diagnostics into `Result<T, E>`; captured
 //!   stderr and SQLite errmsgs ride on typed error payloads instead.
-//! - `MutationFailure` / `FailureClass` — ADR-0016 settles the contract but
-//!   the persisted shape is a flat `{"detail":"…"}` wrapper, not a classified
-//!   record. The wrapper lives at the store boundary
-//!   ([`crate::store::sync`]); a richer classified type only earns its place
-//!   when a concrete Backend Adapter produces the evidence to classify.
+//! - `MutationFailure` — the persisted record is [`backend_outcome::Failure`]
+//!   rather than a second wrapper with the same fields.
 //!
-//! [`apply_outcome`] carries the typed Apply-result shape (ADR-0009 taxonomy);
-//! the sync engine is the consumer ADR-0018 deferred it for.
+//! [`backend_outcome`] carries the directional write-result shapes (ADR-0009
+//! taxonomy); the sync engine is the consumer ADR-0018 deferred them for.
 //!
 //! [`dependency_rule`] is the one behaviour rather than a value type: what a
 //! Dependency edge means for the Mutation Log (ADR-0035). It sits here because
@@ -40,16 +37,15 @@
 //! current consumer (`tk init`); revisit the placement when real cross-module
 //! consumers exist.
 
-pub mod apply_outcome;
 pub mod backend_binding;
 pub mod backend_kind;
 pub mod backend_operation;
+pub mod backend_outcome;
 pub mod dependency_rule;
 pub mod item_class;
 pub mod mutation_payload;
 pub mod mutation_state;
 pub mod mutation_type;
-pub mod mutation_view;
 pub mod origin;
 pub mod priority;
 pub mod promotion_capability;

@@ -362,24 +362,51 @@ _Avoid_: ticket, tickets
 - v1 supports zero or one configured **Remote**.
 - **`tk remote`** shows the configured **Remote**.
 - **`tk remote set <kind>`** configures an absent **Remote** or leaves the same **Backend** kind unchanged; switching kinds requires **`tk remote clear`** followed by **`tk remote set`**.
-- **`tk remote clear`** removes the configured **Remote** when no pending or failed remote **Mutations** would be orphaned.
+- **`tk remote clear`** removes the configured **Remote** when no pending,
+  failed, or applying remote **Mutations** would be orphaned.
 - Configuring or clearing a **Remote** is not a **Mutation** and is never recorded in the **Mutation Log**.
 - **Remote** authentication is delegated to backend-specific external CLIs.
-- A **Backend Adapter** canonicalizes **Adopt** input, exposes per-item **Backend Pull** refresh, and applies **Mutations**. Adopt receives complete Backend Ticket identity; Pull receives only fields for an already-tracked Item.
+- A **Backend Adapter** canonicalizes **Adopt** input, exposes per-item
+  **Backend Pull** refresh, edits existing Backend Items, and creates Backend
+  Items for **Promotion** through separate typed contracts. Adopt receives
+  complete Backend Ticket identity; Pull receives only fields for an
+  already-tracked Item.
 - Sync runs **Backend Pull** before applying pending **Mutations** in v1.
 - **Adopt** and **Promotion** are the two intake directions across the local/**Backend** boundary; both yield a **Backend Ticket**, and tk syncs only items that entered through one of them.
 - tk does not mirror or auto-discover a **Backend**; **Backend Pull** refreshes only the **Adopted** **Backend** items that are not `done`.
 - Retained **Backend** Items and non-terminal **Promotions** use one Backend kind. A Backend read or Promotion commit rechecks the configured **Remote** before writing; if it changed, retry the command.
-- A **Mutation Apply** returns a **Mutation Receipt** or a failure.
+- An edit Apply returns acknowledgement or rejection; an environment failure
+  aborts the run without changing the Mutation.
+- A Promotion creation returns exactly one certainty outcome: **Created** with
+  a Backend identity, certified-no-effect **Rejected**, or **Indeterminate**.
+- Before invoking Backend creation, the Repository Store durably moves the
+  Promotion Mutation to `applying`.
+- **Created** atomically applies the Backend identity, marks the Mutation
+  `applied`, and advances the Sync Cursor. **Rejected** marks it `failed`.
+  **Indeterminate** keeps it `applying` with durable diagnostic evidence.
+- An `applying` Mutation is excluded from automatic replay and blocks Backend
+  Pull, Mutation Apply, Adopt, Promotion commit, and Remote clear until an
+  explicit recovery workflow resolves its certainty. Local Repository Store
+  edits remain available.
+- `tk sync`, `tk adopt`, `tk promote`, and Remote configuration changes hold
+  the repository-scoped Remote workflow lock across their Backend and
+  Repository Store effects. The stable lock file is
+  `<git-common-dir>/tk/remote.lock`; process termination releases ownership,
+  but tk never deletes or replaces the file. Sync Skip takes the lock before
+  changing the Mutation Log but still commits before opening the Backend
+  Adapter. Local edit commands and Sync Log do not take this lock.
 - The sync engine owns mutation ordering, cursors, retries, and failure policy.
 - The sync engine applies pending **Mutations** in global **Mutation Sequence** order in v1.
 - The sync engine stops at the first failed **Mutation** in v1.
-- A failed **Mutation** keeps a **Mutation Failure** and is retried by the next sync.
+- A failed edit or certified-no-effect creation keeps a **Mutation Failure**
+  and is retried by the next sync. An `applying` creation is never retried
+  automatically.
 - A **Sync Conflict** is a kind of **Mutation Failure**.
 - v1 has no automatic merge or local conflict resolution model.
 - A failed **Mutation** may become a **Skipped Mutation** only through **Sync Skip**.
 - Sync output warns when **Skipped Mutations** exist.
-- **Sync Log** inspects pending, failed, skipped, and applied **Mutations**.
+- **Sync Log** inspects pending, failed, applying, skipped, and applied
+  **Mutations**.
 - Force-applying conflicting **Mutations** is deferred from v1.
 - **Backend Adapters** use injectable subprocess runners for external CLIs such as `gh` and `acli`.
 - A repository may have zero or one **Primary Backend**.

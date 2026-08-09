@@ -37,6 +37,10 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
         .map_err(|err| resolver::open_error(&err))?;
     let now = deps.clock.now_iso();
+    let _workflow = store
+        .lock_remote_workflow()
+        .map_err(CommandError::failure)?;
+    store_sync::ensure_adopt_available(store.conn()).map_err(adopt_store_error)?;
 
     let adapter_opt = match factory::open_configured(store.conn(), deps.runner, deps.cwd) {
         Ok(adapter) => adapter,
@@ -126,6 +130,9 @@ fn adopt_store_error(err: AdoptStoreError) -> CommandError {
         AdoptStoreError::BackendCohort(other) => {
             CommandError::failure(format!("Repository Store corruption: {other}"))
         }
+        AdoptStoreError::ApplyingMutation(sequence) => CommandError::failure(format!(
+            "Mutation {sequence} has an indeterminate Backend creation outcome; resolve it before adopting another Item"
+        )),
     }
 }
 
@@ -137,7 +144,8 @@ mod tests {
     use crate::render::Styler;
     use crate::store::migrations;
     use crate::store::testing::{
-        FixtureItem, FixtureRemote, TmpStore, insert_fixture_item, insert_fixture_remote,
+        FixtureItem, FixtureMutation, FixtureRemote, TmpStore, insert_fixture_item,
+        insert_fixture_mutation, insert_fixture_remote,
     };
     use rand::SeedableRng;
     use rand::rngs::StdRng;
@@ -296,6 +304,48 @@ mod tests {
             .unwrap();
         assert_eq!(origin, "backend");
         assert_eq!(selection, "accepted");
+    }
+
+    #[test]
+    fn applying_creation_blocks_adopt_before_the_backend_read() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Local work",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 9,
+                mutation_type: "promote_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
+                state: "applying",
+                promotion_operation_id: Some("op-1"),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+
+        let code = run_rendered(&mut h, "42");
+
+        assert_eq!(code, Exit::Failure);
+        assert_eq!(
+            String::from_utf8(h.stderr).unwrap(),
+            "tk adopt: Mutation 9 has an indeterminate Backend creation outcome; resolve it before adopting another Item\n"
+        );
     }
 
     #[test]

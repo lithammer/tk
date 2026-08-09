@@ -28,8 +28,8 @@ use rand::Rng;
 use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 
-use crate::domain::apply_outcome::PromotionReceipt;
 use crate::domain::backend_kind::BackendKind;
+use crate::domain::backend_operation::BackendItemIdentity;
 use crate::domain::mutation_state::MutationState;
 use crate::domain::origin::Origin;
 use crate::domain::promotion_graph::{GraphDependency, GraphItem, PromotionGraph};
@@ -188,6 +188,8 @@ pub enum CommitPlanError {
         expected: BackendKind,
         actual: Option<BackendKind>,
     },
+    #[error("Mutation {0} has an indeterminate Backend creation outcome")]
+    ApplyingMutation(i64),
 }
 
 /// Commit `plan` to the Mutation Log outbox as one Promotion Operation, in
@@ -203,10 +205,10 @@ pub enum CommitPlanError {
 /// ascending Mutation Sequence order match the plan's contract order: `append`
 /// allocates sequences as it goes.
 ///
-/// An empty plan is a legitimate no-op — re-invoking `tk promote` on work
-/// already Backend or already Pending Promotion appends nothing (see
-/// [`crate::domain::promotion_plan::PromotionPlan::is_empty`]) — and returns
-/// `None` rather than minting an identity that would own zero Mutations.
+/// An empty plan appends nothing and returns `None` rather than minting an
+/// identity that would own zero Mutations. The global `applying` barrier is
+/// checked first, so even a no-op Promotion commit cannot race unresolved
+/// Backend creation.
 pub fn commit_plan<R: Rng + ?Sized>(
     conn: &mut Connection,
     plan: &PromotionPlan,
@@ -214,12 +216,15 @@ pub fn commit_plan<R: Rng + ?Sized>(
     rng: &mut R,
     now: &str,
 ) -> Result<Option<String>, CommitPlanError> {
+    let tx = crate::store::write_transaction(conn)?;
+    if let Some(sequence) = crate::store::sync::applying_mutation_sequence(&tx)? {
+        return Err(CommitPlanError::ApplyingMutation(sequence));
+    }
     if plan.is_empty() {
         return Ok(None);
     }
 
     let operation_id = generate_internal_id(rng);
-    let tx = crate::store::write_transaction(conn)?;
     let actual: Option<String> = tx
         .query_row(
             "select backend_kind from remotes where name = 'primary'",
@@ -269,7 +274,7 @@ pub fn apply_receipt(
     conn: &Connection,
     item_id: &str,
     backend_kind: &str,
-    receipt: &PromotionReceipt,
+    receipt: &BackendItemIdentity,
     now: &str,
 ) -> rusqlite::Result<()> {
     // Statement order is load-bearing. `item_ids_one_display_per_item` is a
@@ -420,8 +425,8 @@ mod tests {
         .unwrap();
     }
 
-    fn receipt(backend_key: &str, display_id: &str) -> PromotionReceipt {
-        PromotionReceipt {
+    fn receipt(backend_key: &str, display_id: &str) -> BackendItemIdentity {
+        BackendItemIdentity {
             backend_key: backend_key.into(),
             display_id: display_id.into(),
         }
@@ -434,7 +439,7 @@ mod tests {
     fn promote(
         conn: &mut Connection,
         item_id: &str,
-        receipt: &PromotionReceipt,
+        receipt: &BackendItemIdentity,
     ) -> rusqlite::Result<()> {
         let tx = crate::store::write_transaction(conn)?;
         apply_receipt(&tx, item_id, "github", receipt, NOW)?;
@@ -1055,6 +1060,40 @@ mod tests {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
         assert_eq!(ids, vec!["t3", "t1", "t2"]);
+    }
+
+    #[test]
+    fn commit_promotion_plan_refuses_while_creation_is_applying() {
+        let mut conn = open_seeded();
+        seed_ticket(&conn, "t1", "tk-1", 1);
+        seed_ticket(&conn, "t2", "tk-2", 2);
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "promote_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"T","body":"","backend_kind":"github"}"#,
+                state: "applying",
+                promotion_operation_id: Some("op-1"),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        let error = commit_plan(
+            &mut conn,
+            &PromotionPlan {
+                mutations: vec![draft("t2")],
+            },
+            BackendKind::Github,
+            &mut seeded_rng(),
+            NOW,
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, CommitPlanError::ApplyingMutation(1)));
+        assert_eq!(mutation_count(&conn).unwrap(), 1);
     }
 
     #[test]

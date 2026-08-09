@@ -1,11 +1,11 @@
 //! Mutation Log entry state.
 //!
-//! The four states are mirrored in the V1 `mutations.state` CHECK constraint
-//! (`'pending'`, `'failed'`, `'skipped'`, `'applied'`); the `text()` spelling is
+//! The five states are mirrored in the `mutations.state` CHECK constraint
+//! (`'pending'`, `'failed'`, `'applying'`, `'skipped'`, `'applied'`); the `text()` spelling is
 //! the storage contract, not just a rendering convenience. The state drives the
-//! outbox transitions — Apply moves `pending`/`failed` → `applied`/`failed`,
-//! Mark-skipped moves `failed` → `skipped` — so it is a domain value, not a
-//! pass-through display string.
+//! outbox transitions — edits move `pending`/`failed` to `applied`/`failed`,
+//! creation first moves to `applying`, and Mark-skipped moves `failed` to
+//! `skipped` — so it is a domain value, not a pass-through display string.
 
 use std::fmt;
 
@@ -13,9 +13,15 @@ use std::fmt;
 /// appended as [`MutationState::Pending`]; the sync engine transitions them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MutationState {
+    /// Queued and not yet attempted.
     Pending,
+    /// Certified rejection with durable failure evidence.
     Failed,
+    /// Backend creation began and no confirmed identity or no-effect verdict exists.
+    Applying,
+    /// Human-curated terminal omission.
     Skipped,
+    /// Backend effect and any resulting identity were persisted.
     Applied,
 }
 
@@ -29,6 +35,7 @@ impl MutationState {
         match self {
             Self::Pending => "pending",
             Self::Failed => "failed",
+            Self::Applying => "applying",
             Self::Skipped => "skipped",
             Self::Applied => "applied",
         }
@@ -53,6 +60,7 @@ mod tests {
         // constraint; drift here is a silent store-contract break.
         assert_eq!(MutationState::Pending.text(), "pending");
         assert_eq!(MutationState::Failed.text(), "failed");
+        assert_eq!(MutationState::Applying.text(), "applying");
         assert_eq!(MutationState::Skipped.text(), "skipped");
         assert_eq!(MutationState::Applied.text(), "applied");
     }

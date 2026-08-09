@@ -1,11 +1,10 @@
 # Promotion intent precedes Backend capability
 
 tk-136 builds the whole local half of Promotion — preflight, the ordered
-outbox, and receipt application — but the delivery order in tk-135 places safe
-non-idempotent Apply (tk-139) and GitHub issue creation (tk-137) after it. That
-slice must therefore produce durable Promotion intent that no Backend in the
-same build is allowed to act on, and it must do so without leaving a shape that
-the two following slices have to unpick.
+outbox, and receipt application — before a Backend in the same build may act
+on it. The first creation slice must add its duplicate guard at the same time
+as the non-idempotent call: there can be no shipped interval in which an
+ambiguous creation is automatically replayed.
 
 ## Decision
 
@@ -52,20 +51,37 @@ whole outbox stopped — including unrelated Mutations for Adopted Backend
 Tickets — with no in-product remedy until the user installed a later build.
 Refusing at preflight leaves the outbox empty instead.
 
-### Promotion applies through the existing Apply seam
+### Promotion uses a directional creation seam
 
-`Adapter::apply_mutation` carries Promotion like every other Mutation Type, and
-the Mutation Receipt becomes a typed enum whose Promotion variant carries the
-Adapter-owned backend key and Display ID as required fields. Receipt
-application commits in the same transaction that marks the Mutation applied and
-advances the Sync Cursor, so no window exists in which a Mutation is applied
-while its Item is still Local.
+Ordinary Mutations resolve to typed `BackendEdit` variants that contain only
+the identities and payload required by that edit. Promotion resolves to a
+typed `BackendCreate::Ticket` or `BackendCreate::Epic`; an independent
+Mutation-Type/Item-Class mismatch is unrepresentable after resolution.
+Identity resolution happens immediately before each delivery, so a Promotion
+receipt remains visible to later Mutations in the same run.
 
-A separate Adapter method for non-idempotent creation is deferred to tk-137.
-The receipt's *success* shape is fixed by the schema and is modelled now; the
-certified-no-effect versus indeterminate *failure* taxonomy depends on what
-`gh issue create` is observed to emit, so it is deferred to the slice that
-gathers that evidence.
+Creation returns one of three value outcomes: `Created(identity)`, certified
+no-effect `Rejected(failure)`, or `Indeterminate(failure)`. It has no generic
+process-error arm because observed `gh issue create` behavior showed that a
+completed nonzero invocation may still create the issue.
+
+The engine durably marks a Promotion `applying` before the creation call.
+`Created` applies identity, marks the Mutation applied, clears failure, and
+advances the cursor in one transaction. `Rejected` moves it to `failed`.
+`Indeterminate` leaves it `applying` with diagnostic evidence. An applying row
+is not automatically replayed and is a global barrier for Pull, Apply, Adopt,
+Promotion commit, and Remote clear. Local Repository Store edits remain
+available. Reconcile and explicit-risk retry are separate recovery work.
+
+Every remote-changing workflow holds the repository-scoped
+`<git-common-dir>/tk/remote.lock` file lock across its Backend and Store
+effects. Promotion acquires it before preflight and passes the same owning
+guard into its nested sync. The stable file is opened in place and never
+deleted or replaced; dropping the guard, including process termination,
+releases ownership. This serialization prevents concurrent processes from
+both passing an `applying` check, while the durable state covers crashes after
+Backend invocation. Sync Skip also holds the guard while changing Mutation Log
+ordering, then opens the Adapter only after that curation commits.
 
 ## Considered Options
 
@@ -74,20 +90,17 @@ The rejection stops the apply loop, the Mutation cannot be skipped, and the
 Remote cannot be cleared while it is pending — so a single `tk promote` would
 leave a permanently stopped sync with no in-product exit.
 
-**Add the `applying` Mutation State in the same migration as the Promotion
-Operation column.** Rejected. ADR-0028's "cheaper to bake in once" applies when
-a table rebuild is already required for an independent reason, as it was for
-migration 005; the Promotion Operation column is a nullable `ALTER TABLE ADD
-COLUMN` and forces no rebuild. The pairing between `applying` and the
-`state`/`failure_json` CHECK also depends on tk-139's transition order, so
-choosing it here risks a second rebuild anyway.
+**Leave `applying` for a later recovery slice.** Rejected after creation
+evidence was gathered. Introducing the creation call before its duplicate
+guard would make the first build capable of silently replaying an ambiguous
+creation. Migration 008 therefore rebuilds the Mutation table at the earliest
+point the non-idempotent seam exists.
 
-**Split the Adapter trait into edit and create seams now.** Rejected. Only the
-success half of the split is schema-determined; committing the failure taxonomy
-before tk-137's evidence is the case ADR-0016 set the precedent against. The
-typed receipt already makes a Promotion receipt without a backend key
-unrepresentable, which is where the unrecoverable state would otherwise be
-produced.
+**Keep one generic Apply seam.** Rejected. A permissive projection admits
+Promotion as an edit, missing counterpart identities, and invalid
+Mutation-Type/Item-Class combinations. Directional enums make those states
+unrepresentable at the Adapter boundary and preserve creation certainty as a
+distinct contract.
 
 **Resolve backend identity when the applicable Mutations are loaded.**
 Rejected. A receipt applied part-way through a run changes the identity of the
@@ -115,8 +128,6 @@ whenever Origin is `backend`.
   on `backend_key` and `counterpart_backend_key`, and the Epic-membership arm's
   claim that no GitHub Backend Epic can exist pre-Promotion. Each changes in
   the slice that falsifies it rather than in the slice that first reaches it.
-- A receipt that cannot be persisted — a Display ID collision against an
-  existing `item_ids` row — rolls back with the Mutation still applicable, so a
-  later sync would create a second backend object. Staging keeps this
-  unreachable here; tk-139 owns it, and needs a way to free or choose the
-  Display ID, because reconciling re-attaches into the same collision.
+- A receipt that cannot be persisted — for example, a Display ID collision
+  against an existing `item_ids` row — rolls back with the Mutation still
+  `applying`. Automatic sync cannot create a second backend object.

@@ -4,32 +4,37 @@
 //!
 //! Every operation here is SQL on the `items` / `mutations` / `item_ids` /
 //! `remotes` / `sync_cursors` tables, so it lives under [`crate::store`]. The
-//! The Adopt, Promote, Remote, and Sync flows compose these transactions with
+//! Adopt, Promote, Remote, and Sync flows compose these transactions with
 //! the backend-blind [`crate::remote::adapter::Adapter`] boundary.
 //!
 //! Write helpers open their own transaction and take `&mut Connection`; read
 //! helpers take `&Connection`. `advance_sync_cursor` is the exception — it runs
-//! inside `apply_mutation_outcome`'s transaction and so takes a borrowed
-//! connection without managing one.
+//! inside an outcome-persistence transaction and so takes a borrowed connection
+//! without managing one.
 
 use rusqlite::{Connection, OptionalExtension, params};
 use std::str::FromStr;
 use thiserror::Error;
 
-use crate::domain::apply_outcome::{ApplyOutcome, Failure, FailureClass, Receipt};
 use crate::domain::backend_kind::BackendKind;
-use crate::domain::backend_operation::{AdoptedItem, BackendItemRefresh};
+use crate::domain::backend_operation::{
+    AdoptedItem, BackendCreate, BackendEdit, BackendItemIdentity, BackendItemRefresh,
+    BackendOperation,
+};
+use crate::domain::backend_outcome::{
+    BackendCreateOutcome, BackendEditOutcome, Failure, FailureClass,
+};
 use crate::domain::item_class::ItemClass;
 use crate::domain::mutation_payload::{
     DependencyRef, EpicRef, MutationPayload, Promotion, StatusChange, TitleBody,
 };
 use crate::domain::mutation_state::MutationState;
 use crate::domain::mutation_type::MutationType;
-use crate::domain::mutation_view::MutationView;
 use crate::domain::priority::Priority;
 use crate::domain::selection_state::SelectionState;
 use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
+use crate::store::repository::RemoteWorkflowGuard;
 use crate::store::repository::create::generate_internal_id;
 use crate::store::sequences::{self, SequenceError};
 
@@ -73,6 +78,8 @@ pub enum AdoptStoreError {
     },
     #[error(transparent)]
     BackendCohort(#[from] BackendCohortError),
+    #[error("Mutation {0} has an indeterminate Backend creation outcome")]
+    ApplyingMutation(i64),
 }
 
 /// Error returned by Backend Pull derivation and refresh merge.
@@ -88,6 +95,8 @@ pub enum RefreshStoreError {
     },
     #[error(transparent)]
     BackendCohort(#[from] BackendCohortError),
+    #[error("Mutation {0} has an indeterminate Backend creation outcome")]
+    ApplyingMutation(i64),
 }
 
 /// Result of canonical Backend Ticket insertion.
@@ -111,6 +120,7 @@ pub fn adopt_backend_ticket(
     now: &str,
 ) -> Result<AdoptOutcome, AdoptStoreError> {
     let tx = crate::store::write_transaction(conn)?;
+    ensure_adopt_available(&tx)?;
     ensure_adopt_remote(&tx, expected_kind)?;
     ensure_backend_cohort(&tx, expected_kind)?;
     if let Some(row) = find_backend_item_in(&tx, expected_kind, &adopted.backend_key)? {
@@ -171,12 +181,20 @@ pub fn adopt_backend_ticket(
     ))
 }
 
+/// Refuse Adopt before any Backend read while creation certainty is unresolved.
+pub fn ensure_adopt_available(conn: &Connection) -> Result<(), AdoptStoreError> {
+    if let Some(sequence) = applying_mutation_sequence(conn)? {
+        return Err(AdoptStoreError::ApplyingMutation(sequence));
+    }
+    Ok(())
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Mutation Log decode (the engine's applicable-set load)
 // ──────────────────────────────────────────────────────────────────────────
 
 /// Error returned by the applicable-set load — [`load_applicable_mutations`]
-/// and the per-Mutation [`resolve_mutation_view`].
+/// and the per-Mutation [`resolve_backend_operation`].
 #[derive(Debug, Error)]
 pub enum LoadApplicableError {
     #[error(transparent)]
@@ -194,14 +212,33 @@ pub enum LoadApplicableError {
     /// did not match the variant's shape — Repository Store corruption.
     #[error("malformed payload_json: {0}")]
     PayloadJson(#[from] serde_json::Error),
+    #[error("mutation {mutation_type} cannot target Item Class {item_class}")]
+    OperationShapeMismatch {
+        mutation_type: MutationType,
+        item_class: ItemClass,
+    },
+    #[error("mutation {mutation_type} requires Backend identity for Item {item_id}")]
+    MissingBackendIdentity {
+        mutation_type: MutationType,
+        item_id: String,
+    },
+    #[error(
+        "mutation {mutation_type} requires Item {item_id} to be {expected}, but it is {actual}"
+    )]
+    CounterpartClassMismatch {
+        mutation_type: MutationType,
+        item_id: String,
+        expected: ItemClass,
+        actual: ItemClass,
+    },
 }
 
 /// One applicable Mutation Log entry, decoded but not yet bound to a backend
 /// identity.
 ///
 /// The engine materialises these once per run; the backend identities that
-/// complete a [`MutationView`] are resolved per Mutation instead
-/// ([`resolve_mutation_view`]), because a Promotion receipt applied earlier in
+/// complete a [`BackendOperation`] are resolved per Mutation instead
+/// ([`resolve_backend_operation`]), because a Promotion identity applied earlier in
 /// the same run changes them (ADR-0036).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplicableMutationRow {
@@ -255,50 +292,191 @@ pub fn load_applicable_mutations(
     Ok(out)
 }
 
-/// Complete a decoded row into the adapter-facing [`MutationView`] by reading
-/// the target Item's backend identity — and, for a Dependency Mutation, its
-/// counterpart's — from `items`.
+/// Resolve one decoded row into a typed edit or creation operation.
 ///
 /// Called immediately before each Apply rather than at load time: a Promotion
 /// receipt committed earlier in the same run gives its Item a backend identity
 /// that the Mutations ordered behind it need (ADR-0036 "Resolve backend
 /// identity when the applicable Mutations are loaded" — rejected).
 ///
-/// A Dependency payload's `blocking_id` is an internal `items.id`
-/// (promote-safe); the counterpart's `backend_key` is `None` while that Item is
-/// still Local, and every other Mutation kind resolves no counterpart at all.
-pub fn resolve_mutation_view(
+/// Dependency and Epic-membership payloads carry a counterpart's internal
+/// `items.id` (promote-safe). Its Backend identity is resolved immediately
+/// before delivery; a missing identity rejects resolution before the Adapter
+/// is invoked.
+pub fn resolve_backend_operation(
     conn: &Connection,
     row: &ApplicableMutationRow,
-) -> Result<MutationView, LoadApplicableError> {
-    let (backend_kind, backend_key): (Option<String>, Option<String>) = conn.query_row(
-        "select backend_kind, backend_key from items where id = ?1 and item_class = ?2",
-        params![row.item_id, row.item_class.text()],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
-
-    let counterpart_backend_key = match &row.payload {
-        MutationPayload::DependencyRef(dependency) => conn
-            .query_row(
-                "select backend_key from items where id = ?1",
-                params![dependency.blocking_id],
-                |r| r.get::<_, Option<String>>(0),
-            )
-            .optional()?
-            .flatten(),
-        _ => None,
+) -> Result<BackendOperation, LoadApplicableError> {
+    let sequence = row.sequence;
+    let item_id = row.item_id.clone();
+    let target = || backend_identity(conn, &row.item_id, row.mutation_type);
+    let shape_error = || LoadApplicableError::OperationShapeMismatch {
+        mutation_type: row.mutation_type,
+        item_class: row.item_class,
     };
 
-    Ok(MutationView {
-        sequence: row.sequence,
-        mutation_type: row.mutation_type,
-        item_id: row.item_id.clone(),
-        item_class: row.item_class,
-        payload: row.payload.clone(),
-        backend_kind,
-        backend_key,
-        counterpart_backend_key,
+    let operation = match (row.mutation_type, &row.payload) {
+        (MutationType::UpdateTicket, MutationPayload::UpdateTitleBody(snapshot)) => {
+            if row.item_class != ItemClass::Ticket {
+                return Err(shape_error());
+            }
+            BackendOperation::Edit(BackendEdit::UpdateTicket {
+                sequence,
+                item_id,
+                ticket: target()?,
+                snapshot: snapshot.clone(),
+            })
+        }
+        (MutationType::UpdateEpic, MutationPayload::UpdateTitleBody(snapshot)) => {
+            if row.item_class != ItemClass::Epic {
+                return Err(shape_error());
+            }
+            BackendOperation::Edit(BackendEdit::UpdateEpic {
+                sequence,
+                item_id,
+                epic: target()?,
+                snapshot: snapshot.clone(),
+            })
+        }
+        (MutationType::SetItemStatus, MutationPayload::ItemStatus(change)) => {
+            BackendOperation::Edit(BackendEdit::SetItemStatus {
+                sequence,
+                item_id,
+                item: target()?,
+                change: change.clone(),
+            })
+        }
+        (MutationType::AddDependency, MutationPayload::DependencyRef(dependency)) => {
+            BackendOperation::Edit(BackendEdit::AddDependency {
+                sequence,
+                item_id,
+                blocked: target()?,
+                blocking: backend_identity(conn, &dependency.blocking_id, row.mutation_type)?,
+            })
+        }
+        (MutationType::RemoveDependency, MutationPayload::DependencyRef(dependency)) => {
+            BackendOperation::Edit(BackendEdit::RemoveDependency {
+                sequence,
+                item_id,
+                blocked: target()?,
+                blocking: backend_identity(conn, &dependency.blocking_id, row.mutation_type)?,
+            })
+        }
+        (MutationType::AddTicketToEpic, MutationPayload::EpicRef(reference)) => {
+            if row.item_class != ItemClass::Ticket {
+                return Err(shape_error());
+            }
+            BackendOperation::Edit(BackendEdit::AddTicketToEpic {
+                sequence,
+                item_id,
+                ticket: target()?,
+                epic: backend_identity_of_class(
+                    conn,
+                    &reference.epic_id,
+                    row.mutation_type,
+                    ItemClass::Epic,
+                )?,
+            })
+        }
+        (MutationType::RemoveTicketFromEpic, MutationPayload::EpicRef(reference)) => {
+            if row.item_class != ItemClass::Ticket {
+                return Err(shape_error());
+            }
+            BackendOperation::Edit(BackendEdit::RemoveTicketFromEpic {
+                sequence,
+                item_id,
+                ticket: target()?,
+                epic: backend_identity_of_class(
+                    conn,
+                    &reference.epic_id,
+                    row.mutation_type,
+                    ItemClass::Epic,
+                )?,
+            })
+        }
+        (MutationType::PromoteTicket, MutationPayload::Promotion(promotion)) => {
+            if row.item_class != ItemClass::Ticket {
+                return Err(shape_error());
+            }
+            BackendOperation::Create(BackendCreate::Ticket {
+                sequence,
+                item_id,
+                promotion: promotion.clone(),
+            })
+        }
+        (MutationType::PromoteEpic, MutationPayload::Promotion(promotion)) => {
+            if row.item_class != ItemClass::Epic {
+                return Err(shape_error());
+            }
+            BackendOperation::Create(BackendCreate::Epic {
+                sequence,
+                item_id,
+                promotion: promotion.clone(),
+            })
+        }
+        (MutationType::AddExternalBlocker | MutationType::ResolveExternalBlocker, _) => {
+            return Err(LoadApplicableError::PayloadVariantMissing(
+                row.mutation_type,
+            ));
+        }
+        _ => return Err(shape_error()),
+    };
+
+    Ok(operation)
+}
+
+fn backend_identity(
+    conn: &Connection,
+    item_id: &str,
+    mutation_type: MutationType,
+) -> Result<BackendItemIdentity, LoadApplicableError> {
+    let identity = conn
+        .query_row(
+            "select backend_key, display_value from items where id = ?1",
+            params![item_id],
+            |r| {
+                let backend_key: Option<String> = r.get(0)?;
+                let display_id: String = r.get(1)?;
+                Ok(backend_key.map(|backend_key| BackendItemIdentity {
+                    backend_key,
+                    display_id,
+                }))
+            },
+        )
+        .optional()?
+        .flatten();
+    identity.ok_or_else(|| LoadApplicableError::MissingBackendIdentity {
+        mutation_type,
+        item_id: item_id.to_owned(),
     })
+}
+
+fn backend_identity_of_class(
+    conn: &Connection,
+    item_id: &str,
+    mutation_type: MutationType,
+    expected: ItemClass,
+) -> Result<BackendItemIdentity, LoadApplicableError> {
+    let actual: Option<ItemClass> = conn
+        .query_row(
+            "select item_class from items where id = ?1",
+            params![item_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let actual = actual.ok_or_else(|| LoadApplicableError::MissingBackendIdentity {
+        mutation_type,
+        item_id: item_id.to_owned(),
+    })?;
+    if actual != expected {
+        return Err(LoadApplicableError::CounterpartClassMismatch {
+            mutation_type,
+            item_id: item_id.to_owned(),
+            expected,
+            actual,
+        });
+    }
+    backend_identity(conn, item_id, mutation_type)
 }
 
 /// Decode a `payload_json` text column into the [`MutationPayload`] variant the
@@ -331,12 +509,12 @@ fn decode_mutation_payload(
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// Apply outcome / mark skipped / cursor
+// Backend outcomes / mark skipped / cursor
 // ──────────────────────────────────────────────────────────────────────────
 
-/// Error returned by [`apply_mutation_outcome`].
+/// Error returned while persisting a Backend write outcome.
 #[derive(Debug, Error)]
-pub enum ApplyMutationOutcomeError {
+pub enum PersistMutationOutcomeError {
     #[error(transparent)]
     Storage(#[from] rusqlite::Error),
     /// No `mutations` row matches `sequence`.
@@ -346,12 +524,11 @@ pub enum ApplyMutationOutcomeError {
     /// must never request a transition out of a terminal state.
     #[error("mutation {0} is not in an applicable state")]
     MutationNotApplicable(i64),
-    /// The adapter's [`Receipt`] shape disagrees with the row's Mutation Type:
-    /// a Promotion receipt against a non-`promote_*` Mutation, or a plain
-    /// acknowledgement against a `promote_*` one. The latter would mark the
-    /// Mutation applied while leaving its Item Local, so neither is written.
+    #[error("Mutation {0} has an indeterminate Backend creation outcome")]
+    ApplyingMutation(i64),
+    /// The Store API does not match the row's Mutation Type.
     #[error("mutation {sequence} of type {mutation_type} cannot carry this receipt")]
-    ReceiptShapeMismatch {
+    OperationShapeMismatch {
         sequence: i64,
         mutation_type: MutationType,
     },
@@ -362,30 +539,48 @@ pub enum ApplyMutationOutcomeError {
     PayloadJson(#[from] serde_json::Error),
 }
 
-/// Persist the effect of an adapter [`ApplyOutcome`] against the Mutation Log row at
-/// `sequence`, inside its own transaction:
-///   - `pending`/`failed` + `Success` → `applied`, clear `failure_json`,
-///     advance the Sync Cursor.
-///   - `pending` + `Failure` → `failed`, record `{"detail":"…"}`.
-///   - `failed` + `Failure` → state unchanged, refresh `failure_json`.
-///   - any other prior state → [`ApplyMutationOutcomeError::MutationNotApplicable`].
+/// Persist an edit acknowledgement or rejection against its Mutation Log row.
 ///
-/// A `promote_*` row accepted with a Promotion [`Receipt`] additionally converts
-/// its Item into a Backend Item ([`crate::store::promotion`]) in this same
-/// transaction: a crash between the conversion and the `applied` transition
-/// would otherwise leave a Mutation applied against a still-Local Item
-/// (ADR-0036). A receipt that cannot be persisted rolls the whole transaction
-/// back, leaving the Mutation applicable.
-///
-/// A missing row returns [`ApplyMutationOutcomeError::MutationNotFound`].
-pub fn apply_mutation_outcome(
+/// A missing or terminal row is rejected, and a Promotion row cannot pass
+/// through the edit outcome boundary.
+pub fn persist_edit_outcome(
     conn: &mut Connection,
     sequence: i64,
-    outcome: &ApplyOutcome,
+    outcome: &BackendEditOutcome,
     now: &str,
-) -> Result<(), ApplyMutationOutcomeError> {
+) -> Result<(), PersistMutationOutcomeError> {
     let tx = crate::store::write_transaction(conn)?;
+    if let Some(applying) = applying_mutation_sequence(&tx)? {
+        return Err(PersistMutationOutcomeError::ApplyingMutation(applying));
+    }
+    let (prior, mutation_type, _, _) = applicable_outcome_row(&tx, sequence)?;
+    if mutation_type.is_promotion() {
+        return Err(PersistMutationOutcomeError::OperationShapeMismatch {
+            sequence,
+            mutation_type,
+        });
+    }
 
+    match outcome {
+        BackendEditOutcome::Acknowledged => persist_applied(&tx, sequence, now)?,
+        BackendEditOutcome::Rejected(failure) => {
+            persist_failure(&tx, sequence, prior, failure, now)?;
+        }
+    }
+
+    tx.commit()?;
+    Ok(())
+}
+
+/// Persist one Backend creation outcome and apply a confirmed identity in the
+/// same transaction as the Mutation state transition.
+pub fn persist_create_outcome(
+    conn: &mut Connection,
+    sequence: i64,
+    outcome: &BackendCreateOutcome,
+    now: &str,
+) -> Result<(), PersistMutationOutcomeError> {
+    let tx = crate::store::write_transaction(conn)?;
     let row: Option<(MutationState, MutationType, String, String)> = tx
         .query_row(
             "select state, mutation_type, item_id, payload_json \
@@ -395,72 +590,175 @@ pub fn apply_mutation_outcome(
         )
         .optional()?;
     let (prior, mutation_type, item_id, payload_json) =
-        row.ok_or(ApplyMutationOutcomeError::MutationNotFound(sequence))?;
-    // Apply is only defined for entries the engine has not yet resolved; an
-    // already-`applied` or curated-`skipped` row is not re-applicable.
-    if !matches!(prior, MutationState::Pending | MutationState::Failed) {
-        return Err(ApplyMutationOutcomeError::MutationNotApplicable(sequence));
+        row.ok_or(PersistMutationOutcomeError::MutationNotFound(sequence))?;
+    if prior != MutationState::Applying {
+        return Err(PersistMutationOutcomeError::MutationNotApplicable(sequence));
+    }
+    if !mutation_type.is_promotion() {
+        return Err(PersistMutationOutcomeError::OperationShapeMismatch {
+            sequence,
+            mutation_type,
+        });
     }
 
     match outcome {
-        ApplyOutcome::Accepted(receipt) => {
-            match (mutation_type.is_promotion(), receipt) {
-                (true, Receipt::Promotion(promotion)) => {
-                    // The Backend the Promotion targets is recorded on the
-                    // payload rather than read from Remote configuration
-                    // (ADR-0036); the Adapter owns only the key and Display ID.
-                    let payload: Promotion = serde_json::from_str(&payload_json)?;
-                    crate::store::promotion::apply_receipt(
-                        &tx,
-                        &item_id,
-                        &payload.backend_kind,
-                        promotion,
-                        now,
-                    )?;
-                }
-                (false, Receipt::Acknowledged) => {}
-                (true, Receipt::Acknowledged) | (false, Receipt::Promotion(_)) => {
-                    return Err(ApplyMutationOutcomeError::ReceiptShapeMismatch {
-                        sequence,
-                        mutation_type,
-                    });
-                }
-            }
-            tx.execute(
-                "update mutations \
-                    set state = 'applied', failure_json = null, state_changed_at = ?2 \
-                  where sequence = ?1",
-                params![sequence, now],
+        BackendCreateOutcome::Created(identity) => {
+            let payload: Promotion = serde_json::from_str(&payload_json)?;
+            crate::store::promotion::apply_receipt(
+                &tx,
+                &item_id,
+                &payload.backend_kind,
+                identity,
+                now,
             )?;
-            advance_sync_cursor(&tx, sequence, now)?;
+            persist_applied(&tx, sequence, now)?;
         }
-        ApplyOutcome::Rejected(failure) => {
-            // The Failure type *is* the on-disk shape (ADR-0016 amendment), so
-            // it serializes straight into `failure_json`; `serde_json` always
-            // emits valid JSON, satisfying the column's `json_valid()` CHECK.
-            let failure_json =
-                serde_json::to_string(failure).expect("Failure serializes infallibly");
-            if prior == MutationState::Pending {
-                tx.execute(
-                    "update mutations \
-                        set state = 'failed', failure_json = ?2, state_changed_at = ?3 \
-                      where sequence = ?1",
-                    params![sequence, failure_json, now],
-                )?;
-            } else {
-                // prior was 'failed' — keep state, refresh failure_json.
-                tx.execute(
-                    "update mutations \
-                        set failure_json = ?2, state_changed_at = ?3 \
-                      where sequence = ?1",
-                    params![sequence, failure_json, now],
-                )?;
-            }
+        BackendCreateOutcome::Rejected(failure) => {
+            persist_failed(&tx, sequence, failure, now)?;
+        }
+        BackendCreateOutcome::Indeterminate(failure) => {
+            persist_applying_failure(&tx, sequence, failure, now)?;
         }
     }
 
     tx.commit()?;
     Ok(())
+}
+
+/// Durably mark a Promotion as in flight before invoking non-idempotent
+/// Backend creation.
+pub fn begin_create(
+    conn: &mut Connection,
+    sequence: i64,
+    now: &str,
+) -> Result<(), PersistMutationOutcomeError> {
+    let tx = crate::store::write_transaction(conn)?;
+    if let Some(applying) = applying_mutation_sequence(&tx)? {
+        return Err(PersistMutationOutcomeError::ApplyingMutation(applying));
+    }
+    let row: Option<(MutationState, MutationType)> = tx
+        .query_row(
+            "select state, mutation_type from mutations where sequence = ?1",
+            params![sequence],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let (state, mutation_type) =
+        row.ok_or(PersistMutationOutcomeError::MutationNotFound(sequence))?;
+    if !matches!(state, MutationState::Pending | MutationState::Failed) {
+        return Err(PersistMutationOutcomeError::MutationNotApplicable(sequence));
+    }
+    if !mutation_type.is_promotion() {
+        return Err(PersistMutationOutcomeError::OperationShapeMismatch {
+            sequence,
+            mutation_type,
+        });
+    }
+    tx.execute(
+        "update mutations \
+            set state = 'applying', failure_json = null, state_changed_at = ?2 \
+          where sequence = ?1",
+        params![sequence, now],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn applicable_outcome_row(
+    conn: &Connection,
+    sequence: i64,
+) -> Result<(MutationState, MutationType, String, String), PersistMutationOutcomeError> {
+    let row = conn
+        .query_row(
+            "select state, mutation_type, item_id, payload_json \
+               from mutations where sequence = ?1",
+            params![sequence],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    let row = row.ok_or(PersistMutationOutcomeError::MutationNotFound(sequence))?;
+    if !matches!(row.0, MutationState::Pending | MutationState::Failed) {
+        return Err(PersistMutationOutcomeError::MutationNotApplicable(sequence));
+    }
+    Ok(row)
+}
+
+fn persist_applied(conn: &Connection, sequence: i64, now: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "update mutations \
+            set state = 'applied', failure_json = null, state_changed_at = ?2 \
+          where sequence = ?1",
+        params![sequence, now],
+    )?;
+    advance_sync_cursor(conn, sequence, now)
+}
+
+fn persist_failure(
+    conn: &Connection,
+    sequence: i64,
+    prior: MutationState,
+    failure: &Failure,
+    now: &str,
+) -> rusqlite::Result<()> {
+    let failure_json = serde_json::to_string(failure).expect("Failure serializes infallibly");
+    if prior == MutationState::Pending {
+        conn.execute(
+            "update mutations \
+                set state = 'failed', failure_json = ?2, state_changed_at = ?3 \
+              where sequence = ?1",
+            params![sequence, failure_json, now],
+        )?;
+    } else {
+        conn.execute(
+            "update mutations \
+                set failure_json = ?2, state_changed_at = ?3 \
+              where sequence = ?1",
+            params![sequence, failure_json, now],
+        )?;
+    }
+    Ok(())
+}
+
+fn persist_failed(
+    conn: &Connection,
+    sequence: i64,
+    failure: &Failure,
+    now: &str,
+) -> rusqlite::Result<()> {
+    let failure_json = serde_json::to_string(failure).expect("Failure serializes infallibly");
+    conn.execute(
+        "update mutations \
+            set state = 'failed', failure_json = ?2, state_changed_at = ?3 \
+          where sequence = ?1",
+        params![sequence, failure_json, now],
+    )?;
+    Ok(())
+}
+
+fn persist_applying_failure(
+    conn: &Connection,
+    sequence: i64,
+    failure: &Failure,
+    now: &str,
+) -> rusqlite::Result<()> {
+    let failure_json = serde_json::to_string(failure).expect("Failure serializes infallibly");
+    conn.execute(
+        "update mutations \
+            set failure_json = ?2, state_changed_at = ?3 \
+          where sequence = ?1 and state = 'applying'",
+        params![sequence, failure_json, now],
+    )?;
+    Ok(())
+}
+
+/// Return the sequence of the globally blocking `applying` Mutation, if any.
+pub fn applying_mutation_sequence(conn: &Connection) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "select sequence from mutations where state = 'applying' order by sequence limit 1",
+        [],
+        |r| r.get(0),
+    )
+    .optional()
 }
 
 /// Advance the v1 single Remote's Sync Cursor to `sequence`. Runs inside the
@@ -508,6 +806,7 @@ pub enum MarkSkippedError {
 /// log` can show why the Mutation was abandoned.
 pub fn mark_mutation_skipped(
     conn: &mut Connection,
+    _workflow: &RemoteWorkflowGuard,
     sequence: i64,
     now: &str,
 ) -> Result<(), MarkSkippedError> {
@@ -631,6 +930,9 @@ pub fn active_backend_keys(
     conn: &Connection,
     expected_kind: BackendKind,
 ) -> Result<Vec<String>, RefreshStoreError> {
+    if let Some(sequence) = applying_mutation_sequence(conn)? {
+        return Err(RefreshStoreError::ApplyingMutation(sequence));
+    }
     ensure_backend_cohort(conn, expected_kind)?;
     let mut stmt = conn.prepare(
         "select backend_key from items \
@@ -659,6 +961,9 @@ pub fn merge_backend_refreshes(
         return Ok(());
     }
     let tx = crate::store::write_transaction(conn)?;
+    if let Some(sequence) = applying_mutation_sequence(&tx)? {
+        return Err(RefreshStoreError::ApplyingMutation(sequence));
+    }
     ensure_refresh_remote(&tx, expected_kind)?;
     ensure_backend_cohort(&tx, expected_kind)?;
     for (key, refresh) in refreshes {
@@ -877,6 +1182,8 @@ pub enum ClearRemoteError {
         "{0} pending or failed Mutation(s) would be orphaned; resolve them with 'tk sync' or skip them with 'tk sync --skip <id>' before clearing the Remote"
     )]
     WouldOrphan(i64),
+    #[error("Mutation {0} has an indeterminate Backend creation outcome")]
+    ApplyingMutation(i64),
 }
 
 /// Remove the v1 singleton Remote and its Sync Cursor, inside one IMMEDIATE
@@ -900,6 +1207,10 @@ pub fn clear_remote(conn: &mut Connection) -> Result<(), ClearRemoteError> {
         return Err(ClearRemoteError::NotConfigured);
     }
 
+    if let Some(sequence) = applying_mutation_sequence(&tx)? {
+        return Err(ClearRemoteError::ApplyingMutation(sequence));
+    }
+
     let in_flight = pending_or_failed_mutation_count(&tx)?;
     if in_flight > 0 {
         return Err(ClearRemoteError::WouldOrphan(in_flight));
@@ -919,7 +1230,7 @@ pub fn clear_remote(conn: &mut Connection) -> Result<(), ClearRemoteError> {
 /// Filter for the `tk sync log` list view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogListFilter {
-    /// Pending + failed + skipped (the default).
+    /// Pending + failed + applying + skipped (the default).
     Default,
     Pending,
     Failed,
@@ -934,9 +1245,9 @@ pub struct LogListRow {
     pub mutation_type: MutationType,
     pub target_display_id: String,
     pub created_at: String,
-    /// Decoded `Failure.detail`; set only for `failed` rows.
+    /// Decoded `Failure.detail`; set for failed and indeterminate applying rows.
     pub failure_detail: Option<String>,
-    /// Decoded `Failure.class`; set only for `failed` rows. `Some(Unknown)` is
+    /// Decoded `Failure.class`; set for rows carrying failure evidence. `Some(Unknown)` is
     /// a failure tk could not classify — rendering suppresses it.
     pub failure_class: Option<FailureClass>,
 }
@@ -975,7 +1286,7 @@ pub fn list_mutation_log(
     filter: LogListFilter,
 ) -> Result<Vec<LogListRow>, LogError> {
     let where_clause = match filter {
-        LogListFilter::Default => "where m.state in ('pending', 'failed', 'skipped')",
+        LogListFilter::Default => "where m.state in ('pending', 'failed', 'applying', 'skipped')",
         LogListFilter::Pending => "where m.state = 'pending'",
         LogListFilter::Failed => "where m.state = 'failed'",
         LogListFilter::Skipped => "where m.state = 'skipped'",
@@ -1053,7 +1364,7 @@ pub fn show_mutation_log(conn: &Connection, sequence: i64) -> Result<LogDetailRo
 }
 
 /// Decode the `failure_json` text column into the typed [`Failure`] — the
-/// inverse of the encoder in [`apply_mutation_outcome`]. A legacy
+/// inverse of the encoder in the outcome-persistence helpers. A legacy
 /// `{"detail":"…"}` row decodes with class `unknown` and no retry hint.
 fn decode_failure(raw: &str) -> Result<Failure, LogError> {
     Ok(serde_json::from_str(raw)?)
@@ -1325,7 +1636,6 @@ mod directional_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::apply_outcome::PromotionReceipt;
     use crate::domain::status::ItemStatus;
     use crate::domain::ticket_kind::TicketKind;
     use crate::store::migrations;
@@ -1857,10 +2167,10 @@ mod tests {
         }
     }
 
-    // ---- resolve_mutation_view ------------------------------------------
+    // ---- resolve_backend_operation --------------------------------------
 
     #[test]
-    fn resolve_view_binds_the_target_items_backend_identity() {
+    fn resolve_operation_binds_the_target_items_backend_identity() {
         let conn = open_seeded();
         backend_ticket(&conn, "t1", "gh-1", "1", 1);
         insert_fixture_mutation(
@@ -1877,15 +2187,19 @@ mod tests {
         .unwrap();
 
         let rows = load_applicable_mutations(&conn).unwrap();
-        let view = resolve_mutation_view(&conn, &rows[0]).unwrap();
-        assert_eq!(view.sequence, 1);
-        assert_eq!(view.backend_kind.as_deref(), Some("github"));
-        assert_eq!(view.backend_key.as_deref(), Some("1"));
-        assert_eq!(view.counterpart_backend_key, None);
+        let BackendOperation::Edit(edit) = resolve_backend_operation(&conn, &rows[0]).unwrap()
+        else {
+            panic!("ordinary Mutation must resolve as an edit")
+        };
+        let BackendEdit::SetItemStatus { sequence, item, .. } = edit else {
+            panic!("expected status edit")
+        };
+        assert_eq!(sequence, 1);
+        assert_eq!(item.backend_key, "1");
     }
 
     #[test]
-    fn resolve_view_leaves_identity_none_for_a_pending_promotion_item() {
+    fn resolve_operation_leaves_identity_none_for_a_pending_promotion_item() {
         // A Promotion Mutation targets a Local Item (ADR-0036), so there is no
         // backend identity to bind until its own receipt lands.
         let conn = open_seeded();
@@ -1914,13 +2228,17 @@ mod tests {
         .unwrap();
 
         let rows = load_applicable_mutations(&conn).unwrap();
-        let view = resolve_mutation_view(&conn, &rows[0]).unwrap();
-        assert_eq!(view.backend_kind, None);
-        assert_eq!(view.backend_key, None);
+        let BackendOperation::Create(create) = resolve_backend_operation(&conn, &rows[0]).unwrap()
+        else {
+            panic!("Promotion must resolve as creation")
+        };
+        assert_eq!(create.sequence(), 1);
+        assert_eq!(create.mutation_type(), MutationType::PromoteTicket);
+        assert_eq!(create.promotion().title, "T");
     }
 
     #[test]
-    fn resolve_view_resolves_dependency_counterpart_backend_key() {
+    fn resolve_operation_resolves_dependency_counterpart_backend_key() {
         // A dependency Mutation's payload stores the Blocking Item's internal
         // id; resolution must turn it into that item's backend_key so the
         // adapter can reach the backend.
@@ -1941,17 +2259,134 @@ mod tests {
         .unwrap();
 
         let rows = load_applicable_mutations(&conn).unwrap();
-        let view = resolve_mutation_view(&conn, &rows[0]).unwrap();
-        assert_eq!(view.backend_key.as_deref(), Some("5"), "blocked item");
-        assert_eq!(
-            view.counterpart_backend_key.as_deref(),
-            Some("9"),
-            "blocking item resolved from its internal id"
-        );
+        let BackendOperation::Edit(edit) = resolve_backend_operation(&conn, &rows[0]).unwrap()
+        else {
+            panic!("Dependency must resolve as an edit")
+        };
+        let BackendEdit::AddDependency {
+            blocked, blocking, ..
+        } = edit
+        else {
+            panic!("expected dependency edit")
+        };
+        assert_eq!(blocked.backend_key, "5", "blocked item");
+        assert_eq!(blocking.backend_key, "9", "blocking item");
     }
 
     #[test]
-    fn resolve_view_leaves_counterpart_none_for_a_local_blocking_item() {
+    fn resolve_operation_resolves_epic_membership_identities() {
+        let conn = open_seeded();
+        backend_ticket(&conn, "ticket", "gh-5", "5", 1);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "epic",
+                display: "gh-9",
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                title: "Epic",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("9"),
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "add_ticket_to_epic",
+                item_id: "ticket",
+                payload_json: r#"{"epic_id":"epic"}"#,
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        let rows = load_applicable_mutations(&conn).unwrap();
+        let BackendOperation::Edit(BackendEdit::AddTicketToEpic { ticket, epic, .. }) =
+            resolve_backend_operation(&conn, &rows[0]).unwrap()
+        else {
+            panic!("expected Epic membership edit")
+        };
+        assert_eq!(ticket.backend_key, "5");
+        assert_eq!(epic.backend_key, "9");
+    }
+
+    #[test]
+    fn resolve_operation_rejects_a_ticket_as_the_membership_epic() {
+        let conn = open_seeded();
+        backend_ticket(&conn, "ticket", "gh-5", "5", 1);
+        backend_ticket(&conn, "not-epic", "gh-9", "9", 2);
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "add_ticket_to_epic",
+                item_id: "ticket",
+                payload_json: r#"{"epic_id":"not-epic"}"#,
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        let rows = load_applicable_mutations(&conn).unwrap();
+        assert!(matches!(
+            resolve_backend_operation(&conn, &rows[0]),
+            Err(LoadApplicableError::CounterpartClassMismatch {
+                mutation_type: MutationType::AddTicketToEpic,
+                ref item_id,
+                expected: ItemClass::Epic,
+                actual: ItemClass::Ticket,
+            }) if item_id == "not-epic"
+        ));
+    }
+
+    #[test]
+    fn resolve_operation_rejects_a_ticket_update_for_an_epic() {
+        let conn = open_seeded();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "epic",
+                display: "gh-9",
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                title: "Epic",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("9"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        let row = ApplicableMutationRow {
+            sequence: 1,
+            mutation_type: MutationType::UpdateTicket,
+            item_id: "epic".into(),
+            item_class: ItemClass::Epic,
+            payload: MutationPayload::UpdateTitleBody(TitleBody {
+                title: "Renamed".into(),
+                body: String::new(),
+            }),
+        };
+
+        assert!(matches!(
+            resolve_backend_operation(&conn, &row),
+            Err(LoadApplicableError::OperationShapeMismatch {
+                mutation_type: MutationType::UpdateTicket,
+                item_class: ItemClass::Epic,
+            })
+        ));
+    }
+
+    #[test]
+    fn resolve_operation_rejects_a_local_blocking_item() {
         let conn = open_seeded();
         backend_ticket(&conn, "blocked", "gh-5", "5", 1);
         insert_fixture_item(
@@ -1979,12 +2414,17 @@ mod tests {
         .unwrap();
 
         let rows = load_applicable_mutations(&conn).unwrap();
-        let view = resolve_mutation_view(&conn, &rows[0]).unwrap();
-        assert_eq!(view.counterpart_backend_key, None);
+        assert!(matches!(
+            resolve_backend_operation(&conn, &rows[0]),
+            Err(LoadApplicableError::MissingBackendIdentity {
+                mutation_type: MutationType::AddDependency,
+                ref item_id,
+            }) if item_id == "blocking"
+        ));
     }
 
     #[test]
-    fn resolve_view_reads_an_identity_a_receipt_just_assigned() {
+    fn resolve_operation_reads_an_identity_a_receipt_just_assigned() {
         // Identity is resolved per Mutation precisely so a Promotion receipt
         // applied earlier in the same run is visible to the Mutations behind it.
         let mut conn = open_seeded();
@@ -2018,7 +2458,7 @@ mod tests {
             &tx,
             "t1",
             "github",
-            &PromotionReceipt {
+            &BackendItemIdentity {
                 backend_key: "42".into(),
                 display_id: "gh-42".into(),
             },
@@ -2027,9 +2467,14 @@ mod tests {
         .unwrap();
         tx.commit().unwrap();
 
-        let view = resolve_mutation_view(&conn, &rows[0]).unwrap();
-        assert_eq!(view.backend_kind.as_deref(), Some("github"));
-        assert_eq!(view.backend_key.as_deref(), Some("42"));
+        let BackendOperation::Edit(edit) = resolve_backend_operation(&conn, &rows[0]).unwrap()
+        else {
+            panic!("ordinary Mutation must resolve as an edit")
+        };
+        let BackendEdit::SetItemStatus { item, .. } = edit else {
+            panic!("expected status edit")
+        };
+        assert_eq!(item.backend_key, "42");
     }
 
     #[test]
@@ -2088,7 +2533,7 @@ mod tests {
         }
     }
 
-    // ---- apply_mutation_outcome -----------------------------------------
+    // ---- outcome persistence -------------------------------------------
 
     fn seed_remote(conn: &Connection) {
         insert_fixture_remote(conn, FixtureRemote::default()).unwrap();
@@ -2111,15 +2556,15 @@ mod tests {
     }
 
     #[test]
-    fn apply_outcome_pending_success_applies_and_advances_cursor() {
+    fn edit_outcome_pending_success_applies_and_advances_cursor() {
         let mut conn = open_seeded();
         seed_remote(&conn);
         seed_pending(&conn, 5);
 
-        apply_mutation_outcome(
+        persist_edit_outcome(
             &mut conn,
             5,
-            &ApplyOutcome::accepted(),
+            &BackendEditOutcome::Acknowledged,
             "2026-05-19T00:00:00Z",
         )
         .unwrap();
@@ -2145,15 +2590,15 @@ mod tests {
     }
 
     #[test]
-    fn apply_outcome_pending_failure_records_detail() {
+    fn edit_outcome_pending_failure_records_detail() {
         let mut conn = open_seeded();
         seed_remote(&conn);
         seed_pending(&conn, 1);
 
-        apply_mutation_outcome(
+        persist_edit_outcome(
             &mut conn,
             1,
-            &ApplyOutcome::rejected("HTTP 422: title required"),
+            &BackendEditOutcome::rejected("HTTP 422: title required"),
             "2026-05-19T00:00:00Z",
         )
         .unwrap();
@@ -2170,7 +2615,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_outcome_failed_success_clears_failure_and_applies() {
+    fn edit_outcome_failed_success_clears_failure_and_applies() {
         let mut conn = open_seeded();
         seed_remote(&conn);
         backend_ticket(&conn, "t1", "gh-1", "1", 1);
@@ -2188,10 +2633,10 @@ mod tests {
         )
         .unwrap();
 
-        apply_mutation_outcome(
+        persist_edit_outcome(
             &mut conn,
             3,
-            &ApplyOutcome::accepted(),
+            &BackendEditOutcome::Acknowledged,
             "2026-05-19T00:00:00Z",
         )
         .unwrap();
@@ -2208,7 +2653,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_outcome_failed_failure_keeps_state_refreshes_detail() {
+    fn edit_outcome_failed_failure_keeps_state_refreshes_detail() {
         let mut conn = open_seeded();
         seed_remote(&conn);
         backend_ticket(&conn, "t1", "gh-1", "1", 1);
@@ -2226,10 +2671,10 @@ mod tests {
         )
         .unwrap();
 
-        apply_mutation_outcome(
+        persist_edit_outcome(
             &mut conn,
             2,
-            &ApplyOutcome::rejected("new reason"),
+            &BackendEditOutcome::rejected("new reason"),
             "2026-05-19T00:00:00Z",
         )
         .unwrap();
@@ -2247,24 +2692,24 @@ mod tests {
     }
 
     #[test]
-    fn apply_outcome_missing_row_returns_not_found() {
+    fn edit_outcome_missing_row_returns_not_found() {
         let mut conn = open_seeded();
         seed_remote(&conn);
-        match apply_mutation_outcome(
+        match persist_edit_outcome(
             &mut conn,
             999,
-            &ApplyOutcome::accepted(),
+            &BackendEditOutcome::Acknowledged,
             "2026-05-19T00:00:00Z",
         )
         .unwrap_err()
         {
-            ApplyMutationOutcomeError::MutationNotFound(999) => {}
+            PersistMutationOutcomeError::MutationNotFound(999) => {}
             other => panic!("expected MutationNotFound, got {other:?}"),
         }
     }
 
     #[test]
-    fn apply_outcome_terminal_state_returns_not_applicable() {
+    fn edit_outcome_terminal_state_returns_not_applicable() {
         let mut conn = open_seeded();
         seed_remote(&conn);
         backend_ticket(&conn, "t1", "gh-1", "1", 1);
@@ -2281,15 +2726,15 @@ mod tests {
         )
         .unwrap();
 
-        match apply_mutation_outcome(
+        match persist_edit_outcome(
             &mut conn,
             7,
-            &ApplyOutcome::accepted(),
+            &BackendEditOutcome::Acknowledged,
             "2026-05-19T00:00:00Z",
         )
         .unwrap_err()
         {
-            ApplyMutationOutcomeError::MutationNotApplicable(7) => {}
+            PersistMutationOutcomeError::MutationNotApplicable(7) => {}
             other => panic!("expected MutationNotApplicable, got {other:?}"),
         }
     }
@@ -2324,15 +2769,19 @@ mod tests {
     }
 
     #[test]
-    fn apply_outcome_promotion_receipt_lands_with_the_state_transition() {
+    fn create_outcome_identity_lands_with_the_state_transition() {
         let mut conn = open_seeded();
         seed_remote(&conn);
         seed_pending_promotion(&conn, 4);
+        begin_create(&mut conn, 4, "2026-05-19T00:00:00Z").unwrap();
 
-        apply_mutation_outcome(
+        persist_create_outcome(
             &mut conn,
             4,
-            &ApplyOutcome::promoted("42", "gh-42"),
+            &BackendCreateOutcome::Created(BackendItemIdentity {
+                backend_key: "42".into(),
+                display_id: "gh-42".into(),
+            }),
             "2026-05-19T00:00:00Z",
         )
         .unwrap();
@@ -2367,10 +2816,137 @@ mod tests {
     }
 
     #[test]
-    fn apply_outcome_rolls_back_when_the_receipt_cannot_be_persisted() {
-        // A Display ID another Item already claims (ADR-0036 Consequences): the
-        // whole transaction rolls back, so the Mutation stays applicable and the
-        // Item stays Local. tk-139 owns the recovery; this pins the behaviour.
+    fn failed_creation_retried_as_created_clears_failure_and_applies_identity() {
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        seed_pending_promotion(&conn, 4);
+        conn.execute(
+            "update mutations set state = 'failed', failure_json = \
+             '{\"detail\":\"prior failure\"}' where sequence = 4",
+            [],
+        )
+        .unwrap();
+        begin_create(&mut conn, 4, "2026-05-19T00:00:00Z").unwrap();
+
+        persist_create_outcome(
+            &mut conn,
+            4,
+            &BackendCreateOutcome::Created(BackendItemIdentity {
+                backend_key: "42".into(),
+                display_id: "gh-42".into(),
+            }),
+            "2026-05-19T00:00:00Z",
+        )
+        .unwrap();
+
+        let (state, failure, display, origin, kind, key): (
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+            String,
+        ) = conn
+            .query_row(
+                "select m.state, m.failure_json, i.display_value, i.origin, \
+                        i.backend_kind, i.backend_key \
+                   from mutations m join items i on i.id = m.item_id \
+                  where m.sequence = 4",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!((state.as_str(), failure), ("applied", None));
+        assert_eq!(
+            (
+                display.as_str(),
+                origin.as_str(),
+                kind.as_str(),
+                key.as_str()
+            ),
+            ("gh-42", "backend", "github", "42")
+        );
+        let cursor: i64 = conn
+            .query_row(
+                "select last_applied_sequence from sync_cursors where remote_name = 'primary'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cursor, 4);
+    }
+
+    #[test]
+    fn create_rejection_records_failure_without_converting_the_item() {
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        seed_pending_promotion(&conn, 4);
+        begin_create(&mut conn, 4, "2026-05-19T00:00:00Z").unwrap();
+
+        persist_create_outcome(
+            &mut conn,
+            4,
+            &BackendCreateOutcome::rejected("title is required"),
+            "2026-05-19T00:00:00Z",
+        )
+        .unwrap();
+
+        let (state, failure, origin): (String, String, String) = conn
+            .query_row(
+                "select m.state, m.failure_json, i.origin \
+                   from mutations m join items i on i.id = m.item_id \
+                  where m.sequence = 4",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "failed");
+        assert!(failure.contains("title is required"));
+        assert_eq!(origin, "local");
+    }
+
+    #[test]
+    fn indeterminate_creation_records_failure_without_inventing_an_identity() {
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        seed_pending_promotion(&conn, 4);
+        begin_create(&mut conn, 4, "2026-05-19T00:00:00Z").unwrap();
+
+        persist_create_outcome(
+            &mut conn,
+            4,
+            &BackendCreateOutcome::indeterminate("gh exited after sending the request"),
+            "2026-05-19T00:00:00Z",
+        )
+        .unwrap();
+
+        let (state, failure, key): (String, String, Option<String>) = conn
+            .query_row(
+                "select m.state, m.failure_json, i.backend_key \
+                   from mutations m join items i on i.id = m.item_id \
+                  where m.sequence = 4",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "applying");
+        assert!(failure.contains("after sending"));
+        assert_eq!(key, None);
+    }
+
+    #[test]
+    fn create_outcome_rolls_back_when_the_identity_cannot_be_persisted() {
+        // A Display ID another Item already claims rolls back the receipt while
+        // preserving `applying`; automatic replay must not risk a second object.
         let mut conn = open_seeded();
         seed_remote(&conn);
         seed_pending_promotion(&conn, 4);
@@ -2385,16 +2961,20 @@ mod tests {
             },
         )
         .unwrap();
+        begin_create(&mut conn, 4, "2026-05-19T00:00:00Z").unwrap();
 
-        let err = apply_mutation_outcome(
+        let err = persist_create_outcome(
             &mut conn,
             4,
-            &ApplyOutcome::promoted("42", "gh-42"),
+            &BackendCreateOutcome::Created(BackendItemIdentity {
+                backend_key: "42".into(),
+                display_id: "gh-42".into(),
+            }),
             "2026-05-19T00:00:00Z",
         )
         .unwrap_err();
         assert!(
-            matches!(err, ApplyMutationOutcomeError::Storage(_)),
+            matches!(err, PersistMutationOutcomeError::Storage(_)),
             "the collision must surface, not be swallowed; got {err:?}"
         );
 
@@ -2407,7 +2987,7 @@ mod tests {
             state, "applied",
             "a Mutation with no receipt is not applied"
         );
-        assert_eq!(state, "pending");
+        assert_eq!(state, "applying");
 
         let (display, origin): (String, String) = conn
             .query_row(
@@ -2430,26 +3010,26 @@ mod tests {
     }
 
     #[test]
-    fn apply_outcome_refuses_an_acknowledgement_for_a_promotion() {
+    fn edit_outcome_refuses_a_promotion_mutation() {
         // Writing `applied` here would strand a Local Item behind an applied
         // Promotion — the state the typed Receipt exists to prevent.
         let mut conn = open_seeded();
         seed_remote(&conn);
         seed_pending_promotion(&conn, 4);
 
-        match apply_mutation_outcome(
+        match persist_edit_outcome(
             &mut conn,
             4,
-            &ApplyOutcome::accepted(),
+            &BackendEditOutcome::Acknowledged,
             "2026-05-19T00:00:00Z",
         )
         .unwrap_err()
         {
-            ApplyMutationOutcomeError::ReceiptShapeMismatch {
+            PersistMutationOutcomeError::OperationShapeMismatch {
                 sequence: 4,
                 mutation_type: MutationType::PromoteTicket,
             } => {}
-            other => panic!("expected ReceiptShapeMismatch, got {other:?}"),
+            other => panic!("expected OperationShapeMismatch, got {other:?}"),
         }
 
         let (state, origin): (String, String) = conn
@@ -2465,24 +3045,17 @@ mod tests {
     }
 
     #[test]
-    fn apply_outcome_refuses_a_promotion_receipt_for_a_plain_mutation() {
+    fn begin_create_refuses_a_plain_mutation() {
         let mut conn = open_seeded();
         seed_remote(&conn);
         seed_pending(&conn, 5);
 
-        match apply_mutation_outcome(
-            &mut conn,
-            5,
-            &ApplyOutcome::promoted("42", "gh-42"),
-            "2026-05-19T00:00:00Z",
-        )
-        .unwrap_err()
-        {
-            ApplyMutationOutcomeError::ReceiptShapeMismatch {
+        match begin_create(&mut conn, 5, "2026-05-19T00:00:00Z").unwrap_err() {
+            PersistMutationOutcomeError::OperationShapeMismatch {
                 sequence: 5,
                 mutation_type: MutationType::UpdateTicket,
             } => {}
-            other => panic!("expected ReceiptShapeMismatch, got {other:?}"),
+            other => panic!("expected OperationShapeMismatch, got {other:?}"),
         }
 
         let state: String = conn
@@ -2513,7 +3086,8 @@ mod tests {
         )
         .unwrap();
 
-        mark_mutation_skipped(&mut conn, 1, "2026-05-19T00:00:00Z").unwrap();
+        let workflow = RemoteWorkflowGuard::for_test();
+        mark_mutation_skipped(&mut conn, &workflow, 1, "2026-05-19T00:00:00Z").unwrap();
 
         let (state, failure): (String, String) = conn
             .query_row(
@@ -2530,7 +3104,8 @@ mod tests {
     fn mark_skipped_refuses_non_failed() {
         let mut conn = open_seeded();
         seed_pending(&conn, 1);
-        match mark_mutation_skipped(&mut conn, 1, "2026-05-19T00:00:00Z").unwrap_err() {
+        let workflow = RemoteWorkflowGuard::for_test();
+        match mark_mutation_skipped(&mut conn, &workflow, 1, "2026-05-19T00:00:00Z").unwrap_err() {
             MarkSkippedError::MutationNotFailed(1) => {}
             other => panic!("expected MutationNotFailed, got {other:?}"),
         }
@@ -2539,7 +3114,8 @@ mod tests {
     #[test]
     fn mark_skipped_missing_row_returns_not_found() {
         let mut conn = open_seeded();
-        match mark_mutation_skipped(&mut conn, 42, "2026-05-19T00:00:00Z").unwrap_err() {
+        let workflow = RemoteWorkflowGuard::for_test();
+        match mark_mutation_skipped(&mut conn, &workflow, 42, "2026-05-19T00:00:00Z").unwrap_err() {
             MarkSkippedError::MutationNotFound(42) => {}
             other => panic!("expected MutationNotFound, got {other:?}"),
         }
@@ -2577,7 +3153,10 @@ mod tests {
             )
             .unwrap();
 
-            match mark_mutation_skipped(&mut conn, 1, "2026-05-19T00:00:00Z").unwrap_err() {
+            let workflow = RemoteWorkflowGuard::for_test();
+            match mark_mutation_skipped(&mut conn, &workflow, 1, "2026-05-19T00:00:00Z")
+                .unwrap_err()
+            {
                 MarkSkippedError::CannotSkipPromotion(1) => {}
                 other => panic!("expected CannotSkipPromotion for {mutation_type}, got {other:?}"),
             }
@@ -2849,12 +3428,59 @@ mod tests {
         assert!(get_remote(&conn).unwrap().is_some());
     }
 
+    #[test]
+    fn clear_remote_refuses_an_applying_creation() {
+        let mut conn = open_seeded();
+        set_remote(&mut conn, BackendKind::Github, "{}", "2026-06-17T00:00:00Z").unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Local work",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 3,
+                mutation_type: "promote_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
+                state: "applying",
+                promotion_operation_id: Some("op-1"),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            clear_remote(&mut conn),
+            Err(ClearRemoteError::ApplyingMutation(3))
+        ));
+        assert!(get_remote(&conn).unwrap().is_some());
+    }
+
     // ---- log read -------------------------------------------------------
 
     fn seed_log_fixture(conn: &Connection) {
         backend_ticket(conn, "t1", "gh-1", "1", 1);
         backend_ticket(conn, "t2", "gh-2", "2", 2);
         backend_ticket(conn, "t3", "gh-3", "3", 3);
+        insert_fixture_item(
+            conn,
+            FixtureItem {
+                id: "t4",
+                display: "tk-4",
+                title: "Local work",
+                created_seq: 4,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
         insert_fixture_mutation(
             conn,
             FixtureMutation {
@@ -2863,6 +3489,20 @@ mod tests {
                 item_id: "t1",
                 payload_json: r#"{"title":"A","body":""}"#,
                 state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            conn,
+            FixtureMutation {
+                sequence: 4,
+                mutation_type: "promote_ticket",
+                item_id: "t4",
+                payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
+                state: "applying",
+                failure_json: Some(r#"{"detail":"unknown effect"}"#),
+                promotion_operation_id: Some("op-1"),
                 ..FixtureMutation::default()
             },
         )
@@ -2895,19 +3535,21 @@ mod tests {
     }
 
     #[test]
-    fn list_default_returns_pending_failed_skipped_with_failure_detail() {
+    fn list_default_returns_nonterminal_and_skipped_rows_with_failure_detail() {
         let conn = open_seeded();
         seed_log_fixture(&conn);
 
         let rows = list_mutation_log(&conn, LogListFilter::Default).unwrap();
         let seqs: Vec<i64> = rows.iter().map(|r| r.sequence).collect();
-        assert_eq!(seqs, vec![1, 2, 3]);
+        assert_eq!(seqs, vec![1, 2, 3, 4]);
         assert_eq!(rows[0].failure_detail, None);
         assert_eq!(
             rows[1].failure_detail.as_deref(),
             Some("HTTP 422: rejected")
         );
         assert_eq!(rows[1].target_display_id, "gh-2");
+        assert_eq!(rows[3].state, MutationState::Applying);
+        assert_eq!(rows[3].failure_detail.as_deref(), Some("unknown effect"));
     }
 
     #[test]

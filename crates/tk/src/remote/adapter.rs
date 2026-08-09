@@ -2,31 +2,30 @@
 //!
 //! Commands and the sync engine consume this trait so tests can substitute a
 //! [`crate::remote::fake::FakeAdapter`] without spawning real backend CLIs.
-//! The contract data types it exchanges — [`AdoptedItem`], [`BackendItemRefresh`],
-//! [`MutationView`], [`ApplyOutcome`] — are pure domain data under
-//! [`crate::domain`].
+//! The contract data types it exchanges are pure domain data under
+//! [`crate::domain`]. Edits and creation are separate calls because creation
+//! has a stronger result-certainty contract.
 //!
 //! Operational calls take `&mut self` so an Adapter may consume per-call
 //! state. Backend-kind and capability declarations are immutable properties
 //! and take `&self`.
 
-use crate::domain::apply_outcome::ApplyOutcome;
 use crate::domain::backend_kind::BackendKind;
-use crate::domain::backend_operation::{AdoptedItem, BackendItemRefresh};
-use crate::domain::mutation_view::MutationView;
+use crate::domain::backend_operation::{
+    AdoptedItem, BackendCreate, BackendEdit, BackendItemRefresh,
+};
+use crate::domain::backend_outcome::{BackendCreateOutcome, BackendEditOutcome};
 use crate::domain::promotion_capability::PromotionCapabilities;
 use crate::proc::ProcError;
 use thiserror::Error;
 
-/// Error returned by [`Adapter::apply_mutation`].
+/// Environment error returned by Backend Adapter edit operations.
 ///
 /// Exactly the subprocess runner's error set: an Adapter reaches the Backend
 /// through the injectable runner, so the environment-failure vocabulary is
 /// the runner's. Mutation-level
-/// rejection — non-zero exit, refused write, validation failure — does NOT
-/// flow here; it rides the [`ApplyOutcome::Rejected`] arm so the engine can persist
-/// the failure detail to `mutations.failure_json` without conflating it with
-/// adapter unavailability (the ADR-0009 sync failure taxonomy).
+/// rejection does not flow here; it rides the typed outcome so the engine can
+/// persist it without conflating it with Adapter unavailability (ADR-0009).
 pub type ApplyError = ProcError;
 
 /// Error returned by Backend Adapter read operations.
@@ -60,17 +59,21 @@ pub trait Adapter {
     /// failure prevents every collected refresh from being merged.
     fn refresh_item(&mut self, key: &str) -> Result<BackendItemRefresh, AdapterReadError>;
 
-    /// Apply one pending Mutation Log entry to the backend.
+    /// Apply one non-Promotion Mutation to an existing Backend object.
     ///
-    /// Returns [`ApplyOutcome::Accepted`] (a `Receipt`) or [`ApplyOutcome::Rejected`] (a
-    /// `Failure` carrying the rejection detail). Environment failures arrive
-    /// through the [`ApplyError`] error arm. `now` is the engine's injected
-    /// timestamp for adapters that stamp their backend writes.
-    fn apply_mutation(
+    /// Environment failures arrive through the [`ApplyError`] error arm.
+    fn apply_edit(
         &mut self,
-        view: &MutationView,
+        edit: &BackendEdit,
         now: &str,
-    ) -> Result<ApplyOutcome, ApplyError>;
+    ) -> Result<BackendEditOutcome, ApplyError>;
+
+    /// Apply one Promotion by creating a new Backend object.
+    ///
+    /// The result distinguishes a confirmed identity, certified no effect,
+    /// and an indeterminate result. Creation exposes no error arm because a
+    /// generic process failure cannot prove that invocation never started.
+    fn create_item(&mut self, create: &BackendCreate, now: &str) -> BackendCreateOutcome;
 
     /// The Backend's static Promotion capability declaration (ADR-0036
     /// "Backend capability is declared per facet and staged"). Preflight

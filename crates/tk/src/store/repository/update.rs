@@ -331,12 +331,11 @@ pub fn update_item<C: Clock + ?Sized>(
 /// Whether an Epic-membership change is backend intent: the Ticket and the
 /// Epic must both be backend-bound, to the *same* Backend.
 ///
-/// An `add_ticket_to_epic` / `remove_ticket_from_epic` payload names the Epic,
-/// and nothing resolves a backend identity for it — `resolve_mutation_view`
-/// resolves a counterpart only for a Dependency payload — so a membership
-/// naming a Local Epic would reach the Backend Adapter unaddressable. Both
-/// endpoints are asked about, the same rule Promotion preflight applies to a
-/// membership draft (ADR-0035) and `dependency_rule` applies to an edge.
+/// The typed membership operation carries both Backend identities, resolved
+/// immediately before delivery. Appending intent only when both endpoints
+/// already bind the same Backend ensures that resolution can succeed. This is
+/// the same rule Promotion preflight applies to a membership draft (ADR-0035)
+/// and `dependency_rule` applies to an edge.
 fn membership_is_backend_intent(
     conn: &rusqlite::Connection,
     ticket: &BackendBinding,
@@ -412,7 +411,10 @@ mod tests {
         let mut conn = Connection::open_in_memory().expect("open :memory:");
         conn.execute_batch("pragma foreign_keys = on").unwrap();
         migrations::apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        Store { conn }
+        Store {
+            conn,
+            tk_dir: std::path::PathBuf::new(),
+        }
     }
 
     fn seed_local_ticket(store: &Store, id: &str, display: &str, created_seq: i64) {
@@ -552,6 +554,37 @@ mod tests {
             .query_row("select count(*) from mutations", [], |r| r.get(0))
             .unwrap();
         assert_eq!(mutations, 0);
+    }
+
+    #[test]
+    fn update_on_an_applying_promotion_appends_intent_behind_it() {
+        let mut store = open_seeded();
+        seed_local_ticket(&store, "t1", "tk-1", 1);
+        commit_promotion(&mut store.conn, "t1");
+        store
+            .conn
+            .execute(
+                "update mutations set state = 'applying' where mutation_type = 'promote_ticket'",
+                [],
+            )
+            .unwrap();
+
+        update_item(
+            &mut store,
+            &clock(),
+            UpdateRequest {
+                id: "t1",
+                item_class: ItemClass::Ticket,
+                title: Some("Renamed while applying"),
+                ..UpdateRequest::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            mutation_types(&store.conn).unwrap(),
+            vec!["promote_ticket", "update_ticket"]
+        );
     }
 
     #[test]

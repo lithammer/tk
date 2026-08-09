@@ -19,8 +19,8 @@ crates/tk/src/
   cli.rs                   top-level dispatch and shared Deps
   commands/                per-command clap-derive Args and handlers
   domain/                  pure domain enums and helpers (incl. sync contract
-                           types: MutationPayload, MutationView,
-                           directional Backend read contracts, ApplyOutcome, and the
+                           types: MutationPayload, BackendEdit, BackendCreate,
+                           directional Backend read and outcome contracts, and the
                            Promotion contract types: BackendBinding,
                            PromotionCapabilities, PromotionGraph,
                            PromotionPlan)
@@ -139,12 +139,23 @@ Important stable contracts:
   and read views exist; command surface is tracked by `tk-19`.
 - `mutations` stores durable backend intent with a monotonic Mutation Sequence,
   state, JSON payload, and optional Mutation Failure JSON. The persisted
-  failure JSON shape is `{"detail": "..."}` ([ADR
-  0009](./docs/adr/0009-sync-failure-taxonomy.md)); `tk-11` graduates this
-  into a typed discriminated union. Migration 007 adds an optional Promotion
+  failure JSON is a typed record carrying detail, classification, and an
+  optional retry hint ([ADR 0009](./docs/adr/0009-sync-failure-taxonomy.md)).
+  Migration 007 adds an optional Promotion
   Operation grouping every Mutation one `tk promote` invocation appended, so
   the command can ask whether its whole operation resolved ([ADR
   0036](./docs/adr/0036-promotion-intent-precedes-backend-capability.md)).
+  Migration 008 adds `applying`, durably written before non-idempotent Backend
+  creation. An `applying` Mutation is excluded from automatic replay and is a
+  global barrier for Pull, Apply, Adopt, Promotion commit, and Remote clear;
+  Repository Store local edits remain available.
+- `Store::lock_remote_workflow` owns an exclusive OS lock on the stable
+  `<git-common-dir>/tk/remote.lock` file. Sync, Adopt, Promotion, and Remote
+  configuration hold one guard across Backend access and Store persistence;
+  nested Promotion sync reuses its caller's guard. The lock closes the live
+  process check-then-act race, while the durable `applying` state remains the
+  crash-recovery barrier. Sync Skip shares the guard but commits before the
+  Adapter opens; Sync Log and local commands stay unlocked.
 - `remotes` and `sync_cursors` hold the v1 singleton Remote model.
 - `store_config.display_prefix` controls newly generated local Display IDs.
   Custom prefix configuration is tracked by `tk-22`.

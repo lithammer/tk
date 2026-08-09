@@ -10,26 +10,28 @@
 //!    The merge transaction is skipped when the Pull is empty so an idle sync
 //!    takes no write lock.
 //! 2. Apply loop. [`load_applicable_mutations`] decodes the pending+failed
-//!    rows in sequence order; [`resolve_mutation_view`] binds each one's
-//!    backend identity in turn, immediately before it is handed to
-//!    [`Adapter::apply_mutation`] and persisted via [`apply_mutation_outcome`].
-//!    The loop stops at the first [`ApplyOutcome::Rejected`].
+//!    rows in sequence order; [`resolve_backend_operation`] classifies and
+//!    binds each one immediately before delivery. Edits and creation use
+//!    distinct Adapter and Store contracts.
 //!
 //! `tk sync --skip <id>` does NOT pass through the engine — the command calls
-//! [`crate::store::sync::mark_mutation_skipped`] directly, before opening the
-//! adapter, so a skip persists even when the Remote's adapter is unavailable.
+//! [`crate::store::sync::mark_mutation_skipped`] directly under the Remote
+//! workflow guard, before opening the adapter, so a skip persists even when
+//! the Remote's adapter is unavailable.
 //!
 //! The engine is backend-blind: the Adapter trait is its only seam.
 
 use rusqlite::Connection;
 use thiserror::Error;
 
-use crate::domain::apply_outcome::ApplyOutcome;
+use crate::domain::backend_operation::BackendOperation;
+use crate::domain::backend_outcome::{BackendCreateOutcome, BackendEditOutcome};
 use crate::remote::adapter::{Adapter, AdapterReadError, ApplyError};
+use crate::store::repository::RemoteWorkflowGuard;
 use crate::store::sync::{
-    ApplyMutationOutcomeError, LoadApplicableError, RefreshStoreError, active_backend_keys,
-    apply_mutation_outcome, load_applicable_mutations, merge_backend_refreshes,
-    resolve_mutation_view,
+    LoadApplicableError, PersistMutationOutcomeError, RefreshStoreError, active_backend_keys,
+    applying_mutation_sequence, begin_create, load_applicable_mutations, merge_backend_refreshes,
+    persist_create_outcome, persist_edit_outcome, resolve_backend_operation,
 };
 
 /// Summary of one sync run for the calling command to render.
@@ -39,28 +41,28 @@ pub struct SyncReport {
     pub pulled_count: usize,
     /// Number of Mutations that transitioned to `applied` during this run.
     pub applied_count: usize,
-    /// When `Some`, the sync stopped because this Mutation's Apply returned
-    /// [`ApplyOutcome::Rejected`]; the `mutations.failure_json` row records the
-    /// detail and the caller renders the sequence.
+    /// When `Some`, the sync stopped because this Mutation's Apply returned a
+    /// certified Backend rejection; `failure_json` records the detail and the
+    /// caller renders the sequence. Indeterminate creation surfaces through
+    /// [`RunSyncError::ApplyingMutation`].
     pub stopped_at_sequence: Option<i64>,
 }
 
 /// Error returned by [`run_sync`].
 ///
 /// One enum unioning the Adapter trait's error sets, the merge/load SQL
-/// boundary, and the outcome-persistence boundary. Catastrophic environment
-/// failures and Pull failures bubble out unchanged so `tk sync` can dispatch
-/// on the variant for its stderr rendering. The per-Mutation rejection that
-/// stops the loop is NOT an error here — it surfaces through
-/// [`SyncReport::stopped_at_sequence`].
+/// boundary, and the outcome-persistence boundary. Environment failures, Pull
+/// failures, and indeterminate creation bubble out so `tk sync` can render safe
+/// recovery guidance. A certified per-Mutation rejection is not an error here
+/// — it surfaces through [`SyncReport::stopped_at_sequence`].
 #[derive(Debug, Error)]
 pub enum RunSyncError {
     /// Pull failed: adapter unavailable ([`AdapterReadError::Env`]) or backend
     /// rejection ([`AdapterReadError::Failed`] carrying captured stderr).
     #[error(transparent)]
     Pull(#[from] AdapterReadError),
-    /// Apply hit an environment failure (backend CLI missing / spawn failed);
-    /// the in-flight Mutation row is left `pending`.
+    /// An edit hit an environment failure (backend CLI missing / spawn failed);
+    /// the in-flight Mutation keeps its prior `pending` or `failed` state.
     #[error(transparent)]
     Apply(#[from] ApplyError),
     #[error(transparent)]
@@ -68,7 +70,9 @@ pub enum RunSyncError {
     #[error(transparent)]
     Load(#[from] LoadApplicableError),
     #[error(transparent)]
-    Outcome(#[from] ApplyMutationOutcomeError),
+    Outcome(#[from] PersistMutationOutcomeError),
+    #[error("Mutation {0} has an indeterminate Backend creation outcome")]
+    ApplyingMutation(i64),
 }
 
 /// Run one sync against a configured Adapter.
@@ -77,8 +81,14 @@ pub enum RunSyncError {
 pub fn run_sync(
     conn: &mut Connection,
     adapter: &mut dyn Adapter,
+    _workflow: &RemoteWorkflowGuard,
     now: &str,
 ) -> Result<SyncReport, RunSyncError> {
+    if let Some(sequence) = applying_mutation_sequence(conn)
+        .map_err(|error| RunSyncError::Refresh(RefreshStoreError::Storage(error)))?
+    {
+        return Err(RunSyncError::ApplyingMutation(sequence));
+    }
     let mut report = SyncReport {
         pulled_count: 0,
         applied_count: 0,
@@ -101,9 +111,9 @@ pub fn run_sync(
         merge_backend_refreshes(conn, kind, &refreshes, now)?;
     }
 
-    // Apply loop. An environment failure from `apply_mutation` bubbles via `?`
-    // and leaves the row `pending` (no outcome persisted); a per-Mutation
-    // rejection is persisted and stops the loop.
+    // Apply loop. An environment failure from an Adapter write bubbles via `?`
+    // without changing the row's prior `pending` or `failed` state; a
+    // per-Mutation rejection is persisted and stops the loop.
     //
     // Decode is batched (one undecodable row fails the run before any backend
     // write); backend identity is resolved per Mutation, immediately before
@@ -111,14 +121,35 @@ pub fn run_sync(
     // the Mutations ordered behind it (ADR-0036).
     let rows = load_applicable_mutations(conn)?;
     for row in &rows {
-        let view = resolve_mutation_view(conn, row)?;
-        let outcome = adapter.apply_mutation(&view, now)?;
-        apply_mutation_outcome(conn, view.sequence, &outcome, now)?;
-        match outcome {
-            ApplyOutcome::Accepted(_) => report.applied_count += 1,
-            ApplyOutcome::Rejected(_) => {
-                report.stopped_at_sequence = Some(view.sequence);
-                return Ok(report);
+        let operation = resolve_backend_operation(conn, row)?;
+        match operation {
+            BackendOperation::Edit(edit) => {
+                let sequence = edit.sequence();
+                let outcome = adapter.apply_edit(&edit, now)?;
+                persist_edit_outcome(conn, sequence, &outcome, now)?;
+                match outcome {
+                    BackendEditOutcome::Acknowledged => report.applied_count += 1,
+                    BackendEditOutcome::Rejected(_) => {
+                        report.stopped_at_sequence = Some(sequence);
+                        return Ok(report);
+                    }
+                }
+            }
+            BackendOperation::Create(create) => {
+                let sequence = create.sequence();
+                begin_create(conn, sequence, now)?;
+                let outcome = adapter.create_item(&create, now);
+                persist_create_outcome(conn, sequence, &outcome, now)?;
+                match outcome {
+                    BackendCreateOutcome::Created(_) => report.applied_count += 1,
+                    BackendCreateOutcome::Rejected(_) => {
+                        report.stopped_at_sequence = Some(sequence);
+                        return Ok(report);
+                    }
+                    BackendCreateOutcome::Indeterminate(_) => {
+                        return Err(RunSyncError::ApplyingMutation(sequence));
+                    }
+                }
             }
         }
     }
@@ -130,11 +161,11 @@ pub fn run_sync(
 mod tests {
     use super::*;
     use crate::domain::backend_kind::BackendKind;
-    use crate::domain::backend_operation::BackendItemRefresh;
+    use crate::domain::backend_operation::{BackendEdit, BackendItemRefresh};
     use crate::domain::status::ItemStatus;
     use crate::domain::ticket_kind::TicketKind;
     use crate::proc::ProcError;
-    use crate::remote::fake::{ApplyResponse, FakeAdapter, RefreshResponse};
+    use crate::remote::fake::{CreateResponse, EditResponse, FakeAdapter, RefreshResponse};
     use crate::store::migrations;
     use crate::store::testing::{
         FixtureItem, FixtureMutation, FixtureRemote, insert_fixture_item, insert_fixture_mutation,
@@ -195,12 +226,21 @@ mod tests {
         })
     }
 
-    fn fake(refreshes: Vec<RefreshResponse>, applies: Vec<ApplyResponse>) -> FakeAdapter {
-        FakeAdapter::directional(vec![], refreshes, applies)
+    fn fake(refreshes: Vec<RefreshResponse>, edits: Vec<EditResponse>) -> FakeAdapter {
+        FakeAdapter::directional(vec![], refreshes, edits, vec![])
+    }
+
+    fn fake_with_create(
+        refreshes: Vec<RefreshResponse>,
+        edits: Vec<EditResponse>,
+        creates: Vec<CreateResponse>,
+    ) -> FakeAdapter {
+        FakeAdapter::directional(vec![], refreshes, edits, creates)
     }
 
     fn run(conn: &mut Connection, fake: &mut FakeAdapter) -> Result<SyncReport, RunSyncError> {
-        run_sync(conn, fake, NOW)
+        let workflow = RemoteWorkflowGuard::for_test();
+        run_sync(conn, fake, &workflow, NOW)
     }
 
     #[test]
@@ -213,6 +253,46 @@ mod tests {
         assert_eq!(report.pulled_count, 0);
         assert_eq!(report.applied_count, 0);
         assert_eq!(report.stopped_at_sequence, None);
+    }
+
+    #[test]
+    fn applying_creation_blocks_pull_and_apply_before_any_adapter_call() {
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Local work",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 7,
+                mutation_type: "promote_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
+                state: "applying",
+                failure_json: Some(r#"{"detail":"unknown effect"}"#),
+                promotion_operation_id: Some("op-1"),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        let mut fake = fake(vec![], vec![]);
+
+        assert!(matches!(
+            run(&mut conn, &mut fake),
+            Err(RunSyncError::ApplyingMutation(7))
+        ));
+        assert!(fake.captured_refresh_keys.is_empty());
+        assert!(fake.captured_edits.is_empty());
+        assert!(fake.captured_creates.is_empty());
     }
 
     #[test]
@@ -254,7 +334,7 @@ mod tests {
             ))
         ));
         assert!(fake.captured_refresh_keys.is_empty());
-        assert!(fake.captured_applies.is_empty());
+        assert!(fake.captured_edits.is_empty());
     }
 
     #[test]
@@ -298,7 +378,7 @@ mod tests {
             ))
         ));
         assert!(fake.captured_refresh_keys.is_empty());
-        assert!(fake.captured_applies.is_empty());
+        assert!(fake.captured_edits.is_empty());
     }
 
     #[test]
@@ -373,7 +453,7 @@ mod tests {
         seed_remote(&conn);
         update_ticket_mutation(&conn, 5, "t1", "New");
 
-        let mut fake = fake(vec![refresh("Old")], vec![ApplyResponse::Success]);
+        let mut fake = fake(vec![refresh("Old")], vec![EditResponse::Success]);
         let report = run(&mut conn, &mut fake).unwrap();
         assert_eq!(report.applied_count, 1);
         assert_eq!(report.stopped_at_sequence, None);
@@ -395,13 +475,12 @@ mod tests {
         assert_eq!(cursor, 5);
 
         // Fake saw the decoded payload.
-        assert_eq!(fake.captured_applies.len(), 1);
-        assert_eq!(fake.captured_applies[0].sequence, 5);
-        assert!(
-            fake.captured_applies[0]
-                .payload_text
-                .contains(r#""title":"New""#)
-        );
+        assert_eq!(fake.captured_edits.len(), 1);
+        assert_eq!(fake.captured_edits[0].sequence(), 5);
+        let BackendEdit::UpdateTicket { snapshot, .. } = &fake.captured_edits[0] else {
+            panic!("expected ticket update")
+        };
+        assert_eq!(snapshot.title, "New");
     }
 
     #[test]
@@ -415,7 +494,7 @@ mod tests {
 
         let mut fake = fake(
             vec![refresh("Old 1"), refresh("Old 2")],
-            vec![ApplyResponse::RecordedFailure(
+            vec![EditResponse::RecordedFailure(
                 "HTTP 422: title required".into(),
             )],
         );
@@ -441,7 +520,7 @@ mod tests {
         assert_eq!(state2, "pending", "loop stopped before sequence 2");
 
         // Only one apply consumed.
-        assert_eq!(fake.captured_applies.len(), 1);
+        assert_eq!(fake.captured_edits.len(), 1);
     }
 
     #[test]
@@ -453,7 +532,7 @@ mod tests {
 
         let mut fake = fake(
             vec![refresh("Old")],
-            vec![ApplyResponse::EnvFailure(ProcError::ExecutableNotFound)],
+            vec![EditResponse::EnvFailure(ProcError::ExecutableNotFound)],
         );
         let err = run(&mut conn, &mut fake).unwrap_err();
         assert!(matches!(
@@ -467,6 +546,65 @@ mod tests {
             })
             .unwrap();
         assert_eq!(state, "pending", "engine wrote no outcome");
+    }
+
+    #[test]
+    fn indeterminate_creation_is_persisted_as_applying_without_converting_the_item() {
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Local work",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "promote_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
+                state: "pending",
+                promotion_operation_id: Some("op-1"),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        let mut fake = fake_with_create(
+            vec![],
+            vec![],
+            vec![CreateResponse::Indeterminate("spawn failed".into())],
+        );
+
+        assert!(matches!(
+            run(&mut conn, &mut fake),
+            Err(RunSyncError::ApplyingMutation(1))
+        ));
+        let (state, failure, origin, backend_key): (
+            String,
+            Option<String>,
+            String,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "select m.state, m.failure_json, i.origin, i.backend_key \
+                   from mutations m join items i on i.id = m.item_id \
+                  where m.sequence = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "applying");
+        assert!(failure.unwrap().contains("spawn failed"));
+        assert_eq!((origin.as_str(), backend_key), ("local", None));
+        assert_eq!(fake.captured_creates.len(), 1);
+        assert!(fake.captured_edits.is_empty());
     }
 
     #[test]
@@ -493,7 +631,7 @@ mod tests {
         }
 
         // Apply never invoked; row still pending.
-        assert!(fake.captured_applies.is_empty());
+        assert!(fake.captured_edits.is_empty());
         assert_eq!(fake.captured_refresh_keys, ["1", "2"]);
         let title: String = conn
             .query_row("select title from items where id = 't1'", [], |r| r.get(0))
@@ -526,7 +664,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut fake = fake(vec![refresh("Old")], vec![ApplyResponse::Success]);
+        let mut fake = fake(vec![refresh("Old")], vec![EditResponse::Success]);
         let report = run(&mut conn, &mut fake).unwrap();
         assert_eq!(report.applied_count, 1);
 
@@ -553,7 +691,7 @@ mod tests {
         // Pull returns a stale backend view; apply the in-flight mutation.
         let mut fake = fake(
             vec![refresh("Stale Backend View")],
-            vec![ApplyResponse::Success],
+            vec![EditResponse::Success],
         );
         run(&mut conn, &mut fake).unwrap();
 
@@ -609,26 +747,27 @@ mod tests {
         )
         .unwrap();
 
-        let mut fake = fake(
+        let mut fake = fake_with_create(
             vec![],
-            vec![
-                ApplyResponse::PromotionSuccess {
-                    backend_key: "42".into(),
-                    display_id: "gh-42".into(),
-                },
-                ApplyResponse::Success,
-            ],
+            vec![EditResponse::Success],
+            vec![CreateResponse::Created {
+                backend_key: "42".into(),
+                display_id: "gh-42".into(),
+            }],
         );
         let report = run(&mut conn, &mut fake).unwrap();
         assert_eq!(report.applied_count, 2);
 
         assert_eq!(
-            fake.captured_applies[0].backend_key, None,
-            "the Promotion itself targets a Local Item"
+            fake.captured_creates[0].sequence(),
+            1,
+            "the Promotion was delivered through creation"
         );
+        let BackendEdit::SetItemStatus { item, .. } = &fake.captured_edits[0] else {
+            panic!("expected status edit")
+        };
         assert_eq!(
-            fake.captured_applies[1].backend_key.as_deref(),
-            Some("42"),
+            item.backend_key, "42",
             "the following Mutation saw the identity the receipt assigned"
         );
 
@@ -642,6 +781,74 @@ mod tests {
         assert_eq!(display, "gh-42");
         assert_eq!(origin, "backend");
         assert_eq!(key, "42");
+    }
+
+    #[test]
+    fn creation_failures_stop_without_inventing_an_identity() {
+        for (response, detail, expected_state, indeterminate) in [
+            (
+                CreateResponse::Rejected("pre-create refusal".into()),
+                "pre-create refusal",
+                "failed",
+                false,
+            ),
+            (
+                CreateResponse::Indeterminate("request outcome unknown".into()),
+                "request outcome unknown",
+                "applying",
+                true,
+            ),
+        ] {
+            let mut conn = open_seeded();
+            seed_remote(&conn);
+            insert_fixture_item(
+                &conn,
+                FixtureItem {
+                    id: "t1",
+                    display: "tk-1",
+                    title: "Local work",
+                    created_seq: 1,
+                    ..FixtureItem::default()
+                },
+            )
+            .unwrap();
+            insert_fixture_mutation(
+                &conn,
+                FixtureMutation {
+                    sequence: 1,
+                    mutation_type: "promote_ticket",
+                    item_id: "t1",
+                    payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
+                    state: "pending",
+                    promotion_operation_id: Some("op-1"),
+                    ..FixtureMutation::default()
+                },
+            )
+            .unwrap();
+            let mut fake = fake_with_create(vec![], vec![], vec![response]);
+
+            let result = run(&mut conn, &mut fake);
+            if indeterminate {
+                assert!(matches!(result, Err(RunSyncError::ApplyingMutation(1))));
+            } else {
+                assert_eq!(result.unwrap().stopped_at_sequence, Some(1));
+            }
+            let (state, failure, origin, key): (String, String, String, Option<String>) = conn
+                .query_row(
+                    "select m.state, m.failure_json, i.origin, i.backend_key \
+                       from mutations m join items i on i.id = m.item_id \
+                      where m.sequence = 1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .unwrap();
+            assert_eq!(state, expected_state);
+            assert!(failure.contains(detail));
+            assert_eq!(origin, "local");
+            assert_eq!(key, None);
+            assert_eq!(fake.captured_creates.len(), 1);
+            assert!(fake.captured_edits.is_empty());
+        }
     }
 
     #[test]
@@ -678,10 +885,7 @@ mod tests {
             "expected the decode to fail the run, got {err:?}"
         );
 
-        assert!(
-            fake.captured_applies.is_empty(),
-            "no backend write happened"
-        );
+        assert!(fake.captured_edits.is_empty(), "no backend write happened");
         let pending: i64 = conn
             .query_row(
                 "select count(*) from mutations where state = 'pending'",
@@ -703,7 +907,7 @@ mod tests {
 
         let mut fake = fake(
             vec![refresh("Old 1"), refresh("Old 2")],
-            vec![ApplyResponse::Success, ApplyResponse::Success],
+            vec![EditResponse::Success, EditResponse::Success],
         );
         let report = run(&mut conn, &mut fake).unwrap();
         assert_eq!(report.applied_count, 2);
@@ -726,6 +930,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(cursor, 2);
-        assert_eq!(fake.captured_applies.len(), 2);
+        assert_eq!(fake.captured_edits.len(), 2);
     }
 }

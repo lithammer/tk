@@ -6,9 +6,10 @@
 //! working set before the engine applies queued Mutations; unsupported Backend
 //! kinds fail while opening the Adapter.
 //!
-//! `tk sync --skip <id>` curates a failed Mutation. The skip commits BEFORE the
-//! adapter is opened so a broken / unimplemented Remote cannot block an
-//! operator from abandoning a Mutation the backend already rejected.
+//! `tk sync --skip <id>` curates a failed Mutation under the repository's
+//! Remote workflow guard. The skip commits BEFORE the adapter is opened so a
+//! broken / unimplemented Remote cannot block an operator from abandoning a
+//! Mutation the backend already rejected.
 //!
 //! `tk sync log` reads the Mutation Log through [`crate::store::sync`]; it
 //! needs no adapter and is exercised end-to-end here.
@@ -19,12 +20,12 @@ use clap::{Args as ClapArgs, Subcommand};
 
 use crate::cli::{Deps, Exit};
 use crate::commands::resolver;
-use crate::domain::apply_outcome::FailureClass;
+use crate::domain::backend_outcome::FailureClass;
 use crate::remote::adapter::AdapterReadError;
 use crate::remote::factory::{self, OpenError as FactoryOpenError};
 use crate::store::sync::{
-    self as store_sync, ApplyMutationOutcomeError, BackendCohortError, LoadApplicableError,
-    LogDetailRow, LogError, LogListFilter, LogListRow, MarkSkippedError, RefreshStoreError,
+    self as store_sync, BackendCohortError, LoadApplicableError, LogDetailRow, LogError,
+    LogListFilter, LogListRow, MarkSkippedError, PersistMutationOutcomeError, RefreshStoreError,
 };
 use crate::sync::{self, RunSyncError, SyncReport};
 
@@ -43,12 +44,13 @@ pub struct Args {
 
 #[derive(Debug, Subcommand)]
 pub enum Sub {
-    /// Inspect pending, failed, and skipped Mutations.
+    /// Inspect pending, failed, applying, and skipped Mutations.
     Log(LogArgs),
 }
 
 /// Flags for `tk sync log`. The three state flags are a filter; if more than
-/// one is given, precedence is pending → failed → skipped.
+/// one is given, precedence is pending → failed → skipped. Applying Mutations
+/// appear in the default view.
 #[derive(Debug, ClapArgs)]
 pub struct LogArgs {
     /// Only pending Mutations.
@@ -91,10 +93,19 @@ fn run_sync(deps: Deps<'_>, skip: Option<i64>) -> Exit {
     };
     let now = clock.now_iso();
 
+    let workflow = match store.lock_remote_workflow() {
+        Ok(guard) => guard,
+        Err(err) => {
+            let _ = writeln!(stderr, "tk sync: {err}");
+            return Exit::Failure;
+        }
+    };
+
     // Commit the skip before opening the adapter: a broken or unimplemented
     // Remote must not block an operator from abandoning a failed Mutation.
     if let Some(seq) = skip {
-        if let Err(err) = store_sync::mark_mutation_skipped(store.conn_mut(), seq, &now) {
+        if let Err(err) = store_sync::mark_mutation_skipped(store.conn_mut(), &workflow, seq, &now)
+        {
             render_skip_error(stderr, &err);
             return Exit::Failure;
         }
@@ -122,7 +133,7 @@ fn run_sync(deps: Deps<'_>, skip: Option<i64>) -> Exit {
         return Exit::Failure;
     };
 
-    let report = match sync::run_sync(store.conn_mut(), &mut *adapter, &now) {
+    let report = match sync::run_sync(store.conn_mut(), &mut *adapter, &workflow, &now) {
         Ok(report) => report,
         Err(err) => {
             render_run_sync_error(stderr, &err);
@@ -277,10 +288,15 @@ fn render_run_sync_error<W: Write + ?Sized>(stderr: &mut W, err: &RunSyncError) 
         // contradicts a contract tk owns. Neither is recoverable and both leave
         // the Mutation applicable, so every later `tk sync` reproduces the
         // abort — say it is a bug rather than printing the raw fault.
-        RunSyncError::Load(LoadApplicableError::PayloadJson(_))
+        RunSyncError::Load(
+            LoadApplicableError::PayloadJson(_)
+            | LoadApplicableError::OperationShapeMismatch { .. }
+            | LoadApplicableError::MissingBackendIdentity { .. }
+            | LoadApplicableError::CounterpartClassMismatch { .. },
+        )
         | RunSyncError::Outcome(
-            ApplyMutationOutcomeError::PayloadJson(_)
-            | ApplyMutationOutcomeError::ReceiptShapeMismatch { .. },
+            PersistMutationOutcomeError::PayloadJson(_)
+            | PersistMutationOutcomeError::OperationShapeMismatch { .. },
         ) => {
             let _ = writeln!(
                 stderr,
@@ -292,7 +308,7 @@ fn render_run_sync_error<W: Write + ?Sized>(stderr: &mut W, err: &RunSyncError) 
             | RefreshStoreError::BackendCohort(BackendCohortError::Storage(e)),
         )
         | RunSyncError::Load(LoadApplicableError::Storage(e))
-        | RunSyncError::Outcome(ApplyMutationOutcomeError::Storage(e)) => {
+        | RunSyncError::Outcome(PersistMutationOutcomeError::Storage(e)) => {
             resolver::storage_error(e).render(stderr, COMMAND);
         }
         // Named exhaustively rather than caught by `_`, so a variant added
@@ -301,10 +317,18 @@ fn render_run_sync_error<W: Write + ?Sized>(stderr: &mut W, err: &RunSyncError) 
         RunSyncError::Pull(AdapterReadError::Env(_))
         | RunSyncError::Apply(_)
         | RunSyncError::Outcome(
-            ApplyMutationOutcomeError::MutationNotFound(_)
-            | ApplyMutationOutcomeError::MutationNotApplicable(_),
+            PersistMutationOutcomeError::MutationNotFound(_)
+            | PersistMutationOutcomeError::MutationNotApplicable(_),
         ) => {
             let _ = writeln!(stderr, "tk sync: {err}");
+        }
+        RunSyncError::ApplyingMutation(sequence)
+        | RunSyncError::Refresh(RefreshStoreError::ApplyingMutation(sequence))
+        | RunSyncError::Outcome(PersistMutationOutcomeError::ApplyingMutation(sequence)) => {
+            let _ = writeln!(
+                stderr,
+                "tk sync: Mutation {sequence} has an indeterminate Backend creation outcome; automatic sync is blocked until it is reconciled"
+            );
         }
         RunSyncError::Refresh(RefreshStoreError::RemoteChanged { .. }) => {
             let _ = writeln!(
@@ -638,6 +662,114 @@ mod tests {
             })
             .unwrap();
         assert_eq!(state, "skipped", "skip committed before the no-remote exit");
+    }
+
+    #[test]
+    fn sync_skip_waits_for_the_repository_remote_workflow_guard() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        backend_ticket(&conn, "t1", "tk-1", "1", 1);
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "update_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"A","body":""}"#,
+                state: "failed",
+                failure_json: Some(r#"{"detail":"rejected"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let holder_runner = FakeRunner::new();
+        holder_runner.expect(
+            &["git", "rev-parse"],
+            RunOutput {
+                exit_code: 0,
+                stdout: store.git_rev_parse_stdout(),
+                stderr: Vec::new(),
+            },
+        );
+        let clock = FakeClock::new(1_778_284_800_000);
+        let first = resolver::open_for_command(&holder_runner, &cwd_path, &clock).unwrap();
+        let first_guard = first.lock_remote_workflow().unwrap();
+        let command_runner = FakeRunner::new();
+        command_runner.expect(
+            &["git", "rev-parse"],
+            RunOutput {
+                exit_code: 0,
+                stdout: store.git_rev_parse_stdout(),
+                stderr: Vec::new(),
+            },
+        );
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let contender = std::thread::spawn(move || {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let mut stdin = std::io::Cursor::new(Vec::new());
+            let command_clock = FakeClock::new(1_778_284_800_000);
+            let mut rng = StdRng::seed_from_u64(0);
+            started_tx.send(()).unwrap();
+            let exit = run(
+                Deps {
+                    stdout: &mut stdout,
+                    stderr: &mut stderr,
+                    stdin: &mut stdin,
+                    runner: &command_runner,
+                    clock: &command_clock,
+                    rng: &mut rng,
+                    cwd: &cwd_path,
+                    styler: Styler::plain(),
+                },
+                Args {
+                    subcommand: None,
+                    skip: Some(1),
+                },
+            );
+            done_tx.send((exit, stderr)).unwrap();
+        });
+
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(matches!(
+            done_rx.recv_timeout(std::time::Duration::from_millis(100)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        let state: String = first
+            .conn()
+            .query_row(
+                "select state from mutations where sequence = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "failed");
+
+        drop(first_guard);
+        let (exit, stderr) = done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        contender.join().unwrap();
+        assert_eq!(exit, Exit::Failure, "no Remote remains a command failure");
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            "tk sync: no Remote configured; run 'tk remote set <kind>' first\n"
+        );
+        let state: String = first
+            .conn()
+            .query_row(
+                "select state from mutations where sequence = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "skipped");
     }
 
     #[test]
@@ -1078,14 +1210,14 @@ mod tests {
     }
 
     #[test]
-    fn render_run_sync_error_names_a_receipt_shape_mismatch_as_a_bug() {
+    fn render_run_sync_error_names_an_outcome_boundary_mismatch_as_a_bug() {
         // An Adapter that answers a Promotion with a bare acknowledgement has
         // broken its contract: the Mutation stays applicable, so the user needs
         // to know retrying will not clear it.
         let mut err_out = Vec::new();
         render_run_sync_error(
             &mut err_out,
-            &RunSyncError::Outcome(ApplyMutationOutcomeError::ReceiptShapeMismatch {
+            &RunSyncError::Outcome(PersistMutationOutcomeError::OperationShapeMismatch {
                 sequence: 4,
                 mutation_type: MutationType::PromoteTicket,
             }),
@@ -1102,7 +1234,7 @@ mod tests {
         let mut err_out = Vec::new();
         render_run_sync_error(
             &mut err_out,
-            &RunSyncError::Outcome(ApplyMutationOutcomeError::PayloadJson(
+            &RunSyncError::Outcome(PersistMutationOutcomeError::PayloadJson(
                 serde_json::from_str::<Promotion>("{}").unwrap_err(),
             )),
         );
@@ -1111,6 +1243,18 @@ mod tests {
             rendered.starts_with("tk sync: malformed payload_json: ")
                 && rendered.ends_with("; this is a Ticket bug — please report it\n"),
             "{rendered}"
+        );
+    }
+
+    #[test]
+    fn render_run_sync_error_blocks_retry_after_indeterminate_creation() {
+        let mut stderr = Vec::new();
+
+        render_run_sync_error(&mut stderr, &RunSyncError::ApplyingMutation(7));
+
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            "tk sync: Mutation 7 has an indeterminate Backend creation outcome; automatic sync is blocked until it is reconciled\n"
         );
     }
 }

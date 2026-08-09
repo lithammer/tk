@@ -104,10 +104,9 @@ pub enum BackendBindingError {
 ///
 /// Backend Origin answers from `items` alone. A Local Item is Pending
 /// Promotion when the Mutation Log holds a `promote_ticket` / `promote_epic`
-/// Mutation for it in `pending` or `failed` state — the two states from which
-/// Apply may still run. An `applied` Promotion has already converted the Item
-/// to Backend Origin, and a `skipped` one is abandoned intent, so neither
-/// keeps the Item pending.
+/// Mutation for it in `pending`, `failed`, or `applying` state. An `applied`
+/// Promotion has already converted the Item to Backend Origin, and a `skipped`
+/// one is abandoned intent, so neither keeps the Item pending.
 ///
 /// The Backend of a Pending Promotion comes from that Mutation's payload, not
 /// from the configured Remote: the target Backend is intent frozen at commit
@@ -138,7 +137,7 @@ pub fn resolve_backend_binding(
             "select payload_json from mutations \
               where item_id = ?1 \
                 and mutation_type in ('promote_ticket','promote_epic') \
-                and state in ('pending','failed') \
+                and state in ('pending','failed','applying') \
               order by sequence asc limit 1",
             params![item_id],
             |r| r.get(0),
@@ -584,6 +583,20 @@ mod tests {
         let conn = open_seeded();
         seed_local_ticket(&conn, "t1", "tk-1");
         seed_promotion(&conn, "t1", "failed", "github");
+
+        assert_eq!(
+            resolve_backend_binding(&conn, "t1").unwrap(),
+            BackendBinding::PendingPromotion {
+                backend_kind: "github".into()
+            }
+        );
+    }
+
+    #[test]
+    fn an_applying_promotion_still_leaves_the_item_pending_promotion() {
+        let conn = open_seeded();
+        seed_local_ticket(&conn, "t1", "tk-1");
+        seed_promotion(&conn, "t1", "applying", "github");
 
         assert_eq!(
             resolve_backend_binding(&conn, "t1").unwrap(),

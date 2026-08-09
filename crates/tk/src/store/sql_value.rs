@@ -148,6 +148,7 @@ impl FromSql for MutationState {
         match value.as_str()? {
             "pending" => Ok(Self::Pending),
             "failed" => Ok(Self::Failed),
+            "applying" => Ok(Self::Applying),
             "skipped" => Ok(Self::Skipped),
             "applied" => Ok(Self::Applied),
             other => Err(corrupt("state", other)),

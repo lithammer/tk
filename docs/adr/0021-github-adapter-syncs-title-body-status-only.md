@@ -12,12 +12,12 @@ GitHub repository through the `gh issue` subcommands:
   `"Feature"`, org-custom types, and a typeless issue — → `Task`, matching the
   closed two-variant `TicketKind`). No Mutation changes a Ticket's Kind, so
   there is nothing to push; `--type` is never written in v1,
-- the issue itself (`gh issue list --state all` → `BackendItemSnapshot`).
+- the issue refresh (`gh issue view <n>` → `BackendItemRefresh`).
 
 It does **not** sync Dependencies or Epic membership. Those Mutations are
 still emitted for same-Backend item pairs (`add_dependency`,
 `remove_ticket_from_epic`, …) and still reach the adapter, so the adapter
-returns a no-op `ApplyOutcome::Accepted` for them: it records that the
+returns a no-op `BackendEditOutcome::Acknowledged` for them: it records that the
 Mutation was handled without driving any `gh` call. The local Dependency
 edge and Epic membership already live in the Repository Store and keep
 driving `tk next` and the read views; there is simply no backend action to
@@ -56,7 +56,7 @@ The deferral therefore rests on scope, not capability:
   so it defers without technical risk — the only cost is the backfill debt
   below.
 - **Reject relationship Mutations.** Rejected: the v1 sync engine stops at
-  the first `ApplyOutcome::Rejected`, so a single `tk block` between two
+  the first `BackendEditOutcome::Rejected`, so a single `tk block` between two
   GitHub Tickets would wedge the whole Mutation queue until `tk sync --skip`.
   No-op-`Accepted` keeps the queue draining.
 
@@ -94,9 +94,10 @@ The deferral therefore rests on scope, not capability:
   `add_dependency` / `remove_dependency` drives the native `gh issue edit
   --add-blocked-by` / `--remove-blocked-by` flags (`gh` ≥ 2.94.0), replacing
   their no-op-Accepted arms. The Mutation sits on the blocked item
-  (`backend_key`); the blocking item's number is resolved from its internal
-  `items.id` at Mutation-load time onto `MutationView.counterpart_backend_key`,
-  so the adapter stays store-free. Three consequences worth recording:
+  identity); the blocking item's identity is resolved from its internal
+  `items.id` immediately before delivery, and both endpoints ride the typed
+  `BackendEdit::AddDependency`, so the adapter stays store-free. Three
+  consequences worth recording:
   - **Title/body/status round-trip; dependencies do not.** Backend Pull does
     not reconstruct Dependency edges in v1 — relationship sync is one
     directional (local intent → GitHub). Read-back is deferred to its own
