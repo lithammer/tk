@@ -89,6 +89,8 @@ pub enum RemoteWorkflowLockError {
         #[source]
         source: std::io::Error,
     },
+    #[error("another remote-changing command is running; retry when it finishes")]
+    Busy,
 }
 
 impl Store {
@@ -127,8 +129,15 @@ impl Store {
                 path: path.clone(),
                 source,
             })?;
-        file.lock()
-            .map_err(|source| RemoteWorkflowLockError::Lock { path, source })?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(RemoteWorkflowLockError::Busy);
+            }
+            Err(std::fs::TryLockError::Error(source)) => {
+                return Err(RemoteWorkflowLockError::Lock { path, source });
+            }
+        }
         Ok(RemoteWorkflowGuard { _file: file })
     }
 }
@@ -641,27 +650,18 @@ mod tests {
     }
 
     #[test]
-    fn remote_workflow_guard_spans_the_whole_store_workflow() {
+    fn remote_workflow_lock_reports_contention_and_succeeds_after_drop() {
         let store = TmpStore::new("repo");
         seed_tk_db(&store);
         let first = open_existing(&fake_runner_for(&store), &cwd(), &fixed_clock()).unwrap();
         let second = open_existing(&fake_runner_for(&store), &cwd(), &fixed_clock()).unwrap();
         let first_guard = first.lock_remote_workflow().unwrap();
-        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
-        let contender = std::thread::spawn(move || {
-            let _guard = second.lock_remote_workflow().unwrap();
-            acquired_tx.send(()).unwrap();
-        });
-
         assert!(matches!(
-            acquired_rx.recv_timeout(std::time::Duration::from_millis(100)),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            second.lock_remote_workflow(),
+            Err(RemoteWorkflowLockError::Busy)
         ));
         drop(first_guard);
-        acquired_rx
-            .recv_timeout(std::time::Duration::from_secs(2))
-            .unwrap();
-        contender.join().unwrap();
+        let _second_guard = second.lock_remote_workflow().unwrap();
     }
 
     #[test]

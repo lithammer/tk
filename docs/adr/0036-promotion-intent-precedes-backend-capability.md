@@ -71,10 +71,13 @@ invocation may still create the issue.
 The GitHub Adapter invokes exactly `gh issue create --title <title> --body
 <body>` for both Ticket and Epic Promotion. It sends no issue type or
 relationship flags. A canonical GitHub issue URL receipt certifies `Created`
-even alongside a nonzero exit. Authentication rejection certifies no effect;
-every other completed result without a trustworthy receipt is
-`Indeterminate`. Arbitrary validation text, network errors, server errors, and
-a negative lookup do not justify automatic replay.
+even alongside a nonzero exit. Only the initial 401/bad-credentials frame
+observed in the playground certifies authentication rejection before creation;
+other auth-flavoured text is classification, not proof. Every other completed
+result without a trustworthy receipt is `Indeterminate`. Arbitrary validation
+text, network errors, server errors, and a negative lookup do not justify
+automatic replay. The receipt URL is retained as the Backend key, pinning later
+operations to the repository that created the issue.
 
 The engine durably marks a Promotion `applying` before the creation call.
 `Created` applies identity, marks the Mutation applied, clears failure, and
@@ -91,7 +94,8 @@ guard into its nested sync. The stable file is opened in place and never
 deleted or replaced; dropping the guard, including process termination,
 releases ownership. This serialization prevents concurrent processes from
 both passing an `applying` check, while the durable state covers crashes after
-Backend invocation. Sync Skip also holds the guard while changing Mutation Log
+Backend invocation. Contention fails with retry guidance instead of waiting
+without a bound. Sync Skip also holds the guard while changing Mutation Log
 ordering, then opens the Adapter only after that curation commits.
 
 ## Considered Options

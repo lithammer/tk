@@ -18,6 +18,12 @@ pub struct BackendItemIdentity {
     pub display_id: String,
 }
 
+impl std::fmt::Display for BackendItemIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.display_id, self.backend_key)
+    }
+}
+
 /// Backend-native address of an object that already exists remotely.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackendItemAddress {

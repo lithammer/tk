@@ -479,6 +479,7 @@ mod tests {
             stderr.contains("pending or failed Mutation"),
             "stderr={stderr:?}"
         );
+        assert!(!stderr.contains("--skip"), "stderr={stderr:?}");
 
         // The Remote survives a refused clear.
         let conn = Connection::open(store.db_path()).unwrap();

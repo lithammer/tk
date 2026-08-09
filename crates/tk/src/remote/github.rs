@@ -2,9 +2,9 @@
 //!
 //! Implements [`Adapter`] by shelling out to `gh issue` through an injected
 //! [`ProcRunner`] (ADR-0031: the real subprocess only in production, a
-//! `FakeRunner` in tests). The repository is resolved from the command cwd —
-//! no `--repo`, no stored repo (ADR-0033): `gh` reads the GitHub repo from the
-//! checkout's git remote, stable across Workspaces.
+//! `FakeRunner` in tests). Creation and bare Adopt input let `gh` resolve the
+//! repository from the command cwd; canonical issue URLs then pin existing
+//! Item operations to their repository (ADR-0033).
 //!
 //! Pull is refresh-by-key: the engine hands the Adopted working set's active
 //! keys to [`GithubAdapter::refresh_item`], which fetches each with one
@@ -28,9 +28,9 @@ use crate::proc::{ProcRunner, RunOutput};
 
 use super::adapter::{Adapter, AdapterReadError, ApplyError};
 
-/// The `--json` field set tk requests from `gh issue view`. `url` is fetched
-/// only for the PR guard (see [`is_pull_request_url`]) and is not stored on the
-/// directional result; `state` arrives UPPERCASE; `issueType` is an
+/// The `--json` field set tk requests from `gh issue view`. `url` supplies the
+/// canonical Adopt identity, guards Pull identity, and rejects pull requests
+/// (see [`is_pull_request_url`]); `state` arrives UPPERCASE; `issueType` is an
 /// object-or-null.
 const ISSUE_JSON_FIELDS: &str = "number,title,body,state,issueType,url";
 
@@ -59,7 +59,14 @@ impl Adapter for GithubAdapter<'_> {
     }
 
     fn refresh_item(&mut self, key: &str) -> Result<BackendItemRefresh, AdapterReadError> {
-        self.view_issue(key)?.into_refresh()
+        let issue = self.view_issue(key)?;
+        if !issue.matches_key(key) {
+            return Err(AdapterReadError::Failed(format!(
+                "GitHub resolved '{key}' to a different issue ({})",
+                issue.url
+            )));
+        }
+        issue.into_refresh()
     }
 
     fn apply_edit(&mut self, edit: &BackendEdit) -> Result<BackendEditOutcome, ApplyError> {
@@ -96,8 +103,8 @@ impl Adapter for GithubAdapter<'_> {
             }
             // Dependency sync (ADR-0021, tk-107): the blocked issue is the
             // Mutation's item; `--add-blocked-by`/`--remove-blocked-by` take the
-            // blocking issue's number, resolved store-side onto the operation's
-            // counterpart identity. Native `gh issue edit` flags, so the
+            // blocking issue's Backend address, resolved store-side onto the
+            // operation's counterpart identity. Native `gh issue edit` flags, so the
             // adapter requires `gh` >= 2.94.0; an older `gh` rejects the unknown
             // flag and the Mutation fails.
             BackendEdit::AddDependency {
@@ -128,12 +135,13 @@ impl Adapter for GithubAdapter<'_> {
                 "--parent",
                 &epic.backend_key,
             ]),
-            BackendEdit::RemoveTicketFromEpic { ticket, .. } => self.run_edit(&[
+            BackendEdit::RemoveTicketFromEpic { ticket, epic } => self.run_edit(&[
                 "gh",
                 "issue",
                 "edit",
+                &epic.backend_key,
+                "--remove-sub-issue",
                 &ticket.backend_key,
-                "--remove-parent",
             ]),
         }
     }
@@ -164,13 +172,7 @@ impl GithubAdapter<'_> {
         if output.succeeded() {
             return Ok(BackendEditOutcome::Acknowledged);
         }
-        let detail = stderr_string(&output);
-        let class = classify(output.exit_code, &detail);
-        Ok(BackendEditOutcome::Rejected(Failure {
-            detail,
-            class,
-            retry_after_s: None,
-        }))
+        Ok(rejected_edit(&output))
     }
 
     /// Create the GitHub issue represented by either Promotion variant.
@@ -225,14 +227,14 @@ impl GithubAdapter<'_> {
             class,
             retry_after_s: None,
         };
-        if !output.succeeded() && class == FailureClass::Auth {
+        if certifies_auth_rejection(&output, &stderr) {
             BackendCreateOutcome::Rejected(failure)
         } else {
             BackendCreateOutcome::Indeterminate(failure)
         }
     }
 
-    /// Fetch and parse one GitHub issue view through the checkout-resolved Remote.
+    /// Fetch and parse one GitHub issue view by the caller's Backend key.
     fn view_issue(&self, key: &str) -> Result<GhIssue, AdapterReadError> {
         let output = self.runner.run(
             &["gh", "issue", "view", key, "--json", ISSUE_JSON_FIELDS],
@@ -259,7 +261,7 @@ struct GhIssue {
     state: String,
     #[serde(rename = "issueType")]
     issue_type: Option<GhIssueType>,
-    /// Canonical issue/PR url; consumed only by the PR guard, never stored.
+    /// Canonical issue/PR URL used for identity and the PR guard.
     url: String,
 }
 
@@ -271,6 +273,7 @@ struct GhIssueType {
 }
 
 struct IssueFields {
+    number: i64,
     backend_key: String,
     ticket_kind: TicketKind,
     title: String,
@@ -279,6 +282,10 @@ struct IssueFields {
 }
 
 impl GhIssue {
+    fn matches_key(&self, key: &str) -> bool {
+        key == self.number.to_string() || key == self.url
+    }
+
     fn into_fields(self) -> Result<IssueFields, AdapterReadError> {
         // PR guard (ADR-0034): `gh issue view <n>` resolves a pull request too
         // (issue and PR numbers share one sequence) and returns it as an
@@ -308,7 +315,8 @@ impl GhIssue {
             _ => TicketKind::Task,
         };
         Ok(IssueFields {
-            backend_key: self.number.to_string(),
+            number: self.number,
+            backend_key: self.url,
             ticket_kind,
             title: self.title,
             body: self.body,
@@ -319,7 +327,7 @@ impl GhIssue {
     fn into_adopted_item(self) -> Result<AdoptedItem, AdapterReadError> {
         let issue = self.into_fields()?;
         Ok(AdoptedItem {
-            display_id: format!("gh-{}", issue.backend_key),
+            display_id: format!("gh-{}", issue.number),
             backend_key: issue.backend_key,
             ticket_kind: issue.ticket_kind,
             title: issue.title,
@@ -354,10 +362,10 @@ fn is_pull_request_url(url: &str) -> bool {
 
 /// Parse the canonical one-line URL receipt emitted by `gh issue create`.
 ///
-/// The host remains adapter-owned so GitHub Enterprise works without tk
-/// storing a second repository coordinate (ADR-0033). Requiring HTTPS and the
-/// exact `<host>/<owner>/<repo>/issues/<positive number>` shape rejects prose,
-/// API URLs, pull requests, and URLs carrying query or fragment suffixes.
+/// The URL itself becomes the Backend key, retaining host and repository
+/// identity without a separate Remote setting (ADR-0033). Requiring HTTPS and
+/// the exact `<host>/<owner>/<repo>/issues/<positive number>` shape rejects
+/// prose, API URLs, pull requests, and query or fragment suffixes.
 fn parse_create_receipt(stdout: &[u8]) -> Option<BackendItemIdentity> {
     let receipt = std::str::from_utf8(stdout).ok()?.trim();
     if receipt.lines().count() != 1 {
@@ -391,9 +399,9 @@ fn parse_create_receipt(stdout: &[u8]) -> Option<BackendItemIdentity> {
     if number <= 0 {
         return None;
     }
-    let backend_key = number.to_string();
+    let backend_key = receipt.to_owned();
     Some(BackendItemIdentity {
-        display_id: format!("gh-{backend_key}"),
+        display_id: format!("gh-{number}"),
         backend_key,
     })
 }
@@ -406,6 +414,16 @@ fn create_failure_detail(output: &RunOutput, stderr: &str) -> String {
         (true, false) => format!("gh issue create returned an unrecognized receipt: {stdout}"),
         (true, true) => "gh issue create returned no GitHub issue URL receipt".to_owned(),
     }
+}
+
+fn certifies_auth_rejection(output: &RunOutput, stderr: &str) -> bool {
+    if output.succeeded() || !output.stdout.is_empty() {
+        return false;
+    }
+    let normalized = stderr.to_ascii_lowercase();
+    normalized.starts_with("http 401: bad credentials (https://")
+        && normalized.contains("/graphql)")
+        && normalized.contains("\ntry authenticating with:  gh auth login -h ")
 }
 
 /// Classify a non-zero `gh` failure into a [`FailureClass`] (ADR-0016).
@@ -440,6 +458,15 @@ fn classify(_exit_code: i32, stderr: &str) -> FailureClass {
 /// detail / `AdapterReadError::Failed` payload.
 fn stderr_string(output: &RunOutput) -> String {
     String::from_utf8_lossy(&output.stderr).trim().to_string()
+}
+
+fn rejected_edit(output: &RunOutput) -> BackendEditOutcome {
+    let detail = stderr_string(output);
+    BackendEditOutcome::Rejected(Failure {
+        class: classify(output.exit_code, &detail),
+        detail,
+        retry_after_s: None,
+    })
 }
 
 #[cfg(test)]
@@ -528,9 +555,10 @@ mod tests {
         }
     }
 
-    fn identity(key: &str) -> BackendItemIdentity {
+    fn identity(url: &str) -> BackendItemIdentity {
+        let key = url.rsplit('/').next().unwrap();
         BackendItemIdentity {
-            backend_key: key.into(),
+            backend_key: url.into(),
             display_id: format!("gh-{key}"),
         }
     }
@@ -578,7 +606,7 @@ mod tests {
         let cwd = cwd();
         let mut adapter = GithubAdapter::new(&runner, &cwd);
         let s = adapter.adopt_ticket("42").unwrap();
-        assert_eq!(s.backend_key, "42");
+        assert_eq!(s.backend_key, "https://github.com/o/r/issues/42");
         assert_eq!(s.display_id, "gh-42");
         assert_eq!(s.ticket_kind, TicketKind::Task);
         assert_eq!(s.status, ItemStatus::Open);
@@ -629,6 +657,30 @@ mod tests {
             );
             runner.assert_all_consumed();
         }
+    }
+
+    #[test]
+    fn refresh_rejects_a_key_that_resolves_to_another_issue() {
+        let key = "https://github.com/o/r/issues/1";
+        let runner = FakeRunner::new();
+        runner.expect_exact(
+            &["gh", "issue", "view", key, "--json", ISSUE_JSON_FIELDS],
+            ok(&issue_json(
+                2,
+                "OPEN",
+                "Task",
+                "https://github.com/o/r/issues/2",
+            )),
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+
+        let AdapterReadError::Failed(detail) = adapter.refresh_item(key).unwrap_err() else {
+            panic!("redirected identity must be a Backend read failure")
+        };
+        assert!(detail.contains("resolved"));
+        assert!(detail.contains("issues/2"));
+        runner.assert_all_consumed();
     }
 
     #[test]
@@ -960,7 +1012,10 @@ mod tests {
     #[test]
     fn apply_remove_ticket_from_epic_removes_parent() {
         let runner = FakeRunner::new();
-        runner.expect_exact(&["gh", "issue", "edit", "42", "--remove-parent"], ok(""));
+        runner.expect_exact(
+            &["gh", "issue", "edit", "9", "--remove-sub-issue", "42"],
+            ok(""),
+        );
         let cwd = cwd();
         let mut adapter = GithubAdapter::new(&runner, &cwd);
         let edit = edit(
@@ -1008,7 +1063,7 @@ mod tests {
     fn apply_epic_membership_spawn_failure_is_apply_error() {
         let runner = FakeRunner::new();
         runner.expect_exact_error(
-            &["gh", "issue", "edit", "42", "--remove-parent"],
+            &["gh", "issue", "edit", "9", "--remove-sub-issue", "42"],
             ProcError::SpawnFailed,
         );
         let cwd = cwd();
@@ -1121,7 +1176,7 @@ mod tests {
             let BackendCreateOutcome::Created(identity) = outcome else {
                 panic!("{mt}: expected a confirmed receipt, got {outcome:?}");
             };
-            assert_eq!(identity.backend_key, "42");
+            assert_eq!(identity.backend_key, "https://github.com/o/r/issues/42");
             assert_eq!(identity.display_id, "gh-42");
             runner.assert_all_consumed();
         }
@@ -1143,7 +1198,7 @@ mod tests {
 
         assert_eq!(
             adapter.create_item(&create(MutationType::PromoteTicket, "T", "B")),
-            BackendCreateOutcome::Created(identity("7"))
+            BackendCreateOutcome::Created(identity("https://github.example/o/r/issues/7"))
         );
         runner.assert_all_consumed();
     }
@@ -1197,9 +1252,32 @@ mod tests {
 
     #[test]
     fn authentication_rejection_is_certified_no_effect() {
+        let stderr = "HTTP 401: Bad credentials (https://api.github.com/graphql)\n\
+                      Try authenticating with:  gh auth login -h github.com";
+        let runner = FakeRunner::new();
+        runner.expect_exact(
+            &["gh", "issue", "create", "--title", "T", "--body", "B"],
+            fail(1, stderr),
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+
+        let BackendCreateOutcome::Rejected(failure) =
+            adapter.create_item(&create(MutationType::PromoteTicket, "T", "B"))
+        else {
+            panic!("the observed initial authentication failure certifies no effect");
+        };
+        assert_eq!(failure.detail, stderr);
+        assert_eq!(failure.class, FailureClass::Auth);
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn auth_flavoured_text_alone_does_not_certify_creation_rejection() {
         for stderr in [
             "HTTP 401: Unauthorized",
             "GraphQL authentication failed: Bad credentials",
+            "To get started, please run:  gh auth login",
         ] {
             let runner = FakeRunner::new();
             runner.expect_exact(
@@ -1209,12 +1287,11 @@ mod tests {
             let cwd = cwd();
             let mut adapter = GithubAdapter::new(&runner, &cwd);
 
-            let BackendCreateOutcome::Rejected(failure) =
+            let BackendCreateOutcome::Indeterminate(failure) =
                 adapter.create_item(&create(MutationType::PromoteTicket, "T", "B"))
             else {
-                panic!("authentication was rejected before creation");
+                panic!("auth classification alone cannot certify no effect");
             };
-            assert_eq!(failure.detail, stderr);
             assert_eq!(failure.class, FailureClass::Auth);
             runner.assert_all_consumed();
         }
@@ -1278,7 +1355,7 @@ mod tests {
         }
         assert_eq!(
             parse_create_receipt(b" https://github.example/o/r/issues/12\n"),
-            Some(identity("12"))
+            Some(identity("https://github.example/o/r/issues/12"))
         );
     }
 

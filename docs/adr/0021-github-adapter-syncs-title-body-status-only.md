@@ -15,11 +15,12 @@ GitHub repository through the `gh issue` subcommands:
 - the issue refresh (`gh issue view <n>` → `BackendItemRefresh`).
 
 Dependencies and Epic membership are push-only. `add_dependency` and
-`remove_dependency` edit the blocked issue's dependency edge;
-`add_ticket_to_epic` and `remove_ticket_from_epic` edit the Ticket's parent.
-Backend Pull does not reconcile either relationship from GitHub. The local
-edge or membership in the Repository Store remains authoritative for tk's
-read views and `tk next`.
+`remove_dependency` edit the blocked issue's dependency edge.
+`add_ticket_to_epic` sets the Ticket's parent; `remove_ticket_from_epic`
+removes the Ticket from the expected Epic's sub-issue list. Backend Pull does
+not reconcile either relationship from GitHub. The local edge or membership
+in the Repository Store remains authoritative for tk's read views and
+`tk next`.
 
 ## Relationship deferral was a scope choice, not a capability gap
 
@@ -29,7 +30,7 @@ relationship first-class in `gh issue` — no raw `gh api` required:
 - Dependencies — `gh issue edit --add-blocked-by`/`--remove-blocked-by`
   (and `--add-blocking`/`--remove-blocking`), read back via the
   `blockedBy`/`blocking` `--json` fields.
-- Sub-issues / Epic membership — `gh issue edit --parent`/`--remove-parent`/
+- Sub-issues / Epic membership — `gh issue edit --parent`/
   `--add-sub-issue`/`--remove-sub-issue`, read back via `parent`/`subIssues`.
 
 The original deferral rested on scope, not capability:
@@ -114,15 +115,19 @@ The original deferral rested on scope, not capability:
 - (tk-132, 2026-08) Epic field and membership Apply lands, **push-only**.
   `update_epic` uses the same title/body edit contract as `update_ticket`.
   `add_ticket_to_epic` sets the Ticket's parent with `gh issue edit --parent`;
-  `remove_ticket_from_epic` uses `--remove-parent`. Both identities are
-  resolved in the Repository Store and ride the typed `BackendEdit`, keeping
-  the adapter store-free. Backend Pull remains field-only and does not request
-  or reconcile parent or sub-issue data.
+  `remove_ticket_from_epic` edits the expected Epic with `--remove-sub-issue`
+  instead of detaching whichever parent the Ticket happens to have. Both
+  identities are resolved in the Repository Store and ride the typed
+  `BackendEdit`, keeping the adapter store-free. Backend Pull remains
+  field-only and does not reconcile parent or sub-issue data.
 - (tk-137, 2026-08) GitHub Promotion lands. Task Tickets and Epics share the
   typeless `gh issue create --title ... --body ...` surface; no `--type` or
   relationship flag rides creation. The Adapter declares Ticket, Epic, Task,
   Dependency, and Epic-membership capabilities together, because the latter
   two already have real Apply arms. Bug remains unsupported. A trustworthy
   issue URL is the creation receipt; completed results without one are
-  indeterminate except for certified authentication rejection. Backend Pull
-  remains field-only, so relationship reconciliation is still out of scope.
+  indeterminate except for the observed initial 401/bad-credentials frame.
+  Backend Pull remains field-only, so relationship reconciliation is still
+  out of scope.
+  Adopt and Promotion retain the canonical issue URL as the GitHub backend key;
+  future view/edit/relationship calls therefore stay pinned to that repository.

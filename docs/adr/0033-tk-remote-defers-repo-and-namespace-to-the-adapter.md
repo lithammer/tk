@@ -53,11 +53,18 @@ Persisting it only creates a second copy that can drift from the real remote.
 
 So tk-106 writes `config_json = {}` — recording only that the Primary Backend is
 GitHub — and defers repo resolution to tk-34's adapter, which lets `gh issue`
-resolve the repository from the checkout for every Backend operation (no
-`--repo`). The hard cases — forks whose issues live upstream, multiple
-remotes, GitHub Enterprise hosts — are owned by `gh` and persisted in the
-repository's git config via `gh repo set-default`, stable across Workspaces; tk
-neither reimplements nor caches that resolution.
+resolve the creation repository from the checkout (no `--repo`). The hard
+cases — forks whose issues live upstream, multiple remotes, GitHub Enterprise
+hosts — are owned by `gh` and persisted in the repository's git config via
+`gh repo set-default`, stable across Workspaces; tk neither reimplements nor
+caches that resolution.
+
+Creation still resolves its target from the checkout, but the Adapter keeps the
+canonical issue URL returned by GitHub as the Backend key. Adopt does the same.
+All later item-specific operations pass that URL back to `gh`, so a later
+`GH_REPO` override or changed checkout default cannot redirect an existing
+Backend Item. This pins object identity without adding a second Remote
+repository setting.
 
 This cut cascades through the command surface:
 

@@ -42,6 +42,18 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         .map_err(CommandError::failure)?;
     store_sync::ensure_adopt_available(store.conn()).map_err(adopt_store_error)?;
 
+    let Some(expected) = store_sync::configured_remote_kind(store.conn())
+        .map_err(|err| resolver::storage_error(&err))?
+    else {
+        return Err(no_remote());
+    };
+    if let Some(row) = store_sync::find_adopted_ticket(store.conn(), expected, &args.key)
+        .map_err(adopt_store_error)?
+    {
+        let _ = writeln!(deps.stdout, "Already adopted: {}", row.display_id);
+        return Ok(Exit::Ok);
+    }
+
     let adapter_opt = match factory::open_configured(store.conn(), deps.runner, deps.cwd) {
         Ok(adapter) => adapter,
         Err(err @ FactoryOpenError::NotImplemented) => return Err(CommandError::failure(err)),
@@ -58,7 +70,7 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         .adopt_ticket(&args.key)
         .map_err(adapter_read_error)?;
 
-    let expected = adapter.backend_kind();
+    debug_assert_eq!(adapter.backend_kind(), expected);
     let outcome = store_sync::adopt_backend_ticket(
         store.conn_mut(),
         expected,
@@ -117,6 +129,9 @@ fn adopt_store_error(err: AdoptStoreError) -> CommandError {
         AdoptStoreError::DisplayIdCollision(id) => CommandError::failure(format!(
             "Display ID '{id}' already claimed by an existing Item"
         )),
+        AdoptStoreError::BackendItemIsEpic(id) => {
+            CommandError::failure(format!("{id} is a Backend Epic, not a Ticket"))
+        }
         AdoptStoreError::RemoteChanged { .. } => CommandError::failure(
             "the configured Remote changed while contacting the Backend; retry 'tk adopt'",
         ),
@@ -297,7 +312,8 @@ mod tests {
         assert_eq!(mutations, 0, "Adopt records no Mutation");
         let (origin, selection): (String, String) = conn
             .query_row(
-                "select origin, selection_state from items where backend_key = '42'",
+                "select origin, selection_state from items \
+                  where backend_key = 'https://github.com/o/r/issues/42'",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
@@ -380,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn already_adopted_fetches_canonical_identity_without_updating_stored_ticket() {
+    fn already_adopted_canonical_url_returns_without_a_backend_call() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
@@ -391,7 +407,7 @@ mod tests {
                 display: "gh-42",
                 origin: "backend",
                 backend_kind: Some("github"),
-                backend_key: Some("42"),
+                backend_key: Some("https://github.com/o/r/issues/42"),
                 title: "Already here",
                 ..FixtureItem::default()
             },
@@ -400,16 +416,6 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        h.runner.expect(
-            &["gh", "issue", "view", "https://github.com/o/r/issues/42"],
-            ok(&issue_json(
-                42,
-                "OPEN",
-                "null",
-                "https://github.com/o/r/issues/42",
-            )),
-        );
-
         let code = run_rendered(&mut h, "https://github.com/o/r/issues/42");
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert_eq!(code, Exit::Ok, "stderr={:?}", String::from_utf8(h.stderr));
@@ -432,6 +438,57 @@ mod tests {
             )
             .unwrap();
         assert_eq!((item_count, created_sequence), (1, 0));
+    }
+
+    #[test]
+    fn adopting_the_issue_backing_an_epic_is_not_ticket_success() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "epic",
+                display: "gh-5",
+                item_class: "epic",
+                ticket_kind: None,
+                selection_state: None,
+                priority: None,
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("https://github.com/o/r/issues/5"),
+                title: "Roadmap",
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        h.runner.expect_exact(
+            &[
+                "gh",
+                "issue",
+                "view",
+                "5",
+                "--json",
+                "number,title,body,state,issueType,url",
+            ],
+            ok(&issue_json(
+                5,
+                "OPEN",
+                "null",
+                "https://github.com/o/r/issues/5",
+            )),
+        );
+
+        let code = run_rendered(&mut h, "5");
+
+        assert_eq!(code, Exit::Failure);
+        assert_eq!(
+            String::from_utf8(h.stderr).unwrap(),
+            "tk adopt: gh-5 is a Backend Epic, not a Ticket\n"
+        );
     }
 
     #[test]

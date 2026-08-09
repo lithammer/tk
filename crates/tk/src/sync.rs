@@ -24,7 +24,7 @@
 use rusqlite::Connection;
 use thiserror::Error;
 
-use crate::domain::backend_operation::BackendOperation;
+use crate::domain::backend_operation::{BackendItemIdentity, BackendOperation};
 use crate::domain::backend_outcome::{BackendCreateOutcome, BackendEditOutcome};
 use crate::remote::adapter::{Adapter, AdapterReadError, ApplyError};
 use crate::store::repository::RemoteWorkflowGuard;
@@ -71,6 +71,15 @@ pub enum RunSyncError {
     Load(#[from] LoadApplicableError),
     #[error(transparent)]
     Outcome(#[from] PersistMutationOutcomeError),
+    #[error(
+        "Backend created {identity} for Mutation {sequence}, but tk could not save its identity: {source}"
+    )]
+    CreatedIdentityNotStored {
+        sequence: i64,
+        identity: BackendItemIdentity,
+        #[source]
+        source: PersistMutationOutcomeError,
+    },
     #[error("Mutation {0} has an indeterminate Backend creation outcome")]
     ApplyingMutation(i64),
 }
@@ -138,7 +147,16 @@ pub fn run_sync(
             BackendOperation::Create(create) => {
                 begin_create(conn, sequence, now)?;
                 let outcome = adapter.create_item(&create);
-                persist_create_outcome(conn, sequence, &outcome, now)?;
+                if let Err(source) = persist_create_outcome(conn, sequence, &outcome, now) {
+                    if let BackendCreateOutcome::Created(identity) = &outcome {
+                        return Err(RunSyncError::CreatedIdentityNotStored {
+                            sequence,
+                            identity: identity.clone(),
+                            source,
+                        });
+                    }
+                    return Err(source.into());
+                }
                 match outcome {
                     BackendCreateOutcome::Created(_) => report.applied_count += 1,
                     BackendCreateOutcome::Rejected(_) => {
@@ -851,6 +869,77 @@ mod tests {
         assert_eq!(display, "gh-42");
         assert_eq!(origin, "backend");
         assert_eq!(key, "42");
+    }
+
+    #[test]
+    fn a_created_identity_that_cannot_be_stored_stays_applying_with_the_receipt() {
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Local work",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t2",
+                display: "gh-42",
+                title: "Existing display",
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "promote_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
+                state: "pending",
+                promotion_operation_id: Some("op-1"),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        let mut fake = fake_with_create(
+            vec![],
+            vec![],
+            vec![CreateResponse::Created {
+                backend_key: "https://github.com/o/r/issues/42".into(),
+                display_id: "gh-42".into(),
+            }],
+        );
+
+        let error = run(&mut conn, &mut fake).unwrap_err();
+
+        assert!(matches!(
+            error,
+            RunSyncError::CreatedIdentityNotStored {
+                sequence: 1,
+                ref identity,
+                ..
+            } if identity.display_id == "gh-42"
+                && identity.backend_key == "https://github.com/o/r/issues/42"
+        ));
+        let (state, origin): (String, String) = conn
+            .query_row(
+                "select m.state, i.origin from mutations m \
+                   join items i on i.id = m.item_id where m.sequence = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "applying");
+        assert_eq!(origin, "local");
     }
 
     #[test]

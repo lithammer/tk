@@ -141,7 +141,11 @@ fn run_sync(deps: Deps<'_>, skip: Option<i64>) -> Exit {
         }
     };
     render_sync_report(stdout, &report, skip);
-    Exit::Ok
+    if report.stopped_at_sequence.is_some() {
+        Exit::Failure
+    } else {
+        Exit::Ok
+    }
 }
 
 fn run_log(deps: Deps<'_>, args: LogArgs) -> Exit {
@@ -311,6 +315,13 @@ fn render_run_sync_error<W: Write + ?Sized>(stderr: &mut W, err: &RunSyncError) 
         | RunSyncError::Outcome(PersistMutationOutcomeError::Storage(e)) => {
             resolver::storage_error(e).render(stderr, COMMAND);
         }
+        RunSyncError::CreatedIdentityNotStored { sequence, .. } => {
+            let _ = writeln!(stderr, "tk sync: {err}");
+            let _ = writeln!(
+                stderr,
+                "Mutation {sequence} remains applying; do not retry automatic sync until its Backend identity is reconciled"
+            );
+        }
         // Named exhaustively rather than caught by `_`, so a variant added
         // later has to choose a line here instead of falling through to the
         // bare technical one.
@@ -393,9 +404,10 @@ mod tests {
     use super::*;
     use crate::clock::FakeClock;
     use crate::domain::backend_kind::BackendKind;
+    use crate::domain::backend_operation::BackendItemIdentity;
     use crate::domain::mutation_payload::Promotion;
     use crate::domain::mutation_type::MutationType;
-    use crate::proc::{FakeRunner, RunOutput};
+    use crate::proc::{FakeRunner, ProcError, RunOutput};
     use crate::render::Styler;
     use crate::store::migrations;
     use crate::store::testing::{
@@ -549,6 +561,76 @@ mod tests {
     }
 
     #[test]
+    fn sync_exits_failure_when_creation_never_started() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Local work",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "promote_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
+                state: "pending",
+                promotion_operation_id: Some("op-1"),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        h.runner.expect_exact_error(
+            &[
+                "gh",
+                "issue",
+                "create",
+                "--title",
+                "Local work",
+                "--body",
+                "",
+            ],
+            ProcError::ExecutableNotFound,
+        );
+
+        let code = run(
+            h.deps(),
+            Args {
+                subcommand: None,
+                skip: None,
+            },
+        );
+
+        assert_eq!(code, Exit::Failure);
+        assert_eq!(
+            String::from_utf8(h.stdout).unwrap(),
+            "Sync complete: 0 pulled, 0 applied, stopped at 1.\n"
+        );
+        let state: String = Connection::open(store.db_path())
+            .unwrap()
+            .query_row(
+                "select state from mutations where sequence = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "failed");
+    }
+
+    #[test]
     fn sync_github_drives_gh_through_the_factory() {
         // End-to-end wiring: command -> factory -> real GithubAdapter -> gh via
         // the same FakeRunner. An Adopted item with a pending update_ticket
@@ -665,7 +747,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_skip_waits_for_the_repository_remote_workflow_guard() {
+    fn sync_skip_reports_a_busy_remote_workflow_guard() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         backend_ticket(&conn, "t1", "tk-1", "1", 1);
@@ -697,50 +779,20 @@ mod tests {
         let clock = FakeClock::new(1_778_284_800_000);
         let first = resolver::open_for_command(&holder_runner, &cwd_path, &clock).unwrap();
         let first_guard = first.lock_remote_workflow().unwrap();
-        let command_runner = FakeRunner::new();
-        command_runner.expect(
-            &["git", "rev-parse"],
-            RunOutput {
-                exit_code: 0,
-                stdout: store.git_rev_parse_stdout(),
-                stderr: Vec::new(),
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let exit = run(
+            h.deps(),
+            Args {
+                subcommand: None,
+                skip: Some(1),
             },
         );
-        let (started_tx, started_rx) = std::sync::mpsc::channel();
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let contender = std::thread::spawn(move || {
-            let mut stdout = Vec::new();
-            let mut stderr = Vec::new();
-            let mut stdin = std::io::Cursor::new(Vec::new());
-            let command_clock = FakeClock::new(1_778_284_800_000);
-            let mut rng = StdRng::seed_from_u64(0);
-            started_tx.send(()).unwrap();
-            let exit = run(
-                Deps {
-                    stdout: &mut stdout,
-                    stderr: &mut stderr,
-                    stdin: &mut stdin,
-                    runner: &command_runner,
-                    clock: &command_clock,
-                    rng: &mut rng,
-                    cwd: &cwd_path,
-                    styler: Styler::plain(),
-                },
-                Args {
-                    subcommand: None,
-                    skip: Some(1),
-                },
-            );
-            done_tx.send((exit, stderr)).unwrap();
-        });
-
-        started_rx
-            .recv_timeout(std::time::Duration::from_secs(2))
-            .unwrap();
-        assert!(matches!(
-            done_rx.recv_timeout(std::time::Duration::from_millis(100)),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-        ));
+        assert_eq!(exit, Exit::Failure);
+        assert_eq!(
+            String::from_utf8(h.stderr).unwrap(),
+            "tk sync: another remote-changing command is running; retry when it finishes\n"
+        );
         let state: String = first
             .conn()
             .query_row(
@@ -750,26 +802,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state, "failed");
-
         drop(first_guard);
-        let (exit, stderr) = done_rx
-            .recv_timeout(std::time::Duration::from_secs(2))
-            .unwrap();
-        contender.join().unwrap();
-        assert_eq!(exit, Exit::Failure, "no Remote remains a command failure");
-        assert_eq!(
-            String::from_utf8(stderr).unwrap(),
-            "tk sync: no Remote configured; run 'tk remote set <kind>' first\n"
-        );
-        let state: String = first
-            .conn()
-            .query_row(
-                "select state from mutations where sequence = 1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(state, "skipped");
     }
 
     #[test]
@@ -1256,5 +1289,26 @@ mod tests {
             String::from_utf8(stderr).unwrap(),
             "tk sync: Mutation 7 has an indeterminate Backend creation outcome; automatic sync is blocked until it is reconciled\n"
         );
+    }
+
+    #[test]
+    fn render_run_sync_error_preserves_an_unstored_created_identity() {
+        let mut stderr = Vec::new();
+        let error = RunSyncError::CreatedIdentityNotStored {
+            sequence: 7,
+            identity: BackendItemIdentity {
+                display_id: "gh-42".into(),
+                backend_key: "https://github.com/o/r/issues/42".into(),
+            },
+            source: PersistMutationOutcomeError::MutationNotFound(7),
+        };
+
+        render_run_sync_error(&mut stderr, &error);
+
+        let rendered = String::from_utf8(stderr).unwrap();
+        assert!(rendered.contains("gh-42"));
+        assert!(rendered.contains("https://github.com/o/r/issues/42"));
+        assert!(rendered.contains("remains applying"));
+        assert!(rendered.contains("do not retry"));
     }
 }

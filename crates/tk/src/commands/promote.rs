@@ -877,7 +877,14 @@ mod tests {
             },
         );
         h.runner.expect_exact(
-            &["gh", "issue", "edit", "2", "--parent", "1"],
+            &[
+                "gh",
+                "issue",
+                "edit",
+                "https://github.com/o/r/issues/2",
+                "--parent",
+                "https://github.com/o/r/issues/1",
+            ],
             RunOutput {
                 exit_code: 0,
                 stdout: Vec::new(),

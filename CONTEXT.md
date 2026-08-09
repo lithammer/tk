@@ -384,9 +384,15 @@ _Avoid_: ticket, tickets
   through later relationship **Mutations**; Bug Promotion remains unsupported.
 - A trustworthy GitHub issue URL receipt certifies **Created**, including when
   `gh` also exits nonzero. Pre-spawn runner failures and authentication
-  rejection certify **Rejected**; every other completed result without a
-  trustworthy receipt is **Indeterminate**. A failure observing a process that
-  already started is likewise **Indeterminate**.
+  rejection with the observed initial 401/bad-credentials frame certifies
+  **Rejected**; every other completed result without a trustworthy receipt is
+  **Indeterminate**. A failure observing a process that already started is
+  likewise **Indeterminate**.
+- GitHub Backend identity retains the canonical issue URL returned by Adopt or
+  Promotion. Later Pull and Apply calls use that URL, so `GH_REPO`, a foreign
+  Adopt URL, or a changed checkout default cannot redirect an existing Item to
+  another repository. Pull rejects a response whose canonical issue differs
+  from the stored key.
 - Before invoking Backend creation, the Repository Store durably moves the
   Promotion Mutation to `applying`.
 - **Created** atomically applies the Backend identity, marks the Mutation
@@ -402,10 +408,14 @@ _Avoid_: ticket, tickets
   `<git-common-dir>/tk/remote.lock`; process termination releases ownership,
   but tk never deletes or replaces the file. Sync Skip takes the lock before
   changing the Mutation Log but still commits before opening the Backend
-  Adapter. Local edit commands and Sync Log do not take this lock.
+  Adapter. A competing command fails with a retry diagnostic instead of
+  waiting without a bound. Local edit commands and Sync Log do not take this
+  lock.
 - The sync engine owns mutation ordering, cursors, retries, and failure policy.
 - The sync engine applies pending **Mutations** in global **Mutation Sequence** order in v1.
 - The sync engine stops at the first failed **Mutation** in v1.
+- `tk sync` reports a stopped Mutation and exits nonzero; a stopped queue is
+  not a successful sync.
 - A failed edit or certified-no-effect creation keeps a **Mutation Failure**
   and is retried by the next sync. An `applying` creation is never retried
   automatically.

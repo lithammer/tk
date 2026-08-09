@@ -80,6 +80,8 @@ pub enum AdoptStoreError {
     BackendCohort(#[from] BackendCohortError),
     #[error("Mutation {0} has an indeterminate Backend creation outcome")]
     ApplyingMutation(i64),
+    #[error("{0} is a Backend Epic, not a Ticket")]
+    BackendItemIsEpic(String),
 }
 
 /// Error returned by Backend Pull derivation and refresh merge.
@@ -123,7 +125,13 @@ pub fn adopt_backend_ticket(
     ensure_adopt_available(&tx)?;
     ensure_adopt_remote(&tx, expected_kind)?;
     ensure_backend_cohort(&tx, expected_kind)?;
-    if let Some(row) = find_backend_item(&tx, expected_kind, &adopted.backend_key)? {
+    let legacy_backend_key = legacy_adopt_backend_key(expected_kind, adopted);
+    if let Some(row) = find_adopted_ticket_by_identity(
+        &tx,
+        expected_kind,
+        &adopted.backend_key,
+        legacy_backend_key,
+    )? {
         return Ok(AdoptOutcome::AlreadyExists(row));
     }
     let id = generate_internal_id(rng);
@@ -176,8 +184,13 @@ pub fn adopt_backend_ticket(
     }
     tx.commit()?;
     Ok(AdoptOutcome::Inserted(
-        find_backend_item(conn, expected_kind, &adopted.backend_key)?
-            .expect("the adopted Backend Ticket was committed"),
+        find_adopted_ticket_by_identity(
+            conn,
+            expected_kind,
+            &adopted.backend_key,
+            legacy_backend_key,
+        )?
+        .expect("the adopted Backend Ticket was committed"),
     ))
 }
 
@@ -789,11 +802,11 @@ pub fn mark_mutation_skipped(
         )
         .optional()?;
     let (prior, mutation_type) = row.ok_or(MarkSkippedError::MutationNotFound(sequence))?;
-    if prior != MutationState::Failed {
-        return Err(MarkSkippedError::MutationNotFailed(sequence));
-    }
     if mutation_type.is_promotion() {
         return Err(MarkSkippedError::CannotSkipPromotion(sequence));
+    }
+    if prior != MutationState::Failed {
+        return Err(MarkSkippedError::MutationNotFailed(sequence));
     }
 
     tx.execute(
@@ -851,29 +864,61 @@ pub struct BackendItemRow {
     pub title: String,
 }
 
-/// Look up a Backend item by its `(backend_kind, backend_key)` identity, the
-/// pair canonical Adopt insertion keys on. Returns `None` when no item
-/// carries that identity. The pair is unique, so at most one row matches.
-pub fn find_backend_item(
+/// Look up a Backend Ticket for an idempotent Adopt.
+///
+/// Exact canonical keys make a repeated Adopt Store-only without equating
+/// same-numbered issues from different repositories. Legacy numeric keys stay
+/// exact-matchable; a Backend read canonicalizes other user input before the
+/// transactional idempotence check.
+pub fn find_adopted_ticket(
+    conn: &Connection,
+    backend_kind: BackendKind,
+    input: &str,
+) -> Result<Option<BackendItemRow>, AdoptStoreError> {
+    find_adopted_ticket_by_identity(conn, backend_kind, input, None)
+}
+
+fn find_adopted_ticket_by_identity(
     conn: &Connection,
     backend_kind: BackendKind,
     backend_key: &str,
-) -> rusqlite::Result<Option<BackendItemRow>> {
-    conn.query_row(
-        "select display_value, ticket_kind, priority, status, title \
-           from items where backend_kind = ?1 and backend_key = ?2",
-        params![backend_kind.text(), backend_key],
-        |row| {
-            Ok(BackendItemRow {
-                display_id: row.get(0)?,
-                ticket_kind: row.get(1)?,
-                priority: row.get(2)?,
-                status: row.get(3)?,
-                title: row.get(4)?,
-            })
-        },
-    )
-    .optional()
+    legacy_backend_key: Option<&str>,
+) -> Result<Option<BackendItemRow>, AdoptStoreError> {
+    let row = conn
+        .query_row(
+            "select item_class, display_value, ticket_kind, priority, status, title \
+           from items \
+          where backend_kind = ?1 \
+            and (backend_key = ?2 or (?3 is not null and backend_key = ?3))",
+            params![backend_kind.text(), backend_key, legacy_backend_key],
+            |row| {
+                Ok((
+                    row.get::<_, ItemClass>(0)?,
+                    BackendItemRow {
+                        display_id: row.get(1)?,
+                        ticket_kind: row.get(2)?,
+                        priority: row.get(3)?,
+                        status: row.get(4)?,
+                        title: row.get(5)?,
+                    },
+                ))
+            },
+        )
+        .optional()?;
+    match row {
+        Some((ItemClass::Ticket, row)) => Ok(Some(row)),
+        Some((ItemClass::Epic, row)) => Err(AdoptStoreError::BackendItemIsEpic(row.display_id)),
+        None => Ok(None),
+    }
+}
+
+fn legacy_adopt_backend_key(backend_kind: BackendKind, adopted: &AdoptedItem) -> Option<&str> {
+    if backend_kind != BackendKind::Github {
+        return None;
+    }
+    let number = adopted.display_id.strip_prefix("gh-")?;
+    let url_number = adopted.backend_key.rsplit_once("/issues/")?.1;
+    (number == url_number && number.parse::<u64>().is_ok()).then_some(number)
 }
 
 /// Count Mutation Log entries in `pending` or `failed` state.
@@ -1140,7 +1185,7 @@ pub enum ClearRemoteError {
     /// Remote would orphan them (CONTEXT.md). Carries the count for the
     /// verbatim diagnostic.
     #[error(
-        "{0} pending or failed Mutation(s) would be orphaned; resolve them with 'tk sync' or skip them with 'tk sync --skip <id>' before clearing the Remote"
+        "{0} pending or failed Mutation(s) would be orphaned; resolve them before clearing the Remote"
     )]
     WouldOrphan(i64),
     #[error("Mutation {0} has an indeterminate Backend creation outcome")]
@@ -1381,12 +1426,46 @@ mod directional_tests {
                 .unwrap();
         assert!(matches!(second, AdoptOutcome::AlreadyExists(_)));
         assert_eq!(
-            find_backend_item(&conn, BackendKind::Github, "42")
+            find_adopted_ticket(&conn, BackendKind::Github, "42")
                 .unwrap()
                 .unwrap()
                 .title,
             "Original"
         );
+    }
+
+    #[test]
+    fn adopt_does_not_alias_same_numbered_issues_across_repositories() {
+        let mut conn = open();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        adopt_backend_ticket(
+            &mut conn,
+            BackendKind::Github,
+            &mut rng,
+            &adopted("https://github.com/one/repo/issues/42", "gh-42"),
+            NOW,
+        )
+        .unwrap();
+
+        assert!(
+            find_adopted_ticket(
+                &conn,
+                BackendKind::Github,
+                "https://github.com/other/repo/issues/42",
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(matches!(
+            adopt_backend_ticket(
+                &mut conn,
+                BackendKind::Github,
+                &mut rng,
+                &adopted("https://github.com/other/repo/issues/42", "gh-42"),
+                NOW,
+            ),
+            Err(AdoptStoreError::DisplayIdCollision(id)) if id == "gh-42"
+        ));
     }
 
     #[test]
@@ -1585,7 +1664,7 @@ mod directional_tests {
             NOW,
         )
         .unwrap();
-        let row = find_backend_item(&conn, BackendKind::Github, "42")
+        let row = find_adopted_ticket(&conn, BackendKind::Github, "42")
             .unwrap()
             .unwrap();
         assert_eq!(row.display_id, "gh-42");
@@ -3087,54 +3166,61 @@ mod tests {
     }
 
     #[test]
-    fn mark_skipped_refuses_a_failed_promotion() {
+    fn mark_skipped_reports_promotion_before_state() {
         // Both Promotion Mutation Types gate the same way: skipping either
         // would strand whatever the invocation queued behind it with no
         // backend identity to resolve against (ADR-0036 Pending Promotion).
-        for mutation_type in ["promote_ticket", "promote_epic"] {
-            let mut conn = open_seeded();
-            insert_fixture_item(
-                &conn,
-                FixtureItem {
-                    id: "t1",
-                    display: "tk-1",
-                    title: "Local work",
-                    created_seq: 1,
-                    ..FixtureItem::default()
-                },
-            )
-            .unwrap();
-            insert_fixture_mutation(
-                &conn,
-                FixtureMutation {
-                    sequence: 1,
-                    mutation_type,
-                    item_id: "t1",
-                    payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
-                    state: "failed",
-                    failure_json: Some(r#"{"detail":"boom"}"#),
-                    ..FixtureMutation::default()
-                },
-            )
-            .unwrap();
-
-            let workflow = RemoteWorkflowGuard::for_test();
-            match mark_mutation_skipped(&mut conn, &workflow, 1, "2026-05-19T00:00:00Z")
-                .unwrap_err()
-            {
-                MarkSkippedError::CannotSkipPromotion(1) => {}
-                other => panic!("expected CannotSkipPromotion for {mutation_type}, got {other:?}"),
-            }
-
-            let state: String = conn
-                .query_row("select state from mutations where sequence = 1", [], |r| {
-                    r.get(0)
-                })
+        for (mutation_type, item_class) in [("promote_ticket", "ticket"), ("promote_epic", "epic")]
+        {
+            for prior_state in ["failed", "applying"] {
+                let mut conn = open_seeded();
+                insert_fixture_item(
+                    &conn,
+                    FixtureItem {
+                        id: "t1",
+                        display: "tk-1",
+                        item_class,
+                        ticket_kind: (item_class == "ticket").then_some("task"),
+                        selection_state: (item_class == "ticket").then_some("accepted"),
+                        priority: (item_class == "ticket").then_some("P2"),
+                        title: "Local work",
+                        created_seq: 1,
+                        ..FixtureItem::default()
+                    },
+                )
                 .unwrap();
-            assert_eq!(
-                state, "failed",
-                "a refused skip must leave the row failed, not skipped"
-            );
+                insert_fixture_mutation(
+                    &conn,
+                    FixtureMutation {
+                        sequence: 1,
+                        mutation_type,
+                        item_id: "t1",
+                        item_class,
+                        payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
+                        state: prior_state,
+                        failure_json: Some(r#"{"detail":"boom"}"#),
+                        ..FixtureMutation::default()
+                    },
+                )
+                .unwrap();
+
+                let workflow = RemoteWorkflowGuard::for_test();
+                match mark_mutation_skipped(&mut conn, &workflow, 1, "2026-05-19T00:00:00Z")
+                    .unwrap_err()
+                {
+                    MarkSkippedError::CannotSkipPromotion(1) => {}
+                    other => panic!(
+                        "expected CannotSkipPromotion for {prior_state} {mutation_type}, got {other:?}"
+                    ),
+                }
+
+                let stored_state: String = conn
+                    .query_row("select state from mutations where sequence = 1", [], |r| {
+                        r.get(0)
+                    })
+                    .unwrap();
+                assert_eq!(stored_state, prior_state);
+            }
         }
     }
 

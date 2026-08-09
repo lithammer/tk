@@ -38,9 +38,16 @@ Repository Store persistence. The stable lock path is
 `<git-common-dir>/tk/remote.lock`; tk never deletes or replaces it, and process
 termination releases it. This closes the live-process check-then-act window;
 `applying` remains necessary because a file lock cannot record an ambiguous
-creation across a crash. Sync Skip participates in this serialization because
-it changes the same outbox ordering state, but it commits before Adapter open
-so Backend availability cannot block curation after the lock is acquired.
+creation across a crash. Contention returns a retryable command failure rather
+than waiting without a bound. Sync Skip participates in this serialization
+because it changes the same outbox ordering state, but it commits before
+Adapter open so Backend availability cannot block curation after the lock is
+acquired.
+
+If Backend creation returns a confirmed identity but the transaction that
+stores it fails, the Mutation remains `applying`. The error preserves the
+canonical Backend identity and warns against automatic retry; a generic Store
+error would hide that the external object already exists.
 
 The two non-obvious claims are that **Pull failures stamp nothing** (they're
 not associated with any outbox row) and that **Apply failures persist per

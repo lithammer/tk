@@ -154,8 +154,9 @@ Important stable contracts:
   configuration hold one guard across Backend access and Store persistence;
   nested Promotion sync reuses its caller's guard. The lock closes the live
   process check-then-act race, while the durable `applying` state remains the
-  crash-recovery barrier. Sync Skip shares the guard but commits before the
-  Adapter opens; Sync Log and local commands stay unlocked.
+  crash-recovery barrier. Lock contention fails immediately with retry
+  guidance instead of blocking indefinitely. Sync Skip shares the guard but
+  commits before the Adapter opens; Sync Log and local commands stay unlocked.
 - `remotes` and `sync_cursors` hold the v1 singleton Remote model.
 - `store_config.display_prefix` controls newly generated local Display IDs.
   Custom prefix configuration is tracked by `tk-22`.
