@@ -1,9 +1,10 @@
 //! Typed Backend Adapter write outcomes.
 //!
 //! Edit environment failures use the Adapter method's `Result` error arm.
-//! Creation always returns a value because a generic process failure cannot
-//! certify that invocation never started. Backend verdicts stay typed so the
-//! sync engine can persist their certainty to the Mutation Log.
+//! Creation always returns a value so its Adapter can classify pre-spawn
+//! process errors separately from completed invocations whose effect may be
+//! ambiguous. Backend verdicts stay typed so the sync engine can persist their
+//! certainty to the Mutation Log.
 
 use serde::{Deserialize, Serialize};
 

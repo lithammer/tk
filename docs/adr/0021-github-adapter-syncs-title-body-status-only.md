@@ -117,5 +117,12 @@ The original deferral rested on scope, not capability:
   `remove_ticket_from_epic` uses `--remove-parent`. Both identities are
   resolved in the Repository Store and ride the typed `BackendEdit`, keeping
   the adapter store-free. Backend Pull remains field-only and does not request
-  or reconcile parent or sub-issue data. Creation and the corresponding
-  Promotion capability declarations remain deferred to tk-137.
+  or reconcile parent or sub-issue data.
+- (tk-137, 2026-08) GitHub Promotion lands. Task Tickets and Epics share the
+  typeless `gh issue create --title ... --body ...` surface; no `--type` or
+  relationship flag rides creation. The Adapter declares Ticket, Epic, Task,
+  Dependency, and Epic-membership capabilities together, because the latter
+  two already have real Apply arms. Bug remains unsupported. A trustworthy
+  issue URL is the creation receipt; completed results without one are
+  indeterminate except for certified authentication rejection. Backend Pull
+  remains field-only, so relationship reconciliation is still out of scope.

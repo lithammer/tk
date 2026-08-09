@@ -106,10 +106,9 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
 /// Preflight, commit, sync, report — the operation itself, once the Repository
 /// Store and the Backend Adapter are open.
 ///
-/// Split from [`run`] at the Adapter seam because the v1 GitHub Adapter
-/// declares no Promotion capability (ADR-0036): against a real Remote the
-/// planner refuses before this function reaches a Backend call, so the paths
-/// past preflight are exercised with a scripted Adapter.
+/// Split from [`run`] at the Adapter seam so the Promotion transaction and
+/// recovery paths can be exercised with a scripted Adapter independently of
+/// the concrete GitHub subprocess mapping.
 fn promote(
     deps: &mut Deps<'_>,
     store: &mut Store,
@@ -743,30 +742,152 @@ mod tests {
     }
 
     #[test]
-    fn a_github_remote_refuses_before_any_backend_call() {
-        // The v1 GitHub Adapter declares no Promotion capability (ADR-0036), so
-        // preflight refuses. Only the git discovery call is queued: a `gh` call
-        // would exhaust the FakeRunner and panic.
+    fn github_capabilities_leave_only_real_aggregate_preflight_findings() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        local_epic(&conn, "e1", "tk-1", 1);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "c1",
+                display: "tk-2",
+                title: "Build the child",
+                container_id: Some("e1"),
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "c2",
+                display: "tk-3",
+                title: "Captured idea",
+                priority: None,
+                container_id: Some("e1"),
+                selection_state: Some("triage"),
+                created_seq: 3,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        local_ticket(&conn, "outside", "tk-4", 4);
+        insert_dependency(&conn, "outside", "c1").unwrap();
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+
+        let code = run_rendered(&mut h, "tk-1", true);
+
+        assert_eq!(code, Exit::Failure);
+        assert_eq!(
+            h.err(),
+            "tk promote: cannot promote tk-1:\n  \
+             tk-3 is in triage; run 'tk accept tk-3 --priority P0..P4' before promoting it.\n  \
+             tk-2 would be backend-backed while its Blocking Item tk-4 stays local. \
+             Promote tk-4 in the same operation, or run 'tk unblock tk-2 tk-4' to drop the Dependency.\n"
+        );
+        assert_eq!(mutation_count(&conn).unwrap(), 0);
+        h.runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn a_github_remote_promotes_a_task_through_the_real_adapter() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         local_ticket(&conn, "t1", "tk-1", 1);
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
+        h.runner.expect_exact(
+            &[
+                "gh",
+                "issue",
+                "create",
+                "--title",
+                "Local work",
+                "--body",
+                "",
+            ],
+            RunOutput {
+                exit_code: 0,
+                stdout: b"https://github.com/o/r/issues/42\n".to_vec(),
+                stderr: Vec::new(),
+            },
+        );
 
         let code = run_rendered(&mut h, "tk-1", false);
 
-        assert_eq!(code, Exit::Failure);
-        assert!(
-            h.err().contains("tk promote: cannot promote tk-1:"),
-            "{}",
-            h.err()
+        assert_eq!(code, Exit::Ok, "{}", h.err());
+        assert_eq!(h.out(), "Promoted Ticket: tk-1 -> gh-42\n");
+        assert_eq!(item_state(&conn, "t1"), ("gh-42".into(), "backend".into()));
+        h.runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn a_github_remote_promotes_an_epic_and_child_with_membership() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        local_epic(&conn, "e1", "tk-1", 1);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "c1",
+                display: "tk-2",
+                title: "Child",
+                container_id: Some("e1"),
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        h.runner.expect_exact(
+            &[
+                "gh",
+                "issue",
+                "create",
+                "--title",
+                "Local epic",
+                "--body",
+                "",
+            ],
+            RunOutput {
+                exit_code: 0,
+                stdout: b"https://github.com/o/r/issues/1\n".to_vec(),
+                stderr: Vec::new(),
+            },
         );
+        h.runner.expect_exact(
+            &["gh", "issue", "create", "--title", "Child", "--body", ""],
+            RunOutput {
+                exit_code: 0,
+                stdout: b"https://github.com/o/r/issues/2\n".to_vec(),
+                stderr: Vec::new(),
+            },
+        );
+        h.runner.expect_exact(
+            &["gh", "issue", "edit", "2", "--parent", "1"],
+            RunOutput {
+                exit_code: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            },
+        );
+
+        let code = run_rendered(&mut h, "tk-1", true);
+
+        assert_eq!(code, Exit::Ok, "{}", h.err());
         assert_eq!(
-            mutation_count(&conn).unwrap(),
-            0,
-            "a refused preflight leaves the outbox empty"
+            h.out(),
+            "Promoted Epic: tk-1 -> gh-1\nPromoted Ticket: tk-2 -> gh-2\n"
         );
+        assert_eq!(item_state(&conn, "e1"), ("gh-1".into(), "backend".into()));
+        assert_eq!(item_state(&conn, "c1"), ("gh-2".into(), "backend".into()));
+        h.runner.assert_all_consumed();
     }
 
     // ---- finding rendering ----------------------------------------------

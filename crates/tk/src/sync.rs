@@ -61,8 +61,8 @@ pub enum RunSyncError {
     /// rejection ([`AdapterReadError::Failed`] carrying captured stderr).
     #[error(transparent)]
     Pull(#[from] AdapterReadError),
-    /// An edit hit an environment failure (backend CLI missing / spawn failed);
-    /// the in-flight Mutation keeps its prior `pending` or `failed` state.
+    /// An edit hit a process environment or observation failure; the in-flight
+    /// Mutation keeps its prior `pending` or `failed` state.
     #[error(transparent)]
     Apply(#[from] ApplyError),
     #[error(transparent)]
@@ -164,13 +164,16 @@ mod tests {
     use crate::domain::backend_operation::{BackendEdit, BackendItemRefresh};
     use crate::domain::status::ItemStatus;
     use crate::domain::ticket_kind::TicketKind;
-    use crate::proc::ProcError;
+    use crate::proc::{ProcError, ProcRunner, RunOutput};
     use crate::remote::fake::{CreateResponse, EditResponse, FakeAdapter, RefreshResponse};
+    use crate::remote::github::GithubAdapter;
     use crate::store::migrations;
     use crate::store::testing::{
         FixtureItem, FixtureMutation, FixtureRemote, insert_fixture_item, insert_fixture_mutation,
         insert_fixture_remote,
     };
+    use std::cell::Cell;
+    use std::path::Path;
 
     const NOW: &str = "2026-05-19T00:00:00Z";
 
@@ -241,6 +244,17 @@ mod tests {
     fn run(conn: &mut Connection, fake: &mut FakeAdapter) -> Result<SyncReport, RunSyncError> {
         let workflow = RemoteWorkflowGuard::for_test();
         run_sync(conn, fake, &workflow, NOW)
+    }
+
+    struct OutcomeUnobservedRunner {
+        calls: Cell<usize>,
+    }
+
+    impl ProcRunner for OutcomeUnobservedRunner {
+        fn run(&self, _argv: &[&str], _cwd: &Path) -> Result<RunOutput, ProcError> {
+            self.calls.set(self.calls.get() + 1);
+            Err(ProcError::OutcomeUnobserved)
+        }
     }
 
     #[test]
@@ -605,6 +619,63 @@ mod tests {
         assert_eq!((origin.as_str(), backend_key), ("local", None));
         assert_eq!(fake.captured_creates.len(), 1);
         assert!(fake.captured_edits.is_empty());
+    }
+
+    #[test]
+    fn post_spawn_create_failure_stays_applying_and_is_not_replayed() {
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Local work",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "promote_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
+                state: "pending",
+                promotion_operation_id: Some("op-1"),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        let runner = OutcomeUnobservedRunner {
+            calls: Cell::new(0),
+        };
+        let cwd = std::env::current_dir().unwrap();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let workflow = RemoteWorkflowGuard::for_test();
+
+        assert!(matches!(
+            run_sync(&mut conn, &mut adapter, &workflow, NOW),
+            Err(RunSyncError::ApplyingMutation(1))
+        ));
+        let (state, failure): (String, String) = conn
+            .query_row(
+                "select state, failure_json from mutations where sequence = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "applying");
+        assert!(failure.contains("outcome is unknown"), "{failure}");
+        assert_eq!(runner.calls.get(), 1);
+
+        assert!(matches!(
+            run_sync(&mut conn, &mut adapter, &workflow, NOW),
+            Err(RunSyncError::ApplyingMutation(1))
+        ));
+        assert_eq!(runner.calls.get(), 1, "automatic sync must not replay it");
     }
 
     #[test]

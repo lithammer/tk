@@ -379,6 +379,14 @@ _Avoid_: ticket, tickets
   aborts the run without changing the Mutation.
 - A Promotion creation returns exactly one certainty outcome: **Created** with
   a Backend identity, certified-no-effect **Rejected**, or **Indeterminate**.
+- The GitHub **Backend Adapter** promotes Task **Tickets** and **Epics** as
+  typeless GitHub issues. It represents **Dependencies** and Epic membership
+  through later relationship **Mutations**; Bug Promotion remains unsupported.
+- A trustworthy GitHub issue URL receipt certifies **Created**, including when
+  `gh` also exits nonzero. Pre-spawn runner failures and authentication
+  rejection certify **Rejected**; every other completed result without a
+  trustworthy receipt is **Indeterminate**. A failure observing a process that
+  already started is likewise **Indeterminate**.
 - Before invoking Backend creation, the Repository Store durably moves the
   Promotion Mutation to `applying`.
 - **Created** atomically applies the Backend identity, marks the Mutation

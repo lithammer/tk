@@ -16,7 +16,7 @@ use serde::Deserialize;
 
 use crate::domain::backend_kind::BackendKind;
 use crate::domain::backend_operation::{
-    AdoptedItem, BackendCreate, BackendEdit, BackendItemRefresh,
+    AdoptedItem, BackendCreate, BackendEdit, BackendItemIdentity, BackendItemRefresh,
 };
 use crate::domain::backend_outcome::{
     BackendCreateOutcome, BackendEditOutcome, Failure, FailureClass,
@@ -66,6 +66,63 @@ impl<'a> GithubAdapter<'a> {
             class,
             retry_after_s: None,
         }))
+    }
+
+    /// Create the GitHub issue represented by either Promotion variant.
+    ///
+    /// GitHub Tickets and Epics share one typeless issue surface; structure is
+    /// applied later through the relationship Mutations ordered behind their
+    /// Promotions. The receipt is authoritative even when `gh` exits non-zero.
+    fn create_issue(&self, create: &BackendCreate) -> BackendCreateOutcome {
+        let promotion = create.promotion();
+        let output = match self.runner.run(
+            &[
+                "gh",
+                "issue",
+                "create",
+                "--title",
+                &promotion.title,
+                "--body",
+                &promotion.body,
+            ],
+            self.cwd,
+        ) {
+            Ok(output) => output,
+            Err(
+                err @ (crate::proc::ProcError::ExecutableNotFound
+                | crate::proc::ProcError::SpawnFailed),
+            ) => {
+                return BackendCreateOutcome::Rejected(Failure {
+                    detail: format!("gh issue create did not start: {err}"),
+                    class: FailureClass::Unknown,
+                    retry_after_s: None,
+                });
+            }
+            Err(err @ crate::proc::ProcError::OutcomeUnobserved) => {
+                return BackendCreateOutcome::Indeterminate(Failure {
+                    detail: format!("gh issue create started, but its outcome is unknown: {err}"),
+                    class: FailureClass::Unknown,
+                    retry_after_s: None,
+                });
+            }
+        };
+
+        if let Some(identity) = parse_create_receipt(&output.stdout) {
+            return BackendCreateOutcome::Created(identity);
+        }
+
+        let stderr = stderr_string(&output);
+        let class = classify(output.exit_code, &stderr);
+        let failure = Failure {
+            detail: create_failure_detail(&output, &stderr),
+            class,
+            retry_after_s: None,
+        };
+        if !output.succeeded() && class == FailureClass::Auth {
+            BackendCreateOutcome::Rejected(failure)
+        } else {
+            BackendCreateOutcome::Indeterminate(failure)
+        }
     }
 }
 
@@ -167,20 +224,17 @@ impl Adapter for GithubAdapter<'_> {
         }
     }
 
-    fn create_item(&mut self, _create: &BackendCreate, _now: &str) -> BackendCreateOutcome {
-        // Creation capability stays disabled until the GitHub implementation
-        // can classify every `gh issue create` result by effect certainty.
-        BackendCreateOutcome::rejected(
-            "the GitHub Backend Adapter cannot apply a Promotion in this build",
-        )
+    fn create_item(&mut self, create: &BackendCreate, _now: &str) -> BackendCreateOutcome {
+        self.create_issue(create)
     }
 
     fn promotion_capabilities(&self) -> PromotionCapabilities {
-        // ADR-0036 "Backend capability is declared per facet and staged":
-        // GitHub declares no Item Class or Ticket Kind until creation can
-        // classify every outcome by effect certainty. Edit support does not
-        // enable Promotion capabilities before that creation boundary lands.
         PromotionCapabilities::none()
+            .with_item_class(crate::domain::item_class::ItemClass::Ticket)
+            .with_item_class(crate::domain::item_class::ItemClass::Epic)
+            .with_ticket_kind(TicketKind::Task)
+            .with_dependencies()
+            .with_epic_membership()
     }
 }
 
@@ -302,6 +356,62 @@ fn is_pull_request_url(url: &str) -> bool {
             rest.ends_with("/pull")
         }
         _ => false,
+    }
+}
+
+/// Parse the canonical one-line URL receipt emitted by `gh issue create`.
+///
+/// The host remains adapter-owned so GitHub Enterprise works without tk
+/// storing a second repository coordinate (ADR-0033). Requiring HTTPS and the
+/// exact `<host>/<owner>/<repo>/issues/<positive number>` shape rejects prose,
+/// API URLs, pull requests, and URLs carrying query or fragment suffixes.
+fn parse_create_receipt(stdout: &[u8]) -> Option<BackendItemIdentity> {
+    let receipt = std::str::from_utf8(stdout).ok()?.trim();
+    if receipt.lines().count() != 1 {
+        return None;
+    }
+    let mut segments = receipt.split('/');
+    let scheme = segments.next()?;
+    let empty = segments.next()?;
+    let host = segments.next()?;
+    let owner = segments.next()?;
+    let repository = segments.next()?;
+    let collection = segments.next()?;
+    let number = segments.next()?;
+    if segments.next().is_some()
+        || scheme != "https:"
+        || !empty.is_empty()
+        || host.is_empty()
+        || host.contains('@')
+        || owner.is_empty()
+        || repository.is_empty()
+        || collection != "issues"
+        || !number.bytes().all(|byte| byte.is_ascii_digit())
+        || (number.len() > 1 && number.starts_with('0'))
+        || [host, owner, repository, number]
+            .iter()
+            .any(|segment| segment.contains(['?', '#']) || segment.chars().any(char::is_whitespace))
+    {
+        return None;
+    }
+    let number: i64 = number.parse().ok()?;
+    if number <= 0 {
+        return None;
+    }
+    let backend_key = number.to_string();
+    Some(BackendItemIdentity {
+        display_id: format!("gh-{backend_key}"),
+        backend_key,
+    })
+}
+
+fn create_failure_detail(output: &RunOutput, stderr: &str) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    match (stderr.is_empty(), stdout.is_empty()) {
+        (false, false) => format!("{stderr}\nUnrecognized stdout receipt: {stdout}"),
+        (false, true) => stderr.to_owned(),
+        (true, false) => format!("gh issue create returned an unrecognized receipt: {stdout}"),
+        (true, true) => "gh issue create returned no GitHub issue URL receipt".to_owned(),
     }
 }
 
@@ -457,6 +567,27 @@ mod tests {
                 blocking: identity(blocking),
             },
             _ => panic!("not a dependency edit"),
+        }
+    }
+
+    fn create(mt: MutationType, title: &str, body: &str) -> BackendCreate {
+        let promotion = Promotion {
+            title: title.into(),
+            body: body.into(),
+            backend_kind: "github".into(),
+        };
+        match mt {
+            MutationType::PromoteTicket => BackendCreate::Ticket {
+                sequence: 1,
+                item_id: "t1".into(),
+                promotion,
+            },
+            MutationType::PromoteEpic => BackendCreate::Epic {
+                sequence: 1,
+                item_id: "e1".into(),
+                promotion,
+            },
+            _ => panic!("not a Promotion Mutation Type"),
         }
     }
 
@@ -1002,59 +1133,184 @@ mod tests {
     // ---- Promotion -------------------------------------------------------
 
     #[test]
-    fn apply_promote_ticket_and_epic_are_rejected_without_a_call() {
-        // GitHub's promotion_capabilities() declares nothing (ADR-0036), so
-        // Apply must reject rather than spawn `gh`; FakeRunner has no
-        // expectations, so any call panics.
+    fn create_ticket_and_epic_use_the_same_exact_typeless_issue_argv() {
         for mt in [MutationType::PromoteTicket, MutationType::PromoteEpic] {
             let runner = FakeRunner::new();
+            runner.expect_exact(
+                &["gh", "issue", "create", "--title", "T", "--body", "Body"],
+                ok("https://github.com/o/r/issues/42\n"),
+            );
             let cwd = cwd();
             let mut adapter = GithubAdapter::new(&runner, &cwd);
-            let promotion = Promotion {
-                title: "T".into(),
-                body: "B".into(),
-                backend_kind: "github".into(),
+            let outcome = adapter.create_item(&create(mt, "T", "Body"), NOW);
+            let BackendCreateOutcome::Created(identity) = outcome else {
+                panic!("{mt}: expected a confirmed receipt, got {outcome:?}");
             };
-            let create = match mt {
-                MutationType::PromoteTicket => BackendCreate::Ticket {
-                    sequence: 1,
-                    item_id: "t1".into(),
-                    promotion,
-                },
-                MutationType::PromoteEpic => BackendCreate::Epic {
-                    sequence: 1,
-                    item_id: "t1".into(),
-                    promotion,
-                },
-                _ => unreachable!(),
-            };
-            match adapter.create_item(&create, NOW) {
-                BackendCreateOutcome::Rejected(f) => {
-                    assert_eq!(
-                        f.detail,
-                        "the GitHub Backend Adapter cannot apply a Promotion in this build",
-                        "{mt}"
-                    );
-                }
-                BackendCreateOutcome::Created(_) | BackendCreateOutcome::Indeterminate(_) => {
-                    panic!("{mt}: GitHub declares no Promotion capability");
-                }
-            }
+            assert_eq!(identity.backend_key, "42");
+            assert_eq!(identity.display_id, "gh-42");
+            runner.assert_all_consumed();
         }
     }
 
     #[test]
-    fn github_declares_no_promotion_capabilities() {
+    fn a_valid_receipt_wins_even_when_gh_exits_nonzero() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(
+            &["gh", "issue", "create", "--title", "T", "--body", "B"],
+            RunOutput {
+                exit_code: 1,
+                stdout: b"https://github.example/o/r/issues/7\n".to_vec(),
+                stderr: b"a later CLI step failed".to_vec(),
+            },
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+
+        assert_eq!(
+            adapter.create_item(&create(MutationType::PromoteTicket, "T", "B"), NOW),
+            BackendCreateOutcome::Created(identity("7"))
+        );
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn empty_and_malformed_success_receipts_are_indeterminate() {
+        for stdout in ["", "created #42", "https://github.com/o/r/pull/42"] {
+            let runner = FakeRunner::new();
+            runner.expect_exact(
+                &["gh", "issue", "create", "--title", "T", "--body", "B"],
+                ok(stdout),
+            );
+            let cwd = cwd();
+            let mut adapter = GithubAdapter::new(&runner, &cwd);
+
+            let BackendCreateOutcome::Indeterminate(failure) =
+                adapter.create_item(&create(MutationType::PromoteTicket, "T", "B"), NOW)
+            else {
+                panic!("{stdout:?}: missing receipt must be indeterminate");
+            };
+            assert_eq!(failure.class, FailureClass::Unknown);
+            assert!(failure.detail.contains("receipt"), "{}", failure.detail);
+            runner.assert_all_consumed();
+        }
+    }
+
+    #[test]
+    fn completed_nonzero_without_a_receipt_is_indeterminate() {
+        for stderr in [
+            "GraphQL: service unavailable",
+            "HTTP 422: Validation Failed",
+            "type \"Bug\" not found; available types:",
+        ] {
+            let runner = FakeRunner::new();
+            runner.expect_exact(
+                &["gh", "issue", "create", "--title", "T", "--body", "B"],
+                fail(1, stderr),
+            );
+            let cwd = cwd();
+            let mut adapter = GithubAdapter::new(&runner, &cwd);
+
+            let BackendCreateOutcome::Indeterminate(failure) =
+                adapter.create_item(&create(MutationType::PromoteTicket, "T", "B"), NOW)
+            else {
+                panic!("{stderr}: completed nonzero is not certified no-effect");
+            };
+            assert_eq!(failure.detail, stderr);
+            runner.assert_all_consumed();
+        }
+    }
+
+    #[test]
+    fn authentication_rejection_is_certified_no_effect() {
+        for stderr in [
+            "HTTP 401: Unauthorized",
+            "GraphQL authentication failed: Bad credentials",
+        ] {
+            let runner = FakeRunner::new();
+            runner.expect_exact(
+                &["gh", "issue", "create", "--title", "T", "--body", "B"],
+                fail(1, stderr),
+            );
+            let cwd = cwd();
+            let mut adapter = GithubAdapter::new(&runner, &cwd);
+
+            let BackendCreateOutcome::Rejected(failure) =
+                adapter.create_item(&create(MutationType::PromoteTicket, "T", "B"), NOW)
+            else {
+                panic!("authentication was rejected before creation");
+            };
+            assert_eq!(failure.detail, stderr);
+            assert_eq!(failure.class, FailureClass::Auth);
+            runner.assert_all_consumed();
+        }
+    }
+
+    #[test]
+    fn pre_spawn_process_failures_are_certified_no_effect() {
+        for err in [ProcError::ExecutableNotFound, ProcError::SpawnFailed] {
+            let runner = ErrorInjectingRunner { err };
+            let cwd = cwd();
+            let mut adapter = GithubAdapter::new(&runner, &cwd);
+
+            let BackendCreateOutcome::Rejected(failure) =
+                adapter.create_item(&create(MutationType::PromoteTicket, "T", "B"), NOW)
+            else {
+                panic!("a pre-spawn error cannot create an issue");
+            };
+            assert!(failure.detail.starts_with("gh issue create did not start:"));
+            assert_eq!(failure.class, FailureClass::Unknown);
+        }
+    }
+
+    #[test]
+    fn post_spawn_process_failure_is_indeterminate() {
+        let runner = ErrorInjectingRunner {
+            err: ProcError::OutcomeUnobserved,
+        };
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+
+        let BackendCreateOutcome::Indeterminate(failure) =
+            adapter.create_item(&create(MutationType::PromoteTicket, "T", "B"), NOW)
+        else {
+            panic!("a started process may already have created an issue");
+        };
+        assert!(failure.detail.contains("started"));
+        assert!(failure.detail.contains("outcome is unknown"));
+        assert_eq!(failure.class, FailureClass::Unknown);
+    }
+
+    #[test]
+    fn receipt_parser_requires_a_canonical_github_issue_url() {
+        for invalid in [
+            b"http://github.com/o/r/issues/1".as_slice(),
+            b"https://github.com/o/r/issues/0",
+            b"https://github.com/o/r/issues/01",
+            b"https://github.com/o/r/issues/1?x=y",
+            b"https://user@github.com/o/r/issues/1",
+            b"https://github.com/o/r/issues/1\nextra",
+            b"https://github.com/o/r/issues/not-a-number",
+        ] {
+            assert_eq!(parse_create_receipt(invalid), None, "{invalid:?}");
+        }
+        assert_eq!(
+            parse_create_receipt(b" https://github.example/o/r/issues/12\n"),
+            Some(identity("12"))
+        );
+    }
+
+    #[test]
+    fn github_declares_the_shipped_promotion_facets() {
         let runner = FakeRunner::new();
         let cwd = cwd();
         let adapter = GithubAdapter::new(&runner, &cwd);
         let caps = adapter.promotion_capabilities();
-        assert!(!caps.can_create_item_class(ItemClass::Ticket));
-        assert!(!caps.can_create_item_class(ItemClass::Epic));
-        assert!(!caps.can_create_ticket_kind(TicketKind::Task));
+        assert!(caps.can_create_item_class(ItemClass::Ticket));
+        assert!(caps.can_create_item_class(ItemClass::Epic));
+        assert!(caps.can_create_ticket_kind(TicketKind::Task));
         assert!(!caps.can_create_ticket_kind(TicketKind::Bug));
-        assert!(!caps.can_represent_dependencies());
-        assert!(!caps.can_represent_epic_membership());
+        assert!(caps.can_represent_dependencies());
+        assert!(caps.can_represent_epic_membership());
     }
 
     // ---- classify / PR guard -------------------------------------------

@@ -804,10 +804,9 @@ fn grep_whitespace_pattern_matches_a_double_space() {
     });
 }
 
-// `tk promote` scenarios stop at the last step before a Backend call
-// (ADR-0031): `tk remote set github` is pure SQL and building the GitHub
-// Adapter spawns nothing, so argument validation, the Remote check, and
-// preflight refusal all run through the real binary without a `gh` on PATH.
+// `tk promote` scenarios cover paths that cannot open a capable Adapter:
+// argument validation and absence of a Remote. Capability preflight and
+// creation use FakeRunner unit tests (ADR-0031), never a live GitHub write.
 
 #[test]
 fn promote_without_a_remote_is_refused() {
@@ -847,35 +846,5 @@ fn promote_children_on_a_ticket_is_a_usage_error() {
     -- stdout --
     -- stderr --
     tk promote: 'project-1' is not an Epic; --children promotes the Promotion Children of an Epic
-    ");
-}
-
-/// Preflight collects every problem in one pass: the v1 GitHub Adapter declares
-/// no Promotion capability (ADR-0036), so an Epic, its Promotion Child, and the
-/// Dependency on an Item the operation does not move all report together — Item
-/// findings in creation order, then relationship findings in endpoint order.
-#[test]
-fn promote_reports_every_preflight_finding_at_once() {
-    let p = Repo::new("project");
-    p.run("init");
-    p.run("remote set github");
-    p.run("add --epic -m 'Feature Epic'"); // project-1
-    p.run("add --parent project-1 -m 'Build the child'"); // project-2
-    p.run("add --parent project-1 --triage -m 'Captured idea'"); // project-3
-    p.run("add -m 'Unrelated work'"); // project-4
-    p.run("block project-2 project-4");
-
-    tk!(p, "promote project-1 --children", @"
-    exit 1
-    -- stdout --
-    -- stderr --
-    tk promote: cannot promote project-1:
-      project-1: the github Backend cannot create Epics under Promotion.
-      project-2: the github Backend cannot create Tickets under Promotion.
-      project-3 is in triage; run 'tk accept project-3 --priority P0..P4' before promoting it.
-      project-3: the github Backend cannot create Tickets under Promotion.
-      project-2 belongs to Epic project-1, and the github Backend cannot represent Epic membership under Promotion.
-      project-2 would be backend-backed while its Blocking Item project-4 stays local. Promote project-4 in the same operation, or run 'tk unblock project-2 project-4' to drop the Dependency.
-      project-3 belongs to Epic project-1, and the github Backend cannot represent Epic membership under Promotion.
     ");
 }

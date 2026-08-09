@@ -9,7 +9,7 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use thiserror::Error;
 
@@ -45,6 +45,10 @@ pub enum ProcError {
     /// (permissions, fork failure, …).
     #[error("failed to spawn child process")]
     SpawnFailed,
+    /// The child started, but tk could not wait for it or capture its output.
+    /// The external effect is therefore unknown.
+    #[error("child process started but its outcome could not be observed")]
+    OutcomeUnobserved,
 }
 
 /// Common subprocess seam. Implementations decide whether to spawn a real
@@ -79,14 +83,20 @@ impl ProcRunner for RealRunner {
         let (program, rest) = argv
             .split_first()
             .expect("ProcRunner contract: argv must contain at least the program");
-        let output = Command::new(program)
+        let child = Command::new(program)
             .args(rest)
             .current_dir(cwd)
-            .output()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|err| match err.kind() {
                 std::io::ErrorKind::NotFound => ProcError::ExecutableNotFound,
                 _ => ProcError::SpawnFailed,
             })?;
+        let output = child
+            .wait_with_output()
+            .map_err(|_| ProcError::OutcomeUnobserved)?;
         Ok(RunOutput {
             exit_code: output.status.code().unwrap_or(255),
             stdout: output.stdout,
@@ -261,7 +271,7 @@ impl ProcRunner for FakeRunner {
 }
 
 /// Test runner that returns a single pre-configured error on every call.
-/// Used to cover the `ExecutableNotFound` / `SpawnFailed` discovery arms.
+/// Used to cover process-certainty error arms without spawning a child.
 pub struct ErrorInjectingRunner {
     pub err: ProcError,
 }

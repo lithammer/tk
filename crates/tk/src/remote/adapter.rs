@@ -36,7 +36,8 @@ pub type ApplyError = ProcError;
 /// while Backend Pull stops before merging any collected refreshes.
 #[derive(Debug, Error)]
 pub enum AdapterReadError {
-    /// Adapter unavailable — backend CLI missing on PATH or spawn failed.
+    /// Adapter unavailable — the Backend CLI did not start or its outcome
+    /// could not be observed.
     #[error(transparent)]
     Env(#[from] ProcError),
     /// The backend CLI ran but rejected the read; the payload is the
@@ -71,8 +72,9 @@ pub trait Adapter {
     /// Apply one Promotion by creating a new Backend object.
     ///
     /// The result distinguishes a confirmed identity, certified no effect,
-    /// and an indeterminate result. Creation exposes no error arm because a
-    /// generic process failure cannot prove that invocation never started.
+    /// and an indeterminate result. Creation exposes no error arm because the
+    /// Adapter owns the effect-certainty classification, including whether a
+    /// runner error proves the process never started.
     fn create_item(&mut self, create: &BackendCreate, now: &str) -> BackendCreateOutcome;
 
     /// The Backend's static Promotion capability declaration (ADR-0036

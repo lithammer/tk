@@ -40,6 +40,9 @@ pub enum DiscoveryError {
     /// Spawning `git` failed for a reason other than a missing binary.
     #[error("failed to invoke git")]
     SpawnFailed,
+    /// `git` started, but its exit status or output could not be observed.
+    #[error("git started but its outcome could not be observed")]
+    OutcomeUnobserved,
     /// `git rev-parse` exited non-zero. `Some` carries git's trimmed stderr,
     /// rendered verbatim; `None` (git failed silently) renders the default
     /// not-in-repo line.
@@ -68,6 +71,7 @@ pub fn discover_paths<R: ProcRunner + ?Sized>(
         Ok(out) => out,
         Err(ProcError::ExecutableNotFound) => return Err(DiscoveryError::GitMissing),
         Err(ProcError::SpawnFailed) => return Err(DiscoveryError::SpawnFailed),
+        Err(ProcError::OutcomeUnobserved) => return Err(DiscoveryError::OutcomeUnobserved),
     };
 
     if !out.succeeded() {
@@ -260,6 +264,17 @@ mod tests {
     }
 
     #[test]
+    fn maps_unobserved_outcome_without_calling_it_a_spawn_failure() {
+        let runner = ErrorInjectingRunner {
+            err: ProcError::OutcomeUnobserved,
+        };
+        assert!(matches!(
+            discover_paths(&runner, &cwd()),
+            Err(DiscoveryError::OutcomeUnobserved)
+        ));
+    }
+
+    #[test]
     fn render_failure_formats_each_arm() {
         let mut buf = Vec::new();
         render_failure(&mut buf, "init", &DiscoveryError::GitMissing);
@@ -273,6 +288,13 @@ mod tests {
         assert_eq!(
             std::str::from_utf8(&buf).unwrap(),
             "tk add: failed to invoke git\n"
+        );
+
+        let mut buf = Vec::new();
+        render_failure(&mut buf, "show", &DiscoveryError::OutcomeUnobserved);
+        assert_eq!(
+            std::str::from_utf8(&buf).unwrap(),
+            "tk show: git started but its outcome could not be observed\n"
         );
 
         let mut buf = Vec::new();

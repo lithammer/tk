@@ -37,11 +37,10 @@ Item class, Ticket Kind, Dependency, and Epic membership under Promotion.
 Preflight reads that declaration and rejects before any backend call, and the
 rejection aggregates with every other finding rather than short-circuiting.
 
-The GitHub Adapter declares no Promotion support in the slice that introduces
-the planner. tk-137 turns on Task and Epic creation once `gh issue create` is
-implemented; tk-132 turns on Epic membership once sub-issue Apply is
-implemented. Bug stays off until GitHub can represent the closed Ticket Kind
-reliably.
+The GitHub Adapter declares Ticket and Epic creation, Task Ticket Kind,
+Dependencies, and Epic membership. It creates both Item Classes as typeless
+GitHub issues; later relationship Mutations supply their structure. Bug stays
+off because a typeless issue cannot reliably represent that closed Ticket Kind.
 
 Staging is a safety property, not sequencing preference. Sync stops at the
 first rejected Mutation, a Promotion Mutation is not a Sync Skip candidate, and
@@ -62,8 +61,20 @@ receipt remains visible to later Mutations in the same run.
 
 Creation returns one of three value outcomes: `Created(identity)`, certified
 no-effect `Rejected(failure)`, or `Indeterminate(failure)`. It has no generic
-process-error arm because observed `gh issue create` behavior showed that a
-completed nonzero invocation may still create the issue.
+process-error arm because the Adapter owns effect-certainty classification.
+The runner's `ExecutableNotFound` and `SpawnFailed` errors happen before a
+child exists and certify no effect. `OutcomeUnobserved` means the child started
+but tk could not observe its exit or captured output, so it is indeterminate;
+observed `gh issue create` behavior also showed that a completed nonzero
+invocation may still create the issue.
+
+The GitHub Adapter invokes exactly `gh issue create --title <title> --body
+<body>` for both Ticket and Epic Promotion. It sends no issue type or
+relationship flags. A canonical GitHub issue URL receipt certifies `Created`
+even alongside a nonzero exit. Authentication rejection certifies no effect;
+every other completed result without a trustworthy receipt is
+`Indeterminate`. Arbitrary validation text, network errors, server errors, and
+a negative lookup do not justify automatic replay.
 
 The engine durably marks a Promotion `applying` before the creation call.
 `Created` applies identity, marks the Mutation applied, clears failure, and
@@ -116,18 +127,11 @@ whenever Origin is `backend`.
 
 ## Consequences
 
-- `tk promote` against a configured GitHub Remote refuses until tk-137. Every
-  preflight refusal is exercisable as a scenario, because no path to the
-  refusal spawns `gh`; everything past preflight is covered by Fake Adapter
-  tests until then.
-- Pending Promotion Items exist only in tests for the same interval, so the
-  Pending Promotion gate is validated against Mutation Log rows the outbox
-  commit actually wrote rather than against hand-built fixtures.
-- Three GitHub Adapter comments assert premises this work falsifies: the
-  `unreachable!` arm for the `promote_*` Mutation Types, the two `expect` calls
-  on `backend_key` and `counterpart_backend_key`, and the Epic-membership arm's
-  claim that no GitHub Backend Epic can exist pre-Promotion. Each changes in
-  the slice that falsifies it rather than in the slice that first reaches it.
+- `tk promote <epic> --children` is available for GitHub because creation and
+  Epic membership are both real capabilities. The ordered outbox creates the
+  Epic and Tickets before applying their membership and Dependency Mutations.
+- Reconciliation and explicit-risk retry remain separate recovery work. An
+  `applying` Promotion is never replayed automatically.
 - A receipt that cannot be persisted — for example, a Display ID collision
   against an existing `item_ids` row — rolls back with the Mutation still
   `applying`. Automatic sync cannot create a second backend object.

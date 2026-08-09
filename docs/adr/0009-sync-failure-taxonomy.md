@@ -4,10 +4,11 @@ The sync engine distinguishes three failure audiences. Each has a different
 persistence lifetime, which drives whether a Mutation row transitions and
 where the failure is rendered:
 
-- **Edit environment failures** (executable not found, spawn failed, OOM) —
-  the Mutation stays `pending`, the sync run aborts, and the user retries when
-  the environment is fixed. No `failed` transition: the failure isn't about
-  the Mutation, the Mutation just didn't get a fair attempt.
+- **Edit environment failures** (executable not found, spawn failed, or the
+  outcome could not be observed after spawn) — the Mutation keeps its prior
+  `pending` or `failed` state, the sync run aborts, and the user retries when
+  the environment is fixed. No state transition occurs: the failure isn't a
+  Backend verdict about the Mutation.
 - **Pull failures mid-sync** (a Backend Pull errored before producing
   snapshot rows) — rendered once on stderr, no Mutation row transition. The
   pull is informational; failures here don't block the outbox or stamp any
@@ -20,11 +21,16 @@ where the failure is rendered:
 
 Creation has a stricter certainty boundary. Before a non-idempotent creation
 call, the Promotion Mutation is durably `applying`. Creation exposes no generic
-environment-error arm because a process failure cannot certify that invocation
-never started. A confirmed identity moves the row to `applied`; certified no
-effect moves it to `failed`; an ambiguous result remains `applying` with its
-diagnostic persisted. `applying` is excluded from automatic replay and blocks
-all other remote-changing workflows until explicit recovery resolves it.
+environment-error arm because its Adapter must classify every runner result by
+effect certainty. `ProcError::ExecutableNotFound` and
+`ProcError::SpawnFailed` occur before a child exists and therefore certify no
+effect; `ProcError::OutcomeUnobserved` means a child started but its exit or
+captured output could not be observed, so its effect is indeterminate. A
+completed nonzero invocation does not itself certify no effect. A confirmed
+identity moves the row to `applied`; certified no effect moves it to `failed`; an
+ambiguous result remains `applying` with its diagnostic persisted.
+`applying` is excluded from automatic replay and blocks all other
+remote-changing workflows until explicit recovery resolves it.
 
 Remote-changing commands additionally hold an exclusive repository-scoped OS
 file lock from before their availability check through Backend access and

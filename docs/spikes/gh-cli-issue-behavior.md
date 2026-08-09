@@ -70,6 +70,31 @@ state never reaches the state parse — the url guard rejects the PR first.
   closing reason is a Local Field), so the two-state `done ↔ CLOSED` mapping is
   unaffected; the default is simply GitHub's, not tk's.
 
+## Promotion — `gh issue create`
+
+Re-probed on 2026-08-09 before enabling GitHub Promotion. Both Task Tickets
+and Epics use the typeless command `gh issue create --title <title> --body
+<body>`; Epic membership is a later `gh issue edit --parent` Mutation.
+
+- A successful create prints one canonical issue URL on stdout. The trailing
+  issue number is the backend key and yields Display ID `gh-<number>`.
+- `gh issue create --type Bug` can exit 1 with empty stdout and stderr while a
+  typeless issue appears later. Completed nonzero is therefore not evidence
+  that creation had no effect, and arbitrary validation text is not enough to
+  permit automatic replay.
+- Bad credentials (`HTTP 401` / `Bad credentials`) reject before creation and
+  certify no effect. `ExecutableNotFound` and `SpawnFailed` runner errors also
+  happen before a child exists. A runner failure after successful spawn has
+  unknown effect and is indeterminate.
+- Empty or malformed stdout, network/server errors, and every other completed
+  result without a trustworthy issue URL are indeterminate. A trustworthy
+  receipt certifies creation even if the process also reports failure.
+
+The Adapter consequently never sends `--type`, parent, Dependency, Label, or
+Assignee flags during creation. Reconciliation and explicit-risk retry are
+separate recovery work; an indeterminate Promotion remains `applying` and is
+not replayed automatically.
+
 ## Failure modes — the `FailureClass` classifier
 
 | class | observed? | evidence |
