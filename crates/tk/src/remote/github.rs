@@ -52,7 +52,7 @@ impl<'a> GithubAdapter<'a> {
     /// **exit code 0**, never by stderr emptiness: `gh issue close`/`reopen`
     /// print an informational "is already closed/open" line to stderr on their
     /// idempotent no-op path yet still exit 0, so a harmless re-apply must read
-    /// as Accepted. A non-zero exit is a per-Mutation rejection carrying the
+    /// as Acknowledged. A non-zero exit is a per-Mutation rejection carrying the
     /// classified stderr.
     fn run_edit(&self, argv: &[&str]) -> Result<BackendEditOutcome, ApplyError> {
         let output = self.runner.run(argv, self.cwd)?;
@@ -100,6 +100,16 @@ impl Adapter for GithubAdapter<'_> {
                 "--body",
                 &snapshot.body,
             ]),
+            BackendEdit::UpdateEpic { epic, snapshot, .. } => self.run_edit(&[
+                "gh",
+                "issue",
+                "edit",
+                &epic.backend_key,
+                "--title",
+                &snapshot.title,
+                "--body",
+                &snapshot.body,
+            ]),
             BackendEdit::SetItemStatus { item, change, .. } => {
                 // done is terminal (ADR-0006), so reopen-from-done never occurs.
                 let verb = match change.status.as_str() {
@@ -139,17 +149,21 @@ impl Adapter for GithubAdapter<'_> {
                 "--remove-blocked-by",
                 &blocking.backend_key,
             ]),
-            // A no-op acknowledgement is ADR-0021's shape for a facet GitHub does not
-            // yet sync: Epic-membership Apply is deferred to tk-132 and Epic
-            // creation to tk-137. GitHub's `promotion_capabilities()` declares
-            // neither representable, so ADR-0036 preflight refuses any
-            // Promotion that would create a GitHub Backend Epic or membership
-            // in one before either Mutation reaches the outbox — this arm never
-            // sees one naming a real backend parent. Accepting keeps the queue
-            // draining instead of wedging on a permanent rejection.
-            BackendEdit::UpdateEpic { .. }
-            | BackendEdit::AddTicketToEpic { .. }
-            | BackendEdit::RemoveTicketFromEpic { .. } => Ok(BackendEditOutcome::Acknowledged),
+            BackendEdit::AddTicketToEpic { ticket, epic, .. } => self.run_edit(&[
+                "gh",
+                "issue",
+                "edit",
+                &ticket.backend_key,
+                "--parent",
+                &epic.backend_key,
+            ]),
+            BackendEdit::RemoveTicketFromEpic { ticket, .. } => self.run_edit(&[
+                "gh",
+                "issue",
+                "edit",
+                &ticket.backend_key,
+                "--remove-parent",
+            ]),
         }
     }
 
@@ -163,10 +177,9 @@ impl Adapter for GithubAdapter<'_> {
 
     fn promotion_capabilities(&self) -> PromotionCapabilities {
         // ADR-0036 "Backend capability is declared per facet and staged":
-        // GitHub declares no Item Class, Ticket Kind, Dependency, or Epic
-        // membership yet. tk-137 turns on Task and Epic creation once `gh
-        // issue create` is implemented; tk-132 turns on Epic membership once
-        // sub-issue Apply is implemented.
+        // GitHub declares no Item Class or Ticket Kind until creation can
+        // classify every outcome by effect certainty. Edit support does not
+        // enable Promotion capabilities before that creation boundary lands.
         PromotionCapabilities::none()
     }
 }
@@ -693,7 +706,7 @@ mod tests {
     #[test]
     fn apply_exit_zero_with_stderr_is_accepted() {
         // gh's idempotent "already closed" no-op exits 0 but prints to stderr.
-        // Success is judged by exit code, so this must be Accepted, not rejected.
+        // Success is judged by exit code, so this must be Acknowledged.
         let runner = FakeRunner::new();
         runner.expect_exact(
             &["gh", "issue", "close", "42"],
@@ -768,44 +781,143 @@ mod tests {
     }
 
     #[test]
-    fn apply_epic_membership_mutations_are_noop_accepted_without_a_call() {
-        // Epic-membership sync stays deferred to a Promote-gated ticket
-        // (ADR-0021): no backend Epic exists pre-Promotion. FakeRunner has no
-        // expectations, so any gh call panics — Accepted proves no subprocess.
-        let cases = [
-            (
-                MutationType::UpdateEpic,
-                MutationPayload::UpdateTitleBody(TitleBody {
-                    title: "E".into(),
-                    body: String::new(),
-                }),
-            ),
-            (
-                MutationType::AddTicketToEpic,
-                MutationPayload::EpicRef(EpicRef {
-                    epic_id: "e".into(),
-                }),
-            ),
-            (
-                MutationType::RemoveTicketFromEpic,
-                MutationPayload::EpicRef(EpicRef {
-                    epic_id: "e".into(),
-                }),
-            ),
-        ];
-        for (mt, payload) in cases {
-            let runner = FakeRunner::new();
-            let cwd = cwd();
-            let mut adapter = GithubAdapter::new(&runner, &cwd);
-            let v = edit(mt, payload, Some("42"));
-            assert!(
-                matches!(
-                    adapter.apply_edit(&v, NOW).unwrap(),
-                    BackendEditOutcome::Acknowledged
-                ),
-                "{mt}"
-            );
+    fn apply_update_epic_edits_title_and_body() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(
+            &[
+                "gh", "issue", "edit", "42", "--title", "Epic", "--body", "Plan",
+            ],
+            ok(""),
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let edit = edit(
+            MutationType::UpdateEpic,
+            MutationPayload::UpdateTitleBody(TitleBody {
+                title: "Epic".into(),
+                body: "Plan".into(),
+            }),
+            Some("42"),
+        );
+        assert_eq!(
+            adapter.apply_edit(&edit, NOW).unwrap(),
+            BackendEditOutcome::Acknowledged
+        );
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn apply_add_ticket_to_epic_sets_parent() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(&["gh", "issue", "edit", "42", "--parent", "9"], ok(""));
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let edit = edit(
+            MutationType::AddTicketToEpic,
+            MutationPayload::EpicRef(EpicRef {
+                epic_id: "e".into(),
+            }),
+            Some("42"),
+        );
+        assert_eq!(
+            adapter.apply_edit(&edit, NOW).unwrap(),
+            BackendEditOutcome::Acknowledged
+        );
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn apply_add_ticket_to_epic_exit_zero_with_stderr_is_acknowledged() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(
+            &["gh", "issue", "edit", "42", "--parent", "9"],
+            RunOutput {
+                exit_code: 0,
+                stdout: Vec::new(),
+                stderr: b"! Issue #42 already has parent #9".to_vec(),
+            },
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let edit = edit(
+            MutationType::AddTicketToEpic,
+            MutationPayload::EpicRef(EpicRef {
+                epic_id: "e".into(),
+            }),
+            Some("42"),
+        );
+        assert_eq!(
+            adapter.apply_edit(&edit, NOW).unwrap(),
+            BackendEditOutcome::Acknowledged
+        );
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn apply_remove_ticket_from_epic_removes_parent() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(&["gh", "issue", "edit", "42", "--remove-parent"], ok(""));
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let edit = edit(
+            MutationType::RemoveTicketFromEpic,
+            MutationPayload::EpicRef(EpicRef {
+                epic_id: "e".into(),
+            }),
+            Some("42"),
+        );
+        assert_eq!(
+            adapter.apply_edit(&edit, NOW).unwrap(),
+            BackendEditOutcome::Acknowledged
+        );
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn apply_epic_membership_non_zero_is_classified_rejection() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(
+            &["gh", "issue", "edit", "42", "--parent", "9"],
+            fail(1, "HTTP 422: parent must be an issue"),
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let edit = edit(
+            MutationType::AddTicketToEpic,
+            MutationPayload::EpicRef(EpicRef {
+                epic_id: "e".into(),
+            }),
+            Some("42"),
+        );
+        match adapter.apply_edit(&edit, NOW).unwrap() {
+            BackendEditOutcome::Rejected(failure) => {
+                assert_eq!(failure.class, FailureClass::Validation);
+                assert_eq!(failure.detail, "HTTP 422: parent must be an issue");
+                assert_eq!(failure.retry_after_s, None);
+            }
+            BackendEditOutcome::Acknowledged => panic!("expected rejection"),
         }
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn apply_epic_membership_spawn_failure_is_apply_error() {
+        let runner = ErrorInjectingRunner {
+            err: ProcError::SpawnFailed,
+        };
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let edit = edit(
+            MutationType::RemoveTicketFromEpic,
+            MutationPayload::EpicRef(EpicRef {
+                epic_id: "e".into(),
+            }),
+            Some("42"),
+        );
+        assert!(matches!(
+            adapter.apply_edit(&edit, NOW),
+            Err(ProcError::SpawnFailed)
+        ));
     }
 
     #[test]
@@ -845,7 +957,7 @@ mod tests {
     #[test]
     fn apply_dependency_exit_zero_with_stderr_is_accepted() {
         // The idempotent re-link no-op: gh may print to stderr yet exit 0.
-        // Success is judged by exit code, so this must read as Accepted.
+        // Success is judged by exit code, so this must read as Acknowledged.
         let runner = FakeRunner::new();
         runner.expect_exact(
             &["gh", "issue", "edit", "5", "--add-blocked-by", "9"],
@@ -868,7 +980,7 @@ mod tests {
     #[test]
     fn apply_dependency_non_zero_is_classified_rejection() {
         // A stale gh (< 2.94.0) rejects the unknown flag; the Mutation fails
-        // like any other (no longer no-op-Accepted) and the queue wedges.
+        // like any other (no longer no-op-Acknowledged) and the queue wedges.
         let runner = FakeRunner::new();
         runner.expect_exact(
             &["gh", "issue", "edit", "5", "--add-blocked-by", "9"],
