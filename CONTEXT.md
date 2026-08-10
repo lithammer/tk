@@ -44,6 +44,13 @@ _Avoid_: Flat List
 A backend-agnostic grouping of related **Tickets** that can be tracked and worked as one unit.
 _Avoid_: Batch, Ticket Group, Umbrella
 
+**Epic Membership**:
+The containment relationship between a **Ticket** and the **Epic** that holds
+it. A **Ticket** has at most one, so membership is a property of the **Ticket**
+rather than an edge named by both of its ends — the distinction from a
+**Dependency**.
+_Avoid_: Sub-issue, Parent Link, Containment
+
 **Parent Argument**:
 CLI shorthand for placing a **Ticket** under a containing item.
 _Avoid_: Parent Domain Model
@@ -223,7 +230,9 @@ A **Mutation** that modifies exactly one **Ticket**.
 _Avoid_: Ticket Change, Change, Audit Entry
 
 **Epic Mutation**:
-A **Mutation** that modifies exactly one **Epic** or its ticket membership.
+A **Mutation** that modifies exactly one **Epic**. A change of **Epic
+Membership** is a **Ticket Mutation**, since it names the **Ticket** whose
+containment changed.
 _Avoid_: Epic Change, Change, Audit Entry
 
 **Mutation Type**:
@@ -459,7 +468,12 @@ _Avoid_: ticket, tickets
 - A **Mutation** targets a **Backend Ticket**, a **Backend Epic**, or a
   **Pending Promotion**.
 - A **Ticket Mutation** modifies exactly one **Ticket**.
-- An **Epic Mutation** modifies exactly one **Epic** or its ticket membership.
+- An **Epic Mutation** modifies exactly one **Epic**; a change of **Epic
+  Membership** is a **Ticket Mutation** naming the contained **Ticket**.
+- A **Ticket Mutation** that clears **Epic Membership** names only the
+  **Ticket**. The **Epic** it left needs no **Backend** identity for the change
+  to be applied, so an **Epic** still awaiting its **Promotion** receipt cannot
+  stop it.
 - Pre-Promotion edits to **Local Tickets** and **Local Epics** are Repository
   Store current-state changes, not **Mutations**.
 - **Promotion** is the boundary where current local state becomes backend
@@ -470,8 +484,25 @@ _Avoid_: ticket, tickets
 - **Promotion** rejects an operation that would leave a backend-backed
   **Blocked Item** waiting on a local **Blocking Item**.
 - **Promotion** rejects before creating backend objects when the configured
-  **Backend Adapter** cannot represent a **Dependency** that the operation
-  would make backend intent.
+  **Backend Adapter** cannot represent a **Dependency** or an **Epic
+  Membership** that the operation would make backend intent.
+- **Promotion** makes an existing **Epic Membership** backend intent when both
+  the **Ticket** and its **Epic** are backed by the same **Backend** after the
+  **Promotion**. Promoting a **Local Epic** therefore snapshots membership for
+  the same-**Backend Tickets** it already contains.
+- Mixed-**Origin** **Epic Membership** stays local and does **not** reject the
+  **Promotion**, where an unrepresentable **Dependency** rejects the whole
+  operation. A half-represented **Dependency** would leave a backend-backed
+  item exposing an incomplete blocking constraint; half-represented membership
+  costs only grouping.
+- **Dependency** and **Epic Membership** sync are push-only. **Backend Pull**
+  refreshes fields alone and reconciles neither relationship, so the
+  **Repository Store** stays authoritative for both.
+- A **Repository Store** syncs with the one **Backend** repository its own
+  version-control repository resolves through the **Backend Adapter**.
+  **Dependencies** and **Epic Membership** spanning two **Backend**
+  repositories are unsupported; tk does not check for them, and the
+  **Backend Adapter**'s external CLI reports the failure.
 - **Promotion** preserves a **Ticket**'s `accepted` or `parked` **Selection
   State**; the field stays local and is not pushed to the **Backend**.
 - **Promotion** rejects a `triage` **Ticket**, which must be **Accepted**
@@ -620,7 +651,10 @@ _Avoid_: ticket, tickets
 > **Domain expert:** "No — default ticket views include both **Local Tickets** and **Backend Tickets**. **Origin** is not a separate rendered field; it is normally inferred from the **Display ID** shape."
 >
 > **Dev:** "If **src-12** belongs to **src-3**, does that mean **src-12** is blocked by **src-3**?"
-> **Domain expert:** "No — **Epic** membership groups work, while a **Dependency** says one item cannot progress until another is done."
+> **Domain expert:** "No — **Epic Membership** groups work, while a **Dependency** says one item cannot progress until another is done."
+>
+> **Dev:** "When a **Backend Ticket** moves out of a **Local Epic**, what reaches the **Backend**?"
+> **Domain expert:** "Nothing. Mixed-**Origin** **Epic Membership** is local-only; it becomes backend intent once both ends share a **Backend**, which is what promoting that **Epic** does."
 >
 > **Dev:** "Does `--parent src-3` introduce a parent-child domain model?"
 > **Domain expert:** "No — in v1, the **Parent Argument** is CLI shorthand for **Epic** membership."
@@ -687,3 +721,19 @@ _Avoid_: ticket, tickets
 - A relevance/edit-distance ordering for **`tk grep`** was considered — resolved: **`tk grep`** orders matches by creation and never ranks, because ranked output is incompatible with streaming one matched item to stdout at a time and belongs to the **Search** family, not **Grep** (ADR-0026).
 - Mirroring the whole **Backend** into the **Repository Store** on every sync — the original tk-34 model — was considered (tk-34) — resolved: tk is a local-first tracker with **opt-in** **Backend** support. **Backend** issues enter only by **Adopt** (or **Promotion**), and **Backend Pull** refreshes just the **Adopted** non-`done` items; tk neither mirrors nor auto-discovers a **Backend**. Mirroring would import an entire tracker (e.g. a 15k-item Jira project) as `accepted` **Backend Tickets**, swamping **`tk next`**, and a fixed pull cap silently drops items past the cap.
 - Naming the derived bound-to-a-**Backend** state **Backend Intent** was considered — resolved: **Backend Binding**, because CONTEXT.md already uses "backend intent" for what a **Mutation** records. One phrase cannot name both a record and an item's relationship to a **Backend**; "intent" is something written down to be carried out, "binding" is the relationship itself (ADR-0036).
+- "Epic membership" was used as undefined prose, and GitHub's "sub-issue" as its
+  backend spelling (tk-132) — resolved: **Epic Membership** is a defined term.
+  Because a **Ticket** has at most one **Epic**, it is a property of the
+  **Ticket** rather than an edge named by both ends, so changing it is a
+  **Ticket Mutation** and clearing it names no **Epic** (ADR-0021).
+- Rejecting a **Promotion** over mixed-**Origin** **Epic Membership**, the way
+  it rejects an unrepresentable **Dependency**, was considered — resolved:
+  membership stays local, because losing grouping is not the same failure as a
+  backend-backed item exposing an incomplete blocking constraint (ADR-0035).
+- Gating relationship **Mutations** on **Backend** repository identity rather
+  than **Backend** kind was considered (tk-132) — resolved: a **Repository
+  Store** syncs with one **Backend** repository (ADR-0033), so a
+  cross-repository relationship is a near-always-wrong configuration tk does
+  not police; the external CLI's own failure is the diagnostic. Silently keeping
+  such a relationship local was rejected, since nothing would then tell the user
+  their request was dropped.

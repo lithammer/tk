@@ -25,6 +25,29 @@ explains the reason, and gives an available remedy. A done Blocking Item
 resolves readiness but does not remove its Dependency, so retained resolved
 edges are included by Promotion too.
 
+## Epic Membership is captured the same way but never rejected for staying local
+
+Epic Membership follows the same rule for *what becomes backend intent*: it
+does when the Ticket and its Epic are both backed by the configured Backend
+after the operation, so promoting a Local Epic snapshots membership for the
+same-Backend Tickets it already contains, and an Adapter that cannot represent
+membership rejects preflight exactly as it does for a Dependency.
+
+The two diverge on the mixed case. A backend-backed Blocked Item still waiting
+on a Local Blocking Item **rejects the whole operation**; a Backend Ticket
+inside a Local Epic **stays local and is not a finding**. The asymmetry is
+about what a half-represented relationship costs. A Dependency is a constraint,
+so a backend-backed item that shows only part of it misrepresents whether the
+work can proceed — the wrong answer to a question the Backend is now being
+asked. Membership is grouping: the backend issue simply sits outside a
+grouping, which is what it would look like before any Promotion anyway, and the
+Repository Store keeps the real containment for tk's own views. Rejecting there
+would make an Epic unpromotable until every Ticket it holds was promoted too,
+which is the recursive promotion this decision already declined.
+
+Membership also needs no remedy line, because there is nothing for the user to
+fix: promoting the Epic later captures the membership then.
+
 After preflight, one local transaction appends the complete ordered outbox.
 Item Promotion Mutations precede Dependency and Epic-membership Mutations
 whose payloads refer to stable internal Item IDs. Backend identities are
