@@ -57,10 +57,11 @@ pub enum BackendEdit {
         ticket: BackendItemAddress,
         epic: BackendItemAddress,
     },
-    RemoveTicketFromEpic {
-        ticket: BackendItemAddress,
-        epic: BackendItemAddress,
-    },
+    /// Clearing a Ticket's containing Epic names only the Ticket: Epic
+    /// membership is 0..1, so the Repository Store's cleared `container_id` is
+    /// the whole intent and no counterpart identity has to be addressable for
+    /// the removal to be delivered.
+    RemoveTicketFromEpic { ticket: BackendItemAddress },
 }
 
 /// A Promotion Mutation that creates a new Backend object.

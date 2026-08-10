@@ -95,6 +95,39 @@ Assignee flags during creation. Reconciliation and explicit-risk retry are
 separate recovery work; an indeterminate Promotion remains `applying` and is
 not replayed automatically.
 
+## Relationships — `--parent` / `--remove-parent` / `--remove-sub-issue`
+
+Probed 2026-08-10 on `gh` 2.97.0 before choosing the Epic-membership removal
+argv (issues 7 and 8, `[tk-132-probe-2026-08-10-1901116e]`, closed after).
+Every call passed **canonical issue URLs** for both the subject and the flag
+value, matching the argv the Adapter builds from stored Backend keys.
+
+- Sub-issues **are** available on this personal private repo, unlike issue
+  types. All ten calls exited **0** with empty stderr and the edited issue's
+  URL on stdout.
+- `gh issue edit <child> --parent <parent>` attaches. `gh issue view <child>
+  --json parent` reads back an object (`id`, `number`, `state`, `title`,
+  `url`); `--json subIssues` on the parent reads back
+  `{"nodes":[…],"totalCount":1}`.
+- Both removal forms work and both clear the relationship:
+  `gh issue edit <parent> --remove-sub-issue <child>` and `gh issue edit
+  <child> --remove-parent` each leave `parent` as `null`.
+- **Both removal forms are silent no-ops when the relationship is absent**, the
+  observation that decided the argv:
+  - `--remove-parent` on an issue with no parent → exit 0, no stderr.
+  - `--remove-sub-issue <child>` where the child is not a sub-issue → exit 0,
+    no stderr.
+
+  ⇒ Neither form reports that it changed nothing, so a divergent parent cannot
+  be detected from the exit code. `--remove-sub-issue` names the Epic tk
+  expected and therefore leaves a *different* parent attached while reporting
+  success; `--remove-parent` clears whichever parent the issue has and
+  converges on tk's cleared `container_id`. The Adapter uses `--remove-parent`
+  (ADR-0021).
+- Read-back of `parent` / `subIssues` is available but unused: Backend Pull
+  stays field-only, so this is the mechanism a future reconciliation slice
+  would build on.
+
 ## Failure modes — the `FailureClass` classifier
 
 | class | observed? | evidence |

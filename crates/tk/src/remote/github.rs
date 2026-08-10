@@ -101,12 +101,12 @@ impl Adapter for GithubAdapter<'_> {
                 };
                 self.run_edit(&["gh", "issue", verb, &item.backend_key])
             }
-            // Dependency sync (ADR-0021, tk-107): the blocked issue is the
-            // Mutation's item; `--add-blocked-by`/`--remove-blocked-by` take the
-            // blocking issue's Backend address, resolved store-side onto the
-            // operation's counterpart identity. Native `gh issue edit` flags, so the
-            // adapter requires `gh` >= 2.94.0; an older `gh` rejects the unknown
-            // flag and the Mutation fails.
+            // Relationship sync (ADR-0021, tk-107 Dependencies, tk-132 Epic
+            // membership): every arm edits the Mutation's own item, and any
+            // counterpart address is resolved store-side onto the operation's
+            // identity. All four flags below are native to `gh issue edit` as of
+            // `gh` 2.94.0, which the adapter therefore requires; an older `gh`
+            // rejects the unknown flag and the Mutation fails.
             BackendEdit::AddDependency {
                 blocked, blocking, ..
             } => self.run_edit(&[
@@ -135,13 +135,17 @@ impl Adapter for GithubAdapter<'_> {
                 "--parent",
                 &epic.backend_key,
             ]),
-            BackendEdit::RemoveTicketFromEpic { ticket, epic } => self.run_edit(&[
+            // `--remove-parent` clears whichever parent the issue actually has,
+            // which is what makes the push converge on tk's cleared
+            // `container_id`. The `--remove-sub-issue <ticket>` form names the
+            // Epic tk expected and was observed to exit 0 without changing a
+            // divergent parent, reporting a removal that never happened.
+            BackendEdit::RemoveTicketFromEpic { ticket } => self.run_edit(&[
                 "gh",
                 "issue",
                 "edit",
-                &epic.backend_key,
-                "--remove-sub-issue",
                 &ticket.backend_key,
+                "--remove-parent",
             ]),
         }
     }
@@ -540,10 +544,7 @@ mod tests {
                 }
             }
             (MutationType::RemoveTicketFromEpic, MutationPayload::EpicRef(_)) => {
-                BackendEdit::RemoveTicketFromEpic {
-                    ticket: target,
-                    epic: address("9"),
-                }
+                BackendEdit::RemoveTicketFromEpic { ticket: target }
             }
             other => panic!("unsupported test edit: {other:?}"),
         }
@@ -1012,10 +1013,7 @@ mod tests {
     #[test]
     fn apply_remove_ticket_from_epic_removes_parent() {
         let runner = FakeRunner::new();
-        runner.expect_exact(
-            &["gh", "issue", "edit", "9", "--remove-sub-issue", "42"],
-            ok(""),
-        );
+        runner.expect_exact(&["gh", "issue", "edit", "42", "--remove-parent"], ok(""));
         let cwd = cwd();
         let mut adapter = GithubAdapter::new(&runner, &cwd);
         let edit = edit(
@@ -1063,7 +1061,7 @@ mod tests {
     fn apply_epic_membership_spawn_failure_is_apply_error() {
         let runner = FakeRunner::new();
         runner.expect_exact_error(
-            &["gh", "issue", "edit", "9", "--remove-sub-issue", "42"],
+            &["gh", "issue", "edit", "42", "--remove-parent"],
             ProcError::SpawnFailed,
         );
         let cwd = cwd();

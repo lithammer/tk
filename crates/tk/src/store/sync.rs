@@ -391,19 +391,14 @@ pub fn resolve_backend_operation(
                 )?,
             })
         }
-        (MutationType::RemoveTicketFromEpic, MutationPayload::EpicRef(reference)) => {
+        (MutationType::RemoveTicketFromEpic, MutationPayload::EpicRef(_)) => {
             if item_class != ItemClass::Ticket {
                 return Err(shape_error());
             }
-            BackendOperation::Edit(BackendEdit::RemoveTicketFromEpic {
-                ticket: target()?,
-                epic: backend_address_of_class(
-                    conn,
-                    &reference.epic_id,
-                    mutation_type,
-                    ItemClass::Epic,
-                )?,
-            })
+            // The payload keeps the Epic it left for the Sync Log and the
+            // emission-time same-Backend gate, but delivery does not resolve
+            // it: clearing a 0..1 slot needs no counterpart address.
+            BackendOperation::Edit(BackendEdit::RemoveTicketFromEpic { ticket: target()? })
         }
         (MutationType::PromoteTicket, MutationPayload::Promotion(promotion)) => {
             if item_class != ItemClass::Ticket {
@@ -2358,6 +2353,50 @@ mod tests {
         };
         assert_eq!(ticket.backend_key, "5");
         assert_eq!(epic.backend_key, "9");
+    }
+
+    /// A removal clears a 0..1 slot, so it must stay deliverable even when the
+    /// Epic it left has no Backend identity to address — the case a Promotion
+    /// that has not yet received its receipt would otherwise stop.
+    #[test]
+    fn resolve_operation_removes_membership_without_addressing_the_epic() {
+        let conn = open_seeded();
+        backend_ticket(&conn, "ticket", "gh-5", "5", 1);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "epic",
+                display: "tk-9",
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                title: "Epic",
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "remove_ticket_from_epic",
+                item_id: "ticket",
+                payload_json: r#"{"epic_id":"epic"}"#,
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        let rows = load_applicable_mutations(&conn).unwrap();
+        let BackendOperation::Edit(BackendEdit::RemoveTicketFromEpic { ticket }) =
+            resolve_backend_operation(&conn, rows.into_iter().next().unwrap())
+                .unwrap()
+                .operation
+        else {
+            panic!("expected Epic membership removal")
+        };
+        assert_eq!(ticket.backend_key, "5");
     }
 
     #[test]
