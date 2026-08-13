@@ -1,0 +1,15 @@
+---
+source: crates/tk/tests/scenarios.rs
+expression: "p.run(\"promote reconcile --help\")"
+---
+Attach a confirmed Backend object to an indeterminate Promotion
+
+Usage: tk promote reconcile [OPTIONS] <ID> <BACKEND-KEY>
+
+Arguments:
+  <ID>           Display ID or Alias of the Pending Promotion
+  <BACKEND-KEY>  Backend-native key or URL of the object to inspect
+
+Options:
+      --force  Accept a content mismatch and converge the Backend to current local content
+  -h, --help   Print help

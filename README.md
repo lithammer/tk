@@ -54,7 +54,14 @@ tk add --parent tk-2 -m "Map Jira issue fields"
 tk list
 tk next
 tk done tk-1
+tk remote set github
+tk promote tk-1
 ```
+
+If Backend creation has an indeterminate outcome, inspect the Mutation with
+`tk sync log`, then use `tk promote reconcile <id> <backend-key>` after
+confirming the created object. Use `tk promote retry <id>` only when creating
+the Backend object again is safe.
 
 Use `tk --help`, `tk <command> --help`, or `man tk` for the command
 reference.

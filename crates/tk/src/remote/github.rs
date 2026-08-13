@@ -737,7 +737,7 @@ mod tests {
         let mut adapter = GithubAdapter::new(&runner, &cwd);
         match adapter.inspect_item("99").unwrap_err() {
             AdapterReadError::Failed(detail) => {
-                assert!(detail.contains("#99 is a pull request"), "{detail}")
+                assert!(detail.contains("#99 is a pull request"), "{detail}");
             }
             AdapterReadError::Env(error) => panic!("expected Failed, got Env({error:?})"),
         }

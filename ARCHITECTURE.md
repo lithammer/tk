@@ -66,7 +66,11 @@ small boundary module after the second caller proves the shape.
   cohort validation, canonical Adopt insertion, Pull refresh, and Mutation Log
   replay and inspection helpers. `store/promotion.rs` exposes the SQL half of
   `tk promote` — the preflight graph read, the one-transaction outbox commit,
-  receipt application, and the post-sync Mutation Log reads.
+  receipt application, and the post-sync Mutation Log reads. Promotion
+  recovery also lives here: unique-target lookup, queue-wide mapping capture,
+  and atomic reconcile/retry transitions. `commands/promote.rs` owns Backend
+  inspection, snapshot comparison, recovery guidance, and the nested sync
+  report.
 - `remote/` owns the type-erased Backend Adapter trait (mirroring
   `ProcRunner`), the factory that dispatches by configured backend kind, and
   the FakeAdapter used by engine tests. It imports `store/`, `proc`, and
@@ -147,8 +151,13 @@ Important stable contracts:
   0036](./docs/adr/0036-promotion-intent-precedes-backend-capability.md)).
   Migration 008 adds `applying`, durably written before non-idempotent Backend
   creation. An `applying` Mutation is excluded from automatic replay and is a
-  global barrier for Pull, Apply, Adopt, Promotion commit, and Remote clear;
-  Repository Store local edits remain available.
+  global barrier for Pull, Apply, Adopt, and Remote clear; Repository Store
+  local edits remain available, and later Promotion intent may be committed
+  behind it without applying. Explicit reconcile or retry resolves only the
+  earliest global nonterminal Mutation. Reconciliation
+  applies identity, optional forced convergence, Mutation state, and monotonic
+  cursor movement in one transaction ([ADR
+  0037](./docs/adr/0037-promotion-recovery-is-explicit-and-ordered.md)).
 - `Store::lock_remote_workflow` owns an exclusive OS lock on the stable
   `<git-common-dir>/tk/remote.lock` file. Sync, Adopt, Promotion, and Remote
   configuration hold one guard across Backend access and Store persistence;

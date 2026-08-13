@@ -328,14 +328,14 @@ fn render_run_sync_error<W: Write + ?Sized>(stderr: &mut W, err: &RunSyncError) 
             );
             let _ = writeln!(
                 stderr,
-                "Mutation {sequence} remains applying; do not retry automatic sync until its Backend identity is reconciled"
+                "Mutation {sequence} remains applying; use 'tk promote reconcile <id> <backend-key>' after confirming the created Backend object"
             );
         }
         RunSyncError::CreatedIdentityNotStored { sequence, .. } => {
             let _ = writeln!(stderr, "tk sync: {err}");
             let _ = writeln!(
                 stderr,
-                "Mutation {sequence} remains applying; do not retry automatic sync until its Backend identity is reconciled"
+                "Mutation {sequence} remains applying; use 'tk promote reconcile <id> <backend-key>' after confirming the created Backend object"
             );
         }
         // Named exhaustively rather than caught by `_`, so a variant added
@@ -354,7 +354,7 @@ fn render_run_sync_error<W: Write + ?Sized>(stderr: &mut W, err: &RunSyncError) 
         | RunSyncError::Outcome(PersistMutationOutcomeError::ApplyingMutation(sequence)) => {
             let _ = writeln!(
                 stderr,
-                "tk sync: Mutation {sequence} has an indeterminate Backend creation outcome; automatic sync is blocked until it is reconciled"
+                "tk sync: Mutation {sequence} has an indeterminate Backend creation outcome; use 'tk promote reconcile <id> <backend-key>' if the object exists, or 'tk promote retry <id>' only when creating it again is safe"
             );
         }
         RunSyncError::Refresh(RefreshStoreError::RemoteChanged { .. }) => {
@@ -1303,7 +1303,7 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(stderr).unwrap(),
-            "tk sync: Mutation 7 has an indeterminate Backend creation outcome; automatic sync is blocked until it is reconciled\n"
+            "tk sync: Mutation 7 has an indeterminate Backend creation outcome; use 'tk promote reconcile <id> <backend-key>' if the object exists, or 'tk promote retry <id>' only when creating it again is safe\n"
         );
     }
 
@@ -1325,7 +1325,7 @@ mod tests {
         assert!(rendered.contains("gh-42"));
         assert!(rendered.contains("https://github.com/o/r/issues/42"));
         assert!(rendered.contains("remains applying"));
-        assert!(rendered.contains("do not retry"));
+        assert!(rendered.contains("tk promote reconcile"));
     }
 
     #[test]
@@ -1349,6 +1349,6 @@ mod tests {
         assert!(rendered.contains("Repository Store corruption or a Ticket bug"));
         assert!(rendered.contains("gh-42"));
         assert!(rendered.contains("remains applying"));
-        assert!(rendered.contains("do not retry"));
+        assert!(rendered.contains("tk promote reconcile"));
     }
 }

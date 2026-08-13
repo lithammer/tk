@@ -1,0 +1,19 @@
+---
+source: crates/tk/tests/scenarios.rs
+expression: "p.run(&format!(\"{command} --help\"))"
+---
+Promote a Local Ticket or Epic through the configured Remote
+
+Usage: tk promote [OPTIONS] <ID>
+       tk promote <COMMAND>
+
+Commands:
+  reconcile  Attach a confirmed Backend object to an indeterminate Promotion
+  retry      Explicitly risk creating the Backend object again
+
+Arguments:
+  <ID>  Display ID or Alias of the Ticket or Epic to promote
+
+Options:
+      --children  Also promote the Epic's directly contained Local Tickets — its Promotion Children. Epics only
+  -h, --help      Print help

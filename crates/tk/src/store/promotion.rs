@@ -661,17 +661,16 @@ pub fn retry_promotion(
             target.item_id.clone(),
         ));
     }
-    let applying = tx.query_row(
-        "select sequence, item_id from mutations where state = 'applying' order by sequence limit 1",
-        [], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
-    ).optional()?;
-    if let Some((sequence, item_id)) = applying
-        && item_id != current.item_id
-    {
-        return Err(RecoveryPromotionError::EarlierNonterminal {
-            sequence,
-            state: MutationState::Applying,
-        });
+    let earlier = tx
+        .query_row(
+            "select sequence, state from mutations where sequence < ?1 \
+          and state in ('pending', 'failed', 'applying') order by sequence limit 1",
+            params![current.sequence],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, MutationState>(1)?)),
+        )
+        .optional()?;
+    if let Some((sequence, state)) = earlier {
+        return Err(RecoveryPromotionError::EarlierNonterminal { sequence, state });
     }
     if matches!(
         current.state,
@@ -1581,7 +1580,7 @@ mod tests {
 
     #[test]
     fn retry_returns_a_target_to_pending_without_moving_the_cursor() {
-        for state in ["failed", "applying"] {
+        for state in ["pending", "failed", "applying"] {
             let mut conn = open_seeded();
             seed_recovery(
                 &conn,
@@ -1600,6 +1599,47 @@ mod tests {
                 [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             ).unwrap();
             assert_eq!(row, ("pending".into(), None, 0));
+        }
+    }
+
+    #[test]
+    fn retry_refuses_every_earlier_nonterminal_state() {
+        for state in ["pending", "failed", "applying"] {
+            let mut conn = open_seeded();
+            seed_recovery(
+                &conn,
+                "earlier",
+                "tk-1",
+                1,
+                state,
+                ItemClass::Ticket,
+                Some("op-1"),
+            );
+            seed_recovery(
+                &conn,
+                "target",
+                "tk-2",
+                4,
+                "applying",
+                ItemClass::Ticket,
+                Some("op-2"),
+            );
+            let target = recoverable_promotion(&conn, "target").unwrap();
+            let workflow = RemoteWorkflowGuard::for_test();
+
+            assert!(matches!(
+                retry_promotion(&mut conn, &workflow, &target, NOW),
+                Err(RecoveryPromotionError::EarlierNonterminal {
+                    sequence: 1,
+                    state: actual
+                }) if actual.text() == state
+            ));
+            let target_state: String = conn
+                .query_row("select state from mutations where sequence = 4", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(target_state, "applying");
         }
     }
 
