@@ -8,9 +8,7 @@
 //! the backend-blind [`crate::remote::adapter::Adapter`] boundary.
 //!
 //! Write helpers open their own transaction and take `&mut Connection`; read
-//! helpers take `&Connection`. `advance_sync_cursor` is the exception — it runs
-//! inside an outcome-persistence transaction and so takes a borrowed connection
-//! without managing one.
+//! helpers take `&Connection`.
 
 use rusqlite::{Connection, OptionalExtension, params};
 use std::str::FromStr;
@@ -30,10 +28,12 @@ use crate::domain::mutation_payload::{
 };
 use crate::domain::mutation_state::MutationState;
 use crate::domain::mutation_type::MutationType;
+use crate::domain::origin::Origin;
 use crate::domain::priority::Priority;
 use crate::domain::selection_state::SelectionState;
 use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
+use crate::store::mutations;
 use crate::store::repository::RemoteWorkflowGuard;
 use crate::store::repository::create::generate_internal_id;
 use crate::store::sequences::{self, SequenceError};
@@ -529,6 +529,10 @@ pub enum PersistMutationOutcomeError {
     /// must never request a transition out of a terminal state.
     #[error("mutation {0} is not in an applicable state")]
     MutationNotApplicable(i64),
+    /// A Promotion receipt or creation attempt targeted an Item that is no
+    /// longer Local. This contradicts the retained Promotion intent.
+    #[error("Promotion Mutation {sequence} targets non-Local Item {item_id}")]
+    TargetNotLocal { sequence: i64, item_id: String },
     #[error("Mutation {0} has an indeterminate Backend creation outcome")]
     ApplyingMutation(i64),
     /// The Store API does not match the row's Mutation Type.
@@ -567,7 +571,7 @@ pub fn persist_edit_outcome(
     }
 
     match outcome {
-        BackendEditOutcome::Acknowledged => persist_applied(&tx, sequence, now)?,
+        BackendEditOutcome::Acknowledged => mutations::mark_applied(&tx, sequence, now)?,
         BackendEditOutcome::Rejected(failure) => persist_failed(&tx, sequence, failure, now)?,
     }
 
@@ -603,6 +607,14 @@ pub fn persist_create_outcome(
             mutation_type,
         });
     }
+    let origin: Origin = tx.query_row(
+        "select origin from items where id = ?1",
+        params![&item_id],
+        |r| r.get(0),
+    )?;
+    if origin != Origin::Local {
+        return Err(PersistMutationOutcomeError::TargetNotLocal { sequence, item_id });
+    }
 
     match outcome {
         BackendCreateOutcome::Created(identity) => {
@@ -613,8 +625,22 @@ pub fn persist_create_outcome(
                 &payload.backend_kind,
                 identity,
                 now,
-            )?;
-            persist_applied(&tx, sequence, now)?;
+            )
+            .map_err(|error| match error {
+                crate::store::promotion::ApplyReceiptError::Storage(error) => {
+                    PersistMutationOutcomeError::Storage(error)
+                }
+                crate::store::promotion::ApplyReceiptError::ItemNotFound(_) => {
+                    PersistMutationOutcomeError::MutationNotFound(sequence)
+                }
+                crate::store::promotion::ApplyReceiptError::TargetNotLocal(_) => {
+                    PersistMutationOutcomeError::TargetNotLocal {
+                        sequence,
+                        item_id: item_id.clone(),
+                    }
+                }
+            })?;
+            mutations::mark_applied(&tx, sequence, now)?;
         }
         BackendCreateOutcome::Rejected(failure) => {
             persist_failed(&tx, sequence, failure, now)?;
@@ -639,14 +665,16 @@ pub fn begin_create(
     if let Some(applying) = applying_mutation_sequence(&tx)? {
         return Err(PersistMutationOutcomeError::ApplyingMutation(applying));
     }
-    let row: Option<(MutationState, MutationType)> = tx
+    let row: Option<(MutationState, MutationType, Origin, String)> = tx
         .query_row(
-            "select state, mutation_type from mutations where sequence = ?1",
+            "select m.state, m.mutation_type, i.origin, m.item_id \
+               from mutations m join items i on i.id = m.item_id \
+              where m.sequence = ?1",
             params![sequence],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?;
-    let (state, mutation_type) =
+    let (state, mutation_type, origin, item_id) =
         row.ok_or(PersistMutationOutcomeError::MutationNotFound(sequence))?;
     if !matches!(state, MutationState::Pending | MutationState::Failed) {
         return Err(PersistMutationOutcomeError::MutationNotApplicable(sequence));
@@ -656,6 +684,9 @@ pub fn begin_create(
             sequence,
             mutation_type,
         });
+    }
+    if origin != Origin::Local {
+        return Err(PersistMutationOutcomeError::TargetNotLocal { sequence, item_id });
     }
     tx.execute(
         "update mutations \
@@ -684,16 +715,6 @@ fn applicable_outcome_row(
         return Err(PersistMutationOutcomeError::MutationNotApplicable(sequence));
     }
     Ok(row)
-}
-
-fn persist_applied(conn: &Connection, sequence: i64, now: &str) -> rusqlite::Result<()> {
-    conn.execute(
-        "update mutations \
-            set state = 'applied', failure_json = null, state_changed_at = ?2 \
-          where sequence = ?1",
-        params![sequence, now],
-    )?;
-    advance_sync_cursor(conn, sequence, now)
 }
 
 fn persist_failed(
@@ -736,19 +757,6 @@ pub fn applying_mutation_sequence(conn: &Connection) -> rusqlite::Result<Option<
         |r| r.get(0),
     )
     .optional()
-}
-
-/// Advance the v1 single Remote's Sync Cursor to `sequence`. Runs inside the
-/// caller's open transaction (so it takes a borrowed connection rather than
-/// opening one). The v1 schema has exactly one cursor — the `primary` row.
-fn advance_sync_cursor(conn: &Connection, sequence: i64, now: &str) -> rusqlite::Result<()> {
-    conn.execute(
-        "update sync_cursors \
-            set last_applied_sequence = ?1, updated_at = ?2 \
-          where remote_name = 'primary'",
-        params![sequence, now],
-    )?;
-    Ok(())
 }
 
 /// Error returned by [`mark_mutation_skipped`].
@@ -3093,6 +3101,42 @@ mod tests {
     }
 
     #[test]
+    fn create_receipt_refuses_a_promotion_whose_item_became_backend_bound() {
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        seed_pending_promotion(&conn, 4);
+        begin_create(&mut conn, 4, "2026-05-19T00:00:00Z").unwrap();
+        conn.execute(
+            "update items set origin = 'backend', backend_kind = 'github', \
+                    backend_key = 'existing' where id = 't1'",
+            [],
+        )
+        .unwrap();
+
+        assert!(matches!(
+            persist_create_outcome(
+                &mut conn,
+                4,
+                &BackendCreateOutcome::Created(BackendItemIdentity {
+                    backend_key: "42".into(),
+                    display_id: "gh-42".into(),
+                }),
+                "2026-05-19T00:00:00Z",
+            ),
+            Err(PersistMutationOutcomeError::TargetNotLocal {
+                sequence: 4,
+                ref item_id,
+            }) if item_id == "t1"
+        ));
+        let state: String = conn
+            .query_row("select state from mutations where sequence = 4", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(state, "applying");
+    }
+
+    #[test]
     fn edit_outcome_refuses_a_promotion_mutation() {
         // Writing `applied` here would strand a Local Item behind an applied
         // Promotion — the state the typed Receipt exists to prevent.
@@ -3689,5 +3733,40 @@ mod tests {
             LogError::MutationNotFound(999) => {}
             other => panic!("expected MutationNotFound, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn begin_create_refuses_a_promotion_whose_item_is_already_backend_bound() {
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        seed_pending_promotion(&conn, 4);
+        conn.execute(
+            "update items set origin = 'backend', backend_kind = 'github', backend_key = '42' where id = 't1'",
+            [],
+        )
+        .unwrap();
+        assert!(matches!(
+            begin_create(&mut conn, 4, "2026-05-19T00:00:00Z"),
+            Err(PersistMutationOutcomeError::TargetNotLocal {
+                sequence: 4,
+                ref item_id,
+            }) if item_id == "t1"
+        ));
+    }
+
+    #[test]
+    fn sync_cursor_never_regresses() {
+        let conn = open_seeded();
+        seed_remote(&conn);
+        mutations::mark_applied(&conn, 9, "2026-05-19T00:00:00Z").unwrap();
+        mutations::mark_applied(&conn, 4, "2026-05-20T00:00:00Z").unwrap();
+        let cursor: i64 = conn
+            .query_row(
+                "select last_applied_sequence from sync_cursors where remote_name = 'primary'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cursor, 9);
     }
 }

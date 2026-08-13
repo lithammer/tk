@@ -7,9 +7,9 @@
 //! or commits a transaction.
 //!
 //! All Mutations are queued first, drained later (tk-97). State is
-//! `pending` on insert and only the Sync Engine transitions it onwards
-//! (`applied`, `failed`, or `skipped`); writers here never construct any
-//! other state directly.
+//! `pending` on insert. [`mark_applied`] owns the Store invariant that an
+//! `applied` transition advances the Sync Cursor in the same transaction;
+//! other transitions remain with the workflow that determines their outcome.
 //!
 //! The one read here, [`resolve_backend_binding`], answers the question the
 //! outbox itself defines: whether a Local Item is already Pending Promotion
@@ -80,6 +80,27 @@ pub fn append(conn: &Connection, req: AppendRequest<'_>) -> Result<i64, AppendEr
         ],
     )?;
     Ok(sequence)
+}
+
+/// Mark one Mutation applied and monotonically advance the primary Sync Cursor.
+///
+/// The caller owns the surrounding write transaction. Keeping both writes in
+/// this Store boundary prevents any recovery or normal Sync path from exposing
+/// an applied Mutation that the cursor has not observed.
+pub(crate) fn mark_applied(conn: &Connection, sequence: i64, now: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "update mutations \
+            set state = 'applied', failure_json = null, state_changed_at = ?2 \
+          where sequence = ?1",
+        params![sequence, now],
+    )?;
+    conn.execute(
+        "update sync_cursors \
+            set last_applied_sequence = max(last_applied_sequence, ?1), updated_at = ?2 \
+          where remote_name = 'primary'",
+        params![sequence, now],
+    )?;
+    Ok(())
 }
 
 /// Errors returned by [`resolve_backend_binding`].

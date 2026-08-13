@@ -125,9 +125,15 @@ fn promote(
         .map_err(|findings| refusal(&target.display_id, &findings, backend))?;
 
     let captured = capture_display_ids(&graph, &plan);
-    let operation_id =
-        store_promotion::commit_plan(store.conn_mut(), &plan, backend, &mut *deps.rng, now)
-            .map_err(commit_error)?;
+    let operation_id = store_promotion::commit_plan(
+        store.conn_mut(),
+        workflow,
+        &plan,
+        backend,
+        &mut *deps.rng,
+        now,
+    )
+    .map_err(commit_error)?;
     if plan.is_empty() {
         render_nothing_to_promote(deps.stdout, target_item(&graph));
     }
@@ -443,9 +449,6 @@ fn commit_error(err: CommitPlanError) -> CommandError {
         CommitPlanError::BackendCohort(e) => {
             CommandError::failure(format!("Repository Store corruption: {e}"))
         }
-        CommitPlanError::ApplyingMutation(sequence) => CommandError::failure(format!(
-            "Mutation {sequence} has an indeterminate Backend creation outcome; resolve it before starting another Promotion"
-        )),
     }
 }
 

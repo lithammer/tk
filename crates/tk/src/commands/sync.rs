@@ -300,7 +300,8 @@ fn render_run_sync_error<W: Write + ?Sized>(stderr: &mut W, err: &RunSyncError) 
         )
         | RunSyncError::Outcome(
             PersistMutationOutcomeError::PayloadJson(_)
-            | PersistMutationOutcomeError::OperationShapeMismatch { .. },
+            | PersistMutationOutcomeError::OperationShapeMismatch { .. }
+            | PersistMutationOutcomeError::TargetNotLocal { .. },
         ) => {
             let _ = writeln!(
                 stderr,
@@ -314,6 +315,21 @@ fn render_run_sync_error<W: Write + ?Sized>(stderr: &mut W, err: &RunSyncError) 
         | RunSyncError::Load(LoadApplicableError::Storage(e))
         | RunSyncError::Outcome(PersistMutationOutcomeError::Storage(e)) => {
             resolver::storage_error(e).render(stderr, COMMAND);
+        }
+        RunSyncError::CreatedIdentityNotStored {
+            sequence,
+            source: PersistMutationOutcomeError::TargetNotLocal { .. },
+            ..
+        } => {
+            let _ = writeln!(stderr, "tk sync: {err}");
+            let _ = writeln!(
+                stderr,
+                "This is Repository Store corruption or a Ticket bug — please report it"
+            );
+            let _ = writeln!(
+                stderr,
+                "Mutation {sequence} remains applying; do not retry automatic sync until its Backend identity is reconciled"
+            );
         }
         RunSyncError::CreatedIdentityNotStored { sequence, .. } => {
             let _ = writeln!(stderr, "tk sync: {err}");
@@ -1308,6 +1324,30 @@ mod tests {
         let rendered = String::from_utf8(stderr).unwrap();
         assert!(rendered.contains("gh-42"));
         assert!(rendered.contains("https://github.com/o/r/issues/42"));
+        assert!(rendered.contains("remains applying"));
+        assert!(rendered.contains("do not retry"));
+    }
+
+    #[test]
+    fn render_run_sync_error_labels_post_create_origin_drift_as_corruption() {
+        let mut stderr = Vec::new();
+        let error = RunSyncError::CreatedIdentityNotStored {
+            sequence: 7,
+            identity: BackendItemIdentity {
+                display_id: "gh-42".into(),
+                backend_key: "https://github.com/o/r/issues/42".into(),
+            },
+            source: PersistMutationOutcomeError::TargetNotLocal {
+                sequence: 7,
+                item_id: "item-1".into(),
+            },
+        };
+
+        render_run_sync_error(&mut stderr, &error);
+
+        let rendered = String::from_utf8(stderr).unwrap();
+        assert!(rendered.contains("Repository Store corruption or a Ticket bug"));
+        assert!(rendered.contains("gh-42"));
         assert!(rendered.contains("remains applying"));
         assert!(rendered.contains("do not retry"));
     }
