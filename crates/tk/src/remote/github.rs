@@ -16,7 +16,8 @@ use serde::Deserialize;
 
 use crate::domain::backend_kind::BackendKind;
 use crate::domain::backend_operation::{
-    AdoptedItem, BackendCreate, BackendEdit, BackendItemIdentity, BackendItemRefresh,
+    AdoptedItem, BackendCreate, BackendEdit, BackendItemIdentity, BackendItemInspection,
+    BackendItemRefresh,
 };
 use crate::domain::backend_outcome::{
     BackendCreateOutcome, BackendEditOutcome, Failure, FailureClass,
@@ -67,6 +68,10 @@ impl Adapter for GithubAdapter<'_> {
             )));
         }
         issue.into_refresh()
+    }
+
+    fn inspect_item(&mut self, key: &str) -> Result<BackendItemInspection, AdapterReadError> {
+        self.view_issue(key)?.into_inspection()
     }
 
     fn apply_edit(&mut self, edit: &BackendEdit) -> Result<BackendEditOutcome, ApplyError> {
@@ -285,12 +290,51 @@ struct IssueFields {
     status: ItemStatus,
 }
 
+struct IssueContent {
+    number: i64,
+    identity: BackendItemIdentity,
+    title: String,
+    body: String,
+}
+
 impl GhIssue {
     fn matches_key(&self, key: &str) -> bool {
         key == self.number.to_string() || key == self.url
     }
 
     fn into_fields(self) -> Result<IssueFields, AdapterReadError> {
+        let state = self.state.clone();
+        let issue_type = self.issue_type.as_ref().map(|value| value.name.clone());
+        let issue = self.into_content()?;
+        let number = issue.number;
+
+        let status = match state.as_str() {
+            "OPEN" => ItemStatus::Open,
+            "CLOSED" => ItemStatus::Done,
+            other => {
+                return Err(AdapterReadError::Failed(format!(
+                    "#{number}: unexpected issue state '{other}'"
+                )));
+            }
+        };
+        // "Bug" → Bug; every other value ("Task", "Feature", org-custom) and a
+        // typeless issue → Task, matching the closed two-variant TicketKind
+        // (ADR-0021). This read-only mapping never writes `--type`.
+        let ticket_kind = match issue_type.as_deref() {
+            Some("Bug") => TicketKind::Bug,
+            _ => TicketKind::Task,
+        };
+        Ok(IssueFields {
+            number,
+            backend_key: issue.identity.backend_key,
+            ticket_kind,
+            title: issue.title,
+            body: issue.body,
+            status,
+        })
+    }
+
+    fn into_content(self) -> Result<IssueContent, AdapterReadError> {
         // PR guard (ADR-0034): `gh issue view <n>` resolves a pull request too
         // (issue and PR numbers share one sequence) and returns it as an
         // issue-shaped object, so reject when the canonical url is a /pull/<n>
@@ -301,30 +345,14 @@ impl GhIssue {
                 self.number
             )));
         }
-        let status = match self.state.as_str() {
-            "OPEN" => ItemStatus::Open,
-            "CLOSED" => ItemStatus::Done,
-            other => {
-                return Err(AdapterReadError::Failed(format!(
-                    "#{}: unexpected issue state '{other}'",
-                    self.number
-                )));
-            }
-        };
-        // "Bug" → Bug; every other value ("Task", "Feature", org-custom) and a
-        // typeless issue → Task, matching the closed two-variant TicketKind
-        // (ADR-0021). This read-only mapping never writes `--type`.
-        let ticket_kind = match self.issue_type.as_ref().map(|t| t.name.as_str()) {
-            Some("Bug") => TicketKind::Bug,
-            _ => TicketKind::Task,
-        };
-        Ok(IssueFields {
+        Ok(IssueContent {
             number: self.number,
-            backend_key: self.url,
-            ticket_kind,
+            identity: BackendItemIdentity {
+                backend_key: self.url,
+                display_id: format!("gh-{}", self.number),
+            },
             title: self.title,
             body: self.body,
-            status,
         })
     }
 
@@ -347,6 +375,15 @@ impl GhIssue {
             body: issue.body,
             status: issue.status,
             ticket_kind: Some(issue.ticket_kind),
+        })
+    }
+
+    fn into_inspection(self) -> Result<BackendItemInspection, AdapterReadError> {
+        let issue = self.into_content()?;
+        Ok(BackendItemInspection {
+            identity: issue.identity,
+            title: issue.title,
+            body: issue.body,
         })
     }
 }
@@ -632,6 +669,110 @@ mod tests {
         let s = adapter.refresh_item("7").unwrap();
         assert_eq!(s.status, ItemStatus::Done);
         assert_eq!(s.ticket_kind, Some(TicketKind::Bug));
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn inspect_requests_exact_argv_and_returns_canonical_identity_and_content() {
+        let key = "42";
+        let runner = FakeRunner::new();
+        runner.expect_exact(
+            &["gh", "issue", "view", key, "--json", ISSUE_JSON_FIELDS],
+            ok(&issue_json(
+                42,
+                "OPEN",
+                "Bug",
+                "https://github.com/o/r/issues/42",
+            )),
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let inspection = adapter.inspect_item(key).unwrap();
+        assert_eq!(
+            inspection.identity,
+            BackendItemIdentity {
+                backend_key: "https://github.com/o/r/issues/42".into(),
+                display_id: "gh-42".into(),
+            }
+        );
+        assert_eq!(inspection.title, "T42");
+        assert_eq!(inspection.body, "B");
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn inspect_does_not_map_backend_status() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(
+            &["gh", "issue", "view", "42", "--json", ISSUE_JSON_FIELDS],
+            ok(&issue_json(
+                42,
+                "FUTURE_STATE",
+                "Bug",
+                "https://github.com/o/r/issues/42",
+            )),
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+
+        let inspection = adapter.inspect_item("42").unwrap();
+
+        assert_eq!(inspection.identity.display_id, "gh-42");
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn inspect_rejects_a_pull_request() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(
+            &["gh", "issue", "view", "99", "--json", ISSUE_JSON_FIELDS],
+            ok(&issue_json(
+                99,
+                "OPEN",
+                "null",
+                "https://github.com/o/r/pull/99",
+            )),
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        match adapter.inspect_item("99").unwrap_err() {
+            AdapterReadError::Failed(detail) => {
+                assert!(detail.contains("#99 is a pull request"), "{detail}")
+            }
+            AdapterReadError::Env(error) => panic!("expected Failed, got Env({error:?})"),
+        }
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn inspect_non_zero_exit_is_adapter_failure() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(
+            &["gh", "issue", "view", "42", "--json", ISSUE_JSON_FIELDS],
+            fail(1, "GraphQL: issue not found"),
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        assert!(matches!(
+            adapter.inspect_item("42").unwrap_err(),
+            AdapterReadError::Failed(detail) if detail == "GraphQL: issue not found"
+        ));
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn inspect_spawn_failure_is_environment_failure() {
+        let runner = FakeRunner::new();
+        runner.expect_exact_error(
+            &["gh", "issue", "view", "42", "--json", ISSUE_JSON_FIELDS],
+            ProcError::ExecutableNotFound,
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        assert!(matches!(
+            adapter.inspect_item("42").unwrap_err(),
+            AdapterReadError::Env(ProcError::ExecutableNotFound)
+        ));
         runner.assert_all_consumed();
     }
 

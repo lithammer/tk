@@ -9,7 +9,8 @@ use std::collections::VecDeque;
 
 use crate::domain::backend_kind::BackendKind;
 use crate::domain::backend_operation::{
-    AdoptedItem, BackendCreate, BackendEdit, BackendItemIdentity, BackendItemRefresh,
+    AdoptedItem, BackendCreate, BackendEdit, BackendItemIdentity, BackendItemInspection,
+    BackendItemRefresh,
 };
 use crate::domain::backend_outcome::{BackendCreateOutcome, BackendEditOutcome};
 use crate::domain::promotion_capability::PromotionCapabilities;
@@ -31,6 +32,17 @@ pub enum AdoptResponse {
 pub enum RefreshResponse {
     /// Success — the fake returns backend-owned fields for this key.
     Item(BackendItemRefresh),
+    /// Adapter-level rejection with this detail.
+    RecordedFailure(String),
+    /// Environment failure — returns this bare error tag.
+    EnvFailure(ProcError),
+}
+
+/// Scripted response for one [`Adapter::inspect_item`] call.
+#[derive(Debug)]
+pub enum InspectionResponse {
+    /// Success — the fake returns canonical identity and Backend content.
+    Item(BackendItemInspection),
     /// Adapter-level rejection with this detail.
     RecordedFailure(String),
     /// Environment failure — returns this bare error tag.
@@ -69,6 +81,7 @@ pub enum CreateResponse {
 pub struct FakeAdapter {
     adopt_script: VecDeque<AdoptResponse>,
     refresh_script: VecDeque<RefreshResponse>,
+    inspection_script: VecDeque<InspectionResponse>,
     edit_script: VecDeque<EditResponse>,
     create_script: VecDeque<CreateResponse>,
     /// Recorded edit invocations in call order — populated on every path,
@@ -80,6 +93,8 @@ pub struct FakeAdapter {
     pub captured_adopt_inputs: Vec<String>,
     /// Backend keys passed to `refresh_item`, in call order.
     pub captured_refresh_keys: Vec<String>,
+    /// Backend keys passed to `inspect_item`, in call order.
+    pub captured_inspection_keys: Vec<String>,
     /// This fake's [`Adapter::promotion_capabilities`] return value. Static
     /// data, not a script entry, so tests set it once via
     /// [`FakeAdapter::with_capabilities`] instead of queuing a response per
@@ -93,12 +108,14 @@ impl FakeAdapter {
         Self {
             adopt_script: VecDeque::new(),
             refresh_script: VecDeque::new(),
+            inspection_script: VecDeque::new(),
             edit_script: VecDeque::new(),
             create_script: VecDeque::new(),
             captured_edits: Vec::new(),
             captured_creates: Vec::new(),
             captured_adopt_inputs: Vec::new(),
             captured_refresh_keys: Vec::new(),
+            captured_inspection_keys: Vec::new(),
             capabilities: PromotionCapabilities::none(),
         }
     }
@@ -112,6 +129,12 @@ impl FakeAdapter {
     #[must_use]
     pub fn with_refreshes(mut self, script: Vec<RefreshResponse>) -> Self {
         self.refresh_script = script.into();
+        self
+    }
+
+    #[must_use]
+    pub fn with_inspections(mut self, script: Vec<InspectionResponse>) -> Self {
+        self.inspection_script = script.into();
         self
     }
 
@@ -170,6 +193,19 @@ impl Adapter for FakeAdapter {
             RefreshResponse::Item(item) => Ok(item),
             RefreshResponse::RecordedFailure(detail) => Err(AdapterReadError::Failed(detail)),
             RefreshResponse::EnvFailure(err) => Err(AdapterReadError::Env(err)),
+        }
+    }
+
+    fn inspect_item(&mut self, key: &str) -> Result<BackendItemInspection, AdapterReadError> {
+        self.captured_inspection_keys.push(key.to_string());
+        let response = self
+            .inspection_script
+            .pop_front()
+            .expect("FakeAdapter: inspection script exhausted");
+        match response {
+            InspectionResponse::Item(item) => Ok(item),
+            InspectionResponse::RecordedFailure(detail) => Err(AdapterReadError::Failed(detail)),
+            InspectionResponse::EnvFailure(err) => Err(AdapterReadError::Env(err)),
         }
     }
 
@@ -242,6 +278,17 @@ mod tests {
         }
     }
 
+    fn inspection(title: &str) -> BackendItemInspection {
+        BackendItemInspection {
+            identity: BackendItemIdentity {
+                backend_key: "https://github.com/o/r/issues/42".into(),
+                display_id: "gh-42".into(),
+            },
+            title: title.into(),
+            body: "Body".into(),
+        }
+    }
+
     fn edit() -> BackendEdit {
         BackendEdit::UpdateTicket {
             ticket: BackendItemAddress {
@@ -281,6 +328,38 @@ mod tests {
         assert_eq!(got.title, "Refreshed");
         assert_eq!(got.ticket_kind, Some(TicketKind::Task));
         assert_eq!(fake.captured_refresh_keys, ["42"]);
+    }
+
+    #[test]
+    fn inspection_returns_scripted_identity_and_captures_key() {
+        let mut fake = FakeAdapter::new()
+            .with_inspections(vec![InspectionResponse::Item(inspection("Inspected"))]);
+        let got = fake
+            .inspect_item("https://github.com/o/r/issues/42")
+            .unwrap();
+        assert_eq!(got.title, "Inspected");
+        assert_eq!(got.identity.display_id, "gh-42");
+        assert_eq!(
+            fake.captured_inspection_keys,
+            ["https://github.com/o/r/issues/42"]
+        );
+    }
+
+    #[test]
+    fn inspection_failure_variants_remain_distinct() {
+        let mut fake = FakeAdapter::new().with_inspections(vec![
+            InspectionResponse::RecordedFailure("HTTP 502".into()),
+            InspectionResponse::EnvFailure(ProcError::SpawnFailed),
+        ]);
+        assert!(matches!(
+            fake.inspect_item("42"),
+            Err(AdapterReadError::Failed(detail)) if detail == "HTTP 502"
+        ));
+        assert!(matches!(
+            fake.inspect_item("42"),
+            Err(AdapterReadError::Env(ProcError::SpawnFailed))
+        ));
+        assert_eq!(fake.captured_inspection_keys, ["42", "42"]);
     }
 
     #[test]

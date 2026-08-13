@@ -24,6 +24,22 @@ impl std::fmt::Display for BackendItemIdentity {
     }
 }
 
+/// Canonical Backend identity and content observed while recovering a
+/// Promotion whose creation outcome was indeterminate.
+///
+/// The Backend Adapter owns canonicalizing the Backend key and Display ID;
+/// recovery workflows use the returned identity to bind the Pending
+/// Promotion and the title/body to reconcile the local item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackendItemInspection {
+    /// Canonical identity assigned by the Backend Adapter.
+    pub identity: BackendItemIdentity,
+    /// Current Backend title observed during inspection.
+    pub title: String,
+    /// Current Backend body observed during inspection.
+    pub body: String,
+}
+
 /// Backend-native address of an object that already exists remotely.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackendItemAddress {

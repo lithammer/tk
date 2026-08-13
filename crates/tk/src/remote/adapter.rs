@@ -12,7 +12,7 @@
 
 use crate::domain::backend_kind::BackendKind;
 use crate::domain::backend_operation::{
-    AdoptedItem, BackendCreate, BackendEdit, BackendItemRefresh,
+    AdoptedItem, BackendCreate, BackendEdit, BackendItemInspection, BackendItemRefresh,
 };
 use crate::domain::backend_outcome::{BackendCreateOutcome, BackendEditOutcome};
 use crate::domain::promotion_capability::PromotionCapabilities;
@@ -59,6 +59,12 @@ pub trait Adapter {
     /// The sync engine owns the working set and calls this once per key; a
     /// failure prevents every collected refresh from being merged.
     fn refresh_item(&mut self, key: &str) -> Result<BackendItemRefresh, AdapterReadError>;
+
+    /// Inspect one Backend object for Promotion recovery.
+    ///
+    /// This narrow read returns only canonical identity and content. It does
+    /// not classify the item as a Ticket Kind or map Backend lifecycle state.
+    fn inspect_item(&mut self, key: &str) -> Result<BackendItemInspection, AdapterReadError>;
 
     /// Apply one non-Promotion Mutation to an existing Backend object.
     ///
