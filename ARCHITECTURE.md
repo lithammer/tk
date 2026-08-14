@@ -145,11 +145,16 @@ Important stable contracts:
   state, JSON payload, and optional Mutation Failure JSON. The persisted
   failure JSON is a typed record carrying detail, classification, and an
   optional retry hint ([ADR 0009](./docs/adr/0009-sync-failure-taxonomy.md)).
-  Migration 007 adds an optional Promotion
+  `domain::mutation_state::MutationState` carries the transition table, and
+  `store::mutations::transition` is the only writer of the `state` column: it
+  refuses an edge the table omits and owns the `failure_json` and
+  `state_changed_at` bookkeeping each edge implies, so a workflow contributes
+  only the domain preconditions it names its own diagnostics for.
+  A Mutation optionally carries the Promotion
   Operation grouping every Mutation one `tk promote` invocation appended, so
   the command can ask whether its whole operation resolved ([ADR
   0036](./docs/adr/0036-promotion-intent-precedes-backend-capability.md)).
-  Migration 008 adds `applying`, durably written before non-idempotent Backend
+  `applying` is durably written before non-idempotent Backend
   creation. An `applying` Mutation is excluded from automatic replay and is a
   global barrier for Pull, Apply, Adopt, and Remote clear; Repository Store
   local edits remain available, and later Promotion intent may be committed

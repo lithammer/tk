@@ -452,7 +452,8 @@ fn finish_recovery_sync(
             | RunSyncError::Outcome(
                 PersistMutationOutcomeError::PayloadJson(_)
                 | PersistMutationOutcomeError::OperationShapeMismatch { .. }
-                | PersistMutationOutcomeError::TargetNotLocal { .. },
+                | PersistMutationOutcomeError::TargetNotLocal { .. }
+                | PersistMutationOutcomeError::Transition(_),
             )),
         ) => Err(CommandError::failure(action.sync_did_not_finish(&format!(
             "{err}; this is a Ticket bug — please report it"
@@ -1002,7 +1003,8 @@ fn recovery_error(err: RecoveryPromotionError, display_id: &str) -> CommandError
         | RecoveryPromotionError::TargetNotLocal { .. }
         | RecoveryPromotionError::BackendCohort(_)
         | RecoveryPromotionError::Receipt(_)
-        | RecoveryPromotionError::Append(_)) => {
+        | RecoveryPromotionError::Append(_)
+        | RecoveryPromotionError::Transition(_)) => {
             CommandError::failure(format!("Repository Store corruption: {err}"))
         }
     }

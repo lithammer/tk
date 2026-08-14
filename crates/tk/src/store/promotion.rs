@@ -434,6 +434,20 @@ pub enum RecoveryPromotionError {
     Receipt(#[from] ApplyReceiptError),
     #[error(transparent)]
     Append(#[from] mutations::AppendError),
+    /// The Mutation state edge recovery asked for is not in the transition
+    /// table. Each transition narrows the row to a nonterminal Promotion first,
+    /// so this names a Store-layer contract break.
+    #[error(transparent)]
+    Transition(#[from] mutations::IllegalTransition),
+}
+
+impl From<mutations::TransitionError> for RecoveryPromotionError {
+    fn from(error: mutations::TransitionError) -> Self {
+        match error {
+            mutations::TransitionError::Storage(error) => Self::Storage(error),
+            mutations::TransitionError::Illegal(error) => Self::Transition(error),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -639,7 +653,7 @@ pub fn reconcile_promotion(
             },
         )?;
     }
-    mutations::mark_applied(&tx, current.sequence, now)?;
+    mutations::mark_applied(&tx, current.sequence, current.state, now)?;
     tx.commit()?;
     Ok(())
 }
@@ -727,9 +741,15 @@ pub fn retry_promotion(
     ensure_no_earlier_nonterminal(&tx, current.sequence)?;
     match current.state {
         MutationState::Applying => {
-            tx.execute(
-                "update mutations set state = 'pending', failure_json = null, state_changed_at = ?2 where sequence = ?1",
-                params![current.sequence, now],
+            mutations::transition(
+                &tx,
+                mutations::TransitionRequest {
+                    sequence: current.sequence,
+                    from: MutationState::Applying,
+                    to: MutationState::Pending,
+                    failure: None,
+                    now,
+                },
             )?;
         }
         // Already pending: the command stays idempotent and just resumes sync.

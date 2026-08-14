@@ -268,6 +268,12 @@ fn render_skip_error<W: Write + ?Sized>(stderr: &mut W, err: &MarkSkippedError) 
                 "tk sync --skip: Mutation {seq} is a Promotion; skipping it would leave every Mutation queued behind it with no backend identity to apply against. Abandoning a Pending Promotion is not supported in this build."
             );
         }
+        MarkSkippedError::Transition(err) => {
+            let _ = writeln!(
+                stderr,
+                "tk sync --skip: {err}; this is a Ticket bug — please report it"
+            );
+        }
         MarkSkippedError::Storage(err) => resolver::storage_error(err).render(stderr, COMMAND),
     }
 }
@@ -301,7 +307,8 @@ fn render_run_sync_error<W: Write + ?Sized>(stderr: &mut W, err: &RunSyncError) 
         | RunSyncError::Outcome(
             PersistMutationOutcomeError::PayloadJson(_)
             | PersistMutationOutcomeError::OperationShapeMismatch { .. }
-            | PersistMutationOutcomeError::TargetNotLocal { .. },
+            | PersistMutationOutcomeError::TargetNotLocal { .. }
+            | PersistMutationOutcomeError::Transition(_),
         ) => {
             let _ = writeln!(
                 stderr,
