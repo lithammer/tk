@@ -71,7 +71,9 @@ were already created.
 Pending Promotion cancellation is a broader recovery decision because later
 title, body, status, membership, Dependency, and External Blocker Mutations
 may all rely on the missing backend identity. Its semantics are deferred from
-this decision.
+this decision and settled by ADR-0038, which withdraws that dependent intent
+with the operation and reuses this decision's Dependency rule to refuse a
+withdrawal that would strand a backend-bound Blocked Item.
 
 ## Considered Options
 

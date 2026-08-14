@@ -1,5 +1,10 @@
 # Promotion recovery is explicit and ordered
 
+> **Amended by ADR-0038.** The ordering rule below governs recovery that reaches
+> a Backend. Promotion Cancellation makes no Backend call, so it may withdraw a
+> Promotion that an earlier nonterminal Mutation precedes. Reconcile and retry
+> remain bound by the rule as written.
+
 A Promotion creation is non-idempotent. When tk cannot observe its outcome,
 the Mutation remains `applying`: automatic sync cannot know whether retrying
 would create a duplicate Backend object. ADR-0036 established that durable

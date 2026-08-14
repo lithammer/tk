@@ -145,11 +145,16 @@ Important stable contracts:
   state, JSON payload, and optional Mutation Failure JSON. The persisted
   failure JSON is a typed record carrying detail, classification, and an
   optional retry hint ([ADR 0009](./docs/adr/0009-sync-failure-taxonomy.md)).
-  Migration 007 adds an optional Promotion
+  `domain::mutation_state::MutationState` carries the transition table, and
+  `store::mutations::transition` is the only writer of the `state` column: it
+  refuses an edge the table omits and owns the `failure_json` and
+  `state_changed_at` bookkeeping each edge implies, so a workflow contributes
+  only the domain preconditions it names its own diagnostics for.
+  A Mutation optionally carries the Promotion
   Operation grouping every Mutation one `tk promote` invocation appended, so
   the command can ask whether its whole operation resolved ([ADR
   0036](./docs/adr/0036-promotion-intent-precedes-backend-capability.md)).
-  Migration 008 adds `applying`, durably written before non-idempotent Backend
+  `applying` is durably written before non-idempotent Backend
   creation. An `applying` Mutation is excluded from automatic replay and is a
   global barrier for Pull, Apply, Adopt, and Remote clear; Repository Store
   local edits remain available, and later Promotion intent may be committed
@@ -158,14 +163,22 @@ Important stable contracts:
   applies identity, optional forced convergence, Mutation state, and monotonic
   cursor movement in one transaction ([ADR
   0037](./docs/adr/0037-promotion-recovery-is-explicit-and-ordered.md)).
+  `cancelled` records intent Promotion Cancellation withdrew: an
+  operation-wide exit that opens no Adapter, so it is exempt from that ordering
+  rule. The `skipped` clause is Mutation-Type-restricted in the same schema, so
+  a Promotion can only ever reach `cancelled`; whether a Promotion Operation has
+  resolved asks the nonterminal set rather than "not applied" ([ADR
+  0038](./docs/adr/0038-promotion-cancellation-withdraws-an-operation.md)).
 - `Store::lock_remote_workflow` owns an exclusive OS lock on the stable
   `<git-common-dir>/tk/remote.lock` file. Sync, Adopt, Promotion, and Remote
   configuration hold one guard across Backend access and Store persistence;
   nested Promotion sync reuses its caller's guard. The lock closes the live
   process check-then-act race, while the durable `applying` state remains the
   crash-recovery barrier. Lock contention fails immediately with retry
-  guidance instead of blocking indefinitely. Sync Skip shares the guard but
-  commits before the Adapter opens; Sync Log and local commands stay unlocked.
+  guidance instead of blocking indefinitely. Sync Skip and Promotion
+  Cancellation share the guard but reach no Adapter — they rewrite Mutation Log
+  state a concurrent sync could be draining, and each commits in one
+  transaction. Sync Log and local commands stay unlocked.
 - `remotes` and `sync_cursors` hold the v1 singleton Remote model.
 - `store_config.display_prefix` controls newly generated local Display IDs.
   Custom prefix configuration is tracked by `tk-22`.

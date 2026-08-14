@@ -546,6 +546,20 @@ pub enum PersistMutationOutcomeError {
     /// [`LoadApplicableError::PayloadJson`] names on the load side.
     #[error("malformed payload_json: {0}")]
     PayloadJson(#[from] serde_json::Error),
+    /// The Mutation state edge this outcome implies is not in the transition
+    /// table. Every outcome path narrows the row to an applicable state before
+    /// transitioning, so this names a Store-layer contract break.
+    #[error(transparent)]
+    Transition(#[from] mutations::IllegalTransition),
+}
+
+impl From<mutations::TransitionError> for PersistMutationOutcomeError {
+    fn from(error: mutations::TransitionError) -> Self {
+        match error {
+            mutations::TransitionError::Storage(error) => Self::Storage(error),
+            mutations::TransitionError::Illegal(error) => Self::Transition(error),
+        }
+    }
 }
 
 /// Persist an edit acknowledgement or rejection against its Mutation Log row.
@@ -562,7 +576,7 @@ pub fn persist_edit_outcome(
     if let Some(applying) = applying_mutation_sequence(&tx)? {
         return Err(PersistMutationOutcomeError::ApplyingMutation(applying));
     }
-    let (_, mutation_type) = applicable_outcome_row(&tx, sequence)?;
+    let (prior, mutation_type) = applicable_outcome_row(&tx, sequence)?;
     if mutation_type.is_promotion() {
         return Err(PersistMutationOutcomeError::OperationShapeMismatch {
             sequence,
@@ -571,8 +585,10 @@ pub fn persist_edit_outcome(
     }
 
     match outcome {
-        BackendEditOutcome::Acknowledged => mutations::mark_applied(&tx, sequence, now)?,
-        BackendEditOutcome::Rejected(failure) => persist_failed(&tx, sequence, failure, now)?,
+        BackendEditOutcome::Acknowledged => mutations::mark_applied(&tx, sequence, prior, now)?,
+        BackendEditOutcome::Rejected(failure) => {
+            persist_failed(&tx, sequence, prior, failure, now)?;
+        }
     }
 
     tx.commit()?;
@@ -635,10 +651,10 @@ pub fn persist_create_outcome(
                     }
                 }
             })?;
-            mutations::mark_applied(&tx, sequence, now)?;
+            mutations::mark_applied(&tx, sequence, prior, now)?;
         }
         BackendCreateOutcome::Rejected(failure) => {
-            persist_failed(&tx, sequence, failure, now)?;
+            persist_failed(&tx, sequence, prior, failure, now)?;
         }
         BackendCreateOutcome::Indeterminate(failure) => {
             persist_applying_failure(&tx, sequence, failure, now)?;
@@ -683,11 +699,15 @@ pub fn begin_create(
     if origin != Origin::Local {
         return Err(PersistMutationOutcomeError::TargetNotLocal { sequence, item_id });
     }
-    tx.execute(
-        "update mutations \
-            set state = 'applying', failure_json = null, state_changed_at = ?2 \
-          where sequence = ?1",
-        params![sequence, now],
+    mutations::transition(
+        &tx,
+        mutations::TransitionRequest {
+            sequence,
+            from: state,
+            to: MutationState::Applying,
+            failure: None,
+            now,
+        },
     )?;
     tx.commit()?;
     Ok(())
@@ -715,33 +735,40 @@ fn applicable_outcome_row(
 fn persist_failed(
     conn: &Connection,
     sequence: i64,
+    prior: MutationState,
     failure: &Failure,
     now: &str,
-) -> rusqlite::Result<()> {
-    let failure_json = serde_json::to_string(failure).expect("Failure serializes infallibly");
-    conn.execute(
-        "update mutations \
-            set state = 'failed', failure_json = ?2, state_changed_at = ?3 \
-          where sequence = ?1",
-        params![sequence, failure_json, now],
-    )?;
-    Ok(())
+) -> Result<(), mutations::TransitionError> {
+    mutations::transition(
+        conn,
+        mutations::TransitionRequest {
+            sequence,
+            from: prior,
+            to: MutationState::Failed,
+            failure: Some(failure),
+            now,
+        },
+    )
 }
 
+/// Record why a creation's effect stayed unknown without resolving the doubt:
+/// the row keeps the `applying` barrier that only reconcile or retry lifts.
 fn persist_applying_failure(
     conn: &Connection,
     sequence: i64,
     failure: &Failure,
     now: &str,
-) -> rusqlite::Result<()> {
-    let failure_json = serde_json::to_string(failure).expect("Failure serializes infallibly");
-    conn.execute(
-        "update mutations \
-            set failure_json = ?2, state_changed_at = ?3 \
-          where sequence = ?1 and state = 'applying'",
-        params![sequence, failure_json, now],
-    )?;
-    Ok(())
+) -> Result<(), mutations::TransitionError> {
+    mutations::transition(
+        conn,
+        mutations::TransitionRequest {
+            sequence,
+            from: MutationState::Applying,
+            to: MutationState::Applying,
+            failure: Some(failure),
+            now,
+        },
+    )
 }
 
 /// Return the sequence of the globally blocking `applying` Mutation, if any.
@@ -772,18 +799,31 @@ pub enum MarkSkippedError {
     /// Promotion's receipt would assign (ADR-0036 Pending Promotion);
     /// skipping it would leave those Mutations with no key to apply against.
     ///
-    /// Abandoning a Pending Promotion is a broader recovery decision than
-    /// curating one rejected Mutation, and this build offers no way to do it —
-    /// the refusal says so, so a reader stops hunting for the flag.
+    /// Withdrawing a Promotion is operation-wide and spans those Mutations, so
+    /// it is Promotion Cancellation's job, not Sync Skip's (ADR-0038). The
+    /// refusal names the command that does it.
     #[error("mutation {0} is a Promotion and cannot be skipped")]
     CannotSkipPromotion(i64),
+    /// Sync Skip refuses any row that is not `failed`, which is the one legal
+    /// `skipped` edge, so this names a Store-layer contract break.
+    #[error(transparent)]
+    Transition(#[from] mutations::IllegalTransition),
+}
+
+impl From<mutations::TransitionError> for MarkSkippedError {
+    fn from(error: mutations::TransitionError) -> Self {
+        match error {
+            mutations::TransitionError::Storage(error) => Self::Storage(error),
+            mutations::TransitionError::Illegal(error) => Self::Transition(error),
+        }
+    }
 }
 
 /// Transition a `failed` Mutation Log entry into `skipped`, inside its own
 /// transaction. Refuses a Mutation that is not `failed`, or whose Mutation
 /// Type is `promote_ticket` / `promote_epic` ([`MarkSkippedError::CannotSkipPromotion`]).
-/// Clears no metadata — the latest `failure_json` is preserved so `tk sync
-/// log` can show why the Mutation was abandoned.
+/// The edge preserves `failure_json`, so `tk sync log` can still show why the
+/// Mutation was abandoned.
 pub fn mark_mutation_skipped(
     conn: &mut Connection,
     _workflow: &RemoteWorkflowGuard,
@@ -807,11 +847,15 @@ pub fn mark_mutation_skipped(
         return Err(MarkSkippedError::MutationNotFailed(sequence));
     }
 
-    tx.execute(
-        "update mutations \
-            set state = 'skipped', state_changed_at = ?2 \
-          where sequence = ?1",
-        params![sequence, now],
+    mutations::transition(
+        &tx,
+        mutations::TransitionRequest {
+            sequence,
+            from: prior,
+            to: MutationState::Skipped,
+            failure: None,
+            now,
+        },
     )?;
 
     tx.commit()?;
@@ -1183,9 +1227,16 @@ pub enum ClearRemoteError {
     /// Remote would orphan them (CONTEXT.md). Carries the count for the
     /// verbatim diagnostic.
     #[error(
-        "{0} pending or failed Mutation(s) would be orphaned; resolve them before clearing the Remote"
+        "{0} pending or failed Mutation(s) would be orphaned; resolve them before clearing the Remote. Run 'tk sync' to apply them, or 'tk sync --skip <mutation-id>' to abandon a failed one"
     )]
     WouldOrphan(i64),
+    /// The same refusal with a Promotion among the in-flight rows. Sync Skip
+    /// refuses a Promotion, so the guidance names the operation that can
+    /// actually clear it (ADR-0038).
+    #[error(
+        "{count} pending or failed Mutation(s) would be orphaned, including Promotion Mutation {promotion}; resolve them before clearing the Remote. Run 'tk promote cancel <id>' to withdraw a Promotion Operation the Backend will never accept"
+    )]
+    WouldOrphanPromotion { count: i64, promotion: i64 },
     #[error("Mutation {0} has an indeterminate Backend creation outcome")]
     ApplyingMutation(i64),
 }
@@ -1217,7 +1268,13 @@ pub fn clear_remote(conn: &mut Connection) -> Result<(), ClearRemoteError> {
 
     let in_flight = pending_or_failed_mutation_count(&tx)?;
     if in_flight > 0 {
-        return Err(ClearRemoteError::WouldOrphan(in_flight));
+        return Err(match earliest_in_flight_promotion(&tx)? {
+            Some(promotion) => ClearRemoteError::WouldOrphanPromotion {
+                count: in_flight,
+                promotion,
+            },
+            None => ClearRemoteError::WouldOrphan(in_flight),
+        });
     }
 
     tx.execute("delete from sync_cursors where remote_name = 'primary'", [])?;
@@ -1227,6 +1284,21 @@ pub fn clear_remote(conn: &mut Connection) -> Result<(), ClearRemoteError> {
     Ok(())
 }
 
+/// The lowest Mutation Sequence of an in-flight Promotion, if the outbox holds
+/// one. Names the Promotion whose Promotion Operation the clear refusal points
+/// the operator at.
+fn earliest_in_flight_promotion(conn: &Connection) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "select sequence from mutations \
+          where state in ('pending','failed') \
+            and mutation_type in ('promote_ticket','promote_epic') \
+          order by sequence limit 1",
+        [],
+        |r| r.get(0),
+    )
+    .optional()
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Mutation Log read (tk sync log)
 // ──────────────────────────────────────────────────────────────────────────
@@ -1234,11 +1306,12 @@ pub fn clear_remote(conn: &mut Connection) -> Result<(), ClearRemoteError> {
 /// Filter for the `tk sync log` list view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogListFilter {
-    /// Pending + failed + applying + skipped (the default).
+    /// Every state but `applied` — a withdrawal is visible without a flag.
     Default,
     Pending,
     Failed,
     Skipped,
+    Cancelled,
 }
 
 /// One row of the `tk sync log` list view.
@@ -1290,10 +1363,13 @@ pub fn list_mutation_log(
     filter: LogListFilter,
 ) -> Result<Vec<LogListRow>, LogError> {
     let where_clause = match filter {
-        LogListFilter::Default => "where m.state in ('pending', 'failed', 'applying', 'skipped')",
+        LogListFilter::Default => {
+            "where m.state in ('pending', 'failed', 'applying', 'skipped', 'cancelled')"
+        }
         LogListFilter::Pending => "where m.state = 'pending'",
         LogListFilter::Failed => "where m.state = 'failed'",
         LogListFilter::Skipped => "where m.state = 'skipped'",
+        LogListFilter::Cancelled => "where m.state = 'cancelled'",
     };
     let sql = format!(
         "select m.sequence, m.state, m.mutation_type, i.display_value, m.created_at, m.failure_json \
@@ -3661,16 +3737,29 @@ mod tests {
             },
         )
         .unwrap();
+        insert_fixture_mutation(
+            conn,
+            FixtureMutation {
+                sequence: 5,
+                mutation_type: "update_ticket",
+                item_id: "t3",
+                payload_json: r#"{"title":"D","body":""}"#,
+                state: "cancelled",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
     }
 
     #[test]
-    fn list_default_returns_nonterminal_and_skipped_rows_with_failure_detail() {
+    fn list_default_returns_every_state_but_applied_with_failure_detail() {
+        // A withdrawal is visible without a flag (ADR-0038).
         let conn = open_seeded();
         seed_log_fixture(&conn);
 
         let rows = list_mutation_log(&conn, LogListFilter::Default).unwrap();
         let seqs: Vec<i64> = rows.iter().map(|r| r.sequence).collect();
-        assert_eq!(seqs, vec![1, 2, 3, 4]);
+        assert_eq!(seqs, vec![1, 2, 3, 4, 5]);
         assert_eq!(rows[0].failure_detail, None);
         assert_eq!(
             rows[1].failure_detail.as_deref(),
@@ -3679,6 +3768,7 @@ mod tests {
         assert_eq!(rows[1].target_display_id, "gh-2");
         assert_eq!(rows[3].state, MutationState::Applying);
         assert_eq!(rows[3].failure_detail.as_deref(), Some("unknown effect"));
+        assert_eq!(rows[4].state, MutationState::Cancelled);
     }
 
     #[test]
@@ -3703,6 +3793,12 @@ mod tests {
                 .unwrap()
                 .len(),
             1
+        );
+        let cancelled = list_mutation_log(&conn, LogListFilter::Cancelled).unwrap();
+        assert_eq!(
+            cancelled.iter().map(|r| r.sequence).collect::<Vec<_>>(),
+            vec![5],
+            "a Cancelled Mutation is separable from a Skipped one"
         );
     }
 
@@ -3747,21 +3843,5 @@ mod tests {
                 ref item_id,
             }) if item_id == "t1"
         ));
-    }
-
-    #[test]
-    fn sync_cursor_never_regresses() {
-        let conn = open_seeded();
-        seed_remote(&conn);
-        mutations::mark_applied(&conn, 9, "2026-05-19T00:00:00Z").unwrap();
-        mutations::mark_applied(&conn, 4, "2026-05-20T00:00:00Z").unwrap();
-        let cursor: i64 = conn
-            .query_row(
-                "select last_applied_sequence from sync_cursors where remote_name = 'primary'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(cursor, 9);
     }
 }

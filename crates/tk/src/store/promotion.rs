@@ -29,12 +29,16 @@ use rand::Rng;
 use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 
+use crate::domain::backend_binding::BackendBinding;
 use crate::domain::backend_kind::BackendKind;
 use crate::domain::backend_operation::BackendItemIdentity;
+use crate::domain::dependency_rule::{self, DependencyClassification, DependencyRejection};
 use crate::domain::item_class::ItemClass;
-use crate::domain::mutation_payload::{MutationPayload, Promotion, TitleBody};
+use crate::domain::mutation_payload::{
+    DependencyRef, EpicRef, MutationPayload, Promotion, TitleBody,
+};
 use crate::domain::mutation_state::MutationState;
-use crate::domain::mutation_type::MutationType;
+use crate::domain::mutation_type::{AddressedCounterpart, MutationType};
 use crate::domain::origin::Origin;
 use crate::domain::promotion_graph::{GraphDependency, GraphItem, PromotionGraph};
 use crate::domain::promotion_plan::PromotionPlan;
@@ -434,6 +438,20 @@ pub enum RecoveryPromotionError {
     Receipt(#[from] ApplyReceiptError),
     #[error(transparent)]
     Append(#[from] mutations::AppendError),
+    /// The Mutation state edge recovery asked for is not in the transition
+    /// table. Each transition narrows the row to a nonterminal Promotion first,
+    /// so this names a Store-layer contract break.
+    #[error(transparent)]
+    Transition(#[from] mutations::IllegalTransition),
+}
+
+impl From<mutations::TransitionError> for RecoveryPromotionError {
+    fn from(error: mutations::TransitionError) -> Self {
+        match error {
+            mutations::TransitionError::Storage(error) => Self::Storage(error),
+            mutations::TransitionError::Illegal(error) => Self::Transition(error),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -639,7 +657,7 @@ pub fn reconcile_promotion(
             },
         )?;
     }
-    mutations::mark_applied(&tx, current.sequence, now)?;
+    mutations::mark_applied(&tx, current.sequence, current.state, now)?;
     tx.commit()?;
     Ok(())
 }
@@ -727,9 +745,15 @@ pub fn retry_promotion(
     ensure_no_earlier_nonterminal(&tx, current.sequence)?;
     match current.state {
         MutationState::Applying => {
-            tx.execute(
-                "update mutations set state = 'pending', failure_json = null, state_changed_at = ?2 where sequence = ?1",
-                params![current.sequence, now],
+            mutations::transition(
+                &tx,
+                mutations::TransitionRequest {
+                    sequence: current.sequence,
+                    from: MutationState::Applying,
+                    to: MutationState::Pending,
+                    failure: None,
+                    now,
+                },
             )?;
         }
         // Already pending: the command stays idempotent and just resumes sync.
@@ -743,6 +767,407 @@ pub fn retry_promotion(
     }
     tx.commit()?;
     Ok(())
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Promotion Cancellation (ADR-0038)
+// ──────────────────────────────────────────────────────────────────────────
+
+/// One item whose Promotion the cancellation touched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CancelledPromotion {
+    pub sequence: i64,
+    pub display_id: String,
+    pub item_class: ItemClass,
+}
+
+/// One Mutation the withdrawal took with the Promotions, other than the
+/// Promotions themselves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WithdrawnMutation {
+    pub sequence: i64,
+    pub mutation_type: MutationType,
+    pub target_display_id: String,
+    /// Whether the target is itself one of the cancelled items. When it is
+    /// not, this is intent lost for an object that really exists upstream —
+    /// the distinction a report leads with (ADR-0038).
+    pub target_cancelled: bool,
+}
+
+/// What one Promotion Cancellation withdrew.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CancellationReport {
+    /// Promotions the withdrawal resolved, in Mutation Sequence order. Their
+    /// items are back to Local Backend Binding.
+    pub cancelled_promotions: Vec<CancelledPromotion>,
+    /// Promotions the Backend already accepted. tk never compensates by
+    /// deleting a Backend object, so these are reported, not undone.
+    pub applied_promotions: Vec<CancelledPromotion>,
+    /// Everything else the withdrawal took, in Mutation Sequence order.
+    pub withdrawn: Vec<WithdrawnMutation>,
+}
+
+/// A Dependency edge a withdrawal would leave unrepresentable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnrepresentableDependency {
+    pub blocked_display_id: String,
+    pub blocking_display_id: String,
+    pub rejection: DependencyRejection,
+}
+
+/// Errors returned by [`cancel_promotion`].
+#[derive(Debug, Error)]
+pub enum CancelPromotionError {
+    #[error(transparent)]
+    Storage(#[from] rusqlite::Error),
+    #[error(transparent)]
+    Recovery(Box<RecoveryPromotionError>),
+    /// A Promotion of the operation has an indeterminate Backend creation
+    /// outcome. Withdrawing the rest would leave an operation whose Epic may
+    /// exist upstream and whose children are gone, so the whole cancellation
+    /// refuses (ADR-0038).
+    #[error(
+        "Promotion Mutation {sequence} for {display_id} has an indeterminate Backend creation outcome"
+    )]
+    ApplyingPromotion { sequence: i64, display_id: String },
+    /// The withdrawal would leave a backend-bound Blocked Item waiting on a
+    /// Local Blocking Item — the graph ADR-0035 refuses to create by
+    /// Promotion, reached from the other direction.
+    #[error("{} Dependency edge(s) would become unrepresentable", .0.len())]
+    UnrepresentableDependencies(Vec<UnrepresentableDependency>),
+    /// Every Promotion of the operation has already resolved, so there is no
+    /// untried or certified-rejected intent left to withdraw.
+    #[error("Promotion Operation {0} has no Promotion left to withdraw")]
+    NothingToWithdraw(String),
+    /// A Mutation's `payload_json` did not decode into the counterpart its
+    /// Mutation Type addresses. Repository Store corruption.
+    #[error("malformed payload_json on mutation {sequence}: {source}")]
+    MalformedPayload {
+        sequence: i64,
+        source: serde_json::Error,
+    },
+    #[error(transparent)]
+    BackendBinding(#[from] mutations::BackendBindingError),
+    #[error(transparent)]
+    Transition(#[from] mutations::IllegalTransition),
+}
+
+impl From<RecoveryPromotionError> for CancelPromotionError {
+    fn from(error: RecoveryPromotionError) -> Self {
+        Self::Recovery(Box::new(error))
+    }
+}
+
+impl From<mutations::TransitionError> for CancelPromotionError {
+    fn from(error: mutations::TransitionError) -> Self {
+        match error {
+            mutations::TransitionError::Storage(error) => Self::Storage(error),
+            mutations::TransitionError::Illegal(error) => Self::Transition(error),
+        }
+    }
+}
+
+/// Withdraw the Promotion Operation the Promotion of `item_id` belongs to.
+///
+/// Plans and commits in one transaction under the caller's Remote workflow
+/// guard: the whole decision reads Mutation Log state a concurrent sync could
+/// be draining, and no part of it reaches a Backend Adapter (ADR-0038). That is
+/// also why ADR-0037's "earliest nonterminal Mutation" rule does not apply —
+/// it exists to keep *Backend* effects ordered.
+///
+/// A refusal drops the transaction, so nothing is withdrawn.
+pub fn cancel_promotion(
+    conn: &mut Connection,
+    _workflow: &RemoteWorkflowGuard,
+    item_id: &str,
+    now: &str,
+) -> Result<CancellationReport, CancelPromotionError> {
+    let tx = crate::store::write_transaction(conn)?;
+    let operation_id = cancellable_operation_id(&tx, item_id)?;
+    let promotions = operation_promotions(&tx, &operation_id)?;
+    let mut cancelled_promotions = Vec::new();
+    let mut applied_promotions = Vec::new();
+    for promotion in promotions {
+        match promotion.state {
+            MutationState::Pending | MutationState::Failed => {
+                cancelled_promotions.push(promotion);
+            }
+            MutationState::Applying => {
+                return Err(CancelPromotionError::ApplyingPromotion {
+                    sequence: promotion.sequence,
+                    display_id: promotion.display_id,
+                });
+            }
+            MutationState::Applied => applied_promotions.push(promotion),
+            // A Promotion cannot be `skipped` (the `mutations` CHECK), and a
+            // `cancelled` one is already withdrawn by an earlier invocation.
+            MutationState::Skipped | MutationState::Cancelled => {}
+        }
+    }
+
+    if cancelled_promotions.is_empty() {
+        return Err(CancelPromotionError::NothingToWithdraw(operation_id));
+    }
+
+    let cancelled_items: BTreeSet<String> = cancelled_promotions
+        .iter()
+        .map(|promotion| promotion.item_id.clone())
+        .collect();
+    ensure_dependencies_representable(&tx, &cancelled_items)?;
+
+    let withdrawn = withdrawn_mutations(&tx, &cancelled_items)?;
+    for row in &withdrawn {
+        mutations::transition(
+            &tx,
+            mutations::TransitionRequest {
+                sequence: row.sequence,
+                from: row.state,
+                to: MutationState::Cancelled,
+                failure: None,
+                now,
+            },
+        )?;
+    }
+    tx.commit()?;
+
+    Ok(CancellationReport {
+        cancelled_promotions: cancelled_promotions.into_iter().map(Into::into).collect(),
+        applied_promotions: applied_promotions.into_iter().map(Into::into).collect(),
+        // The Promotions themselves have their own two fields.
+        withdrawn: withdrawn
+            .into_iter()
+            .filter(|row| !row.mutation_type.is_promotion())
+            .map(|row| WithdrawnMutation {
+                target_cancelled: cancelled_items.contains(&row.item_id),
+                sequence: row.sequence,
+                mutation_type: row.mutation_type,
+                target_display_id: row.display_id,
+            })
+            .collect(),
+    })
+}
+
+/// The Promotion Operation `tk promote cancel <item_id>` names.
+///
+/// Usually the item's own nonterminal Promotion, which also rules out the
+/// ambiguity of an item carrying two of them. A resolved Promotion still
+/// identifies its operation, though, and has to: cancelling a `--children`
+/// Epic whose own Promotion applied while a child's was rejected is exactly
+/// the half-applied operation ADR-0038 says the withdrawal still covers, and
+/// the Epic is the item the operator typed at promote time. The item's latest
+/// Promotion wins, so a re-promoted item resolves to its current operation
+/// rather than a withdrawn one.
+fn cancellable_operation_id(
+    conn: &Connection,
+    item_id: &str,
+) -> Result<String, CancelPromotionError> {
+    match recoverable_promotion(conn, item_id) {
+        Ok(promotion) => Ok(promotion.operation_id),
+        Err(RecoveryPromotionError::TerminalPromotion { sequence, .. }) => conn
+            .query_row(
+                "select promotion_operation_id from mutations \
+                  where item_id = ?1 and mutation_type in ('promote_ticket', 'promote_epic') \
+                  order by sequence desc limit 1",
+                params![item_id],
+                |r| r.get::<_, Option<String>>(0),
+            )?
+            .ok_or_else(|| RecoveryPromotionError::MissingOperationId(sequence).into()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+/// One Promotion of the operation being cancelled, with the state and Item
+/// identity the decision needs.
+#[derive(Debug, Clone)]
+struct OperationPromotion {
+    sequence: i64,
+    state: MutationState,
+    item_id: String,
+    display_id: String,
+    item_class: ItemClass,
+}
+
+impl From<OperationPromotion> for CancelledPromotion {
+    fn from(promotion: OperationPromotion) -> Self {
+        Self {
+            sequence: promotion.sequence,
+            display_id: promotion.display_id,
+            item_class: promotion.item_class,
+        }
+    }
+}
+
+fn operation_promotions(
+    conn: &Connection,
+    operation_id: &str,
+) -> rusqlite::Result<Vec<OperationPromotion>> {
+    let mut stmt = conn.prepare(
+        "select m.sequence, m.state, m.item_id, i.display_value, m.item_class \
+           from mutations m join items i on i.id = m.item_id \
+          where m.promotion_operation_id = ?1 \
+            and m.mutation_type in ('promote_ticket', 'promote_epic') \
+          order by m.sequence asc",
+    )?;
+    stmt.query_map(params![operation_id], |r| {
+        Ok(OperationPromotion {
+            sequence: r.get(0)?,
+            state: r.get(1)?,
+            item_id: r.get(2)?,
+            display_id: r.get(3)?,
+            item_class: r.get(4)?,
+        })
+    })?
+    .collect()
+}
+
+/// One nonterminal Mutation the withdrawal takes with it.
+#[derive(Debug, Clone)]
+struct WithdrawnRow {
+    sequence: i64,
+    state: MutationState,
+    mutation_type: MutationType,
+    item_id: String,
+    display_id: String,
+}
+
+/// Every Mutation that cannot resolve once `cancelled_items` lose their
+/// prospective Backend identity, in Mutation Sequence order.
+///
+/// One hop and never transitive: only the cancelled items lose an identity, so
+/// no third item's Mutations become unresolvable (ADR-0038). Only `pending` and
+/// `failed` rows can qualify — global Mutation Sequence order holds every later
+/// Mutation behind a nonterminal Promotion, and the operation's own `applying`
+/// Promotion already refused the whole cancellation.
+fn withdrawn_mutations(
+    conn: &Connection,
+    cancelled_items: &BTreeSet<String>,
+) -> Result<Vec<WithdrawnRow>, CancelPromotionError> {
+    let mut stmt = conn.prepare(
+        "select m.sequence, m.state, m.mutation_type, m.item_id, i.display_value, m.payload_json \
+           from mutations m join items i on i.id = m.item_id \
+          where m.state in ('pending', 'failed') \
+          order by m.sequence asc",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                WithdrawnRow {
+                    sequence: r.get(0)?,
+                    state: r.get(1)?,
+                    mutation_type: r.get(2)?,
+                    item_id: r.get(3)?,
+                    display_id: r.get(4)?,
+                },
+                r.get::<_, String>(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut out = Vec::new();
+    for (row, payload_json) in rows {
+        let counterpart = addressed_counterpart_id(row.sequence, row.mutation_type, &payload_json)?;
+        let withdrawn = cancelled_items.contains(&row.item_id)
+            || counterpart.is_some_and(|id| cancelled_items.contains(&id));
+        if withdrawn {
+            out.push(row);
+        }
+    }
+    Ok(out)
+}
+
+/// The internal Item ID of the counterpart `mutation_type` addresses, decoded
+/// from the row's payload.
+fn addressed_counterpart_id(
+    sequence: i64,
+    mutation_type: MutationType,
+    payload_json: &str,
+) -> Result<Option<String>, CancelPromotionError> {
+    let malformed = |source| CancelPromotionError::MalformedPayload { sequence, source };
+    Ok(match mutation_type.addressed_counterpart() {
+        AddressedCounterpart::None => None,
+        AddressedCounterpart::Epic => Some(
+            serde_json::from_str::<EpicRef>(payload_json)
+                .map_err(malformed)?
+                .epic_id,
+        ),
+        AddressedCounterpart::BlockingItem => Some(
+            serde_json::from_str::<DependencyRef>(payload_json)
+                .map_err(malformed)?
+                .blocking_id,
+        ),
+    })
+}
+
+/// Refuse a withdrawal that would leave a Dependency the Backend graph cannot
+/// represent.
+///
+/// Cancellation is the third caller of ADR-0035's Dependency classification,
+/// judging each affected edge against the Backend Binding the withdrawal will
+/// produce exactly as Promotion preflight judges against the Binding a
+/// Promotion will produce. Epic Membership degrades to local instead, as
+/// ADR-0035 already decided.
+fn ensure_dependencies_representable(
+    conn: &Connection,
+    cancelled_items: &BTreeSet<String>,
+) -> Result<(), CancelPromotionError> {
+    let mut stmt = conn.prepare(
+        "select blocked_id, blocking_id from dependencies \
+          where blocked_id = ?1 or blocking_id = ?1",
+    )?;
+    let mut edges: BTreeSet<(String, String)> = BTreeSet::new();
+    for item_id in cancelled_items {
+        for edge in stmt.query_map(params![item_id], |r| Ok((r.get(0)?, r.get(1)?)))? {
+            edges.insert(edge?);
+        }
+    }
+
+    // Every edge here has at least one endpoint returning to Local, and a
+    // Backend-kind mismatch needs two bound endpoints, so only
+    // `BackendBlockedLocalBlocking` is reachable today. The rejection travels
+    // with the edge anyway, so a change to the classification cannot leave
+    // this path rendering the wrong remedy.
+    let mut rejected = Vec::new();
+    for (blocked_id, blocking_id) in edges {
+        let blocked = post_cancellation_binding(conn, &blocked_id, cancelled_items)?;
+        let blocking = post_cancellation_binding(conn, &blocking_id, cancelled_items)?;
+        if let DependencyClassification::Rejected(rejection) =
+            dependency_rule::classify(&blocked, &blocking)
+        {
+            rejected.push(UnrepresentableDependency {
+                blocked_display_id: display_id(conn, &blocked_id)?,
+                blocking_display_id: display_id(conn, &blocking_id)?,
+                rejection,
+            });
+        }
+    }
+    if rejected.is_empty() {
+        return Ok(());
+    }
+    Err(CancelPromotionError::UnrepresentableDependencies(rejected))
+}
+
+/// The Backend Binding `item_id` will have once the withdrawal commits.
+///
+/// A cancelled item is Local: its only Promotion is in the withdrawn set. Every
+/// other item keeps the Binding it has now, because a Promotion joins the
+/// withdrawn set only through its own item.
+fn post_cancellation_binding(
+    conn: &Connection,
+    item_id: &str,
+    cancelled_items: &BTreeSet<String>,
+) -> Result<BackendBinding, CancelPromotionError> {
+    if cancelled_items.contains(item_id) {
+        return Ok(BackendBinding::Local);
+    }
+    Ok(mutations::resolve_backend_binding(conn, item_id)?)
+}
+
+fn display_id(conn: &Connection, item_id: &str) -> rusqlite::Result<String> {
+    conn.query_row(
+        "select display_value from items where id = ?1",
+        params![item_id],
+        |r| r.get(0),
+    )
 }
 
 /// Mutation Log fields needed by Promotion's post-sync report.
@@ -782,7 +1207,7 @@ pub fn earliest_applicable_mutation(
     .optional()
 }
 
-/// The Mutations of `operation_id` that have not reached `applied`, in Mutation
+/// The Mutations of `operation_id` still awaiting an outcome, in Mutation
 /// Sequence order.
 ///
 /// An empty result is the success condition for one `tk promote`: overall
@@ -790,6 +1215,10 @@ pub fn earliest_applicable_mutation(
 /// resolve (CONTEXT.md Promotion Operation). Comparing a non-empty result
 /// against [`earliest_applicable_mutation`] separates a Promotion queued behind
 /// an older Mutation from one of the operation's own Mutations being rejected.
+///
+/// The question is the nonterminal set, not "not applied": a human-curated
+/// terminal omission — Skipped or Cancelled — is a resolved outcome, not a
+/// waiting one (ADR-0038).
 pub fn unresolved_in_operation(
     conn: &Connection,
     operation_id: &str,
@@ -797,7 +1226,8 @@ pub fn unresolved_in_operation(
     let mut stmt = conn.prepare(
         "select m.sequence, m.state, i.display_value \
            from mutations m join items i on i.id = m.item_id \
-          where m.promotion_operation_id = ?1 and m.state <> 'applied' \
+          where m.promotion_operation_id = ?1 \
+            and m.state in ('pending', 'failed', 'applying') \
           order by m.sequence asc",
     )?;
     let rows = stmt.query_map(params![operation_id], |r| {
@@ -1621,7 +2051,9 @@ mod tests {
                 Err(RecoveryPromotionError::EarlierNonterminal { sequence: 1, .. })
             ));
         }
-        for state in ["applied", "skipped"] {
+        // `skipped` is absent because the `mutations` CHECK forbids it for a
+        // Promotion; cancellation is a Promotion's terminal omission.
+        for state in ["applied", "cancelled"] {
             let mut conn = open_seeded();
             seed_recovery(
                 &conn,
@@ -2591,14 +3023,575 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_skipped_mutation_of_the_operation_is_still_unresolved() {
-        // `skipped` is abandoned intent, not a resolved one: the operation did
-        // not do everything it promised.
-        let conn = open_seeded();
-        seed_ticket(&conn, "t1", "tk-1", 1);
-        seed_mutation(&conn, 1, "t1", "skipped", Some("op-1"));
+    // ── Promotion Cancellation (ADR-0038) ─────────────────────────────────
 
-        assert_eq!(unresolved_in_operation(&conn, "op-1").unwrap().len(), 1);
+    /// Seed one Mutation whose payload names a counterpart, so the withdrawn
+    /// set can be exercised on the roles it is derived from.
+    fn seed_counterpart_mutation(
+        conn: &Connection,
+        sequence: i64,
+        mutation_type: MutationType,
+        item_id: &str,
+        counterpart_id: &str,
+        op: Option<&str>,
+    ) {
+        // `remove_ticket_from_epic` addresses no counterpart yet still carries
+        // an `EpicRef`, which is exactly the distinction under test.
+        let payload = match mutation_type.addressed_counterpart() {
+            AddressedCounterpart::BlockingItem => MutationPayload::DependencyRef(DependencyRef {
+                blocking_id: counterpart_id.into(),
+            }),
+            AddressedCounterpart::Epic | AddressedCounterpart::None => {
+                MutationPayload::EpicRef(EpicRef {
+                    epic_id: counterpart_id.into(),
+                })
+            }
+        }
+        .to_json_string();
+        insert_fixture_mutation(
+            conn,
+            FixtureMutation {
+                sequence,
+                mutation_type: mutation_type.text(),
+                item_id,
+                payload_json: &payload,
+                promotion_operation_id: op,
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+    }
+
+    fn state_of(conn: &Connection, sequence: i64) -> MutationState {
+        conn.query_row(
+            "select state from mutations where sequence = ?1",
+            params![sequence],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    fn cancel(
+        conn: &mut Connection,
+        item_id: &str,
+    ) -> Result<CancellationReport, CancelPromotionError> {
+        let workflow = RemoteWorkflowGuard::for_test();
+        cancel_promotion(conn, &workflow, item_id, NOW)
+    }
+
+    #[test]
+    fn cancelling_withdraws_the_whole_operation_not_one_promotion() {
+        // The unit is the invocation: a regretted `--children` Epic Promotion
+        // must not leave its children to be created as bare Backend Tickets.
+        let mut conn = open_seeded();
+        seed_recovery(
+            &conn,
+            "e1",
+            "tk-1",
+            1,
+            "failed",
+            ItemClass::Epic,
+            Some("op-1"),
+        );
+        seed_recovery(
+            &conn,
+            "c1",
+            "tk-2",
+            2,
+            "pending",
+            ItemClass::Ticket,
+            Some("op-1"),
+        );
+
+        let report = cancel(&mut conn, "e1").unwrap();
+
+        assert_eq!(
+            report
+                .cancelled_promotions
+                .iter()
+                .map(|p| p.display_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tk-1", "tk-2"]
+        );
+        assert_eq!(state_of(&conn, 1), MutationState::Cancelled);
+        assert_eq!(state_of(&conn, 2), MutationState::Cancelled);
+    }
+
+    #[test]
+    fn a_cancelled_item_returns_to_local_backend_binding() {
+        let mut conn = open_seeded();
+        seed_recovery(
+            &conn,
+            "t1",
+            "tk-1",
+            1,
+            "failed",
+            ItemClass::Ticket,
+            Some("op-1"),
+        );
+
+        cancel(&mut conn, "t1").unwrap();
+
+        assert_eq!(
+            mutations::resolve_backend_binding(&conn, "t1").unwrap(),
+            BackendBinding::Local
+        );
+    }
+
+    #[test]
+    fn a_withdrawal_keeps_the_failure_evidence_that_motivated_it() {
+        let mut conn = open_seeded();
+        seed_recovery(
+            &conn,
+            "t1",
+            "tk-1",
+            1,
+            "failed",
+            ItemClass::Ticket,
+            Some("op-1"),
+        );
+
+        cancel(&mut conn, "t1").unwrap();
+
+        let failure: Option<String> = conn
+            .query_row(
+                "select failure_json from mutations where sequence = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(failure.as_deref(), Some(r#"{"detail":"prior"}"#));
+    }
+
+    #[test]
+    fn adding_membership_to_a_cancelled_epic_is_withdrawn_and_removing_it_is_not() {
+        // The withdrawn set's defining asymmetry: a Backend Ticket's addition
+        // needs the Epic's address, its removal clears a 0..1 slot.
+        let mut conn = open_seeded();
+        seed_recovery(
+            &conn,
+            "e1",
+            "tk-1",
+            1,
+            "failed",
+            ItemClass::Epic,
+            Some("op-1"),
+        );
+        seed_ticket(&conn, "backend", "gh-9", 2);
+        conn.execute(
+            "update items set origin = 'backend', backend_kind = 'github', backend_key = '9' \
+               where id = 'backend'",
+            [],
+        )
+        .unwrap();
+        seed_counterpart_mutation(
+            &conn,
+            2,
+            MutationType::AddTicketToEpic,
+            "backend",
+            "e1",
+            None,
+        );
+        seed_counterpart_mutation(
+            &conn,
+            3,
+            MutationType::RemoveTicketFromEpic,
+            "backend",
+            "e1",
+            None,
+        );
+
+        let report = cancel(&mut conn, "e1").unwrap();
+
+        assert_eq!(state_of(&conn, 2), MutationState::Cancelled);
+        assert_eq!(
+            state_of(&conn, 3),
+            MutationState::Pending,
+            "clearing Epic Membership resolves without the Epic's address"
+        );
+        assert_eq!(
+            report
+                .withdrawn
+                .iter()
+                .map(|m| (m.sequence, m.target_display_id.as_str(), m.target_cancelled))
+                .collect::<Vec<_>>(),
+            vec![(2, "gh-9", false)],
+            "intent lost for an object that really exists upstream is enumerated"
+        );
+    }
+
+    #[test]
+    fn a_dependency_naming_a_cancelled_blocking_item_is_withdrawn() {
+        // `remove_dependency`, because a live `add_dependency` still has its
+        // `dependencies` row and so meets the Dependency refusal instead.
+        let mut conn = open_seeded();
+        seed_recovery(
+            &conn,
+            "t1",
+            "tk-1",
+            1,
+            "failed",
+            ItemClass::Ticket,
+            Some("op-1"),
+        );
+        seed_recovery(
+            &conn,
+            "t2",
+            "tk-2",
+            2,
+            "pending",
+            ItemClass::Ticket,
+            Some("op-2"),
+        );
+        seed_counterpart_mutation(
+            &conn,
+            3,
+            MutationType::RemoveDependency,
+            "t2",
+            "t1",
+            Some("op-2"),
+        );
+
+        let report = cancel(&mut conn, "t1").unwrap();
+
+        assert_eq!(state_of(&conn, 3), MutationState::Cancelled);
+        assert_eq!(
+            state_of(&conn, 2),
+            MutationState::Pending,
+            "cancellation is one hop: another item's Promotion survives"
+        );
+        assert_eq!(
+            report
+                .withdrawn
+                .iter()
+                .map(|m| (m.sequence, m.target_cancelled))
+                .collect::<Vec<_>>(),
+            vec![(3, false)]
+        );
+    }
+
+    #[test]
+    fn a_mutation_targeting_a_cancelled_item_is_counted_not_enumerated() {
+        let mut conn = open_seeded();
+        seed_recovery(
+            &conn,
+            "t1",
+            "tk-1",
+            1,
+            "pending",
+            ItemClass::Ticket,
+            Some("op-1"),
+        );
+        seed_mutation(&conn, 2, "t1", "pending", Some("op-1"));
+
+        let report = cancel(&mut conn, "t1").unwrap();
+
+        assert_eq!(state_of(&conn, 2), MutationState::Cancelled);
+        assert_eq!(
+            report
+                .withdrawn
+                .iter()
+                .map(|m| (m.sequence, m.target_cancelled))
+                .collect::<Vec<_>>(),
+            vec![(2, true)]
+        );
+    }
+
+    #[test]
+    fn an_applying_promotion_anywhere_in_the_operation_refuses_the_whole_cancellation() {
+        let mut conn = open_seeded();
+        seed_recovery(
+            &conn,
+            "t1",
+            "tk-1",
+            1,
+            "failed",
+            ItemClass::Ticket,
+            Some("op-1"),
+        );
+        seed_recovery(
+            &conn,
+            "t2",
+            "tk-2",
+            2,
+            "applying",
+            ItemClass::Ticket,
+            Some("op-1"),
+        );
+
+        let err = cancel(&mut conn, "t1").unwrap_err();
+
+        assert!(
+            matches!(
+                err,
+                CancelPromotionError::ApplyingPromotion { sequence: 2, .. }
+            ),
+            "got {err:?}"
+        );
+        assert_eq!(
+            state_of(&conn, 1),
+            MutationState::Failed,
+            "a refusal withdraws nothing"
+        );
+    }
+
+    #[test]
+    fn an_applied_promotion_is_reported_rather_than_undone() {
+        // tk never compensates by deleting a Backend object.
+        let mut conn = open_seeded();
+        seed_recovery(
+            &conn,
+            "e1",
+            "tk-1",
+            1,
+            "applied",
+            ItemClass::Epic,
+            Some("op-1"),
+        );
+        seed_recovery(
+            &conn,
+            "c1",
+            "tk-2",
+            2,
+            "failed",
+            ItemClass::Ticket,
+            Some("op-1"),
+        );
+
+        let report = cancel(&mut conn, "c1").unwrap();
+
+        assert_eq!(
+            report
+                .applied_promotions
+                .iter()
+                .map(|p| p.display_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tk-1"]
+        );
+        assert_eq!(state_of(&conn, 1), MutationState::Applied);
+        assert_eq!(state_of(&conn, 2), MutationState::Cancelled);
+    }
+
+    #[test]
+    fn a_backend_bound_blocked_item_may_not_be_left_waiting_on_a_cancelled_one() {
+        // The graph ADR-0035 refuses to create by Promotion, reached from the
+        // other direction: cancellation refuses it too.
+        let mut conn = open_seeded();
+        seed_recovery(
+            &conn,
+            "t1",
+            "tk-1",
+            1,
+            "failed",
+            ItemClass::Ticket,
+            Some("op-1"),
+        );
+        seed_ticket(&conn, "backend", "gh-9", 2);
+        conn.execute(
+            "update items set origin = 'backend', backend_kind = 'github', backend_key = '9' \
+               where id = 'backend'",
+            [],
+        )
+        .unwrap();
+        insert_dependency(&conn, "t1", "backend").unwrap();
+
+        let err = cancel(&mut conn, "t1").unwrap_err();
+
+        let CancelPromotionError::UnrepresentableDependencies(edges) = err else {
+            panic!("expected a Dependency refusal, got {err:?}");
+        };
+        assert_eq!(
+            edges,
+            vec![UnrepresentableDependency {
+                blocked_display_id: "gh-9".into(),
+                blocking_display_id: "tk-1".into(),
+                rejection: DependencyRejection::BackendBlockedLocalBlocking,
+            }]
+        );
+        assert_eq!(state_of(&conn, 1), MutationState::Failed);
+    }
+
+    #[test]
+    fn cancelling_both_endpoints_leaves_the_edge_local() {
+        // An operation-wide withdrawal is self-consistent: neither endpoint
+        // keeps a Backend identity, so the edge simply stays local.
+        let mut conn = open_seeded();
+        seed_recovery(
+            &conn,
+            "t1",
+            "tk-1",
+            1,
+            "failed",
+            ItemClass::Ticket,
+            Some("op-1"),
+        );
+        seed_recovery(
+            &conn,
+            "t2",
+            "tk-2",
+            2,
+            "pending",
+            ItemClass::Ticket,
+            Some("op-1"),
+        );
+        insert_dependency(&conn, "t1", "t2").unwrap();
+
+        cancel(&mut conn, "t1").unwrap();
+
+        assert_eq!(state_of(&conn, 1), MutationState::Cancelled);
+        assert_eq!(state_of(&conn, 2), MutationState::Cancelled);
+    }
+
+    #[test]
+    fn cancellation_ignores_an_earlier_nonterminal_mutation() {
+        // ADR-0037's ordering rule exists to keep Backend effects ordered, and
+        // cancellation opens no Adapter, so it is exempt (ADR-0038).
+        let mut conn = open_seeded();
+        seed_update_mutation(&conn, "pending");
+        seed_recovery(
+            &conn,
+            "t1",
+            "tk-1",
+            4,
+            "failed",
+            ItemClass::Ticket,
+            Some("op-1"),
+        );
+
+        cancel(&mut conn, "t1").unwrap();
+
+        assert_eq!(state_of(&conn, 4), MutationState::Cancelled);
+        assert_eq!(
+            state_of(&conn, 1),
+            MutationState::Pending,
+            "an unrelated older Mutation is untouched"
+        );
+    }
+
+    #[test]
+    fn an_applied_promotion_still_names_the_operation_it_belongs_to() {
+        // The half-applied `--children` case: the Epic the operator typed at
+        // promote time landed, its child was rejected, and the Epic is still
+        // the natural handle on the operation to withdraw.
+        let mut conn = open_seeded();
+        seed_recovery(
+            &conn,
+            "e1",
+            "tk-1",
+            1,
+            "applied",
+            ItemClass::Epic,
+            Some("op-1"),
+        );
+        seed_recovery(
+            &conn,
+            "c1",
+            "tk-2",
+            2,
+            "failed",
+            ItemClass::Ticket,
+            Some("op-1"),
+        );
+
+        let report = cancel(&mut conn, "e1").unwrap();
+
+        assert_eq!(
+            report
+                .cancelled_promotions
+                .iter()
+                .map(|p| p.display_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tk-2"]
+        );
+        assert_eq!(state_of(&conn, 2), MutationState::Cancelled);
+        assert_eq!(state_of(&conn, 1), MutationState::Applied);
+    }
+
+    #[test]
+    fn an_operation_with_nothing_left_to_withdraw_is_refused() {
+        let mut conn = open_seeded();
+        seed_recovery(
+            &conn,
+            "t1",
+            "tk-1",
+            1,
+            "applied",
+            ItemClass::Ticket,
+            Some("op-1"),
+        );
+
+        let err = cancel(&mut conn, "t1").unwrap_err();
+
+        assert!(
+            matches!(err, CancelPromotionError::NothingToWithdraw(ref op) if op == "op-1"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_re_promoted_item_resolves_to_its_current_operation() {
+        let mut conn = open_seeded();
+        seed_recovery(
+            &conn,
+            "t1",
+            "tk-1",
+            1,
+            "cancelled",
+            ItemClass::Ticket,
+            Some("op-1"),
+        );
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 2,
+                mutation_type: "promote_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"T","body":"","backend_kind":"github"}"#,
+                promotion_operation_id: Some("op-2"),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        let report = cancel(&mut conn, "t1").unwrap();
+
+        assert_eq!(
+            report
+                .cancelled_promotions
+                .iter()
+                .map(|p| p.sequence)
+                .collect::<Vec<_>>(),
+            vec![2],
+            "the withdrawn operation is the live one, not the already-cancelled one"
+        );
+    }
+
+    #[test]
+    fn cancelling_an_item_with_no_nonterminal_promotion_is_refused() {
+        let mut conn = open_seeded();
+        seed_ticket(&conn, "t1", "tk-1", 1);
+
+        let err = cancel(&mut conn, "t1").unwrap_err();
+
+        assert!(
+            matches!(err, CancelPromotionError::Recovery(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_human_curated_terminal_omission_counts_as_resolved() {
+        // The operation is no longer waiting on a Skipped or Cancelled
+        // Mutation; a human already decided its outcome (ADR-0038).
+        for state in ["skipped", "cancelled"] {
+            let conn = open_seeded();
+            seed_ticket(&conn, "t1", "tk-1", 1);
+            seed_mutation(&conn, 1, "t1", state, Some("op-1"));
+
+            assert!(
+                unresolved_in_operation(&conn, "op-1").unwrap().is_empty(),
+                "a {state} Mutation is a resolved outcome"
+            );
+        }
     }
 }

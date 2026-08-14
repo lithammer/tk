@@ -1,16 +1,41 @@
 //! Mutation Log entry state.
 //!
-//! The five states are mirrored in the `mutations.state` CHECK constraint
-//! (`'pending'`, `'failed'`, `'applying'`, `'skipped'`, `'applied'`); the `text()` spelling is
-//! the storage contract, not just a rendering convenience. The state drives the
-//! outbox transitions — edits move `pending`/`failed` to `applied`/`failed`,
-//! creation first moves to `applying`, and Mark-skipped moves `failed` to
-//! `skipped` — so it is a domain value, not a pass-through display string.
+//! Every state is mirrored in the `mutations.state` CHECK constraint, so the
+//! `text()` spelling is the storage contract, not just a rendering
+//! convenience. [`MutationState`] carries the transition table every
+//! `mutations.state` write obeys, so it is a domain value rather than a
+//! pass-through display string.
 
 use std::fmt;
 
 /// Lifecycle state of one Mutation Log (outbox) entry. New Mutations are
-/// appended as [`MutationState::Pending`]; the sync engine transitions them.
+/// appended as [`MutationState::Pending`]; the sync engine and the explicit
+/// recovery commands transition them.
+///
+/// # Transition table
+///
+/// `crate::store::mutations::transition` is the only writer of
+/// `mutations.state`, and it refuses every edge this table omits. The
+/// `failure_json` column is bookkeeping of the edge, not of the caller: an
+/// edge either clears the previous attempt's evidence, records fresh evidence,
+/// or preserves what is already there.
+///
+/// | From | To | `failure_json` | Taken by |
+/// | --- | --- | --- | --- |
+/// | `pending`, `failed` | `applying` | cleared | durably marking a Backend creation in flight |
+/// | `applying` | `applying` | recorded | a creation whose effect stayed indeterminate |
+/// | `applying` | `pending` | cleared | Promotion Retry |
+/// | `pending`, `failed`, `applying` | `failed` | recorded | a certified Backend rejection |
+/// | `failed` | `skipped` | preserved | Sync Skip |
+/// | `pending`, `failed` | `cancelled` | preserved | Promotion Cancellation |
+/// | `pending`, `failed`, `applying` | `applied` | cleared | a persisted Backend effect |
+///
+/// `skipped`, `cancelled`, and `applied` are terminal: nothing leaves them.
+/// `applying` is the only self-edge, and it exists because an indeterminate
+/// creation records why without resolving the doubt. `applying` also has no
+/// edge to `cancelled`: an indeterminate creation is not certified to have
+/// created nothing, so Promotion Reconciliation or Promotion Retry must settle
+/// it first (ADR-0038).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MutationState {
     /// Queued and not yet attempted.
@@ -19,8 +44,10 @@ pub enum MutationState {
     Failed,
     /// Backend creation began and no confirmed identity or no-effect verdict exists.
     Applying,
-    /// Human-curated terminal omission.
+    /// Human-curated terminal omission after sync failed on the Mutation.
     Skipped,
+    /// Terminally withdrawn by Promotion Cancellation, never attempted.
+    Cancelled,
     /// Backend effect and any resulting identity were persisted.
     Applied,
 }
@@ -37,6 +64,7 @@ impl MutationState {
             Self::Failed => "failed",
             Self::Applying => "applying",
             Self::Skipped => "skipped",
+            Self::Cancelled => "cancelled",
             Self::Applied => "applied",
         }
     }

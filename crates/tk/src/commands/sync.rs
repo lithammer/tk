@@ -44,14 +44,17 @@ pub struct Args {
 
 #[derive(Debug, Subcommand)]
 pub enum Sub {
-    /// Inspect pending, failed, applying, and skipped Mutations.
+    /// Inspect pending, failed, applying, skipped, and cancelled Mutations.
     Log(LogArgs),
 }
 
-/// Flags for `tk sync log`. The three state flags are a filter; if more than
-/// one is given, precedence is pending → failed → skipped. Applying Mutations
-/// appear in the default view.
+/// Flags for `tk sync log`. The state flags are a filter; if more than one is
+/// given, precedence is pending → failed → skipped → cancelled. Applying
+/// Mutations appear in the default view.
 #[derive(Debug, ClapArgs)]
+// One bool per CLI flag at the parser layer; `run_log` collapses them into
+// `LogListFilter` before anything reasons over them.
+#[allow(clippy::struct_excessive_bools)]
 pub struct LogArgs {
     /// Only pending Mutations.
     #[arg(long)]
@@ -62,6 +65,9 @@ pub struct LogArgs {
     /// Only skipped Mutations.
     #[arg(long)]
     pub skipped: bool,
+    /// Only cancelled Mutations.
+    #[arg(long)]
+    pub cancelled: bool,
     /// Show one Mutation in detail (Mutation Sequence).
     pub id: Option<i64>,
 }
@@ -196,6 +202,8 @@ fn run_log(deps: Deps<'_>, args: LogArgs) -> Exit {
         LogListFilter::Failed
     } else if args.skipped {
         LogListFilter::Skipped
+    } else if args.cancelled {
+        LogListFilter::Cancelled
     } else {
         LogListFilter::Default
     };
@@ -231,6 +239,7 @@ fn empty_log_message(filter: LogListFilter) -> &'static str {
         LogListFilter::Pending => "No pending Mutations.",
         LogListFilter::Failed => "No failed Mutations.",
         LogListFilter::Skipped => "No skipped Mutations.",
+        LogListFilter::Cancelled => "No cancelled Mutations.",
     }
 }
 
@@ -265,7 +274,13 @@ fn render_skip_error<W: Write + ?Sized>(stderr: &mut W, err: &MarkSkippedError) 
         MarkSkippedError::CannotSkipPromotion(seq) => {
             let _ = writeln!(
                 stderr,
-                "tk sync --skip: Mutation {seq} is a Promotion; skipping it would leave every Mutation queued behind it with no backend identity to apply against. Abandoning a Pending Promotion is not supported in this build."
+                "tk sync --skip: Mutation {seq} is a Promotion; skipping it would leave every Mutation queued behind it with no backend identity to apply against. Use 'tk promote cancel <id>' to withdraw the whole Promotion Operation."
+            );
+        }
+        MarkSkippedError::Transition(err) => {
+            let _ = writeln!(
+                stderr,
+                "tk sync --skip: {err}; this is a Ticket bug — please report it"
             );
         }
         MarkSkippedError::Storage(err) => resolver::storage_error(err).render(stderr, COMMAND),
@@ -301,7 +316,8 @@ fn render_run_sync_error<W: Write + ?Sized>(stderr: &mut W, err: &RunSyncError) 
         | RunSyncError::Outcome(
             PersistMutationOutcomeError::PayloadJson(_)
             | PersistMutationOutcomeError::OperationShapeMismatch { .. }
-            | PersistMutationOutcomeError::TargetNotLocal { .. },
+            | PersistMutationOutcomeError::TargetNotLocal { .. }
+            | PersistMutationOutcomeError::Transition(_),
         ) => {
             let _ = writeln!(
                 stderr,
@@ -865,8 +881,8 @@ mod tests {
         assert_eq!(
             String::from_utf8(h.stderr).unwrap(),
             "tk sync --skip: Mutation 1 is a Promotion; skipping it would leave every Mutation \
-             queued behind it with no backend identity to apply against. Abandoning a Pending \
-             Promotion is not supported in this build.\n"
+             queued behind it with no backend identity to apply against. Use 'tk promote cancel \
+             <id>' to withdraw the whole Promotion Operation.\n"
         );
 
         let conn = Connection::open(store.db_path()).unwrap();
@@ -932,6 +948,7 @@ mod tests {
                     pending: false,
                     failed: false,
                     skipped: false,
+                    cancelled: false,
                     id: None,
                 })),
                 skip: None,
@@ -988,6 +1005,7 @@ mod tests {
                     pending: false,
                     failed: false,
                     skipped: false,
+                    cancelled: false,
                     id: None,
                 })),
                 skip: None,
@@ -1030,6 +1048,7 @@ mod tests {
                     pending: false,
                     failed: false,
                     skipped: false,
+                    cancelled: false,
                     id: Some(7),
                 })),
                 skip: None,
@@ -1074,6 +1093,7 @@ mod tests {
                     pending: false,
                     failed: false,
                     skipped: false,
+                    cancelled: false,
                     id: None,
                 })),
                 skip: None,
@@ -1119,6 +1139,7 @@ mod tests {
                     pending: false,
                     failed: false,
                     skipped: false,
+                    cancelled: false,
                     id: Some(3),
                 })),
                 skip: None,
@@ -1147,6 +1168,7 @@ mod tests {
                     pending: false,
                     failed: false,
                     skipped: false,
+                    cancelled: false,
                     id: Some(99),
                 })),
                 skip: None,

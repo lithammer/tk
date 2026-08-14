@@ -63,6 +63,10 @@ If Backend creation has an indeterminate outcome, inspect the Mutation with
 confirming the created object. Use `tk promote retry <id>` only when creating
 the Backend object again is safe.
 
+When the Backend will never accept a Promotion, `tk promote cancel <id>`
+withdraws the whole `tk promote` invocation it belongs to and returns those
+items to local. It reaches no Backend, so it works even with a broken Remote.
+
 Use `tk --help`, `tk <command> --help`, or `man tk` for the command
 reference.
 

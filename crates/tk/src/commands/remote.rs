@@ -479,7 +479,10 @@ mod tests {
             stderr.contains("pending or failed Mutation"),
             "stderr={stderr:?}"
         );
-        assert!(!stderr.contains("--skip"), "stderr={stderr:?}");
+        assert!(
+            stderr.contains("tk sync --skip <mutation-id>"),
+            "an ordinary Mutation really is Sync Skip's to curate, stderr={stderr:?}"
+        );
 
         // The Remote survives a refused clear.
         let conn = Connection::open(store.db_path()).unwrap();
@@ -487,5 +490,57 @@ mod tests {
             .query_row("select count(*) from remotes", [], |r| r.get(0))
             .unwrap();
         assert_eq!(remotes, 1);
+    }
+
+    #[test]
+    fn clear_refused_by_a_promotion_recommends_cancellation_not_skip() {
+        // Sync Skip refuses a Promotion, so naming it here would send the
+        // operator to the operation that just refused (ADR-0038).
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Local work",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "promote_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
+                state: "failed",
+                failure_json: Some(r#"{"detail":"rejected"}"#),
+                promotion_operation_id: Some("op-1"),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        {
+            let mut h = Harness::new(&cwd_path);
+            expect_git(&h, &store);
+            run_rendered(&mut h, set_args("github"));
+        }
+
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run_rendered(&mut h, clear_args());
+        assert_eq!(code, Exit::Failure);
+        let stderr = String::from_utf8(h.stderr).unwrap();
+        assert!(
+            stderr.contains("tk promote cancel <id>"),
+            "stderr={stderr:?}"
+        );
+        assert!(!stderr.contains("--skip"), "stderr={stderr:?}");
     }
 }

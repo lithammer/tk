@@ -10,6 +10,7 @@ Usage: tk promote [OPTIONS] <ID>
 Commands:
   reconcile  Attach a confirmed Backend object to an indeterminate Promotion
   retry      Explicitly risk creating the Backend object again
+  cancel     Withdraw the whole Promotion Operation without reaching the Backend
 
 Arguments:
   <ID>  Display ID or Alias of the Ticket or Epic to promote

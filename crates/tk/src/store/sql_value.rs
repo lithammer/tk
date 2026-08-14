@@ -150,6 +150,7 @@ impl FromSql for MutationState {
             "failed" => Ok(Self::Failed),
             "applying" => Ok(Self::Applying),
             "skipped" => Ok(Self::Skipped),
+            "cancelled" => Ok(Self::Cancelled),
             "applied" => Ok(Self::Applied),
             other => Err(corrupt("state", other)),
         }

@@ -1,0 +1,13 @@
+---
+source: crates/tk/tests/scenarios.rs
+expression: "p.run(\"promote cancel --help\")"
+---
+Withdraw the whole Promotion Operation without reaching the Backend
+
+Usage: tk promote cancel <ID>
+
+Arguments:
+  <ID>  Display ID or Alias of any item in the Promotion Operation to withdraw
+
+Options:
+  -h, --help  Print help

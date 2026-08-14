@@ -52,6 +52,7 @@ const MIGRATION_5_SQL: &str = include_str!("migrations/005_relax_priority_for_tr
 const MIGRATION_6_SQL: &str = include_str!("migrations/006_require_accepted_for_active.sql");
 const MIGRATION_7_SQL: &str = include_str!("migrations/007_promotion_operation.sql");
 const MIGRATION_8_SQL: &str = include_str!("migrations/008_mutation_applying.sql");
+const MIGRATION_9_SQL: &str = include_str!("migrations/009_mutation_cancelled.sql");
 
 /// V1 Repository Store schema skeleton.
 pub const MIGRATION_1: Migration = Migration {
@@ -130,6 +131,17 @@ pub const MIGRATION_8: Migration = Migration {
     foreign_keys: ForeignKeys::Off,
 };
 
+/// Rebuilds `mutations` to add the terminal `cancelled` state Promotion
+/// Cancellation writes (ADR-0038), and to restrict `skipped` to non-Promotion
+/// Mutation Types — a Promotion leaves the queue through cancellation, never
+/// through Sync Skip. Runs with foreign keys disabled because the table-level
+/// State x Failure CHECK cannot be altered in place.
+pub const MIGRATION_9: Migration = Migration {
+    version: 9,
+    sql: MIGRATION_9_SQL,
+    foreign_keys: ForeignKeys::Off,
+};
+
 /// Ordered migration list applied by [`apply_all`].
 pub const ALL_MIGRATIONS: &[Migration] = &[
     MIGRATION_1,
@@ -140,13 +152,14 @@ pub const ALL_MIGRATIONS: &[Migration] = &[
     MIGRATION_6,
     MIGRATION_7,
     MIGRATION_8,
+    MIGRATION_9,
 ];
 
 /// Highest schema version this binary can apply. Named so future migrations
 /// surface the threshold to `grep` instead of hiding it behind `.last()`.
 /// Adding a migration is a two-line patch: append to `ALL_MIGRATIONS`, bump
 /// this constant, with a debug_assert below catching the drift.
-pub const MAX_KNOWN_VERSION: u32 = MIGRATION_8.version;
+pub const MAX_KNOWN_VERSION: u32 = MIGRATION_9.version;
 
 /// Errors returned while applying migrations.
 ///
@@ -337,7 +350,10 @@ mod tests {
         let mut conn = open_memory();
         apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
 
-        assert_eq!(current_version(&conn).unwrap(), 8);
+        assert_eq!(
+            current_version(&conn).unwrap(),
+            i64::from(MAX_KNOWN_VERSION)
+        );
 
         let app_id: i64 = conn
             .query_row("pragma application_id", [], |r| r.get(0))
@@ -347,7 +363,7 @@ mod tests {
         let user_version: i64 = conn
             .query_row("pragma user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(user_version, 8);
+        assert_eq!(user_version, i64::from(MAX_KNOWN_VERSION));
     }
 
     #[test]
@@ -359,7 +375,7 @@ mod tests {
         let count: i64 = conn
             .query_row("select count(*) from schema_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(count, 8);
+        assert_eq!(usize::try_from(count).unwrap(), ALL_MIGRATIONS.len());
     }
 
     #[test]
@@ -920,7 +936,10 @@ mod tests {
         .unwrap();
 
         apply_all(&mut conn, "2026-05-09T00:00:01.000Z").unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 8);
+        assert_eq!(
+            current_version(&conn).unwrap(),
+            i64::from(MAX_KNOWN_VERSION)
+        );
 
         let (priority, selection, container): (Option<String>, String, Option<String>) = conn
             .query_row(
@@ -1026,7 +1045,10 @@ mod tests {
 
         apply_all(&mut conn, "2026-05-09T00:00:01.000Z").unwrap();
 
-        assert_eq!(current_version(&conn).unwrap(), 8);
+        assert_eq!(
+            current_version(&conn).unwrap(),
+            i64::from(MAX_KNOWN_VERSION)
+        );
         let (mutation_type, promotion_operation_id): (String, Option<String>) = conn
             .query_row(
                 "select mutation_type, promotion_operation_id from mutations where sequence = 1",
@@ -1182,6 +1204,129 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_state_upgrade_preserves_rows_and_the_promotion_foreign_key() {
+        use crate::store::testing::{
+            FixtureItem, FixtureMutation, insert_fixture_item, insert_fixture_mutation,
+        };
+
+        let mut conn = open_memory();
+        apply_through(&mut conn, 8, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Local work",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 4,
+                mutation_type: "promote_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
+                state: "failed",
+                failure_json: Some(r#"{"detail":"rejected"}"#),
+                promotion_operation_id: Some("op-1"),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        apply_all(&mut conn, "2026-05-09T00:00:01.000Z").unwrap();
+
+        let preserved: (String, String, Option<String>, Option<String>) = conn
+            .query_row(
+                "select mutation_type, state, failure_json, promotion_operation_id \
+                   from mutations where sequence = 4",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            preserved,
+            (
+                "promote_ticket".into(),
+                "failed".into(),
+                Some(r#"{"detail":"rejected"}"#.into()),
+                Some("op-1".into())
+            )
+        );
+
+        conn.execute(
+            "update mutations set state = 'cancelled' where sequence = 4",
+            [],
+        )
+        .expect("a failed Promotion may be withdrawn, keeping its failure evidence");
+
+        let index_count: i64 = conn
+            .query_row(
+                "select count(*) from sqlite_master where type = 'index' \
+                   and name in ('mutations_state_idx', 'mutations_promotion_operation_idx')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(index_count, 2);
+
+        let dangling = conn.execute(
+            "insert into mutations(\
+                sequence, mutation_type, item_id, item_class, payload_json, state, \
+                failure_json, created_at, state_changed_at\
+             ) values (5, 'update_ticket', 'missing', 'ticket', '{}', 'pending', \
+                       null, 'now', 'now')",
+            [],
+        );
+        assert!(
+            dangling.is_err(),
+            "the rebuilt table must retain its Item foreign key"
+        );
+    }
+
+    #[test]
+    fn a_promotion_may_be_cancelled_but_never_skipped() {
+        use crate::store::testing::{FixtureItem, insert_fixture_item};
+
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Ticket",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+
+        let insert = |sequence: i64, mutation_type: &str, state: &str| {
+            conn.execute(
+                "insert into mutations(\
+                    sequence, mutation_type, item_id, item_class, payload_json, state, \
+                    failure_json, created_at, state_changed_at\
+                 ) values (?1, ?2, 't1', 'ticket', '{}', ?3, null, 'now', 'now')",
+                rusqlite::params![sequence, mutation_type, state],
+            )
+        };
+
+        assert!(
+            insert(1, "promote_ticket", "skipped").is_err(),
+            "Sync Skip never touches a Promotion; the schema, not a runtime guard, says so"
+        );
+        insert(2, "promote_ticket", "cancelled").expect("cancellation is a Promotion's exit");
+        insert(3, "update_ticket", "skipped")
+            .expect("Sync Skip still curates an ordinary Mutation");
+        insert(4, "update_ticket", "cancelled")
+            .expect("collateral of a withdrawn operation is cancelled whatever its kind");
+    }
+
+    #[test]
     fn fk_off_rebuild_restores_foreign_keys_after_a_failed_check() {
         // ADR-0028's load-bearing contract: a foreign-keys-off migration whose
         // rebuild leaves a dangling reference must roll back AND re-enable
@@ -1223,7 +1368,10 @@ mod tests {
             .optional()
             .unwrap();
         assert!(probe.is_none(), "the failed rebuild must leave no trace");
-        assert_eq!(current_version(&conn).unwrap(), 8);
+        assert_eq!(
+            current_version(&conn).unwrap(),
+            i64::from(MAX_KNOWN_VERSION)
+        );
     }
 
     #[test]
@@ -1235,7 +1383,10 @@ mod tests {
         // already-current store reproduces the loser's stale-snapshot view.
         let mut conn = open_memory();
         apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 8);
+        assert_eq!(
+            current_version(&conn).unwrap(),
+            i64::from(MAX_KNOWN_VERSION)
+        );
 
         apply_one(&mut conn, &MIGRATION_3, "2026-05-09T00:00:01.000Z")
             .expect("re-applying an already-applied migration must be a clean no-op");
