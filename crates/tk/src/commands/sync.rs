@@ -52,8 +52,8 @@ pub enum Sub {
 /// given, precedence is pending → failed → skipped → cancelled. Applying
 /// Mutations appear in the default view.
 #[derive(Debug, ClapArgs)]
-// Each bool is one CLI flag clap parses; the state machine clippy suggests is
-// `LogListFilter`, which `run_log` derives from them.
+// One bool per CLI flag at the parser layer; `run_log` collapses them into
+// `LogListFilter` before anything reasons over them.
 #[allow(clippy::struct_excessive_bools)]
 pub struct LogArgs {
     /// Only pending Mutations.

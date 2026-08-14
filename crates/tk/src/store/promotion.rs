@@ -838,7 +838,7 @@ pub enum CancelPromotionError {
     /// Every Promotion of the operation has already resolved, so there is no
     /// untried or certified-rejected intent left to withdraw.
     #[error("Promotion Operation {0} has no Promotion left to withdraw")]
-    NoWithdrawablePromotion(String),
+    NothingToWithdraw(String),
     /// A Mutation's `payload_json` did not decode into the counterpart its
     /// Mutation Type addresses. Repository Store corruption.
     #[error("malformed payload_json on mutation {sequence}: {source}")]
@@ -907,7 +907,7 @@ pub fn cancel_promotion(
     }
 
     if cancelled_promotions.is_empty() {
-        return Err(CancelPromotionError::NoWithdrawablePromotion(operation_id));
+        return Err(CancelPromotionError::NothingToWithdraw(operation_id));
     }
 
     let cancelled_items: BTreeSet<String> = cancelled_promotions
@@ -934,7 +934,7 @@ pub fn cancel_promotion(
     Ok(CancellationReport {
         cancelled_promotions: cancelled_promotions.into_iter().map(Into::into).collect(),
         applied_promotions: applied_promotions.into_iter().map(Into::into).collect(),
-        // The Promotions themselves are already enumerated above.
+        // The Promotions themselves have their own two fields.
         withdrawn: withdrawn
             .into_iter()
             .filter(|row| !row.mutation_type.is_promotion())
@@ -3229,7 +3229,7 @@ mod tests {
     #[test]
     fn a_dependency_naming_a_cancelled_blocking_item_is_withdrawn() {
         // `remove_dependency`, because a live `add_dependency` still has its
-        // `dependencies` row and so meets the refusal below instead.
+        // `dependencies` row and so meets the Dependency refusal instead.
         let mut conn = open_seeded();
         seed_recovery(
             &conn,
@@ -3529,7 +3529,7 @@ mod tests {
         let err = cancel(&mut conn, "t1").unwrap_err();
 
         assert!(
-            matches!(err, CancelPromotionError::NoWithdrawablePromotion(ref op) if op == "op-1"),
+            matches!(err, CancelPromotionError::NothingToWithdraw(ref op) if op == "op-1"),
             "got {err:?}"
         );
     }

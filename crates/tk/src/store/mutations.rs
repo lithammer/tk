@@ -90,10 +90,10 @@ pub fn append(conn: &Connection, req: AppendRequest<'_>) -> Result<i64, AppendEr
 ///
 /// Every caller narrows the row under its own domain precondition before
 /// reaching the seam, so this names a Store-layer contract break rather than an
-/// operator mistake. It stays a small standalone error, separate from the
-/// SQLite fault channel, so the enums carrying it neither grow a second
-/// [`rusqlite::Error`] nor divert a busy Repository Store away from the retry
-/// guidance its own `Storage` variant renders.
+/// operator mistake. It stays separate from the SQLite fault channel: folding
+/// the two together would route a busy Repository Store into a corruption
+/// diagnostic instead of the retry guidance each caller's `Storage` variant
+/// renders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum IllegalTransition {
     /// The edge is absent from the transition table, or the row was not in
@@ -181,8 +181,8 @@ pub(crate) fn transition(
         ))
     };
 
-    // Exhaustive in both positions: a sixth Mutation state must not compile
-    // until every edge into and out of it has been decided.
+    // Exhaustive in both positions: a Mutation state added later must not
+    // compile until every edge into and out of it has been decided.
     let column = match req.to {
         MutationState::Pending => match req.from {
             MutationState::Applying => FailureColumn::Clear,

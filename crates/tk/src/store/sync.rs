@@ -547,8 +547,8 @@ pub enum PersistMutationOutcomeError {
     #[error("malformed payload_json: {0}")]
     PayloadJson(#[from] serde_json::Error),
     /// The Mutation state edge this outcome implies is not in the transition
-    /// table. The state checks above narrow the row first, so this names a
-    /// Store-layer contract break.
+    /// table. Every outcome path narrows the row to an applicable state before
+    /// transitioning, so this names a Store-layer contract break.
     #[error(transparent)]
     Transition(#[from] mutations::IllegalTransition),
 }
@@ -804,8 +804,8 @@ pub enum MarkSkippedError {
     /// refusal names the command that does it.
     #[error("mutation {0} is a Promotion and cannot be skipped")]
     CannotSkipPromotion(i64),
-    /// The `failed` check above narrows the row to the one legal `skipped`
-    /// edge, so this names a Store-layer contract break.
+    /// Sync Skip refuses any row that is not `failed`, which is the one legal
+    /// `skipped` edge, so this names a Store-layer contract break.
     #[error(transparent)]
     Transition(#[from] mutations::IllegalTransition),
 }

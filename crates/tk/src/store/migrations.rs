@@ -134,8 +134,8 @@ pub const MIGRATION_8: Migration = Migration {
 /// Rebuilds `mutations` to add the terminal `cancelled` state Promotion
 /// Cancellation writes (ADR-0038), and to restrict `skipped` to non-Promotion
 /// Mutation Types — a Promotion leaves the queue through cancellation, never
-/// through Sync Skip. Runs with foreign keys disabled for the same
-/// table-rebuild reason as MIGRATION_8.
+/// through Sync Skip. Runs with foreign keys disabled because the table-level
+/// State x Failure CHECK cannot be altered in place.
 pub const MIGRATION_9: Migration = Migration {
     version: 9,
     sql: MIGRATION_9_SQL,

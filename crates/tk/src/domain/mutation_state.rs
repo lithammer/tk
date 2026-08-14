@@ -1,11 +1,10 @@
 //! Mutation Log entry state.
 //!
-//! The six states are mirrored in the `mutations.state` CHECK constraint
-//! (`'pending'`, `'failed'`, `'applying'`, `'skipped'`, `'cancelled'`,
-//! `'applied'`); the `text()` spelling is
-//! the storage contract, not just a rendering convenience. [`MutationState`]
-//! carries the transition table every `mutations.state` write obeys, so it is a
-//! domain value rather than a pass-through display string.
+//! Every state is mirrored in the `mutations.state` CHECK constraint, so the
+//! `text()` spelling is the storage contract, not just a rendering
+//! convenience. [`MutationState`] carries the transition table every
+//! `mutations.state` write obeys, so it is a domain value rather than a
+//! pass-through display string.
 
 use std::fmt;
 

@@ -1062,7 +1062,7 @@ fn cancel_error(err: CancelPromotionError, display_id: &str) -> CommandError {
             }
             CommandError::failure(body)
         }
-        CancelPromotionError::NoWithdrawablePromotion(_) => CommandError::failure(format!(
+        CancelPromotionError::NothingToWithdraw(_) => CommandError::failure(format!(
             "the Promotion Operation for {display_id} has already resolved; there is no Promotion left to withdraw"
         )),
         err @ (CancelPromotionError::MalformedPayload { .. }
