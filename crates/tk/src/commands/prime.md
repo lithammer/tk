@@ -98,15 +98,21 @@ create or manage git worktrees; use `git worktree` directly.
 tk promote <id> [--children]
 tk promote reconcile <id> <backend-key>
 tk promote retry <id>
+tk promote cancel <id>
 tk sync
 tk sync --skip <mutation-id>
 tk remote
 ```
 
-Agents should surface promotion, sync failures, and skipped Mutations rather
-than quietly repairing upstream state.
+Agents should surface promotion, sync failures, and skipped or cancelled
+Mutations rather than quietly repairing upstream state.
 
 An `applying` Mutation means tk could not observe whether Backend creation
 succeeded. Resolving it is a human decision, so surface it rather than choosing:
 `tk promote reconcile` attaches a Backend object the human has confirmed
 already exists, and `tk promote retry` accepts the risk of creating a duplicate.
+
+`tk promote cancel` withdraws a whole Promotion Operation the Backend will never
+accept, returning those items to Local. Withdrawing intent is a human decision
+in the same way reconcile and retry are, so report the stuck Promotion rather
+than cancelling it.

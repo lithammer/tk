@@ -189,31 +189,48 @@ pub(crate) fn transition(
             MutationState::Pending
             | MutationState::Failed
             | MutationState::Skipped
+            | MutationState::Cancelled
             | MutationState::Applied => return Err(illegal()),
         },
         MutationState::Failed => match req.from {
             MutationState::Pending | MutationState::Failed | MutationState::Applying => {
                 FailureColumn::Record(evidence()?)
             }
-            MutationState::Skipped | MutationState::Applied => return Err(illegal()),
+            MutationState::Skipped | MutationState::Cancelled | MutationState::Applied => {
+                return Err(illegal());
+            }
         },
         MutationState::Applying => match req.from {
             MutationState::Pending | MutationState::Failed => FailureColumn::Clear,
             MutationState::Applying => FailureColumn::Record(evidence()?),
-            MutationState::Skipped | MutationState::Applied => return Err(illegal()),
+            MutationState::Skipped | MutationState::Cancelled | MutationState::Applied => {
+                return Err(illegal());
+            }
         },
         MutationState::Skipped => match req.from {
             MutationState::Failed => FailureColumn::Preserve,
             MutationState::Pending
             | MutationState::Applying
             | MutationState::Skipped
+            | MutationState::Cancelled
+            | MutationState::Applied => return Err(illegal()),
+        },
+        // An `applying` Promotion is not certified to have created nothing, so
+        // reconcile or retry settles it before anything may be withdrawn.
+        MutationState::Cancelled => match req.from {
+            MutationState::Pending | MutationState::Failed => FailureColumn::Preserve,
+            MutationState::Applying
+            | MutationState::Skipped
+            | MutationState::Cancelled
             | MutationState::Applied => return Err(illegal()),
         },
         MutationState::Applied => match req.from {
             MutationState::Pending | MutationState::Failed | MutationState::Applying => {
                 FailureColumn::Clear
             }
-            MutationState::Skipped | MutationState::Applied => return Err(illegal()),
+            MutationState::Skipped | MutationState::Cancelled | MutationState::Applied => {
+                return Err(illegal());
+            }
         },
     };
 
@@ -301,9 +318,10 @@ pub enum BackendBindingError {
 ///
 /// Backend Origin answers from `items` alone. A Local Item is Pending
 /// Promotion when the Mutation Log holds a `promote_ticket` / `promote_epic`
-/// Mutation for it in `pending`, `failed`, or `applying` state. An `applied`
-/// Promotion has already converted the Item to Backend Origin, and a `skipped`
-/// one is abandoned intent, so neither keeps the Item pending.
+/// Mutation for it in a nonterminal state. An `applied` Promotion has already
+/// converted the Item to Backend Origin, and a `cancelled` one is withdrawn
+/// intent, so neither keeps the Item pending — which is the whole of what
+/// returns a cancelled item to Local Backend Binding (ADR-0038).
 ///
 /// The Backend of a Pending Promotion comes from that Mutation's payload, not
 /// from the configured Remote: the target Backend is intent frozen at commit
@@ -807,9 +825,11 @@ mod tests {
 
     #[test]
     fn a_resolved_promotion_does_not_make_a_local_item_pending() {
-        // `applied` has already moved its Item to Backend Origin and `skipped`
-        // is abandoned intent; a Local Item behind either is plain Local.
-        for state in ["applied", "skipped"] {
+        // `applied` has already moved its Item to Backend Origin and
+        // `cancelled` is withdrawn intent; a Local Item behind either is plain
+        // Local. A Promotion never reaches `skipped` — the `mutations` CHECK
+        // forbids it (ADR-0038).
+        for state in ["applied", "cancelled"] {
             let conn = open_seeded();
             seed_local_ticket(&conn, "t1", "tk-1");
             seed_promotion(&conn, "t1", state, "github");
@@ -928,25 +948,39 @@ mod tests {
 
     const LATER: &str = "2026-05-10T00:00:00.000Z";
 
-    /// Seeds a Promotion row, the only Mutation kind the `mutations` CHECK lets
-    /// reach `applying` — so one helper covers every state in the table.
-    fn seed_row(conn: &Connection, state: MutationState, failure_json: Option<&str>) {
+    /// Seeds one Mutation row. The Mutation Type is a parameter because the
+    /// `mutations` CHECK admits `applying` only for a Promotion and `skipped`
+    /// only for everything else, so an edge touching either state can only be
+    /// exercised with the matching kind.
+    fn seed_row(
+        conn: &Connection,
+        mutation_type: MutationType,
+        state: MutationState,
+        failure_json: Option<&str>,
+    ) {
         seed_local_ticket(conn, "t1", "tk-1");
-        let payload = MutationPayload::Promotion(Promotion {
-            title: "Local".into(),
-            body: String::new(),
-            backend_kind: "github".into(),
-        })
+        let payload = if mutation_type.is_promotion() {
+            MutationPayload::Promotion(Promotion {
+                title: "Local".into(),
+                body: String::new(),
+                backend_kind: "github".into(),
+            })
+        } else {
+            MutationPayload::UpdateTitleBody(TitleBody {
+                title: "Local".into(),
+                body: String::new(),
+            })
+        }
         .to_json_string();
         insert_fixture_mutation(
             conn,
             FixtureMutation {
-                mutation_type: "promote_ticket",
+                mutation_type: mutation_type.text(),
                 item_id: "t1",
                 payload_json: &payload,
                 state: state.text(),
                 failure_json,
-                promotion_operation_id: Some("promo-1"),
+                promotion_operation_id: mutation_type.is_promotion().then_some("promo-1"),
                 ..FixtureMutation::default()
             },
         )
@@ -991,7 +1025,12 @@ mod tests {
     #[test]
     fn beginning_a_creation_clears_the_previous_attempts_failure() {
         let conn = open_seeded();
-        seed_row(&conn, MutationState::Failed, Some(r#"{"detail":"old"}"#));
+        seed_row(
+            &conn,
+            MutationType::PromoteTicket,
+            MutationState::Failed,
+            Some(r#"{"detail":"old"}"#),
+        );
 
         transition_row(&conn, MutationState::Failed, MutationState::Applying, None).unwrap();
 
@@ -1004,7 +1043,12 @@ mod tests {
     #[test]
     fn a_certified_rejection_records_its_failure_evidence() {
         let conn = open_seeded();
-        seed_row(&conn, MutationState::Applying, None);
+        seed_row(
+            &conn,
+            MutationType::PromoteTicket,
+            MutationState::Applying,
+            None,
+        );
 
         transition_row(
             &conn,
@@ -1025,7 +1069,12 @@ mod tests {
     #[test]
     fn an_indeterminate_creation_records_its_failure_and_stays_applying() {
         let conn = open_seeded();
-        seed_row(&conn, MutationState::Applying, None);
+        seed_row(
+            &conn,
+            MutationType::PromoteTicket,
+            MutationState::Applying,
+            None,
+        );
 
         transition_row(
             &conn,
@@ -1044,7 +1093,12 @@ mod tests {
     #[test]
     fn sync_skip_preserves_the_failure_it_curated_away() {
         let conn = open_seeded();
-        seed_row(&conn, MutationState::Failed, Some(r#"{"detail":"boom"}"#));
+        seed_row(
+            &conn,
+            MutationType::UpdateTicket,
+            MutationState::Failed,
+            Some(r#"{"detail":"boom"}"#),
+        );
 
         transition_row(&conn, MutationState::Failed, MutationState::Skipped, None).unwrap();
 
@@ -1061,7 +1115,12 @@ mod tests {
     #[test]
     fn returning_an_indeterminate_creation_to_the_queue_clears_its_failure() {
         let conn = open_seeded();
-        seed_row(&conn, MutationState::Applying, Some(r#"{"detail":"?"}"#));
+        seed_row(
+            &conn,
+            MutationType::PromoteTicket,
+            MutationState::Applying,
+            Some(r#"{"detail":"?"}"#),
+        );
 
         transition_row(&conn, MutationState::Applying, MutationState::Pending, None).unwrap();
 
@@ -1074,7 +1133,12 @@ mod tests {
     #[test]
     fn applying_a_mutation_clears_the_failure_of_the_attempt_that_preceded_it() {
         let conn = open_seeded();
-        seed_row(&conn, MutationState::Failed, Some(r#"{"detail":"boom"}"#));
+        seed_row(
+            &conn,
+            MutationType::UpdateTicket,
+            MutationState::Failed,
+            Some(r#"{"detail":"boom"}"#),
+        );
 
         transition_row(&conn, MutationState::Failed, MutationState::Applied, None).unwrap();
 
@@ -1085,6 +1149,57 @@ mod tests {
     }
 
     #[test]
+    fn promotion_cancellation_withdraws_untried_and_rejected_intent_alike() {
+        for (from, seeded_failure) in [
+            (MutationState::Pending, None),
+            (MutationState::Failed, Some(r#"{"detail":"boom"}"#)),
+        ] {
+            let conn = open_seeded();
+            seed_row(&conn, MutationType::PromoteTicket, from, seeded_failure);
+
+            transition_row(&conn, from, MutationState::Cancelled, None).unwrap();
+
+            let (state, stored, _) = read_row(&conn);
+            assert_eq!(state, MutationState::Cancelled);
+            assert_eq!(
+                stored.as_deref(),
+                seeded_failure,
+                "a withdrawal keeps the evidence of the rejection that motivated it"
+            );
+        }
+    }
+
+    #[test]
+    fn an_indeterminate_creation_cannot_be_withdrawn() {
+        // Cancellation only withdraws intent certified to have created
+        // nothing; reconcile or retry has to settle `applying` first.
+        let conn = open_seeded();
+        seed_row(
+            &conn,
+            MutationType::PromoteTicket,
+            MutationState::Applying,
+            None,
+        );
+
+        let err = transition_row(
+            &conn,
+            MutationState::Applying,
+            MutationState::Cancelled,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(
+                err,
+                TransitionError::Illegal(IllegalTransition::Edge { .. })
+            ),
+            "got {err:?}"
+        );
+        assert_eq!(read_row(&conn).0, MutationState::Applying);
+    }
+
+    #[test]
     fn an_edge_outside_the_transition_table_is_refused() {
         // Terminal states have no exit, and no workflow reaches `skipped`
         // from anything but a certified rejection.
@@ -1092,10 +1207,11 @@ mod tests {
             (MutationState::Applied, MutationState::Pending),
             (MutationState::Skipped, MutationState::Applying),
             (MutationState::Pending, MutationState::Skipped),
+            (MutationState::Cancelled, MutationState::Pending),
             (MutationState::Applied, MutationState::Applied),
         ] {
             let conn = open_seeded();
-            seed_row(&conn, from, None);
+            seed_row(&conn, MutationType::UpdateTicket, from, None);
 
             let err = transition_row(&conn, from, to, Some(&failure())).unwrap_err();
             assert!(
@@ -1114,7 +1230,12 @@ mod tests {
         // The caller reads the state inside its own transaction, so this
         // guards a Store-layer contract break rather than a live race.
         let conn = open_seeded();
-        seed_row(&conn, MutationState::Pending, None);
+        seed_row(
+            &conn,
+            MutationType::UpdateTicket,
+            MutationState::Pending,
+            None,
+        );
 
         let err = transition_row(&conn, MutationState::Applying, MutationState::Pending, None)
             .unwrap_err();
@@ -1131,7 +1252,12 @@ mod tests {
     #[test]
     fn an_edge_that_records_evidence_refuses_to_run_without_it() {
         let conn = open_seeded();
-        seed_row(&conn, MutationState::Pending, None);
+        seed_row(
+            &conn,
+            MutationType::UpdateTicket,
+            MutationState::Pending,
+            None,
+        );
 
         let err =
             transition_row(&conn, MutationState::Pending, MutationState::Failed, None).unwrap_err();

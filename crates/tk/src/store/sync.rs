@@ -799,9 +799,9 @@ pub enum MarkSkippedError {
     /// Promotion's receipt would assign (ADR-0036 Pending Promotion);
     /// skipping it would leave those Mutations with no key to apply against.
     ///
-    /// Abandoning a Pending Promotion is a broader recovery decision than
-    /// curating one rejected Mutation, and this build offers no way to do it —
-    /// the refusal says so, so a reader stops hunting for the flag.
+    /// Withdrawing a Promotion is operation-wide and spans those Mutations, so
+    /// it is Promotion Cancellation's job, not Sync Skip's (ADR-0038). The
+    /// refusal names the command that does it.
     #[error("mutation {0} is a Promotion and cannot be skipped")]
     CannotSkipPromotion(i64),
     /// The `failed` check above narrows the row to the one legal `skipped`
@@ -1227,9 +1227,16 @@ pub enum ClearRemoteError {
     /// Remote would orphan them (CONTEXT.md). Carries the count for the
     /// verbatim diagnostic.
     #[error(
-        "{0} pending or failed Mutation(s) would be orphaned; resolve them before clearing the Remote"
+        "{0} pending or failed Mutation(s) would be orphaned; resolve them before clearing the Remote. Run 'tk sync' to apply them, or 'tk sync --skip <mutation-id>' to abandon a failed one"
     )]
     WouldOrphan(i64),
+    /// The same refusal with a Promotion among the in-flight rows. Sync Skip
+    /// refuses a Promotion, so the guidance names the operation that can
+    /// actually clear it (ADR-0038).
+    #[error(
+        "{count} pending or failed Mutation(s) would be orphaned, including Promotion Mutation {promotion}; resolve them before clearing the Remote. Run 'tk promote cancel <id>' to withdraw a Promotion Operation the Backend will never accept"
+    )]
+    WouldOrphanPromotion { count: i64, promotion: i64 },
     #[error("Mutation {0} has an indeterminate Backend creation outcome")]
     ApplyingMutation(i64),
 }
@@ -1261,7 +1268,13 @@ pub fn clear_remote(conn: &mut Connection) -> Result<(), ClearRemoteError> {
 
     let in_flight = pending_or_failed_mutation_count(&tx)?;
     if in_flight > 0 {
-        return Err(ClearRemoteError::WouldOrphan(in_flight));
+        return Err(match earliest_in_flight_promotion(&tx)? {
+            Some(promotion) => ClearRemoteError::WouldOrphanPromotion {
+                count: in_flight,
+                promotion,
+            },
+            None => ClearRemoteError::WouldOrphan(in_flight),
+        });
     }
 
     tx.execute("delete from sync_cursors where remote_name = 'primary'", [])?;
@@ -1271,6 +1284,21 @@ pub fn clear_remote(conn: &mut Connection) -> Result<(), ClearRemoteError> {
     Ok(())
 }
 
+/// The lowest Mutation Sequence of an in-flight Promotion, if the outbox holds
+/// one. Names the Promotion whose Promotion Operation the clear refusal points
+/// the operator at.
+fn earliest_in_flight_promotion(conn: &Connection) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "select sequence from mutations \
+          where state in ('pending','failed') \
+            and mutation_type in ('promote_ticket','promote_epic') \
+          order by sequence limit 1",
+        [],
+        |r| r.get(0),
+    )
+    .optional()
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Mutation Log read (tk sync log)
 // ──────────────────────────────────────────────────────────────────────────
@@ -1278,11 +1306,12 @@ pub fn clear_remote(conn: &mut Connection) -> Result<(), ClearRemoteError> {
 /// Filter for the `tk sync log` list view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogListFilter {
-    /// Pending + failed + applying + skipped (the default).
+    /// Every state but `applied` — a withdrawal is visible without a flag.
     Default,
     Pending,
     Failed,
     Skipped,
+    Cancelled,
 }
 
 /// One row of the `tk sync log` list view.
@@ -1334,10 +1363,13 @@ pub fn list_mutation_log(
     filter: LogListFilter,
 ) -> Result<Vec<LogListRow>, LogError> {
     let where_clause = match filter {
-        LogListFilter::Default => "where m.state in ('pending', 'failed', 'applying', 'skipped')",
+        LogListFilter::Default => {
+            "where m.state in ('pending', 'failed', 'applying', 'skipped', 'cancelled')"
+        }
         LogListFilter::Pending => "where m.state = 'pending'",
         LogListFilter::Failed => "where m.state = 'failed'",
         LogListFilter::Skipped => "where m.state = 'skipped'",
+        LogListFilter::Cancelled => "where m.state = 'cancelled'",
     };
     let sql = format!(
         "select m.sequence, m.state, m.mutation_type, i.display_value, m.created_at, m.failure_json \
@@ -3705,16 +3737,29 @@ mod tests {
             },
         )
         .unwrap();
+        insert_fixture_mutation(
+            conn,
+            FixtureMutation {
+                sequence: 5,
+                mutation_type: "update_ticket",
+                item_id: "t3",
+                payload_json: r#"{"title":"D","body":""}"#,
+                state: "cancelled",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
     }
 
     #[test]
-    fn list_default_returns_nonterminal_and_skipped_rows_with_failure_detail() {
+    fn list_default_returns_every_state_but_applied_with_failure_detail() {
+        // A withdrawal is visible without a flag (ADR-0038).
         let conn = open_seeded();
         seed_log_fixture(&conn);
 
         let rows = list_mutation_log(&conn, LogListFilter::Default).unwrap();
         let seqs: Vec<i64> = rows.iter().map(|r| r.sequence).collect();
-        assert_eq!(seqs, vec![1, 2, 3, 4]);
+        assert_eq!(seqs, vec![1, 2, 3, 4, 5]);
         assert_eq!(rows[0].failure_detail, None);
         assert_eq!(
             rows[1].failure_detail.as_deref(),
@@ -3723,6 +3768,7 @@ mod tests {
         assert_eq!(rows[1].target_display_id, "gh-2");
         assert_eq!(rows[3].state, MutationState::Applying);
         assert_eq!(rows[3].failure_detail.as_deref(), Some("unknown effect"));
+        assert_eq!(rows[4].state, MutationState::Cancelled);
     }
 
     #[test]
@@ -3747,6 +3793,12 @@ mod tests {
                 .unwrap()
                 .len(),
             1
+        );
+        let cancelled = list_mutation_log(&conn, LogListFilter::Cancelled).unwrap();
+        assert_eq!(
+            cancelled.iter().map(|r| r.sequence).collect::<Vec<_>>(),
+            vec![5],
+            "a Cancelled Mutation is separable from a Skipped one"
         );
     }
 

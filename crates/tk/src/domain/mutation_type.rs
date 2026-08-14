@@ -90,6 +90,44 @@ impl MutationType {
             | Self::ResolveExternalBlocker => false,
         }
     }
+
+    /// Which other item's Backend address this Mutation's delivery has to
+    /// resolve, beyond the target named by `mutations.item_id` (ADR-0038).
+    ///
+    /// Promotion Cancellation asks this of every Mutation ordered behind a
+    /// withdrawn Promotion: one whose counterpart loses its prospective
+    /// identity can never be applied, so it is withdrawn too. The match is
+    /// exhaustive so a Mutation kind added later cannot reach the Mutation Log
+    /// without a decision about what a withdrawal does to it.
+    #[must_use]
+    pub fn addressed_counterpart(self) -> AddressedCounterpart {
+        match self {
+            Self::AddTicketToEpic => AddressedCounterpart::Epic,
+            Self::AddDependency | Self::RemoveDependency => AddressedCounterpart::BlockingItem,
+            // Clearing Epic Membership is a 0..1 slot the Backend resolves
+            // without naming the Epic, so it survives the Epic's withdrawal.
+            Self::RemoveTicketFromEpic
+            | Self::UpdateTicket
+            | Self::UpdateEpic
+            | Self::SetItemStatus
+            | Self::AddExternalBlocker
+            | Self::ResolveExternalBlocker
+            | Self::PromoteTicket
+            | Self::PromoteEpic => AddressedCounterpart::None,
+        }
+    }
+}
+
+/// The counterpart role a Mutation's payload names, when its delivery needs
+/// that item's Backend address (ADR-0038).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddressedCounterpart {
+    /// The Mutation addresses nothing beyond its own target.
+    None,
+    /// The Epic named by the payload's `epic_id`.
+    Epic,
+    /// The Blocking Item named by the payload's `blocking_id`.
+    BlockingItem,
 }
 
 impl fmt::Display for MutationType {
@@ -145,6 +183,44 @@ mod tests {
             .map(MutationType::text)
             .collect();
         assert_eq!(promotions, vec!["promote_ticket", "promote_epic"]);
+    }
+
+    #[test]
+    fn adding_epic_membership_addresses_the_epic_and_clearing_it_does_not() {
+        // The asymmetry ADR-0038 turns on: withdrawing an Epic's Promotion
+        // withdraws the additions naming it, while a removal still applies
+        // because the Backend clears a 0..1 slot without addressing the Epic.
+        assert_eq!(
+            MutationType::AddTicketToEpic.addressed_counterpart(),
+            AddressedCounterpart::Epic
+        );
+        assert_eq!(
+            MutationType::RemoveTicketFromEpic.addressed_counterpart(),
+            AddressedCounterpart::None
+        );
+    }
+
+    #[test]
+    fn both_dependency_kinds_address_their_blocking_item() {
+        for mutation_type in [MutationType::AddDependency, MutationType::RemoveDependency] {
+            assert_eq!(
+                mutation_type.addressed_counterpart(),
+                AddressedCounterpart::BlockingItem,
+                "{mutation_type} names a Blocking Item the Backend must address"
+            );
+        }
+    }
+
+    #[test]
+    fn a_promotion_addresses_no_counterpart() {
+        // A Promotion creates its own target, so it can only join a withdrawn
+        // set as one of the cancelled Promotions themselves.
+        for mutation_type in MutationType::ALL.into_iter().filter(|t| t.is_promotion()) {
+            assert_eq!(
+                mutation_type.addressed_counterpart(),
+                AddressedCounterpart::None
+            );
+        }
     }
 
     #[test]

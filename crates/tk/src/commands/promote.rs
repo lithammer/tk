@@ -38,8 +38,9 @@ use crate::remote::adapter::{Adapter, AdapterReadError};
 use crate::remote::factory::{self, OpenError as FactoryOpenError};
 use crate::store::mutations::AppendError;
 use crate::store::promotion::{
-    self as store_promotion, CommitPlanError, MutationSummary, ReadGraphError, RecoveryPromotion,
-    RecoveryPromotionError, RecoveryPromotionMapping,
+    self as store_promotion, CancelPromotionError, CancellationReport, CommitPlanError,
+    MutationSummary, ReadGraphError, RecoveryPromotion, RecoveryPromotionError,
+    RecoveryPromotionMapping, UnrepresentableDependency,
 };
 use crate::store::repository::RemoteWorkflowGuard;
 use crate::store::repository::{ResolvedItemRefWithDisplay, Store};
@@ -70,6 +71,8 @@ pub enum Sub {
     Reconcile(ReconcileArgs),
     /// Explicitly risk creating the Backend object again.
     Retry(RetryArgs),
+    /// Withdraw the whole Promotion Operation without reaching the Backend.
+    Cancel(CancelArgs),
 }
 
 /// Arguments for `tk promote reconcile`.
@@ -94,10 +97,19 @@ pub struct RetryArgs {
     pub id: String,
 }
 
+/// Arguments for `tk promote cancel`.
+#[derive(Debug, ClapArgs)]
+pub struct CancelArgs {
+    /// Display ID or Alias of any item in the Promotion Operation to withdraw.
+    #[arg(value_name = "ID")]
+    pub id: String,
+}
+
 pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     match args.subcommand {
         Some(Sub::Reconcile(args)) => return run_reconcile(deps, args),
         Some(Sub::Retry(args)) => return run_retry(deps, args),
+        Some(Sub::Cancel(args)) => return run_cancel(deps, args),
         None => {}
     }
     let id = args
@@ -181,6 +193,25 @@ fn run_retry(deps: &mut Deps<'_>, args: RetryArgs) -> Result<Exit, CommandError>
         .map_err(|err| recovery_error(err, &target.display_id))?;
     let mut adapter = open_recovery_adapter(deps.runner, deps.cwd, &store)?;
     retry(deps, &mut store, &mut *adapter, &workflow, &recovery, &now)
+}
+
+/// Withdraw a Promotion Operation.
+///
+/// Unlike reconcile and retry this opens no Backend Adapter and runs no nested
+/// sync (ADR-0038), so it works with a broken, unimplemented, or already-cleared
+/// Remote — which is the point of an exit of last resort.
+fn run_cancel(deps: &mut Deps<'_>, args: CancelArgs) -> Result<Exit, CommandError> {
+    let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
+        .map_err(|err| resolver::open_error(&err))?;
+    let now = deps.clock.now_iso();
+    let workflow = store
+        .lock_remote_workflow()
+        .map_err(CommandError::failure)?;
+    let target = resolve_recovery_target(&store, &args.id)?;
+    let report = store_promotion::cancel_promotion(store.conn_mut(), &workflow, &target.id, &now)
+        .map_err(|err| cancel_error(err, &target.display_id))?;
+    render_cancellation(deps.stdout, &report);
+    Ok(Exit::Ok)
 }
 
 fn resolve_recovery_target(
@@ -1010,6 +1041,96 @@ fn recovery_error(err: RecoveryPromotionError, display_id: &str) -> CommandError
     }
 }
 
+fn cancel_error(err: CancelPromotionError, display_id: &str) -> CommandError {
+    match err {
+        CancelPromotionError::Storage(err) => resolver::storage_error(&err),
+        CancelPromotionError::Recovery(err) => recovery_error(*err, display_id),
+        CancelPromotionError::ApplyingPromotion {
+            sequence,
+            display_id: applying_display_id,
+        } => CommandError::failure(format!(
+            "the Promotion for {applying_display_id} has an indeterminate Backend creation outcome, so the Promotion Operation cannot be withdrawn\nInspect it with 'tk sync log {sequence}'. Then use 'tk promote reconcile {applying_display_id} <backend-key>' if the Backend object exists, or 'tk promote retry {applying_display_id}' only when creating it again is safe."
+        )),
+        // ADR-0035 asks a rejected Dependency to name both endpoints, the
+        // reason, and a remedy; a withdrawal reaches the same graph from the
+        // other direction and says the same thing.
+        CancelPromotionError::UnrepresentableDependencies(edges) => {
+            let mut body = format!("cannot cancel the Promotion Operation for {display_id}:");
+            for edge in &edges {
+                body.push_str("\n  ");
+                body.push_str(&render_withdrawn_dependency(edge));
+            }
+            CommandError::failure(body)
+        }
+        err @ (CancelPromotionError::MalformedPayload { .. }
+        | CancelPromotionError::BackendBinding(_)
+        | CancelPromotionError::Transition(_)) => {
+            CommandError::failure(format!("Repository Store corruption: {err}"))
+        }
+    }
+}
+
+fn render_withdrawn_dependency(edge: &UnrepresentableDependency) -> String {
+    match edge.rejection {
+        DependencyRejection::BackendBlockedLocalBlocking => format!(
+            "{blocked_id} is backend-backed and would be left waiting on {blocking_id}, which the withdrawal returns to local. \
+             Run 'tk unblock {blocked_id} {blocking_id}' to drop the Dependency, then cancel again.",
+            blocked_id = edge.blocked_display_id,
+            blocking_id = edge.blocking_display_id,
+        ),
+        DependencyRejection::BackendKindMismatch => format!(
+            "{blocked_id} and {blocking_id} would be backed by different Backends. \
+             Run 'tk unblock {blocked_id} {blocking_id}' to drop the Dependency, then cancel again.",
+            blocked_id = edge.blocked_display_id,
+            blocking_id = edge.blocking_display_id,
+        ),
+    }
+}
+
+/// Report one withdrawal.
+///
+/// Enumerate what surprises, count what does not (ADR-0038): every withdrawn
+/// Promotion, every Promotion the Backend already accepted, and every withdrawn
+/// Mutation whose target survives — that last group is intent lost for an object
+/// that really exists upstream. Mutations targeting a withdrawn item follow
+/// from the withdrawal itself, so they are a count.
+fn render_cancellation<W: Write + ?Sized>(stdout: &mut W, report: &CancellationReport) {
+    for promotion in &report.cancelled_promotions {
+        let _ = writeln!(
+            stdout,
+            "Cancelled Promotion: {} {}",
+            promotion.item_class.label(),
+            promotion.display_id
+        );
+    }
+    for promotion in &report.applied_promotions {
+        let _ = writeln!(
+            stdout,
+            "Already created upstream, left in place: {} {}",
+            promotion.item_class.label(),
+            promotion.display_id
+        );
+    }
+    let mut on_cancelled_items = 0;
+    for mutation in &report.withdrawn {
+        if mutation.target_cancelled {
+            on_cancelled_items += 1;
+            continue;
+        }
+        let _ = writeln!(
+            stdout,
+            "Withdrew {} for {} (Mutation {})",
+            mutation.mutation_type, mutation.target_display_id, mutation.sequence
+        );
+    }
+    if on_cancelled_items > 0 {
+        let _ = writeln!(
+            stdout,
+            "Withdrew {on_cancelled_items} further Mutation(s) targeting the cancelled items."
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1299,6 +1420,21 @@ mod tests {
         let mut deps = h.deps();
         let now = deps.clock.now_iso();
         match retry(&mut deps, store, fake, &workflow, &recovery, &now) {
+            Ok(exit) => exit,
+            Err(err) => {
+                let exit = err.exit();
+                err.render(deps.stderr, "promote");
+                exit
+            }
+        }
+    }
+
+    /// Drive `tk promote cancel` end to end, framing any error as the dispatch
+    /// seam does. No Adapter is threaded through, because cancellation opens
+    /// none (ADR-0038).
+    fn cancel_rendered(h: &mut Harness<'_>, id: &str) -> Exit {
+        let mut deps = h.deps();
+        match run_cancel(&mut deps, CancelArgs { id: id.into() }) {
             Ok(exit) => exit,
             Err(err) => {
                 let exit = err.exit();
@@ -1944,6 +2080,168 @@ mod tests {
             })
             .unwrap();
         assert_eq!(state, "applying");
+    }
+
+    // ---- cancel ----------------------------------------------------------
+
+    #[test]
+    fn cancel_withdraws_the_operation_and_returns_the_item_to_local() {
+        let fixture = TmpStore::new("repo");
+        let mut conn = seed_store(&fixture);
+        local_ticket(&conn, "t1", "tk-1", 1);
+        commit_promotion(&mut conn, "t1");
+        drop(conn);
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &fixture);
+
+        let code = cancel_rendered(&mut h, "tk-1");
+
+        assert_eq!(code, Exit::Ok, "{}", h.err());
+        assert_eq!(h.out(), "Cancelled Promotion: Ticket tk-1\n");
+        let conn = Connection::open(fixture.db_path()).unwrap();
+        assert_eq!(
+            crate::store::mutations::resolve_backend_binding(&conn, "t1").unwrap(),
+            BackendBinding::Local
+        );
+    }
+
+    #[test]
+    fn cancel_needs_no_adapter_so_a_cleared_remote_still_lets_it_run() {
+        // The exit of last resort must not depend on the Remote that produced
+        // the stuck Promotion (ADR-0038).
+        let fixture = TmpStore::new("repo");
+        let mut conn = seed_store(&fixture);
+        local_ticket(&conn, "t1", "tk-1", 1);
+        commit_promotion(&mut conn, "t1");
+        conn.execute("delete from sync_cursors", []).unwrap();
+        conn.execute("delete from remotes", []).unwrap();
+        drop(conn);
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &fixture);
+
+        let code = cancel_rendered(&mut h, "tk-1");
+
+        assert_eq!(code, Exit::Ok, "{}", h.err());
+    }
+
+    #[test]
+    fn cancel_reports_a_withdrawal_that_reaches_a_backend_backed_target() {
+        let fixture = TmpStore::new("repo");
+        let mut conn = seed_store(&fixture);
+        local_epic(&conn, "e1", "tk-1", 1);
+        commit_promotion(&mut conn, "e1");
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "backend",
+                display: "gh-9",
+                title: "Backend Ticket",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("9"),
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 9,
+                mutation_type: "add_ticket_to_epic",
+                item_id: "backend",
+                payload_json: r#"{"epic_id":"e1"}"#,
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &fixture);
+
+        let code = cancel_rendered(&mut h, "tk-1");
+
+        assert_eq!(code, Exit::Ok, "{}", h.err());
+        assert_eq!(
+            h.out(),
+            "Cancelled Promotion: Epic tk-1\n\
+             Withdrew add_ticket_to_epic for gh-9 (Mutation 9)\n"
+        );
+    }
+
+    #[test]
+    fn cancel_refuses_an_indeterminate_creation_and_names_both_recoveries() {
+        let fixture = TmpStore::new("repo");
+        let mut conn = seed_store(&fixture);
+        local_ticket(&conn, "t1", "tk-1", 1);
+        commit_promotion(&mut conn, "t1");
+        conn.execute("update mutations set state = 'applying'", [])
+            .unwrap();
+        drop(conn);
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &fixture);
+
+        let code = cancel_rendered(&mut h, "tk-1");
+
+        assert_eq!(code, Exit::Failure);
+        assert!(h.err().contains("indeterminate Backend creation outcome"));
+        assert!(h.err().contains("tk promote reconcile tk-1"));
+        assert!(h.err().contains("tk promote retry tk-1"));
+    }
+
+    #[test]
+    fn cancel_refuses_a_dependency_the_withdrawal_would_strand() {
+        let fixture = TmpStore::new("repo");
+        let mut conn = seed_store(&fixture);
+        local_ticket(&conn, "t1", "tk-1", 1);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "backend",
+                display: "gh-9",
+                title: "Backend Ticket",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("9"),
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        commit_promotion(&mut conn, "t1");
+        insert_dependency(&conn, "t1", "backend").unwrap();
+        drop(conn);
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &fixture);
+
+        let code = cancel_rendered(&mut h, "tk-1");
+
+        assert_eq!(code, Exit::Failure);
+        assert!(h.err().contains("tk unblock gh-9 tk-1"), "{}", h.err());
+    }
+
+    #[test]
+    fn cancel_refuses_an_item_with_no_nonterminal_promotion() {
+        let fixture = TmpStore::new("repo");
+        let conn = seed_store(&fixture);
+        local_ticket(&conn, "t1", "tk-1", 1);
+        drop(conn);
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &fixture);
+
+        let code = cancel_rendered(&mut h, "tk-1");
+
+        assert_eq!(code, Exit::Failure);
+        assert_eq!(
+            h.err(),
+            "tk promote: 'tk-1' has no nonterminal Promotion to recover\n"
+        );
     }
 
     #[test]

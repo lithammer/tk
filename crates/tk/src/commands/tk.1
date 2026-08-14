@@ -407,10 +407,35 @@ and run normal ordered sync. Use this only when creating the Backend object
 again is safe; automatic sync never replays an indeterminate creation. A failed
 Promotion is refused, because ordinary sync already retries it.
 .PP
-Recovery cannot pass an earlier pending, failed, or applying Mutation. Both
-forms hold the Remote workflow lock through Backend access, Store changes, and
-nested sync, then print every Promotion Display ID replacement that nested
-sync landed.
+Reconcile and retry cannot pass an earlier pending, failed, or applying
+Mutation. Both hold the Remote workflow lock through Backend access, Store
+changes, and nested sync, then print every Promotion Display ID replacement
+that nested sync landed.
+.TP
+\fBtk promote cancel\fR \fIid\fR
+Withdraw the whole Promotion Operation the named item's Promotion belongs to,
+together with every queued Mutation that cannot be applied without a withdrawn
+item's backend identity. Cancelled items become Local again, keeping their
+current state, Display IDs, and Aliases; promoting them again is an ordinary
+Promotion.
+.PP
+A pending or failed Promotion may be cancelled, because neither created a
+Backend object. An applying Promotion anywhere in the operation refuses the
+whole cancellation; resolve it with
+.B tk promote reconcile
+or
+.B tk promote retry
+first. A Promotion the Backend already accepted is reported and left in place —
+tk never deletes a Backend object.
+.PP
+Cancellation is refused while a withdrawal would leave a backend-backed Blocked
+Item waiting on an item returning to Local; drop the Dependency with
+.B tk unblock
+first. Epic membership degrades to local instead. Cancellation reaches no
+Backend, so it works with a broken or unconfigured Remote and is not held back
+by an earlier unresolved Mutation. Withdrawn Mutations are recorded as
+cancelled and listed by
+.BR "tk sync log \-\-cancelled" .
 .SS Agent briefing
 .TP
 .B tk prime

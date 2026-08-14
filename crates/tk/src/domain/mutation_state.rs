@@ -1,7 +1,8 @@
 //! Mutation Log entry state.
 //!
-//! The five states are mirrored in the `mutations.state` CHECK constraint
-//! (`'pending'`, `'failed'`, `'applying'`, `'skipped'`, `'applied'`); the `text()` spelling is
+//! The six states are mirrored in the `mutations.state` CHECK constraint
+//! (`'pending'`, `'failed'`, `'applying'`, `'skipped'`, `'cancelled'`,
+//! `'applied'`); the `text()` spelling is
 //! the storage contract, not just a rendering convenience. [`MutationState`]
 //! carries the transition table every `mutations.state` write obeys, so it is a
 //! domain value rather than a pass-through display string.
@@ -27,11 +28,15 @@ use std::fmt;
 /// | `applying` | `pending` | cleared | Promotion Retry |
 /// | `pending`, `failed`, `applying` | `failed` | recorded | a certified Backend rejection |
 /// | `failed` | `skipped` | preserved | Sync Skip |
+/// | `pending`, `failed` | `cancelled` | preserved | Promotion Cancellation |
 /// | `pending`, `failed`, `applying` | `applied` | cleared | a persisted Backend effect |
 ///
-/// `skipped` and `applied` are terminal: nothing leaves them. `applying` is the
-/// only self-edge, and it exists because an indeterminate creation records why
-/// without resolving the doubt.
+/// `skipped`, `cancelled`, and `applied` are terminal: nothing leaves them.
+/// `applying` is the only self-edge, and it exists because an indeterminate
+/// creation records why without resolving the doubt. `applying` also has no
+/// edge to `cancelled`: an indeterminate creation is not certified to have
+/// created nothing, so Promotion Reconciliation or Promotion Retry must settle
+/// it first (ADR-0038).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MutationState {
     /// Queued and not yet attempted.
@@ -40,8 +45,10 @@ pub enum MutationState {
     Failed,
     /// Backend creation began and no confirmed identity or no-effect verdict exists.
     Applying,
-    /// Human-curated terminal omission.
+    /// Human-curated terminal omission after sync failed on the Mutation.
     Skipped,
+    /// Terminally withdrawn by Promotion Cancellation, never attempted.
+    Cancelled,
     /// Backend effect and any resulting identity were persisted.
     Applied,
 }
@@ -58,6 +65,7 @@ impl MutationState {
             Self::Failed => "failed",
             Self::Applying => "applying",
             Self::Skipped => "skipped",
+            Self::Cancelled => "cancelled",
             Self::Applied => "applied",
         }
     }

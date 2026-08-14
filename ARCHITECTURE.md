@@ -163,14 +163,22 @@ Important stable contracts:
   applies identity, optional forced convergence, Mutation state, and monotonic
   cursor movement in one transaction ([ADR
   0037](./docs/adr/0037-promotion-recovery-is-explicit-and-ordered.md)).
+  `cancelled` records intent Promotion Cancellation withdrew: an
+  operation-wide exit that opens no Adapter, so it is exempt from that ordering
+  rule. The `skipped` clause is Mutation-Type-restricted in the same schema, so
+  a Promotion can only ever reach `cancelled`; whether a Promotion Operation has
+  resolved asks the nonterminal set rather than "not applied" ([ADR
+  0038](./docs/adr/0038-promotion-cancellation-withdraws-an-operation.md)).
 - `Store::lock_remote_workflow` owns an exclusive OS lock on the stable
   `<git-common-dir>/tk/remote.lock` file. Sync, Adopt, Promotion, and Remote
   configuration hold one guard across Backend access and Store persistence;
   nested Promotion sync reuses its caller's guard. The lock closes the live
   process check-then-act race, while the durable `applying` state remains the
   crash-recovery barrier. Lock contention fails immediately with retry
-  guidance instead of blocking indefinitely. Sync Skip shares the guard but
-  commits before the Adapter opens; Sync Log and local commands stay unlocked.
+  guidance instead of blocking indefinitely. Sync Skip and Promotion
+  Cancellation share the guard but reach no Adapter — they rewrite Mutation Log
+  state a concurrent sync could be draining, and each commits in one
+  transaction. Sync Log and local commands stay unlocked.
 - `remotes` and `sync_cursors` hold the v1 singleton Remote model.
 - `store_config.display_prefix` controls newly generated local Display IDs.
   Custom prefix configuration is tracked by `tk-22`.

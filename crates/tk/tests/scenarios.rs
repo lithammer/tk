@@ -554,6 +554,7 @@ fn command_help_snapshots() {
     }
     insta::assert_snapshot!("help_promote_reconcile", p.run("promote reconcile --help"));
     insta::assert_snapshot!("help_promote_retry", p.run("promote retry --help"));
+    insta::assert_snapshot!("help_promote_cancel", p.run("promote cancel --help"));
 }
 
 /// `tk search` is a flat, whole-store title lookup across every Item Status
@@ -868,6 +869,35 @@ fn promote_recovery_subcommands_resolve_their_explicit_target() {
     -- stderr --
     tk promote: 'project-404' is not a known Display ID or Alias
     ");
+    tk!(p, "promote cancel project-404", @"
+    exit 1
+    -- stdout --
+    -- stderr --
+    tk promote: 'project-404' is not a known Display ID or Alias
+    ");
+}
+
+#[test]
+fn cancelling_an_item_with_no_promotion_intent_is_refused() {
+    let p = Repo::new("project");
+    p.run("init");
+    p.run("add -m 'Local work'"); // project-1
+
+    tk!(p, "promote cancel project-1", @"
+    exit 1
+    -- stdout --
+    -- stderr --
+    tk promote: 'project-1' has no nonterminal Promotion to recover
+    ");
+}
+
+#[test]
+fn sync_log_reports_cancelled_mutations_without_a_flag() {
+    let p = Repo::new("project");
+    p.run("init");
+
+    tk!(p, "sync log", @"No Mutations recorded.");
+    tk!(p, "sync log --cancelled", @"No cancelled Mutations.");
 }
 
 #[test]
