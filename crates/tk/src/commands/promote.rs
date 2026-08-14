@@ -1062,6 +1062,9 @@ fn cancel_error(err: CancelPromotionError, display_id: &str) -> CommandError {
             }
             CommandError::failure(body)
         }
+        CancelPromotionError::NoWithdrawablePromotion(_) => CommandError::failure(format!(
+            "the Promotion Operation for {display_id} has already resolved; there is no Promotion left to withdraw"
+        )),
         err @ (CancelPromotionError::MalformedPayload { .. }
         | CancelPromotionError::BackendBinding(_)
         | CancelPromotionError::Transition(_)) => {
@@ -2223,6 +2226,31 @@ mod tests {
 
         assert_eq!(code, Exit::Failure);
         assert!(h.err().contains("tk unblock gh-9 tk-1"), "{}", h.err());
+    }
+
+    #[test]
+    fn cancelling_an_already_withdrawn_operation_says_so() {
+        let fixture = TmpStore::new("repo");
+        let mut conn = seed_store(&fixture);
+        local_ticket(&conn, "t1", "tk-1", 1);
+        commit_promotion(&mut conn, "t1");
+        drop(conn);
+        let cwd_path = cwd();
+        {
+            let mut h = Harness::new(&cwd_path);
+            expect_git(&h, &fixture);
+            assert_eq!(cancel_rendered(&mut h, "tk-1"), Exit::Ok);
+        }
+
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &fixture);
+        let code = cancel_rendered(&mut h, "tk-1");
+
+        assert_eq!(code, Exit::Failure);
+        assert_eq!(
+            h.err(),
+            "tk promote: the Promotion Operation for tk-1 has already resolved; there is no Promotion left to withdraw\n"
+        );
     }
 
     #[test]
