@@ -253,7 +253,7 @@ fn reconcile(
     .map_err(|err| recovery_error(err, &recovery.outgoing_display_id))?;
     let sync_result = sync::run_sync(store.conn_mut(), adapter, workflow, now);
     let mapping_result = render_recovery_mappings(deps.stdout, store, &mappings);
-    finish_recovery(sync_result, mapping_result, "reconciled")
+    finish_recovery(sync_result, mapping_result, RecoveryAction::Reconcile)
 }
 
 fn retry(
@@ -271,7 +271,7 @@ fn retry(
         .map_err(|err| recovery_error(err, &recovery.outgoing_display_id))?;
     let sync_result = sync::run_sync(store.conn_mut(), adapter, workflow, now);
     let mapping_result = render_recovery_mappings(deps.stdout, store, &mappings);
-    finish_recovery(sync_result, mapping_result, "retried")
+    finish_recovery(sync_result, mapping_result, RecoveryAction::Retry)
 }
 
 fn ensure_recovery_backend(
@@ -293,33 +293,116 @@ fn inspection_error(backend_key: &str, err: AdapterReadError) -> CommandError {
     ))
 }
 
+/// Recovery result vocabulary whose rendering stays verbatim under ADR-0017.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryAction {
+    Reconcile,
+    Retry,
+}
+
+impl RecoveryAction {
+    fn stopped_at_mutation(self, sequence: i64) -> String {
+        match self {
+            Self::Reconcile => format!(
+                "the Promotion was reconciled, but sync stopped at Mutation {sequence}\nInspect it with 'tk sync log {sequence}'; fix the cause, then run 'tk sync' to continue the queue."
+            ),
+            Self::Retry => format!(
+                "the Promotion was retried, but sync stopped at Mutation {sequence}\nInspect it with 'tk sync log {sequence}'; fix the cause, then run 'tk sync' to continue the queue."
+            ),
+        }
+    }
+
+    fn indeterminate_creation(self, sequence: i64) -> String {
+        match self {
+            Self::Reconcile => format!(
+                "the Promotion was reconciled, but Mutation {sequence} has an indeterminate Backend creation outcome\nUse 'tk promote reconcile <id> <backend-key>' if the object exists, or 'tk promote retry <id>' only when creating it again is safe."
+            ),
+            Self::Retry => format!(
+                "the Promotion was retried, but Mutation {sequence} has an indeterminate Backend creation outcome\nUse 'tk promote reconcile <id> <backend-key>' if the object exists, or 'tk promote retry <id>' only when creating it again is safe."
+            ),
+        }
+    }
+
+    fn created_identity_not_stored(
+        self,
+        sequence: i64,
+        error: &RunSyncError,
+        detail: Option<&str>,
+    ) -> String {
+        match (self, detail) {
+            (Self::Reconcile, Some(detail)) => format!(
+                "the Promotion was reconciled, but sync could not save a created Backend identity\n{error}\n{detail}\nMutation {sequence} remains applying; use 'tk promote reconcile <id> <backend-key>' after confirming the created object."
+            ),
+            (Self::Retry, Some(detail)) => format!(
+                "the Promotion was retried, but sync could not save a created Backend identity\n{error}\n{detail}\nMutation {sequence} remains applying; use 'tk promote reconcile <id> <backend-key>' after confirming the created object."
+            ),
+            (Self::Reconcile, None) => format!(
+                "the Promotion was reconciled, but sync could not save a created Backend identity\n{error}\nMutation {sequence} remains applying; use 'tk promote reconcile <id> <backend-key>' after confirming the created object."
+            ),
+            (Self::Retry, None) => format!(
+                "the Promotion was retried, but sync could not save a created Backend identity\n{error}\nMutation {sequence} remains applying; use 'tk promote reconcile <id> <backend-key>' after confirming the created object."
+            ),
+        }
+    }
+
+    fn sync_did_not_finish(self, detail: &str) -> String {
+        match self {
+            Self::Reconcile => {
+                format!("the Promotion was reconciled, but sync did not finish\n{detail}")
+            }
+            Self::Retry => format!("the Promotion was retried, but sync did not finish\n{detail}"),
+        }
+    }
+
+    fn remote_changed(self) -> String {
+        match self {
+            Self::Reconcile => "the Promotion was reconciled, but the configured Remote changed while contacting the Backend; retry 'tk sync'".into(),
+            Self::Retry => "the Promotion was retried, but the configured Remote changed while contacting the Backend; retry 'tk sync'".into(),
+        }
+    }
+
+    fn reporting_failed(self, body: &str) -> String {
+        match self {
+            Self::Reconcile => format!(
+                "the Promotion was reconciled, but could not report every Display ID replacement\n{body}"
+            ),
+            Self::Retry => format!(
+                "the Promotion was retried, but could not report every Display ID replacement\n{body}"
+            ),
+        }
+    }
+}
+
 fn finish_recovery_sync(
     result: Result<sync::SyncReport, RunSyncError>,
-    action: &str,
+    action: RecoveryAction,
 ) -> Result<Exit, CommandError> {
     match result {
         Ok(report) if report.stopped_at_sequence.is_none() => Ok(Exit::Ok),
-        Ok(report) => Err(CommandError::failure(format!(
-            "the Promotion was {action}, but sync stopped at Mutation {sequence}\nInspect it with 'tk sync log {sequence}'; fix the cause, then run 'tk sync' to continue the queue.",
-            sequence = report
-                .stopped_at_sequence
-                .expect("the guarded branch has a stopping Mutation"),
-        ))),
+        Ok(report) => Err(CommandError::failure(
+            action.stopped_at_mutation(
+                report
+                    .stopped_at_sequence
+                    .expect("the guarded branch has a stopping Mutation"),
+            ),
+        )),
         Err(
             RunSyncError::ApplyingMutation(sequence)
             | RunSyncError::Refresh(RefreshStoreError::ApplyingMutation(sequence))
             | RunSyncError::Outcome(PersistMutationOutcomeError::ApplyingMutation(sequence)),
-        ) => Err(CommandError::failure(format!(
-            "the Promotion was {action}, but Mutation {sequence} has an indeterminate Backend creation outcome\nUse 'tk promote reconcile <id> <backend-key>' if the object exists, or 'tk promote retry <id>' only when creating it again is safe."
-        ))),
+        ) => Err(CommandError::failure(
+            action.indeterminate_creation(sequence),
+        )),
         Err(
             err @ RunSyncError::CreatedIdentityNotStored {
                 sequence,
                 source: PersistMutationOutcomeError::TargetNotLocal { .. },
                 ..
             },
-        ) => Err(CommandError::failure(format!(
-            "the Promotion was {action}, but sync could not save a created Backend identity\n{err}\nThis is Repository Store corruption or a Ticket bug — please report it.\nMutation {sequence} remains applying; use 'tk promote reconcile <id> <backend-key>' after confirming the created object."
+        ) => Err(CommandError::failure(action.created_identity_not_stored(
+            sequence,
+            &err,
+            Some("This is Repository Store corruption or a Ticket bug — please report it."),
         ))),
         Err(
             err @ RunSyncError::CreatedIdentityNotStored {
@@ -334,16 +417,16 @@ fn finish_recovery_sync(
             let PersistMutationOutcomeError::Storage(storage) = source else {
                 unreachable!("the match arm fixes the source variant")
             };
-            Err(CommandError::failure(format!(
-                "the Promotion was {action}, but sync could not save a created Backend identity\n{err}\n{}\nMutation {sequence} remains applying; use 'tk promote reconcile <id> <backend-key>' after confirming the created object.",
-                created_identity_storage_detail(storage)
+            let detail = created_identity_storage_detail(storage);
+            Err(CommandError::failure(action.created_identity_not_stored(
+                sequence,
+                &err,
+                Some(&detail),
             )))
         }
-        Err(err @ RunSyncError::CreatedIdentityNotStored { sequence, .. }) => {
-            Err(CommandError::failure(format!(
-                "the Promotion was {action}, but sync could not save a created Backend identity\n{err}\nMutation {sequence} remains applying; use 'tk promote reconcile <id> <backend-key>' after confirming the created object."
-            )))
-        }
+        Err(err @ RunSyncError::CreatedIdentityNotStored { sequence, .. }) => Err(
+            CommandError::failure(action.created_identity_not_stored(sequence, &err, None)),
+        ),
         Err(
             RunSyncError::Refresh(
                 RefreshStoreError::Storage(storage)
@@ -366,26 +449,24 @@ fn finish_recovery_sync(
                 | PersistMutationOutcomeError::OperationShapeMismatch { .. }
                 | PersistMutationOutcomeError::TargetNotLocal { .. },
             )),
-        ) => Err(CommandError::failure(format!(
-            "the Promotion was {action}, but sync did not finish\n{err}; this is a Ticket bug — please report it"
-        ))),
+        ) => Err(CommandError::failure(action.sync_did_not_finish(&format!(
+            "{err}; this is a Ticket bug — please report it"
+        )))),
         Err(
             err @ RunSyncError::Refresh(RefreshStoreError::BackendCohort(
                 BackendCohortError::MultipleBackendKinds
                 | BackendCohortError::UnknownBackendKind(_)
                 | BackendCohortError::BackendKindMismatch { .. },
             )),
-        ) => Err(CommandError::failure(format!(
-            "the Promotion was {action}, but sync did not finish\n{err}; this is a Repository Store invariant failure"
-        ))),
+        ) => Err(CommandError::failure(action.sync_did_not_finish(&format!(
+            "{err}; this is a Repository Store invariant failure"
+        )))),
         Err(RunSyncError::Refresh(RefreshStoreError::RemoteChanged { .. })) => {
-            Err(CommandError::failure(format!(
-                "the Promotion was {action}, but the configured Remote changed while contacting the Backend; retry 'tk sync'"
-            )))
+            Err(CommandError::failure(action.remote_changed()))
         }
-        Err(RunSyncError::Pull(AdapterReadError::Failed(detail))) => Err(CommandError::failure(
-            format!("the Promotion was {action}, but sync did not finish\n{detail}"),
-        )),
+        Err(RunSyncError::Pull(AdapterReadError::Failed(detail))) => {
+            Err(CommandError::failure(action.sync_did_not_finish(&detail)))
+        }
         Err(
             err @ (RunSyncError::Pull(AdapterReadError::Env(_))
             | RunSyncError::Apply(_)
@@ -393,38 +474,34 @@ fn finish_recovery_sync(
                 PersistMutationOutcomeError::MutationNotFound(_)
                 | PersistMutationOutcomeError::MutationNotApplicable(_),
             )),
-        ) => Err(CommandError::failure(format!(
-            "the Promotion was {action}, but sync did not finish\n{err}"
-        ))),
+        ) => Err(CommandError::failure(
+            action.sync_did_not_finish(&err.to_string()),
+        )),
     }
 }
 
 fn finish_recovery(
     sync_result: Result<sync::SyncReport, RunSyncError>,
     mapping_result: Result<(), CommandError>,
-    action: &str,
+    action: RecoveryAction,
 ) -> Result<Exit, CommandError> {
     let sync_result = finish_recovery_sync(sync_result, action);
     match (sync_result, mapping_result) {
         (Ok(exit), Ok(())) => Ok(exit),
         (Err(sync_error), Ok(())) => Err(sync_error),
-        (Ok(_), Err(mapping_error)) => Err(with_partial_recovery_context(
-            action,
-            "could not report every Display ID replacement",
-            mapping_error,
-        )),
+        (Ok(_), Err(mapping_error)) => Err(with_partial_recovery_context(action, mapping_error)),
         (Err(sync_error), Err(mapping_error)) => {
             Err(append_secondary_error(sync_error, mapping_error))
         }
     }
 }
 
-fn with_partial_recovery_context(action: &str, context: &str, error: CommandError) -> CommandError {
+fn with_partial_recovery_context(action: RecoveryAction, error: CommandError) -> CommandError {
     let CommandError::Failure { body, tail } = error else {
         unreachable!("recovery mapping errors are operation failures")
     };
     CommandError::Failure {
-        body: format!("the Promotion was {action}, but {context}\n{body}"),
+        body: action.reporting_failed(&body),
         tail,
     }
 }
@@ -465,13 +542,13 @@ fn created_identity_storage_detail(storage: &rusqlite::Error) -> String {
     }
 }
 
-fn recovery_storage_error(action: &str, storage: &rusqlite::Error) -> CommandError {
+fn recovery_storage_error(action: RecoveryAction, storage: &rusqlite::Error) -> CommandError {
     let classified = resolver::storage_error(storage);
     let CommandError::Failure { body, tail } = classified else {
         unreachable!("storage errors are operation failures")
     };
     CommandError::Failure {
-        body: format!("the Promotion was {action}, but sync did not finish\n{body}"),
+        body: action.sync_did_not_finish(&body),
         tail,
     }
 }
@@ -1518,6 +1595,53 @@ mod tests {
     }
 
     #[test]
+    fn public_reconcile_stops_at_remote_workflow_contention() {
+        let fixture = TmpStore::new("repo");
+        let _conn = seed_store(&fixture);
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        let blocking_store = open_store(&h, &fixture, &cwd_path);
+        let _guard = blocking_store.lock_remote_workflow().unwrap();
+        expect_git(&h, &fixture);
+
+        let code = run_subcommand_rendered(
+            &mut h,
+            Sub::Reconcile(ReconcileArgs {
+                id: "tk-1".into(),
+                backend_key: "42".into(),
+                force: false,
+            }),
+        );
+
+        assert_eq!(code, Exit::Failure);
+        assert_eq!(
+            h.err(),
+            "tk promote: another remote-changing command is running; retry when it finishes\n"
+        );
+        h.runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn public_retry_stops_at_remote_workflow_contention() {
+        let fixture = TmpStore::new("repo");
+        let _conn = seed_store(&fixture);
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        let blocking_store = open_store(&h, &fixture, &cwd_path);
+        let _guard = blocking_store.lock_remote_workflow().unwrap();
+        expect_git(&h, &fixture);
+
+        let code = run_subcommand_rendered(&mut h, Sub::Retry(RetryArgs { id: "tk-1".into() }));
+
+        assert_eq!(code, Exit::Failure);
+        assert_eq!(
+            h.err(),
+            "tk promote: another remote-changing command is running; retry when it finishes\n"
+        );
+        h.runner.assert_all_consumed();
+    }
+
+    #[test]
     fn public_retry_reports_a_known_item_without_recoverable_promotion() {
         let fixture = TmpStore::new("repo");
         let conn = seed_store(&fixture);
@@ -1790,7 +1914,7 @@ mod tests {
             },
         };
 
-        let failure = finish_recovery_sync(Err(error), "retried").unwrap_err();
+        let failure = finish_recovery_sync(Err(error), RecoveryAction::Retry).unwrap_err();
         let mut rendered = Vec::new();
         failure.render(&mut rendered, "promote");
         let rendered = String::from_utf8(rendered).unwrap();
@@ -1818,7 +1942,7 @@ mod tests {
             source: PersistMutationOutcomeError::Storage(busy),
         };
 
-        let failure = finish_recovery_sync(Err(error), "retried").unwrap_err();
+        let failure = finish_recovery_sync(Err(error), RecoveryAction::Retry).unwrap_err();
         let mut rendered = Vec::new();
         failure.render(&mut rendered, "promote");
         let rendered = String::from_utf8(rendered).unwrap();
@@ -1842,7 +1966,7 @@ mod tests {
             Err(RunSyncError::Outcome(PersistMutationOutcomeError::Storage(
                 busy,
             ))),
-            "reconciled",
+            RecoveryAction::Reconcile,
         )
         .unwrap_err();
         let mut rendered = Vec::new();
@@ -1861,15 +1985,16 @@ mod tests {
             Err(RunSyncError::Outcome(
                 PersistMutationOutcomeError::MutationNotFound(8),
             )),
-            "retried",
+            RecoveryAction::Retry,
         )
         .unwrap_err();
         let mut rendered = Vec::new();
         failure.render(&mut rendered, "promote");
-        let rendered = String::from_utf8(rendered).unwrap();
-
-        assert!(rendered.contains("the Promotion was retried"));
-        assert!(rendered.contains("mutation 8 not found"));
+        assert_eq!(
+            String::from_utf8(rendered).unwrap(),
+            "tk promote: the Promotion was retried, but sync did not finish\n\
+             mutation 8 not found\n"
+        );
     }
 
     #[test]
@@ -1880,7 +2005,7 @@ mod tests {
         let failure = finish_recovery(
             Err(RunSyncError::ApplyingMutation(7)),
             Err(mapping_error),
-            "retried",
+            RecoveryAction::Retry,
         )
         .unwrap_err();
         let mut rendered = Vec::new();

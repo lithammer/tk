@@ -347,10 +347,6 @@ pub struct RecoveryPromotion {
     pub promotion: Promotion,
     /// Typed Backend kind decoded from the retained Promotion payload.
     pub backend_kind: BackendKind,
-    /// Current Local title, which may differ from the original snapshot.
-    pub local_title: String,
-    /// Current Local body, which may differ from the original snapshot.
-    pub local_body: String,
     /// Required Promotion Operation grouping for recovery and convergence.
     pub operation_id: String,
 }
@@ -432,8 +428,6 @@ struct RecoveryPromotionRow {
     payload_json: String,
     operation_id: Option<String>,
     display: String,
-    title: String,
-    body: String,
 }
 
 /// Load the unique nonterminal Promotion targeting `item_id` by stable
@@ -445,7 +439,7 @@ pub fn recoverable_promotion(
 ) -> Result<RecoveryPromotion, RecoveryPromotionError> {
     let mut stmt = conn.prepare(
         "select m.sequence, m.state, m.mutation_type, m.item_class, m.payload_json, \
-                m.promotion_operation_id, i.display_value, i.title, i.body \
+                m.promotion_operation_id, i.display_value \
            from mutations m join items i on i.id = m.item_id \
           where m.item_id = ?1 and m.mutation_type in ('promote_ticket', 'promote_epic') \
             and m.state in ('pending', 'failed', 'applying') \
@@ -461,8 +455,6 @@ pub fn recoverable_promotion(
                 payload_json: r.get(4)?,
                 operation_id: r.get(5)?,
                 display: r.get(6)?,
-                title: r.get(7)?,
-                body: r.get(8)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -527,8 +519,6 @@ pub fn recoverable_promotion(
         item_class: row.item_class,
         promotion,
         backend_kind,
-        local_title: row.title,
-        local_body: row.body,
         operation_id,
     })
 }
@@ -1368,6 +1358,24 @@ mod tests {
         .unwrap();
     }
 
+    fn seed_update_mutation(conn: &Connection, state: &str) {
+        insert_fixture_item(
+            conn,
+            FixtureItem {
+                id: "backend",
+                display: "gh-1",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("https://github.com/o/r/issues/1"),
+                title: "Backend",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        seed_mutation(conn, 1, "backend", state, None);
+    }
+
     #[test]
     fn recoverable_promotion_loads_each_nonterminal_state() {
         for state in ["pending", "failed", "applying"] {
@@ -1386,7 +1394,6 @@ mod tests {
             assert_eq!(target.state.text(), state);
             assert_eq!(target.outgoing_display_id, "tk-1");
             assert_eq!(target.promotion.title, "Original title");
-            assert_eq!(target.local_title, "Current title");
             assert_eq!(target.operation_id, "op-1");
         }
     }
@@ -1579,6 +1586,52 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_cannot_jump_an_earlier_nonpromotion_mutation() {
+        let mut conn = open_seeded();
+        seed_update_mutation(&conn, "pending");
+        seed_recovery(
+            &conn,
+            "target",
+            "tk-2",
+            4,
+            "applying",
+            ItemClass::Ticket,
+            Some("op-1"),
+        );
+        let target = recoverable_promotion(&conn, "target").unwrap();
+        let workflow = RemoteWorkflowGuard::for_test();
+
+        assert!(matches!(
+            reconcile_promotion(
+                &mut conn,
+                &workflow,
+                &target,
+                &receipt("https://github.com/o/r/issues/42", "gh-42"),
+                false,
+                NOW,
+            ),
+            Err(RecoveryPromotionError::EarlierNonterminal {
+                sequence: 1,
+                state: MutationState::Pending,
+            })
+        ));
+        let unchanged: (String, String, Option<String>, String, i64) = conn
+            .query_row(
+                "select i.display_value, i.origin, i.backend_key, m.state, c.last_applied_sequence \
+                   from items i join mutations m on m.item_id = i.id \
+                   join sync_cursors c on c.remote_name = 'primary' \
+                  where i.id = 'target' and m.sequence = 4",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            unchanged,
+            ("tk-2".into(), "local".into(), None, "applying".into(), 0)
+        );
+    }
+
+    #[test]
     fn retry_returns_a_target_to_pending_without_moving_the_cursor() {
         for state in ["pending", "failed", "applying"] {
             let mut conn = open_seeded();
@@ -1641,6 +1694,41 @@ mod tests {
                 .unwrap();
             assert_eq!(target_state, "applying");
         }
+    }
+
+    #[test]
+    fn retry_cannot_jump_an_earlier_nonpromotion_mutation() {
+        let mut conn = open_seeded();
+        seed_update_mutation(&conn, "failed");
+        seed_recovery(
+            &conn,
+            "target",
+            "tk-2",
+            4,
+            "applying",
+            ItemClass::Ticket,
+            Some("op-1"),
+        );
+        let target = recoverable_promotion(&conn, "target").unwrap();
+        let workflow = RemoteWorkflowGuard::for_test();
+
+        assert!(matches!(
+            retry_promotion(&mut conn, &workflow, &target, NOW),
+            Err(RecoveryPromotionError::EarlierNonterminal {
+                sequence: 1,
+                state: MutationState::Failed,
+            })
+        ));
+        let unchanged: (String, i64) = conn
+            .query_row(
+                "select m.state, c.last_applied_sequence from mutations m \
+                   join sync_cursors c on c.remote_name = 'primary' \
+                  where m.sequence = 4",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(unchanged, ("applying".into(), 0));
     }
 
     #[test]
