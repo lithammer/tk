@@ -607,15 +607,10 @@ pub fn persist_create_outcome(
             mutation_type,
         });
     }
-    let origin: Origin = tx.query_row(
-        "select origin from items where id = ?1",
-        params![&item_id],
-        |r| r.get(0),
-    )?;
-    if origin != Origin::Local {
-        return Err(PersistMutationOutcomeError::TargetNotLocal { sequence, item_id });
-    }
-
+    // The non-Local precondition belongs to receipt application, which owns
+    // it typed. Checking it here as well would refuse a Rejected or
+    // Indeterminate outcome before its failure evidence is durable, leaving
+    // the Mutation `applying` with nothing recorded against it.
     match outcome {
         BackendCreateOutcome::Created(identity) => {
             let payload: Promotion = serde_json::from_str(&payload_json)?;

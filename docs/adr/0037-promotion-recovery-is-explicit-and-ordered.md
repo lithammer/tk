@@ -13,6 +13,11 @@ and body only; reconciliation does not classify Ticket Kind or lifecycle
 state. Exact title and body equality with the retained Promotion snapshot is
 the default proof that the candidate is the created object.
 
+A candidate identity that another Item already holds is refused outright, with
+or without `--force`: attaching it would break Backend Item and Display ID
+uniqueness, and the object is more likely one Adopt already imported than the
+one this Promotion created.
+
 A mismatch writes nothing unless `--force` is supplied. Forced reconciliation
 attaches the confirmed identity and appends current local title and body as a
 normal update Mutation in the same Promotion Operation. Receipt application,
@@ -21,9 +26,11 @@ atomically. Backend lifecycle remains authoritative after attachment, so the
 nested sync may immediately import a closed Backend object as `done`.
 
 `tk promote retry <id>` is the explicit-risk alternative. It moves an
-`applying` or `failed` Promotion back to `pending`, then delegates to the normal
-ordered sync engine. A pending Promotion is an idempotent input to the command.
-Retry never records an identity or advances the cursor by itself.
+`applying` Promotion back to `pending`, then delegates to the normal ordered
+sync engine. A pending Promotion is an idempotent input to the command. A
+`failed` Promotion is refused: ordinary sync already retries it, so accepting it
+here would ask the operator to accept a duplicate-creation risk that does not
+apply. Retry never records an identity or advances the cursor by itself.
 
 Recovery preserves global Mutation Sequence order. Reconcile or retry may act
 only on the earliest `pending`, `failed`, or `applying` Mutation; terminal rows

@@ -331,24 +331,29 @@ pub fn apply_receipt(
 }
 
 /// Immutable Store data needed to recover one nonterminal Promotion.
+///
+/// A value read outside a transaction is only a candidate: every transition
+/// re-reads the Promotion under its own write transaction and acts on that
+/// row. Fields the command layer does not need stay module-private so the
+/// authoritative copy is the one the transition reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoveryPromotion {
     /// Mutation Sequence that fixes recovery ordering.
     pub sequence: i64,
-    /// Current nonterminal Mutation state.
-    pub state: MutationState,
-    /// Stable internal Item ID, unaffected by receipt Display ID replacement.
-    pub item_id: String,
     /// Local Display ID to retain as an Alias when reconciliation succeeds.
     pub outgoing_display_id: String,
-    /// Item Class that selects any forced-convergence Mutation type.
-    pub item_class: ItemClass,
     /// Original Promotion snapshot and retained Backend payload.
     pub promotion: Promotion,
     /// Typed Backend kind decoded from the retained Promotion payload.
     pub backend_kind: BackendKind,
-    /// Required Promotion Operation grouping for recovery and convergence.
-    pub operation_id: String,
+    /// Mutation state as of this read.
+    state: MutationState,
+    /// Stable internal Item ID, unaffected by receipt Display ID replacement.
+    item_id: String,
+    /// Item Class as of this read.
+    item_class: ItemClass,
+    /// Promotion Operation grouping as of this read.
+    operation_id: String,
 }
 
 /// One pre-sync display mapping candidate captured from the complete Promotion
@@ -404,6 +409,18 @@ pub enum RecoveryPromotionError {
     },
     #[error("Promotion Mutation {sequence} no longer targets a Local Item")]
     TargetNotLocal { sequence: i64 },
+    /// The confirmed Backend identity already belongs to another Item, so
+    /// attaching it would break the Repository Store's Backend Item and
+    /// Display ID uniqueness. Reported before any write so the operator sees
+    /// the collision rather than a SQL constraint.
+    #[error("Backend object {display_id} is already tracked by tk")]
+    BackendIdentityTaken { display_id: String },
+    /// `tk promote retry` exists to resolve an indeterminate creation. A
+    /// `failed` Promotion is already retried by ordinary sync, so routing it
+    /// through recovery would claim a duplicate-creation risk the operator
+    /// does not need to accept (ADR-0037).
+    #[error("Promotion Mutation {sequence} is in state {state}, not applying")]
+    RetryNotApplying { sequence: i64, state: MutationState },
     #[error("Remote changed while recovering the Promotion; retry the command")]
     RemoteChanged {
         expected: BackendKind,
@@ -591,17 +608,8 @@ pub fn reconcile_promotion(
         });
     }
     crate::store::sync::ensure_backend_cohort(&tx, current.backend_kind)?;
-    let earlier = tx
-        .query_row(
-            "select sequence, state from mutations where sequence < ?1 \
-          and state in ('pending', 'failed', 'applying') order by sequence limit 1",
-            params![current.sequence],
-            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, MutationState>(1)?)),
-        )
-        .optional()?;
-    if let Some((sequence, state)) = earlier {
-        return Err(RecoveryPromotionError::EarlierNonterminal { sequence, state });
-    }
+    ensure_no_earlier_nonterminal(&tx, current.sequence)?;
+    ensure_identity_unclaimed(&tx, &target.item_id, current.backend_kind, identity)?;
     let (title, body): (String, String) = tx.query_row(
         "select title, body from items where id = ?1",
         params![&target.item_id],
@@ -636,7 +644,72 @@ pub fn reconcile_promotion(
     Ok(())
 }
 
-/// Return a recoverable Promotion to pending so the normal ordered sync may
+/// Refuse recovery that would resolve a Promotion ahead of older unresolved
+/// intent, which global Mutation Sequence order forbids (ADR-0037).
+///
+/// A pure local read, so a command can reject the invocation before spending a
+/// Backend round trip. Every transition repeats it inside its own transaction,
+/// where the answer is authoritative.
+pub fn ensure_no_earlier_nonterminal(
+    conn: &Connection,
+    sequence: i64,
+) -> Result<(), RecoveryPromotionError> {
+    let earlier = conn
+        .query_row(
+            "select sequence, state from mutations where sequence < ?1 \
+          and state in ('pending', 'failed', 'applying') order by sequence limit 1",
+            params![sequence],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, MutationState>(1)?)),
+        )
+        .optional()?;
+    match earlier {
+        Some((sequence, state)) => {
+            Err(RecoveryPromotionError::EarlierNonterminal { sequence, state })
+        }
+        None => Ok(()),
+    }
+}
+
+/// Refuse a confirmed Backend identity that another Item already holds.
+///
+/// `apply_receipt` would otherwise hit `items_backend_unique` or the
+/// `item_ids.value` primary key and surface a SQL constraint to the operator.
+/// A mistyped Backend key and an object already imported by Adopt both land
+/// here.
+fn ensure_identity_unclaimed(
+    conn: &Connection,
+    item_id: &str,
+    backend_kind: BackendKind,
+    identity: &BackendItemIdentity,
+) -> Result<(), RecoveryPromotionError> {
+    let backend_taken = conn
+        .query_row(
+            "select 1 from items \
+              where backend_kind = ?1 and backend_key = ?2 and id <> ?3",
+            params![backend_kind.text(), &identity.backend_key, item_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    // `item_ids.value` is the nocase primary key, so this covers an existing
+    // Display ID and a retained Alias alike.
+    let display_taken = conn
+        .query_row(
+            "select 1 from item_ids where value = ?1 and item_id <> ?2",
+            params![&identity.display_id, item_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if backend_taken || display_taken {
+        return Err(RecoveryPromotionError::BackendIdentityTaken {
+            display_id: identity.display_id.clone(),
+        });
+    }
+    Ok(())
+}
+
+/// Return an indeterminate Promotion to pending so the normal ordered sync may
 /// attempt it again. Retrying never records an identity or advances the cursor.
 pub fn retry_promotion(
     conn: &mut Connection,
@@ -651,25 +724,22 @@ pub fn retry_promotion(
             target.item_id.clone(),
         ));
     }
-    let earlier = tx
-        .query_row(
-            "select sequence, state from mutations where sequence < ?1 \
-          and state in ('pending', 'failed', 'applying') order by sequence limit 1",
-            params![current.sequence],
-            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, MutationState>(1)?)),
-        )
-        .optional()?;
-    if let Some((sequence, state)) = earlier {
-        return Err(RecoveryPromotionError::EarlierNonterminal { sequence, state });
-    }
-    if matches!(
-        current.state,
-        MutationState::Applying | MutationState::Failed
-    ) {
-        tx.execute(
-            "update mutations set state = 'pending', failure_json = null, state_changed_at = ?2 where sequence = ?1",
-            params![current.sequence, now],
-        )?;
+    ensure_no_earlier_nonterminal(&tx, current.sequence)?;
+    match current.state {
+        MutationState::Applying => {
+            tx.execute(
+                "update mutations set state = 'pending', failure_json = null, state_changed_at = ?2 where sequence = ?1",
+                params![current.sequence, now],
+            )?;
+        }
+        // Already pending: the command stays idempotent and just resumes sync.
+        MutationState::Pending => {}
+        state => {
+            return Err(RecoveryPromotionError::RetryNotApplying {
+                sequence: current.sequence,
+                state,
+            });
+        }
     }
     tx.commit()?;
     Ok(())
@@ -1633,7 +1703,9 @@ mod tests {
 
     #[test]
     fn retry_returns_a_target_to_pending_without_moving_the_cursor() {
-        for state in ["pending", "failed", "applying"] {
+        // `pending` is the idempotent re-run; `applying` is the state the
+        // command exists for.
+        for state in ["pending", "applying"] {
             let mut conn = open_seeded();
             seed_recovery(
                 &conn,
@@ -1653,6 +1725,45 @@ mod tests {
             ).unwrap();
             assert_eq!(row, ("pending".into(), None, 0));
         }
+    }
+
+    /// Retry carries duplicate-creation risk, so it is reserved for an
+    /// indeterminate outcome. A rejected Promotion has certified no effect and
+    /// is already retried by ordinary sync (ADR-0037).
+    #[test]
+    fn retry_refuses_a_failed_promotion() {
+        let mut conn = open_seeded();
+        seed_recovery(
+            &conn,
+            "target",
+            "tk-1",
+            4,
+            "failed",
+            ItemClass::Ticket,
+            Some("op-1"),
+        );
+        let target = recoverable_promotion(&conn, "target").unwrap();
+        let workflow = RemoteWorkflowGuard::for_test();
+
+        assert!(matches!(
+            retry_promotion(&mut conn, &workflow, &target, NOW),
+            Err(RecoveryPromotionError::RetryNotApplying {
+                sequence: 4,
+                state: MutationState::Failed,
+            })
+        ));
+        let row: (String, Option<String>) = conn
+            .query_row(
+                "select state, failure_json from mutations where sequence = 4",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            ("failed".into(), Some(r#"{"detail":"prior"}"#.into())),
+            "the refusal leaves the recorded Mutation Failure intact"
+        );
     }
 
     #[test]
@@ -1842,15 +1953,79 @@ mod tests {
                 false,
                 NOW
             ),
-            Err(RecoveryPromotionError::Receipt(ApplyReceiptError::Storage(
-                _
-            )))
+            // A claimed identity is diagnosed before any write, so the
+            // operator never sees the underlying uniqueness constraint.
+            Err(RecoveryPromotionError::BackendIdentityTaken { ref display_id })
+                if display_id == "gh-42"
         ));
         let row: (String, String) = conn.query_row(
             "select i.origin, m.state from items i join mutations m on m.sequence = 4 where i.id = 'target'",
             [], |r| Ok((r.get(0)?, r.get(1)?)),
         ).unwrap();
         assert_eq!(row, ("local".into(), "applying".into()));
+    }
+
+    #[test]
+    fn reconcile_refuses_an_identity_another_item_already_holds() {
+        for (id, display, backend_key) in [
+            // Adopt imported the same object under its own Display ID.
+            ("adopted", "gh-9", Some("https://github.com/o/r/issues/42")),
+            // A different object already owns the incoming Display ID.
+            ("other", "gh-42", Some("https://github.com/o/r/issues/9")),
+        ] {
+            let mut conn = open_seeded();
+            seed_recovery(
+                &conn,
+                "target",
+                "tk-1",
+                4,
+                "applying",
+                ItemClass::Ticket,
+                Some("op-1"),
+            );
+            insert_fixture_item(
+                &conn,
+                FixtureItem {
+                    id,
+                    display,
+                    title: "Already tracked",
+                    origin: "backend",
+                    backend_kind: Some("github"),
+                    backend_key,
+                    created_seq: 5,
+                    ..FixtureItem::default()
+                },
+            )
+            .unwrap();
+            let target = recoverable_promotion(&conn, "target").unwrap();
+            let workflow = RemoteWorkflowGuard::for_test();
+
+            let err = reconcile_promotion(
+                &mut conn,
+                &workflow,
+                &target,
+                &receipt("https://github.com/o/r/issues/42", "gh-42"),
+                // Force cannot buy past a claimed identity.
+                true,
+                NOW,
+            )
+            .unwrap_err();
+
+            assert!(
+                matches!(
+                    err,
+                    RecoveryPromotionError::BackendIdentityTaken { ref display_id }
+                        if display_id == "gh-42"
+                ),
+                "{id} should claim the identity, got {err:?}"
+            );
+            let state: String = conn
+                .query_row("select state from mutations where sequence = 4", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(state, "applying", "{id}: the Promotion is untouched");
+        }
     }
 
     #[test]

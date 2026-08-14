@@ -292,7 +292,6 @@ struct IssueFields {
 }
 
 struct IssueContent {
-    number: i64,
     identity: BackendItemIdentity,
     title: String,
     body: String,
@@ -309,6 +308,13 @@ impl GhIssue {
         )))
     }
 
+    /// Canonical identity, or a read failure when `gh` returns something tk
+    /// must not bind an Item to.
+    ///
+    /// PR guard (ADR-0034): `gh issue view <n>` resolves a pull request too
+    /// (issue and PR numbers share one sequence) and returns it as an
+    /// issue-shaped object, so reject when the canonical url is a /pull/<n>
+    /// path. tk has no PR concept; the user meant an issue.
     fn validated_identity(&self) -> Result<BackendItemIdentity, AdapterReadError> {
         if is_pull_request_url(&self.url) {
             return Err(AdapterReadError::Failed(format!(
@@ -333,12 +339,10 @@ impl GhIssue {
     }
 
     fn into_fields(self) -> Result<IssueFields, AdapterReadError> {
-        let state = self.state.clone();
-        let issue_type = self.issue_type.as_ref().map(|value| value.name.clone());
-        let issue = self.into_content()?;
-        let number = issue.number;
+        let identity = self.validated_identity()?;
+        let number = self.number;
 
-        let status = match state.as_str() {
+        let status = match self.state.as_str() {
             "OPEN" => ItemStatus::Open,
             "CLOSED" => ItemStatus::Done,
             other => {
@@ -350,28 +354,23 @@ impl GhIssue {
         // "Bug" → Bug; every other value ("Task", "Feature", org-custom) and a
         // typeless issue → Task, matching the closed two-variant TicketKind
         // (ADR-0021). This read-only mapping never writes `--type`.
-        let ticket_kind = match issue_type.as_deref() {
+        let ticket_kind = match self.issue_type.as_ref().map(|t| t.name.as_str()) {
             Some("Bug") => TicketKind::Bug,
             _ => TicketKind::Task,
         };
         Ok(IssueFields {
             number,
-            backend_key: issue.identity.backend_key,
+            backend_key: identity.backend_key,
             ticket_kind,
-            title: issue.title,
-            body: issue.body,
+            title: self.title,
+            body: self.body,
             status,
         })
     }
 
     fn into_content(self) -> Result<IssueContent, AdapterReadError> {
-        // PR guard (ADR-0034): `gh issue view <n>` resolves a pull request too
-        // (issue and PR numbers share one sequence) and returns it as an
-        // issue-shaped object, so reject when the canonical url is a /pull/<n>
-        // path. tk has no PR concept; the user meant an issue.
         let identity = self.validated_identity()?;
         Ok(IssueContent {
-            number: self.number,
             identity,
             title: self.title,
             body: self.body,

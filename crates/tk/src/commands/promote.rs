@@ -219,6 +219,11 @@ fn reconcile(
     now: &str,
 ) -> Result<Exit, CommandError> {
     ensure_recovery_backend(adapter, recovery)?;
+    // Ordering is a local precondition, so refuse before spending a Backend
+    // round trip — and before a content mismatch sends the operator after
+    // '--force' for a refusal that would not have applied anyway.
+    store_promotion::ensure_no_earlier_nonterminal(store.conn(), recovery.sequence)
+        .map_err(|err| recovery_error(err, &recovery.outgoing_display_id))?;
     let inspection = adapter
         .inspect_item(&args.backend_key)
         .map_err(|err| inspection_error(&args.backend_key, err))?;
@@ -530,12 +535,7 @@ fn append_secondary_error(primary: CommandError, secondary: CommandError) -> Com
 }
 
 fn created_identity_storage_detail(storage: &rusqlite::Error) -> String {
-    use rusqlite::ErrorCode;
-    if matches!(
-        storage,
-        rusqlite::Error::SqliteFailure(inner, _)
-            if matches!(inner.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
-    ) {
+    if resolver::is_busy_error(storage) {
         "The Repository Store was busy while saving the created identity.".into()
     } else {
         format!("The created identity could not be saved in the Repository Store: {storage}")
@@ -558,22 +558,33 @@ fn render_recovery_mappings<W: Write + ?Sized>(
     store: &Store,
     captured: &[RecoveryPromotionMapping],
 ) -> Result<(), CommandError> {
+    // Nested sync drains the whole queue, so a corruption finding on one
+    // captured Promotion must not hide the replacements that did land. Report
+    // every mapping first and surface the finding afterwards; only an
+    // unreadable Store aborts, because the next row would fail the same way.
+    let mut corruption: Option<CommandError> = None;
     for item in captured {
-        let current =
-            resolver::resolve_with_display(store, &item.outgoing_display_id).map_err(|err| {
-                match err {
-                    resolver::ResolveError::NotFound => CommandError::failure(format!(
+        let current = match resolver::resolve_with_display(store, &item.outgoing_display_id) {
+            Ok(current) => current,
+            Err(resolver::ResolveError::NotFound) => {
+                corruption.get_or_insert_with(|| {
+                    CommandError::failure(format!(
                         "Repository Store corruption: Promotion alias {} disappeared",
                         item.outgoing_display_id
-                    )),
-                    resolver::ResolveError::Storage(err) => resolver::storage_error(&err),
-                }
-            })?;
+                    ))
+                });
+                continue;
+            }
+            Err(resolver::ResolveError::Storage(err)) => return Err(resolver::storage_error(&err)),
+        };
         if current.id != item.item_id {
-            return Err(CommandError::failure(format!(
-                "Repository Store corruption: Promotion alias {} changed ownership",
-                item.outgoing_display_id
-            )));
+            corruption.get_or_insert_with(|| {
+                CommandError::failure(format!(
+                    "Repository Store corruption: Promotion alias {} changed ownership",
+                    item.outgoing_display_id
+                ))
+            });
+            continue;
         }
         if current.display_id != item.outgoing_display_id {
             let _ = writeln!(
@@ -585,7 +596,10 @@ fn render_recovery_mappings<W: Write + ?Sized>(
             );
         }
     }
-    Ok(())
+    match corruption {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
 }
 
 /// Preflight, commit, sync, report — the operation itself, once the Repository
@@ -789,8 +803,14 @@ fn unresolved_failure(
                     "Resolve that Mutation — 'tk sync log {}' shows why it stopped — then run 'tk sync' to apply the Promotion.",
                     blocker.sequence
                 ),
-                // Never attempted, so there is nothing recorded against it and
-                // nothing to resolve — see `recovery_guidance`.
+                // Automatic sync can never clear the blocker, so naming it is
+                // the only actionable guidance — see `recovery_guidance`.
+                MutationState::Applying => format!(
+                    "Inspect it with 'tk sync log {}'. Then use 'tk promote reconcile {} <backend-key>' if the Backend object exists, or 'tk promote retry {}' only when creating it again is safe.",
+                    blocker.sequence, blocker.target_display_id, blocker.target_display_id
+                ),
+                // Still `pending`: never attempted, so there is nothing
+                // recorded against it and nothing to resolve.
                 _ => "Fix the cause above, then run 'tk sync' to apply the Promotion.".to_owned(),
             },
         ),
@@ -957,10 +977,34 @@ fn recovery_error(err: RecoveryPromotionError, display_id: &str) -> CommandError
         RecoveryPromotionError::RemoteChanged { .. } => CommandError::failure(format!(
             "the configured Remote changed while recovering the Promotion for {display_id}; retry the command"
         )),
-        RecoveryPromotionError::BackendCohort(err) => {
+        RecoveryPromotionError::BackendIdentityTaken {
+            display_id: backend_display_id,
+        } => CommandError::failure(format!(
+            "Backend object {backend_display_id} is already tracked by tk, so the Promotion for {display_id} was left unchanged\nConfirm the Backend object this Promotion created, or resolve the duplicate first."
+        )),
+        RecoveryPromotionError::RetryNotApplying { sequence, state } => {
+            CommandError::failure(format!(
+                "the Promotion for {display_id} is {state}, not an indeterminate creation; Mutation {sequence} is retried by 'tk sync'"
+            ))
+        }
+        // Named exhaustively rather than caught by `_`, so a variant added
+        // later has to be classified here instead of inheriting a corruption
+        // diagnosis it may not deserve.
+        RecoveryPromotionError::MultipleNonterminalPromotions { first, second, .. } => {
+            CommandError::failure(format!(
+                "Repository Store corruption: '{display_id}' has multiple nonterminal Promotion Mutations ({first} and {second})"
+            ))
+        }
+        err @ (RecoveryPromotionError::MalformedPayload { .. }
+        | RecoveryPromotionError::MalformedBackendKind { .. }
+        | RecoveryPromotionError::MissingOperationId(_)
+        | RecoveryPromotionError::WrongMutationShape { .. }
+        | RecoveryPromotionError::TargetNotLocal { .. }
+        | RecoveryPromotionError::BackendCohort(_)
+        | RecoveryPromotionError::Receipt(_)
+        | RecoveryPromotionError::Append(_)) => {
             CommandError::failure(format!("Repository Store corruption: {err}"))
         }
-        err => CommandError::failure(format!("Repository Store corruption: {err}")),
     }
 }
 
@@ -2464,6 +2508,110 @@ mod tests {
              Sync stopped: Mutation 1 has an indeterminate Backend creation outcome\n\
              Inspect it with 'tk sync log 1'. Then use 'tk promote reconcile <id> <backend-key>' if the Backend object exists, or 'tk promote retry <id>' only when creating it again is safe.\n"
         );
+    }
+
+    /// ADR-0037 lets a Promotion commit behind an unresolved creation, so this
+    /// diagnostic has to name the recovery commands. Automatic sync can never
+    /// clear an `applying` blocker, and recommending it would loop the operator.
+    #[test]
+    fn an_older_applying_mutation_points_at_promotion_recovery() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        local_ticket(&conn, "t0", "tk-9", 1);
+        local_ticket(&conn, "t1", "tk-1", 2);
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "promote_ticket",
+                item_id: "t0",
+                payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
+                state: "applying",
+                failure_json: Some(r#"{"detail":"gh timed out"}"#),
+                promotion_operation_id: Some("op-old"),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "update sequences set value = 1 where name = 'mutation_seq'",
+            [],
+        )
+        .unwrap();
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        let mut st = open_store(&h, &store, &cwd_path);
+        let mut fake = adapter_with_refresh(vec![], vec![]);
+
+        let code = promote_rendered(&mut h, &mut st, &mut fake, "tk-1", false);
+
+        assert_eq!(code, Exit::Failure);
+        assert_eq!(
+            h.err(),
+            "tk promote: the Promotion is committed and remains pending behind Mutation 1 (applying) for tk-9\n\
+             Sync stopped: Mutation 1 has an indeterminate Backend creation outcome\n\
+             Inspect it with 'tk sync log 1'. Then use 'tk promote reconcile tk-9 <backend-key>' if the Backend object exists, or 'tk promote retry tk-9' only when creating it again is safe.\n"
+        );
+        let state: String = conn
+            .query_row("select state from mutations where sequence = 2", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            state, "pending",
+            "the Promotion is durable behind the barrier"
+        );
+    }
+
+    /// The operator's most likely mistake is naming an object tk already
+    /// tracks — often one Adopt imported while the Promotion hung. That must
+    /// read as a collision, not as the uniqueness constraint underneath.
+    #[test]
+    fn reconcile_refuses_a_backend_object_tk_already_tracks() {
+        let fixture = TmpStore::new("repo");
+        let mut conn = seed_store(&fixture);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "adopted",
+                display: "gh-42",
+                title: "Already tracked",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("42"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        local_ticket(&conn, "t1", "tk-1", 2);
+        commit_promotion(&mut conn, "t1");
+        conn.execute("update mutations set state = 'applying'", [])
+            .unwrap();
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        let mut store = open_store(&h, &fixture, &cwd_path);
+        let mut fake =
+            FakeAdapter::new().with_inspections(vec![inspection("gh-42", "42", "Local work", "")]);
+
+        let code = reconcile_rendered(&mut h, &mut store, &mut fake, "tk-1", "42", false);
+
+        assert_eq!(code, Exit::Failure);
+        assert_eq!(h.out(), "");
+        assert_eq!(
+            h.err(),
+            "tk promote: Backend object gh-42 is already tracked by tk, so the Promotion for tk-1 was left unchanged\n\
+             Confirm the Backend object this Promotion created, or resolve the duplicate first.\n"
+        );
+        let row: (String, String) = conn
+            .query_row(
+                "select i.origin, m.state from items i join mutations m on m.item_id = i.id \
+                   where i.id = 't1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row, ("local".into(), "applying".into()));
     }
 
     #[test]

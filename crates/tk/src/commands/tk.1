@@ -397,12 +397,15 @@ body to match the retained Promotion snapshot exactly.
 accepts a content mismatch only after the operator confirms the candidate.
 The confirmed identity is attached atomically and current local title and body
 are queued to converge the Backend object. Normal Backend Pull remains
-authoritative for lifecycle state after attachment.
+authoritative for lifecycle state after attachment. A Backend object another
+Item already tracks is refused with or without
+.BR \-\-force .
 .TP
 \fBtk promote retry\fR \fIid\fR
-Explicitly return an applying or failed Promotion to pending and run normal
-ordered sync. Use this only when creating the Backend object again is safe;
-automatic sync never replays an indeterminate creation.
+Explicitly return a Promotion with an indeterminate creation outcome to pending
+and run normal ordered sync. Use this only when creating the Backend object
+again is safe; automatic sync never replays an indeterminate creation. A failed
+Promotion is refused, because ordinary sync already retries it.
 .PP
 Recovery cannot pass an earlier pending, failed, or applying Mutation. Both
 forms hold the Remote workflow lock through Backend access, Store changes, and

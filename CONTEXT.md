@@ -228,8 +228,9 @@ content as convergence intent.
 _Avoid_: Promotion Repair, Manual Receipt
 
 **Promotion Retry**:
-The explicit-risk recovery that returns a nonterminal **Promotion** to pending
-and lets normal ordered sync attempt Backend creation again.
+The explicit-risk recovery that returns an indeterminate **Promotion** to
+pending and lets normal ordered sync attempt Backend creation again. A failed
+**Promotion** is not a Promotion Retry input; ordinary sync already retries it.
 _Avoid_: Automatic Retry, Replay
 
 **Mutation**:
@@ -449,6 +450,8 @@ _Avoid_: ticket, tickets
   body to match the retained Promotion snapshot. Forced reconciliation binds
   the confirmed Backend identity and appends current local title and body as
   convergence intent in the same **Promotion Operation**.
+- **Promotion Reconciliation** refuses a Backend identity another **Item**
+  already holds, with or without force.
 - Backend status is authoritative after reconciliation. The nested sync may
   import a closed Backend object as a `done` Item.
 - A **Sync Conflict** is a kind of **Mutation Failure**.
