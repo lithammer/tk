@@ -125,7 +125,11 @@ pub fn backend_binding_error(err: &mutations::BackendBindingError) -> CommandErr
     }
 }
 
-fn is_busy_error(err: &rusqlite::Error) -> bool {
+/// Whether a Repository Store error is transient contention the operator can
+/// resolve by retrying, rather than a fault to report. The single definition
+/// of "retryable" for every command that classifies a storage failure.
+#[must_use]
+pub fn is_busy_error(err: &rusqlite::Error) -> bool {
     use rusqlite::ErrorCode;
     if let rusqlite::Error::SqliteFailure(inner, _) = err {
         return matches!(

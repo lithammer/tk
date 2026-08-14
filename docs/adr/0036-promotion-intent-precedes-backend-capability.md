@@ -1,5 +1,12 @@
 # Promotion intent precedes Backend capability
 
+> **Amended by ADR-0037.** The global `applying` barrier below no longer stops
+> Promotion commit: a later Promotion Operation may append durable intent
+> behind an unresolved creation, and global Mutation Sequence order keeps that
+> intent from applying until the earlier Mutation resolves. The barrier still
+> stops Backend Pull, Mutation Apply, Adopt, and Remote clear. ADR-0037 also
+> supplies the operator recovery workflow this decision deferred.
+
 tk-136 builds the whole local half of Promotion — preflight, the ordered
 outbox, and receipt application — before a Backend in the same build may act
 on it. The first creation slice must add its duplicate guard at the same time

@@ -270,6 +270,7 @@ pub fn commit_promotion(conn: &mut Connection, id: &str) {
     }
     crate::store::promotion::commit_plan(
         conn,
+        &crate::store::repository::RemoteWorkflowGuard::for_test(),
         &plan,
         BackendKind::Github,
         &mut rand::rngs::StdRng::seed_from_u64(7),

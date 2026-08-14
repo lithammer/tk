@@ -219,6 +219,20 @@ The durable identity of one `tk promote` invocation, shared by every
 whether the whole operation resolved.
 _Avoid_: Promotion Batch, Promotion Transaction, Promotion Group
 
+**Promotion Reconciliation**:
+The explicit recovery that binds a **Pending Promotion** to a confirmed
+existing Backend object after creation had an indeterminate outcome. Exact
+reconciliation compares the Backend title and body with the retained
+**Promotion** snapshot; forced reconciliation also records current local
+content as convergence intent.
+_Avoid_: Promotion Repair, Manual Receipt
+
+**Promotion Retry**:
+The explicit-risk recovery that returns an indeterminate **Promotion** to
+pending and lets normal ordered sync attempt Backend creation again. A failed
+**Promotion** is not a Promotion Retry input; ordinary sync already retries it.
+_Avoid_: Automatic Retry, Replay
+
 **Mutation**:
 A durable local intent to modify **tk** domain state through a **Backend**. Its
 target is a **Backend Ticket** or **Backend Epic**, or a **Pending Promotion**
@@ -408,9 +422,10 @@ _Avoid_: ticket, tickets
   `applied`, and advances the Sync Cursor. **Rejected** marks it `failed`.
   **Indeterminate** keeps it `applying` with durable diagnostic evidence.
 - An `applying` Mutation is excluded from automatic replay and blocks Backend
-  Pull, Mutation Apply, Adopt, Promotion commit, and Remote clear until an
-  explicit recovery workflow resolves its certainty. Local Repository Store
-  edits remain available.
+  Pull, Mutation Apply, Adopt, and Remote clear until an explicit recovery
+  workflow resolves its certainty. Local Repository Store edits remain
+  available, and later Promotion intent may be committed behind the barrier
+  without applying.
 - `tk sync`, `tk adopt`, `tk promote`, and Remote configuration changes hold
   the repository-scoped Remote workflow lock across their Backend and
   Repository Store effects. The stable lock file is
@@ -428,6 +443,17 @@ _Avoid_: ticket, tickets
 - A failed edit or certified-no-effect creation keeps a **Mutation Failure**
   and is retried by the next sync. An `applying` creation is never retried
   automatically.
+- **Promotion Reconciliation** and **Promotion Retry** resolve nonterminal
+  Promotions explicitly. Recovery cannot pass an earlier `pending`, `failed`,
+  or `applying` **Mutation** in global **Mutation Sequence** order.
+- Exact **Promotion Reconciliation** requires the inspected Backend title and
+  body to match the retained Promotion snapshot. Forced reconciliation binds
+  the confirmed Backend identity and appends current local title and body as
+  convergence intent in the same **Promotion Operation**.
+- **Promotion Reconciliation** refuses a Backend identity another **Item**
+  already holds, with or without force.
+- Backend status is authoritative after reconciliation. The nested sync may
+  import a closed Backend object as a `done` Item.
 - A **Sync Conflict** is a kind of **Mutation Failure**.
 - v1 has no automatic merge or local conflict resolution model.
 - A failed **Mutation** may become a **Skipped Mutation** only through **Sync Skip**.

@@ -37,7 +37,7 @@ tk sync log
 - Use `tk done <id>` for completed scoped work.
 - Use `tk add` for follow-ups, deferred decisions, or context that should
   survive a fresh session.
-- Surface pending, failed, or skipped Mutations from `tk sync log`.
+- Surface pending, failed, applying, or skipped Mutations from `tk sync log`.
 - State whether code is uncommitted, committed, or waiting for an explicit push.
 
 ## Essential Commands
@@ -96,6 +96,8 @@ create or manage git worktrees; use `git worktree` directly.
 
 ```sh
 tk promote <id> [--children]
+tk promote reconcile <id> <backend-key>
+tk promote retry <id>
 tk sync
 tk sync --skip <mutation-id>
 tk remote
@@ -103,3 +105,8 @@ tk remote
 
 Agents should surface promotion, sync failures, and skipped Mutations rather
 than quietly repairing upstream state.
+
+An `applying` Mutation means tk could not observe whether Backend creation
+succeeded. Resolving it is a human decision, so surface it rather than choosing:
+`tk promote reconcile` attaches a Backend object the human has confirmed
+already exists, and `tk promote retry` accepts the risk of creating a duplicate.

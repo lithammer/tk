@@ -544,14 +544,16 @@ fn tk_scope_env_filters_list_to_the_epic() {
 fn command_help_snapshots() {
     let p = Repo::new("repo");
     for command in [
-        "accept", "add", "block", "done", "grep", "list", "next", "park", "search", "show",
-        "unblock", "unpark", "update",
+        "accept", "add", "block", "done", "grep", "list", "next", "park", "promote", "search",
+        "show", "unblock", "unpark", "update",
     ] {
         insta::assert_snapshot!(
             format!("help_{command}"),
             p.run(&format!("{command} --help"))
         );
     }
+    insta::assert_snapshot!("help_promote_reconcile", p.run("promote reconcile --help"));
+    insta::assert_snapshot!("help_promote_retry", p.run("promote retry --help"));
 }
 
 /// `tk search` is a flat, whole-store title lookup across every Item Status
@@ -846,5 +848,41 @@ fn promote_children_on_a_ticket_is_a_usage_error() {
     -- stdout --
     -- stderr --
     tk promote: 'project-1' is not an Epic; --children promotes the Promotion Children of an Epic
+    ");
+}
+
+#[test]
+fn promote_recovery_subcommands_resolve_their_explicit_target() {
+    let p = Repo::new("project");
+    p.run("init");
+
+    tk!(p, "promote reconcile project-404 42", @"
+    exit 1
+    -- stdout --
+    -- stderr --
+    tk promote: 'project-404' is not a known Display ID or Alias
+    ");
+    tk!(p, "promote retry project-404", @"
+    exit 1
+    -- stdout --
+    -- stderr --
+    tk promote: 'project-404' is not a known Display ID or Alias
+    ");
+}
+
+#[test]
+fn promote_recovery_subcommands_conflict_with_creation_arguments() {
+    let p = Repo::new("project");
+
+    tk!(p, "promote project-1 reconcile project-1 42", @"
+    exit 2
+    -- stdout --
+    -- stderr --
+    error: the subcommand 'reconcile' cannot be used with '<ID>'
+
+    Usage: tk promote [OPTIONS] <ID>
+           tk promote <COMMAND>
+
+    For more information, try '--help'.
     ");
 }

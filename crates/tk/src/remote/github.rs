@@ -16,7 +16,8 @@ use serde::Deserialize;
 
 use crate::domain::backend_kind::BackendKind;
 use crate::domain::backend_operation::{
-    AdoptedItem, BackendCreate, BackendEdit, BackendItemIdentity, BackendItemRefresh,
+    AdoptedItem, BackendCreate, BackendEdit, BackendItemIdentity, BackendItemInspection,
+    BackendItemRefresh,
 };
 use crate::domain::backend_outcome::{
     BackendCreateOutcome, BackendEditOutcome, Failure, FailureClass,
@@ -59,14 +60,11 @@ impl Adapter for GithubAdapter<'_> {
     }
 
     fn refresh_item(&mut self, key: &str) -> Result<BackendItemRefresh, AdapterReadError> {
-        let issue = self.view_issue(key)?;
-        if !issue.matches_key(key) {
-            return Err(AdapterReadError::Failed(format!(
-                "GitHub resolved '{key}' to a different issue ({})",
-                issue.url
-            )));
-        }
-        issue.into_refresh()
+        self.view_matching_issue(key)?.into_refresh()
+    }
+
+    fn inspect_item(&mut self, key: &str) -> Result<BackendItemInspection, AdapterReadError> {
+        self.view_matching_issue(key)?.into_inspection()
     }
 
     fn apply_edit(&mut self, edit: &BackendEdit) -> Result<BackendEditOutcome, ApplyError> {
@@ -251,6 +249,14 @@ impl GithubAdapter<'_> {
             AdapterReadError::Failed(format!("could not parse gh issue JSON for #{key}: {e}"))
         })
     }
+
+    /// Fetch one issue and reject if `gh` returns another identity. Adopt
+    /// remains the separate canonicalization entrypoint.
+    fn view_matching_issue(&self, key: &str) -> Result<GhIssue, AdapterReadError> {
+        let issue = self.view_issue(key)?;
+        issue.validate_key(key)?;
+        Ok(issue)
+    }
 }
 
 /// Raw `gh issue view --json` shape. Only the fields tk maps are named; serde
@@ -285,29 +291,63 @@ struct IssueFields {
     status: ItemStatus,
 }
 
+struct IssueContent {
+    identity: BackendItemIdentity,
+    title: String,
+    body: String,
+}
+
 impl GhIssue {
-    fn matches_key(&self, key: &str) -> bool {
-        key == self.number.to_string() || key == self.url
+    fn validate_key(&self, key: &str) -> Result<(), AdapterReadError> {
+        if key == self.number.to_string() || key == self.url {
+            return Ok(());
+        }
+        Err(AdapterReadError::Failed(format!(
+            "GitHub resolved '{key}' to a different issue ({})",
+            self.url
+        )))
     }
 
-    fn into_fields(self) -> Result<IssueFields, AdapterReadError> {
-        // PR guard (ADR-0034): `gh issue view <n>` resolves a pull request too
-        // (issue and PR numbers share one sequence) and returns it as an
-        // issue-shaped object, so reject when the canonical url is a /pull/<n>
-        // path. tk has no PR concept; the user meant an issue.
+    /// Canonical identity, or a read failure when `gh` returns something tk
+    /// must not bind an Item to.
+    ///
+    /// PR guard (ADR-0034): `gh issue view <n>` resolves a pull request too
+    /// (issue and PR numbers share one sequence) and returns it as an
+    /// issue-shaped object, so reject when the canonical url is a /pull/<n>
+    /// path. tk has no PR concept; the user meant an issue.
+    fn validated_identity(&self) -> Result<BackendItemIdentity, AdapterReadError> {
         if is_pull_request_url(&self.url) {
             return Err(AdapterReadError::Failed(format!(
                 "#{} is a pull request, not an issue",
                 self.number
             )));
         }
+        let identity = parse_issue_url(&self.url).ok_or_else(|| {
+            AdapterReadError::Failed(format!(
+                "#{}: GitHub returned a non-canonical issue URL ({})",
+                self.number, self.url
+            ))
+        })?;
+        let display_id = format!("gh-{}", self.number);
+        if identity.display_id != display_id {
+            return Err(AdapterReadError::Failed(format!(
+                "#{}: GitHub returned an issue URL for a different number ({})",
+                self.number, self.url
+            )));
+        }
+        Ok(identity)
+    }
+
+    fn into_fields(self) -> Result<IssueFields, AdapterReadError> {
+        let identity = self.validated_identity()?;
+        let number = self.number;
+
         let status = match self.state.as_str() {
             "OPEN" => ItemStatus::Open,
             "CLOSED" => ItemStatus::Done,
             other => {
                 return Err(AdapterReadError::Failed(format!(
-                    "#{}: unexpected issue state '{other}'",
-                    self.number
+                    "#{number}: unexpected issue state '{other}'"
                 )));
             }
         };
@@ -319,12 +359,21 @@ impl GhIssue {
             _ => TicketKind::Task,
         };
         Ok(IssueFields {
-            number: self.number,
-            backend_key: self.url,
+            number,
+            backend_key: identity.backend_key,
             ticket_kind,
             title: self.title,
             body: self.body,
             status,
+        })
+    }
+
+    fn into_content(self) -> Result<IssueContent, AdapterReadError> {
+        let identity = self.validated_identity()?;
+        Ok(IssueContent {
+            identity,
+            title: self.title,
+            body: self.body,
         })
     }
 
@@ -349,6 +398,15 @@ impl GhIssue {
             ticket_kind: Some(issue.ticket_kind),
         })
     }
+
+    fn into_inspection(self) -> Result<BackendItemInspection, AdapterReadError> {
+        let issue = self.into_content()?;
+        Ok(BackendItemInspection {
+            identity: issue.identity,
+            title: issue.title,
+            body: issue.body,
+        })
+    }
 }
 
 /// True when `url`'s path ends in `/pull/<digits>` — GitHub's canonical PR url
@@ -364,18 +422,14 @@ fn is_pull_request_url(url: &str) -> bool {
     }
 }
 
-/// Parse the canonical one-line URL receipt emitted by `gh issue create`.
+/// Parse a canonical GitHub issue URL into its Backend identity.
 ///
-/// The URL itself becomes the Backend key, retaining host and repository
-/// identity without a separate Remote setting (ADR-0033). Requiring HTTPS and
-/// the exact `<host>/<owner>/<repo>/issues/<positive number>` shape rejects
-/// prose, API URLs, pull requests, and query or fragment suffixes.
-fn parse_create_receipt(stdout: &[u8]) -> Option<BackendItemIdentity> {
-    let receipt = std::str::from_utf8(stdout).ok()?.trim();
-    if receipt.lines().count() != 1 {
-        return None;
-    }
-    let mut segments = receipt.split('/');
+/// Requiring HTTPS and the exact
+/// `<host>/<owner>/<repo>/issues/<positive number>` shape keeps the URL and
+/// Display ID consistent before the identity crosses into the Repository
+/// Store.
+fn parse_issue_url(url: &str) -> Option<BackendItemIdentity> {
+    let mut segments = url.split('/');
     let scheme = segments.next()?;
     let empty = segments.next()?;
     let host = segments.next()?;
@@ -403,11 +457,23 @@ fn parse_create_receipt(stdout: &[u8]) -> Option<BackendItemIdentity> {
     if number <= 0 {
         return None;
     }
-    let backend_key = receipt.to_owned();
+    let backend_key = url.to_owned();
     Some(BackendItemIdentity {
         display_id: format!("gh-{number}"),
         backend_key,
     })
+}
+
+/// Parse the canonical one-line URL receipt emitted by `gh issue create`.
+///
+/// The URL itself becomes the Backend key, retaining host and repository
+/// identity without a separate Remote setting (ADR-0033).
+fn parse_create_receipt(stdout: &[u8]) -> Option<BackendItemIdentity> {
+    let receipt = std::str::from_utf8(stdout).ok()?.trim();
+    if receipt.lines().count() != 1 {
+        return None;
+    }
+    parse_issue_url(receipt)
 }
 
 fn create_failure_detail(output: &RunOutput, stderr: &str) -> String {
@@ -632,6 +698,200 @@ mod tests {
         let s = adapter.refresh_item("7").unwrap();
         assert_eq!(s.status, ItemStatus::Done);
         assert_eq!(s.ticket_kind, Some(TicketKind::Bug));
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn inspect_requests_exact_argv_and_returns_canonical_identity_and_content() {
+        let key = "42";
+        let runner = FakeRunner::new();
+        runner.expect_exact(
+            &["gh", "issue", "view", key, "--json", ISSUE_JSON_FIELDS],
+            ok(&issue_json(
+                42,
+                "OPEN",
+                "Bug",
+                "https://github.com/o/r/issues/42",
+            )),
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let inspection = adapter.inspect_item(key).unwrap();
+        assert_eq!(
+            inspection.identity,
+            BackendItemIdentity {
+                backend_key: "https://github.com/o/r/issues/42".into(),
+                display_id: "gh-42".into(),
+            }
+        );
+        assert_eq!(inspection.title, "T42");
+        assert_eq!(inspection.body, "B");
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn inspect_rejects_a_numeric_key_that_resolves_to_another_issue() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(
+            &["gh", "issue", "view", "1", "--json", ISSUE_JSON_FIELDS],
+            ok(&issue_json(
+                2,
+                "OPEN",
+                "Task",
+                "https://github.com/o/r/issues/2",
+            )),
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+
+        let AdapterReadError::Failed(detail) = adapter.inspect_item("1").unwrap_err() else {
+            panic!("redirected identity must be a Backend read failure")
+        };
+        assert!(detail.contains("resolved '1' to a different issue"));
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn inspect_rejects_a_url_key_that_resolves_to_another_issue() {
+        let key = "https://github.com/o/r/issues/1";
+        let runner = FakeRunner::new();
+        runner.expect_exact(
+            &["gh", "issue", "view", key, "--json", ISSUE_JSON_FIELDS],
+            ok(&issue_json(
+                2,
+                "OPEN",
+                "Task",
+                "https://github.com/o/r/issues/2",
+            )),
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+
+        let AdapterReadError::Failed(detail) = adapter.inspect_item(key).unwrap_err() else {
+            panic!("redirected identity must be a Backend read failure")
+        };
+        assert!(detail.contains("resolved"));
+        assert!(detail.contains("issues/2"));
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn inspect_rejects_an_issue_number_that_disagrees_with_its_url() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(
+            &["gh", "issue", "view", "1", "--json", ISSUE_JSON_FIELDS],
+            ok(&issue_json(
+                1,
+                "OPEN",
+                "Task",
+                "https://github.com/o/r/issues/2",
+            )),
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+
+        let AdapterReadError::Failed(detail) = adapter.inspect_item("1").unwrap_err() else {
+            panic!("inconsistent identity must be a Backend read failure")
+        };
+        assert!(detail.contains("URL for a different number"));
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn inspect_rejects_a_noncanonical_issue_url() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(
+            &["gh", "issue", "view", "1", "--json", ISSUE_JSON_FIELDS],
+            ok(&issue_json(
+                1,
+                "OPEN",
+                "Task",
+                "http://github.com/o/r/issues/1",
+            )),
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+
+        let AdapterReadError::Failed(detail) = adapter.inspect_item("1").unwrap_err() else {
+            panic!("noncanonical identity must be a Backend read failure")
+        };
+        assert!(detail.contains("non-canonical issue URL"));
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn inspect_does_not_map_backend_status() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(
+            &["gh", "issue", "view", "42", "--json", ISSUE_JSON_FIELDS],
+            ok(&issue_json(
+                42,
+                "FUTURE_STATE",
+                "Bug",
+                "https://github.com/o/r/issues/42",
+            )),
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+
+        let inspection = adapter.inspect_item("42").unwrap();
+
+        assert_eq!(inspection.identity.display_id, "gh-42");
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn inspect_rejects_a_pull_request() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(
+            &["gh", "issue", "view", "99", "--json", ISSUE_JSON_FIELDS],
+            ok(&issue_json(
+                99,
+                "OPEN",
+                "null",
+                "https://github.com/o/r/pull/99",
+            )),
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        match adapter.inspect_item("99").unwrap_err() {
+            AdapterReadError::Failed(detail) => {
+                assert!(detail.contains("#99 is a pull request"), "{detail}");
+            }
+            AdapterReadError::Env(error) => panic!("expected Failed, got Env({error:?})"),
+        }
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn inspect_non_zero_exit_is_adapter_failure() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(
+            &["gh", "issue", "view", "42", "--json", ISSUE_JSON_FIELDS],
+            fail(1, "GraphQL: issue not found"),
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        assert!(matches!(
+            adapter.inspect_item("42").unwrap_err(),
+            AdapterReadError::Failed(detail) if detail == "GraphQL: issue not found"
+        ));
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn inspect_spawn_failure_is_environment_failure() {
+        let runner = FakeRunner::new();
+        runner.expect_exact_error(
+            &["gh", "issue", "view", "42", "--json", ISSUE_JSON_FIELDS],
+            ProcError::ExecutableNotFound,
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        assert!(matches!(
+            adapter.inspect_item("42").unwrap_err(),
+            AdapterReadError::Env(ProcError::ExecutableNotFound)
+        ));
         runner.assert_all_consumed();
     }
 

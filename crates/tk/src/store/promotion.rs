@@ -22,7 +22,8 @@
 //! command tells a Promotion queued behind an older Mutation from one whose
 //! own Mutations did not land.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::str::FromStr;
 
 use rand::Rng;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -30,11 +31,15 @@ use thiserror::Error;
 
 use crate::domain::backend_kind::BackendKind;
 use crate::domain::backend_operation::BackendItemIdentity;
+use crate::domain::item_class::ItemClass;
+use crate::domain::mutation_payload::{MutationPayload, Promotion, TitleBody};
 use crate::domain::mutation_state::MutationState;
+use crate::domain::mutation_type::MutationType;
 use crate::domain::origin::Origin;
 use crate::domain::promotion_graph::{GraphDependency, GraphItem, PromotionGraph};
 use crate::domain::promotion_plan::PromotionPlan;
 use crate::store::mutations;
+use crate::store::repository::RemoteWorkflowGuard;
 use crate::store::repository::create::generate_internal_id;
 
 /// Error returned by [`read_graph`].
@@ -188,8 +193,6 @@ pub enum CommitPlanError {
         expected: BackendKind,
         actual: Option<BackendKind>,
     },
-    #[error("Mutation {0} has an indeterminate Backend creation outcome")]
-    ApplyingMutation(i64),
 }
 
 /// Commit `plan` to the Mutation Log outbox as one Promotion Operation, in
@@ -206,20 +209,18 @@ pub enum CommitPlanError {
 /// allocates sequences as it goes.
 ///
 /// An empty plan appends nothing and returns `None` rather than minting an
-/// identity that would own zero Mutations. The global `applying` barrier is
-/// checked first, so even a no-op Promotion commit cannot race unresolved
-/// Backend creation.
+/// identity that would own zero Mutations. The workflow guard proves the
+/// caller owns the Remote workflow while appending behind any unresolved
+/// creation; ordered sync remains blocked at that earlier Mutation.
 pub fn commit_plan<R: Rng + ?Sized>(
     conn: &mut Connection,
+    _workflow: &RemoteWorkflowGuard,
     plan: &PromotionPlan,
     expected_kind: BackendKind,
     rng: &mut R,
     now: &str,
 ) -> Result<Option<String>, CommitPlanError> {
     let tx = crate::store::write_transaction(conn)?;
-    if let Some(sequence) = crate::store::sync::applying_mutation_sequence(&tx)? {
-        return Err(CommitPlanError::ApplyingMutation(sequence));
-    }
     if plan.is_empty() {
         return Ok(None);
     }
@@ -250,6 +251,17 @@ pub fn commit_plan<R: Rng + ?Sized>(
     Ok(Some(operation_id))
 }
 
+/// Error returned by [`apply_receipt`].
+#[derive(Debug, Error)]
+pub enum ApplyReceiptError {
+    #[error(transparent)]
+    Storage(#[from] rusqlite::Error),
+    #[error("Promotion Mutation targets Item {0}, which no longer exists")]
+    ItemNotFound(String),
+    #[error("Promotion Mutation targets Item {0}, which is not Local")]
+    TargetNotLocal(String),
+}
+
 /// Convert the Local Item `item_id` into a Backend Item using the identity its
 /// Promotion receipt carries: store `backend_kind` / `receipt.backend_key`,
 /// replace the Display ID with `receipt.display_id`, and keep the outgoing
@@ -269,7 +281,19 @@ pub fn apply_receipt(
     backend_kind: &str,
     receipt: &BackendItemIdentity,
     now: &str,
-) -> rusqlite::Result<()> {
+) -> Result<(), ApplyReceiptError> {
+    let origin: Option<Origin> = conn
+        .query_row(
+            "select origin from items where id = ?1",
+            params![item_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match origin {
+        Some(Origin::Local) => {}
+        Some(Origin::Backend) => return Err(ApplyReceiptError::TargetNotLocal(item_id.into())),
+        None => return Err(ApplyReceiptError::ItemNotFound(item_id.into())),
+    }
     // Statement order is load-bearing. `item_ids_one_display_per_item` is a
     // plain partial unique index on (item_id) where source = 'display' and is
     // not deferrable, so the outgoing row must be demoted to an Alias *before*
@@ -306,6 +330,421 @@ pub fn apply_receipt(
     Ok(())
 }
 
+/// Immutable Store data needed to recover one nonterminal Promotion.
+///
+/// A value read outside a transaction is only a candidate: every transition
+/// re-reads the Promotion under its own write transaction and acts on that
+/// row. Fields the command layer does not need stay module-private so the
+/// authoritative copy is the one the transition reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryPromotion {
+    /// Mutation Sequence that fixes recovery ordering.
+    pub sequence: i64,
+    /// Local Display ID to retain as an Alias when reconciliation succeeds.
+    pub outgoing_display_id: String,
+    /// Original Promotion snapshot and retained Backend payload.
+    pub promotion: Promotion,
+    /// Typed Backend kind decoded from the retained Promotion payload.
+    pub backend_kind: BackendKind,
+    /// Mutation state as of this read.
+    state: MutationState,
+    /// Stable internal Item ID, unaffected by receipt Display ID replacement.
+    item_id: String,
+    /// Item Class as of this read.
+    item_class: ItemClass,
+    /// Promotion Operation grouping as of this read.
+    operation_id: String,
+}
+
+/// One pre-sync display mapping candidate captured from the complete Promotion
+/// queue, rather than only from the graph of the recovery target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryPromotionMapping {
+    /// Promotion Mutation Sequence order.
+    pub sequence: i64,
+    /// Stable internal Item ID used to resolve the post-sync Display ID.
+    pub item_id: String,
+    /// Display ID before a receipt replaces it with the Backend identity.
+    pub outgoing_display_id: String,
+    /// Item Class for command rendering and recovery decisions.
+    pub item_class: ItemClass,
+}
+
+/// Errors returned while locating or changing a recoverable Promotion.
+#[derive(Debug, Error)]
+pub enum RecoveryPromotionError {
+    #[error(transparent)]
+    Storage(#[from] rusqlite::Error),
+    #[error("Item {0} has no recoverable Promotion")]
+    NoRecoverablePromotion(String),
+    #[error("Item {item_id} has terminal Promotion Mutation {sequence} in state {state}")]
+    TerminalPromotion {
+        item_id: String,
+        sequence: i64,
+        state: MutationState,
+    },
+    #[error("Item {item_id} has multiple nonterminal Promotion Mutations ({first} and {second})")]
+    MultipleNonterminalPromotions {
+        item_id: String,
+        first: i64,
+        second: i64,
+    },
+    #[error("Promotion Mutation {sequence} has malformed payload_json: {source}")]
+    MalformedPayload {
+        sequence: i64,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("Promotion Mutation {sequence} has malformed Backend kind '{backend_kind}'")]
+    MalformedBackendKind { sequence: i64, backend_kind: String },
+    #[error("Promotion Mutation {0} has no Promotion Operation ID")]
+    MissingOperationId(i64),
+    #[error(
+        "Promotion Mutation {sequence} has invalid type/class pair {mutation_type}/{item_class}"
+    )]
+    WrongMutationShape {
+        sequence: i64,
+        mutation_type: MutationType,
+        item_class: ItemClass,
+    },
+    #[error("Promotion Mutation {sequence} no longer targets a Local Item")]
+    TargetNotLocal { sequence: i64 },
+    /// The confirmed Backend identity already belongs to another Item, so
+    /// attaching it would break the Repository Store's Backend Item and
+    /// Display ID uniqueness. Reported before any write so the operator sees
+    /// the collision rather than a SQL constraint.
+    #[error("Backend object {display_id} is already tracked by tk")]
+    BackendIdentityTaken { display_id: String },
+    /// `tk promote retry` exists to resolve an indeterminate creation. A
+    /// `failed` Promotion is already retried by ordinary sync, so routing it
+    /// through recovery would claim a duplicate-creation risk the operator
+    /// does not need to accept (ADR-0037).
+    #[error("Promotion Mutation {sequence} is in state {state}, not applying")]
+    RetryNotApplying { sequence: i64, state: MutationState },
+    #[error("Remote changed while recovering the Promotion; retry the command")]
+    RemoteChanged {
+        expected: BackendKind,
+        actual: Option<BackendKind>,
+    },
+    #[error(transparent)]
+    BackendCohort(#[from] crate::store::sync::BackendCohortError),
+    #[error("Mutation {sequence} in state {state} must resolve before this Promotion")]
+    EarlierNonterminal { sequence: i64, state: MutationState },
+    #[error(transparent)]
+    Receipt(#[from] ApplyReceiptError),
+    #[error(transparent)]
+    Append(#[from] mutations::AppendError),
+}
+
+#[derive(Debug)]
+struct RecoveryPromotionRow {
+    sequence: i64,
+    state: MutationState,
+    mutation_type: MutationType,
+    item_class: ItemClass,
+    payload_json: String,
+    operation_id: Option<String>,
+    display: String,
+}
+
+/// Load the unique nonterminal Promotion targeting `item_id` by stable
+/// internal Item ID. Display IDs deliberately remain a command concern because
+/// receipt application replaces them with Backend-owned identities.
+pub fn recoverable_promotion(
+    conn: &Connection,
+    item_id: &str,
+) -> Result<RecoveryPromotion, RecoveryPromotionError> {
+    let mut stmt = conn.prepare(
+        "select m.sequence, m.state, m.mutation_type, m.item_class, m.payload_json, \
+                m.promotion_operation_id, i.display_value \
+           from mutations m join items i on i.id = m.item_id \
+          where m.item_id = ?1 and m.mutation_type in ('promote_ticket', 'promote_epic') \
+            and m.state in ('pending', 'failed', 'applying') \
+          order by m.sequence",
+    )?;
+    let rows = stmt
+        .query_map(params![item_id], |r| {
+            Ok(RecoveryPromotionRow {
+                sequence: r.get(0)?,
+                state: r.get(1)?,
+                mutation_type: r.get(2)?,
+                item_class: r.get(3)?,
+                payload_json: r.get(4)?,
+                operation_id: r.get(5)?,
+                display: r.get(6)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if rows.len() > 1 {
+        return Err(RecoveryPromotionError::MultipleNonterminalPromotions {
+            item_id: item_id.into(),
+            first: rows[0].sequence,
+            second: rows[1].sequence,
+        });
+    }
+    let Some(row) = rows.into_iter().next() else {
+        let terminal = conn
+            .query_row(
+                "select sequence, state from mutations where item_id = ?1 \
+              and mutation_type in ('promote_ticket', 'promote_epic') order by sequence limit 1",
+                params![item_id],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, MutationState>(1)?)),
+            )
+            .optional()?;
+        return match terminal {
+            Some((sequence, state)) => Err(RecoveryPromotionError::TerminalPromotion {
+                item_id: item_id.into(),
+                sequence,
+                state,
+            }),
+            None => Err(RecoveryPromotionError::NoRecoverablePromotion(
+                item_id.into(),
+            )),
+        };
+    };
+    if !matches!(
+        (row.mutation_type, row.item_class),
+        (MutationType::PromoteTicket, ItemClass::Ticket)
+            | (MutationType::PromoteEpic, ItemClass::Epic)
+    ) {
+        return Err(RecoveryPromotionError::WrongMutationShape {
+            sequence: row.sequence,
+            mutation_type: row.mutation_type,
+            item_class: row.item_class,
+        });
+    }
+    let promotion: Promotion = serde_json::from_str(&row.payload_json).map_err(|source| {
+        RecoveryPromotionError::MalformedPayload {
+            sequence: row.sequence,
+            source,
+        }
+    })?;
+    let backend_kind = BackendKind::from_str(&promotion.backend_kind).map_err(|_| {
+        RecoveryPromotionError::MalformedBackendKind {
+            sequence: row.sequence,
+            backend_kind: promotion.backend_kind.clone(),
+        }
+    })?;
+    let operation_id = row
+        .operation_id
+        .ok_or(RecoveryPromotionError::MissingOperationId(row.sequence))?;
+    Ok(RecoveryPromotion {
+        sequence: row.sequence,
+        state: row.state,
+        item_id: item_id.into(),
+        outgoing_display_id: row.display,
+        item_class: row.item_class,
+        promotion,
+        backend_kind,
+        operation_id,
+    })
+}
+
+/// Capture every nonterminal Promotion before a recovery workflow runs nested
+/// sync, preserving the outgoing Display IDs needed to render old-to-new maps.
+pub fn capture_recovery_mappings(
+    conn: &Connection,
+) -> Result<Vec<RecoveryPromotionMapping>, RecoveryPromotionError> {
+    let mut stmt = conn.prepare(
+        "select m.sequence, m.item_id, i.display_value, m.item_class \
+           from mutations m join items i on i.id = m.item_id \
+          where m.mutation_type in ('promote_ticket', 'promote_epic') \
+            and m.state in ('pending', 'failed', 'applying') order by m.sequence",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(RecoveryPromotionMapping {
+                sequence: r.get(0)?,
+                item_id: r.get(1)?,
+                outgoing_display_id: r.get(2)?,
+                item_class: r.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut seen = BTreeMap::new();
+    for mapping in &rows {
+        if let Some(first) = seen.insert(mapping.item_id.as_str(), mapping.sequence) {
+            return Err(RecoveryPromotionError::MultipleNonterminalPromotions {
+                item_id: mapping.item_id.clone(),
+                first,
+                second: mapping.sequence,
+            });
+        }
+    }
+    Ok(rows)
+}
+
+/// Reconcile a confirmed Backend identity into the Repository Store atomically.
+pub fn reconcile_promotion(
+    conn: &mut Connection,
+    _workflow: &RemoteWorkflowGuard,
+    target: &RecoveryPromotion,
+    identity: &BackendItemIdentity,
+    force_convergence: bool,
+    now: &str,
+) -> Result<(), RecoveryPromotionError> {
+    let tx = crate::store::write_transaction(conn)?;
+    let current = recoverable_promotion(&tx, &target.item_id)?;
+    if current.sequence != target.sequence {
+        return Err(RecoveryPromotionError::NoRecoverablePromotion(
+            target.item_id.clone(),
+        ));
+    }
+    let origin: Origin = tx.query_row(
+        "select origin from items where id = ?1",
+        params![&target.item_id],
+        |r| r.get(0),
+    )?;
+    if origin != Origin::Local {
+        return Err(RecoveryPromotionError::TargetNotLocal {
+            sequence: target.sequence,
+        });
+    }
+    let actual = crate::store::sync::configured_remote_kind(&tx)?;
+    if actual != Some(current.backend_kind) {
+        return Err(RecoveryPromotionError::RemoteChanged {
+            expected: current.backend_kind,
+            actual,
+        });
+    }
+    crate::store::sync::ensure_backend_cohort(&tx, current.backend_kind)?;
+    ensure_no_earlier_nonterminal(&tx, current.sequence)?;
+    ensure_identity_unclaimed(&tx, &target.item_id, current.backend_kind, identity)?;
+    let (title, body): (String, String) = tx.query_row(
+        "select title, body from items where id = ?1",
+        params![&target.item_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    apply_receipt(
+        &tx,
+        &target.item_id,
+        current.backend_kind.text(),
+        identity,
+        now,
+    )?;
+    if force_convergence {
+        let mutation_type = match current.item_class {
+            ItemClass::Ticket => MutationType::UpdateTicket,
+            ItemClass::Epic => MutationType::UpdateEpic,
+        };
+        mutations::append(
+            &tx,
+            mutations::AppendRequest {
+                mutation_type,
+                item_id: &current.item_id,
+                item_class: current.item_class,
+                payload: &MutationPayload::UpdateTitleBody(TitleBody { title, body }),
+                promotion_operation_id: Some(&current.operation_id),
+                now_iso: now,
+            },
+        )?;
+    }
+    mutations::mark_applied(&tx, current.sequence, now)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Refuse recovery that would resolve a Promotion ahead of older unresolved
+/// intent, which global Mutation Sequence order forbids (ADR-0037).
+///
+/// A pure local read, so a command can reject the invocation before spending a
+/// Backend round trip. Every transition repeats it inside its own transaction,
+/// where the answer is authoritative.
+pub fn ensure_no_earlier_nonterminal(
+    conn: &Connection,
+    sequence: i64,
+) -> Result<(), RecoveryPromotionError> {
+    let earlier = conn
+        .query_row(
+            "select sequence, state from mutations where sequence < ?1 \
+          and state in ('pending', 'failed', 'applying') order by sequence limit 1",
+            params![sequence],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, MutationState>(1)?)),
+        )
+        .optional()?;
+    match earlier {
+        Some((sequence, state)) => {
+            Err(RecoveryPromotionError::EarlierNonterminal { sequence, state })
+        }
+        None => Ok(()),
+    }
+}
+
+/// Refuse a confirmed Backend identity that another Item already holds.
+///
+/// `apply_receipt` would otherwise hit `items_backend_unique` or the
+/// `item_ids.value` primary key and surface a SQL constraint to the operator.
+/// A mistyped Backend key and an object already imported by Adopt both land
+/// here.
+fn ensure_identity_unclaimed(
+    conn: &Connection,
+    item_id: &str,
+    backend_kind: BackendKind,
+    identity: &BackendItemIdentity,
+) -> Result<(), RecoveryPromotionError> {
+    let backend_taken = conn
+        .query_row(
+            "select 1 from items \
+              where backend_kind = ?1 and backend_key = ?2 and id <> ?3",
+            params![backend_kind.text(), &identity.backend_key, item_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    // `item_ids.value` is the nocase primary key, so this covers an existing
+    // Display ID and a retained Alias alike.
+    let display_taken = conn
+        .query_row(
+            "select 1 from item_ids where value = ?1 and item_id <> ?2",
+            params![&identity.display_id, item_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if backend_taken || display_taken {
+        return Err(RecoveryPromotionError::BackendIdentityTaken {
+            display_id: identity.display_id.clone(),
+        });
+    }
+    Ok(())
+}
+
+/// Return an indeterminate Promotion to pending so the normal ordered sync may
+/// attempt it again. Retrying never records an identity or advances the cursor.
+pub fn retry_promotion(
+    conn: &mut Connection,
+    _workflow: &RemoteWorkflowGuard,
+    target: &RecoveryPromotion,
+    now: &str,
+) -> Result<(), RecoveryPromotionError> {
+    let tx = crate::store::write_transaction(conn)?;
+    let current = recoverable_promotion(&tx, &target.item_id)?;
+    if current.sequence != target.sequence {
+        return Err(RecoveryPromotionError::NoRecoverablePromotion(
+            target.item_id.clone(),
+        ));
+    }
+    ensure_no_earlier_nonterminal(&tx, current.sequence)?;
+    match current.state {
+        MutationState::Applying => {
+            tx.execute(
+                "update mutations set state = 'pending', failure_json = null, state_changed_at = ?2 where sequence = ?1",
+                params![current.sequence, now],
+            )?;
+        }
+        // Already pending: the command stays idempotent and just resumes sync.
+        MutationState::Pending => {}
+        state => {
+            return Err(RecoveryPromotionError::RetryNotApplying {
+                sequence: current.sequence,
+                state,
+            });
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 /// Mutation Log fields needed by Promotion's post-sync report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MutationSummary {
@@ -314,8 +753,8 @@ pub struct MutationSummary {
     pub target_display_id: String,
 }
 
-/// The earliest Mutation an Apply would still attempt: the lowest Mutation
-/// Sequence in `pending` or `failed` state, across the whole Mutation Log.
+/// The earliest nonterminal Mutation: the lowest Mutation Sequence in
+/// `pending`, `failed`, or `applying` state, across the whole Mutation Log.
 ///
 /// Deliberately not scoped to a Promotion Operation. A Promotion is appended
 /// behind whatever the outbox already held, so the Mutation that stops the sync
@@ -329,7 +768,7 @@ pub fn earliest_applicable_mutation(
     conn.query_row(
         "select m.sequence, m.state, i.display_value \
            from mutations m join items i on i.id = m.item_id \
-          where m.state in ('pending','failed') \
+          where m.state in ('pending','failed','applying') \
           order by m.sequence asc limit 1",
         [],
         |r| {
@@ -430,10 +869,10 @@ mod tests {
         conn: &mut Connection,
         item_id: &str,
         receipt: &BackendItemIdentity,
-    ) -> rusqlite::Result<()> {
+    ) -> Result<(), ApplyReceiptError> {
         let tx = crate::store::write_transaction(conn)?;
         apply_receipt(&tx, item_id, "github", receipt, NOW)?;
-        tx.commit()
+        Ok(tx.commit()?)
     }
 
     #[test]
@@ -562,7 +1001,7 @@ mod tests {
         assert!(
             matches!(
                 err,
-                rusqlite::Error::SqliteFailure(e, _)
+                ApplyReceiptError::Storage(rusqlite::Error::SqliteFailure(e, _))
                     if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY
                         || e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
             ),
@@ -901,6 +1340,17 @@ mod tests {
         StdRng::seed_from_u64(7)
     }
 
+    fn commit_plan_for_test<R: Rng + ?Sized>(
+        conn: &mut Connection,
+        plan: &PromotionPlan,
+        expected_kind: BackendKind,
+        rng: &mut R,
+        now: &str,
+    ) -> Result<Option<String>, CommitPlanError> {
+        let workflow = RemoteWorkflowGuard::for_test();
+        commit_plan(conn, &workflow, plan, expected_kind, rng, now)
+    }
+
     /// The `mutation_seq` counter's current value. It lives in `sequences`,
     /// not in `mutations`, so a rollback has to return it separately from the
     /// rows an aborted batch wrote.
@@ -928,11 +1378,751 @@ mod tests {
         }
     }
 
+    fn seed_recovery(
+        conn: &Connection,
+        id: &str,
+        display: &str,
+        sequence: i64,
+        state: &str,
+        item_class: ItemClass,
+        operation_id: Option<&str>,
+    ) {
+        insert_fixture_item(
+            conn,
+            FixtureItem {
+                id,
+                display,
+                item_class: item_class.text(),
+                ticket_kind: (item_class == ItemClass::Ticket).then_some("task"),
+                priority: (item_class == ItemClass::Ticket).then_some("P2"),
+                title: "Current title",
+                body: "Current body",
+                created_seq: sequence,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            conn,
+            FixtureMutation {
+                sequence,
+                mutation_type: match item_class {
+                    ItemClass::Ticket => "promote_ticket",
+                    ItemClass::Epic => "promote_epic",
+                },
+                item_id: id,
+                item_class: item_class.text(),
+                payload_json: r#"{"title":"Original title","body":"Original body","backend_kind":"github"}"#,
+                state,
+                failure_json: (state == "failed" || state == "applying")
+                    .then_some(r#"{"detail":"prior"}"#),
+                promotion_operation_id: operation_id,
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "update sequences set value = max(value, ?1) where name = 'mutation_seq'",
+            params![sequence],
+        )
+        .unwrap();
+    }
+
+    fn seed_update_mutation(conn: &Connection, state: &str) {
+        insert_fixture_item(
+            conn,
+            FixtureItem {
+                id: "backend",
+                display: "gh-1",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("https://github.com/o/r/issues/1"),
+                title: "Backend",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        seed_mutation(conn, 1, "backend", state, None);
+    }
+
+    #[test]
+    fn recoverable_promotion_loads_each_nonterminal_state() {
+        for state in ["pending", "failed", "applying"] {
+            let conn = open_seeded();
+            seed_recovery(
+                &conn,
+                "t1",
+                "tk-1",
+                4,
+                state,
+                ItemClass::Ticket,
+                Some("op-1"),
+            );
+            let target = recoverable_promotion(&conn, "t1").unwrap();
+            assert_eq!(target.sequence, 4);
+            assert_eq!(target.state.text(), state);
+            assert_eq!(target.outgoing_display_id, "tk-1");
+            assert_eq!(target.promotion.title, "Original title");
+            assert_eq!(target.operation_id, "op-1");
+        }
+    }
+
+    #[test]
+    fn recoverable_promotion_rejects_missing_operation_and_duplicate_rows() {
+        let conn = open_seeded();
+        seed_recovery(&conn, "t1", "tk-1", 4, "applying", ItemClass::Ticket, None);
+        assert!(matches!(
+            recoverable_promotion(&conn, "t1"),
+            Err(RecoveryPromotionError::MissingOperationId(4))
+        ));
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 5,
+                mutation_type: "promote_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"T","body":"","backend_kind":"github"}"#,
+                state: "pending",
+                promotion_operation_id: Some("op-2"),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            recoverable_promotion(&conn, "t1"),
+            Err(RecoveryPromotionError::MultipleNonterminalPromotions {
+                first: 4,
+                second: 5,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn reconcile_promotes_atomically_and_forced_convergence_uses_the_operation() {
+        for (class, update) in [
+            (ItemClass::Ticket, "update_ticket"),
+            (ItemClass::Epic, "update_epic"),
+        ] {
+            let mut conn = open_seeded();
+            seed_recovery(&conn, "item", "tk-1", 4, "applying", class, Some("op-1"));
+            let target = recoverable_promotion(&conn, "item").unwrap();
+            let workflow = RemoteWorkflowGuard::for_test();
+            reconcile_promotion(
+                &mut conn,
+                &workflow,
+                &target,
+                &receipt("42", "gh-42"),
+                true,
+                NOW,
+            )
+            .unwrap();
+            let values: (String, String, String, String, Option<String>, i64) = conn
+                .query_row(
+                    "select i.display_value, i.origin, i.backend_key, m.state, m.failure_json, c.last_applied_sequence \
+                     from items i join mutations m on m.sequence = 4 \
+                     join sync_cursors c on c.remote_name = 'primary' where i.id = 'item'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                values,
+                (
+                    "gh-42".into(),
+                    "backend".into(),
+                    "42".into(),
+                    "applied".into(),
+                    None,
+                    4
+                )
+            );
+            let update_row: (String, String, String, String) = conn.query_row(
+                "select mutation_type, payload_json, promotion_operation_id, state from mutations where sequence = 5",
+                [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            ).unwrap();
+            assert_eq!(update_row.0, update);
+            let payload: TitleBody = serde_json::from_str(&update_row.1).unwrap();
+            assert_eq!(
+                payload,
+                TitleBody {
+                    title: "Current title".into(),
+                    body: "Current body".into(),
+                }
+            );
+            assert_eq!(update_row.2, "op-1");
+            assert_eq!(update_row.3, "pending");
+        }
+    }
+
+    #[test]
+    fn exact_reconciliation_does_not_append_convergence() {
+        let mut conn = open_seeded();
+        seed_recovery(
+            &conn,
+            "item",
+            "tk-1",
+            4,
+            "applying",
+            ItemClass::Ticket,
+            Some("op-1"),
+        );
+        let target = recoverable_promotion(&conn, "item").unwrap();
+        let workflow = RemoteWorkflowGuard::for_test();
+
+        reconcile_promotion(
+            &mut conn,
+            &workflow,
+            &target,
+            &receipt("42", "gh-42"),
+            false,
+            NOW,
+        )
+        .unwrap();
+
+        assert_eq!(mutation_count(&conn).unwrap(), 1);
+        assert_eq!(mutation_seq(&conn).unwrap(), 4);
+    }
+
+    #[test]
+    fn reconcile_refuses_an_earlier_nonterminal_but_allows_terminal_history() {
+        for state in ["pending", "failed", "applying"] {
+            let mut conn = open_seeded();
+            seed_recovery(
+                &conn,
+                "earlier",
+                "tk-1",
+                1,
+                state,
+                ItemClass::Ticket,
+                Some("old"),
+            );
+            seed_recovery(
+                &conn,
+                "target",
+                "tk-2",
+                4,
+                "applying",
+                ItemClass::Ticket,
+                Some("op-1"),
+            );
+            let target = recoverable_promotion(&conn, "target").unwrap();
+            let workflow = RemoteWorkflowGuard::for_test();
+            assert!(matches!(
+                reconcile_promotion(
+                    &mut conn,
+                    &workflow,
+                    &target,
+                    &receipt("42", "gh-42"),
+                    false,
+                    NOW
+                ),
+                Err(RecoveryPromotionError::EarlierNonterminal { sequence: 1, .. })
+            ));
+        }
+        for state in ["applied", "skipped"] {
+            let mut conn = open_seeded();
+            seed_recovery(
+                &conn,
+                "earlier",
+                "tk-1",
+                1,
+                state,
+                ItemClass::Ticket,
+                Some("old"),
+            );
+            seed_recovery(
+                &conn,
+                "target",
+                "tk-2",
+                4,
+                "applying",
+                ItemClass::Ticket,
+                Some("op-1"),
+            );
+            let target = recoverable_promotion(&conn, "target").unwrap();
+            let workflow = RemoteWorkflowGuard::for_test();
+            reconcile_promotion(
+                &mut conn,
+                &workflow,
+                &target,
+                &receipt("42", "gh-42"),
+                false,
+                NOW,
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn reconcile_cannot_jump_an_earlier_nonpromotion_mutation() {
+        let mut conn = open_seeded();
+        seed_update_mutation(&conn, "pending");
+        seed_recovery(
+            &conn,
+            "target",
+            "tk-2",
+            4,
+            "applying",
+            ItemClass::Ticket,
+            Some("op-1"),
+        );
+        let target = recoverable_promotion(&conn, "target").unwrap();
+        let workflow = RemoteWorkflowGuard::for_test();
+
+        assert!(matches!(
+            reconcile_promotion(
+                &mut conn,
+                &workflow,
+                &target,
+                &receipt("https://github.com/o/r/issues/42", "gh-42"),
+                false,
+                NOW,
+            ),
+            Err(RecoveryPromotionError::EarlierNonterminal {
+                sequence: 1,
+                state: MutationState::Pending,
+            })
+        ));
+        let unchanged: (String, String, Option<String>, String, i64) = conn
+            .query_row(
+                "select i.display_value, i.origin, i.backend_key, m.state, c.last_applied_sequence \
+                   from items i join mutations m on m.item_id = i.id \
+                   join sync_cursors c on c.remote_name = 'primary' \
+                  where i.id = 'target' and m.sequence = 4",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            unchanged,
+            ("tk-2".into(), "local".into(), None, "applying".into(), 0)
+        );
+    }
+
+    #[test]
+    fn retry_returns_a_target_to_pending_without_moving_the_cursor() {
+        // `pending` is the idempotent re-run; `applying` is the state the
+        // command exists for.
+        for state in ["pending", "applying"] {
+            let mut conn = open_seeded();
+            seed_recovery(
+                &conn,
+                "target",
+                "tk-1",
+                4,
+                state,
+                ItemClass::Ticket,
+                Some("op-1"),
+            );
+            let target = recoverable_promotion(&conn, "target").unwrap();
+            let workflow = RemoteWorkflowGuard::for_test();
+            retry_promotion(&mut conn, &workflow, &target, NOW).unwrap();
+            let row: (String, Option<String>, i64) = conn.query_row(
+                "select m.state, m.failure_json, c.last_applied_sequence from mutations m join sync_cursors c on c.remote_name = 'primary' where m.sequence = 4",
+                [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            ).unwrap();
+            assert_eq!(row, ("pending".into(), None, 0));
+        }
+    }
+
+    /// Retry carries duplicate-creation risk, so it is reserved for an
+    /// indeterminate outcome. A rejected Promotion has certified no effect and
+    /// is already retried by ordinary sync (ADR-0037).
+    #[test]
+    fn retry_refuses_a_failed_promotion() {
+        let mut conn = open_seeded();
+        seed_recovery(
+            &conn,
+            "target",
+            "tk-1",
+            4,
+            "failed",
+            ItemClass::Ticket,
+            Some("op-1"),
+        );
+        let target = recoverable_promotion(&conn, "target").unwrap();
+        let workflow = RemoteWorkflowGuard::for_test();
+
+        assert!(matches!(
+            retry_promotion(&mut conn, &workflow, &target, NOW),
+            Err(RecoveryPromotionError::RetryNotApplying {
+                sequence: 4,
+                state: MutationState::Failed,
+            })
+        ));
+        let row: (String, Option<String>) = conn
+            .query_row(
+                "select state, failure_json from mutations where sequence = 4",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            ("failed".into(), Some(r#"{"detail":"prior"}"#.into())),
+            "the refusal leaves the recorded Mutation Failure intact"
+        );
+    }
+
+    #[test]
+    fn retry_refuses_every_earlier_nonterminal_state() {
+        for state in ["pending", "failed", "applying"] {
+            let mut conn = open_seeded();
+            seed_recovery(
+                &conn,
+                "earlier",
+                "tk-1",
+                1,
+                state,
+                ItemClass::Ticket,
+                Some("op-1"),
+            );
+            seed_recovery(
+                &conn,
+                "target",
+                "tk-2",
+                4,
+                "applying",
+                ItemClass::Ticket,
+                Some("op-2"),
+            );
+            let target = recoverable_promotion(&conn, "target").unwrap();
+            let workflow = RemoteWorkflowGuard::for_test();
+
+            assert!(matches!(
+                retry_promotion(&mut conn, &workflow, &target, NOW),
+                Err(RecoveryPromotionError::EarlierNonterminal {
+                    sequence: 1,
+                    state: actual
+                }) if actual.text() == state
+            ));
+            let target_state: String = conn
+                .query_row("select state from mutations where sequence = 4", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(target_state, "applying");
+        }
+    }
+
+    #[test]
+    fn retry_cannot_jump_an_earlier_nonpromotion_mutation() {
+        let mut conn = open_seeded();
+        seed_update_mutation(&conn, "failed");
+        seed_recovery(
+            &conn,
+            "target",
+            "tk-2",
+            4,
+            "applying",
+            ItemClass::Ticket,
+            Some("op-1"),
+        );
+        let target = recoverable_promotion(&conn, "target").unwrap();
+        let workflow = RemoteWorkflowGuard::for_test();
+
+        assert!(matches!(
+            retry_promotion(&mut conn, &workflow, &target, NOW),
+            Err(RecoveryPromotionError::EarlierNonterminal {
+                sequence: 1,
+                state: MutationState::Failed,
+            })
+        ));
+        let unchanged: (String, i64) = conn
+            .query_row(
+                "select m.state, c.last_applied_sequence from mutations m \
+                   join sync_cursors c on c.remote_name = 'primary' \
+                  where m.sequence = 4",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(unchanged, ("applying".into(), 0));
+    }
+
+    #[test]
+    fn recovery_capture_and_retry_preserve_queue_identity() {
+        let mut conn = open_seeded();
+        seed_recovery(
+            &conn,
+            "first",
+            "tk-1",
+            2,
+            "pending",
+            ItemClass::Ticket,
+            Some("op-1"),
+        );
+        seed_recovery(
+            &conn,
+            "second",
+            "tk-2",
+            4,
+            "failed",
+            ItemClass::Ticket,
+            Some("op-2"),
+        );
+        assert_eq!(
+            capture_recovery_mappings(&conn).unwrap(),
+            vec![
+                RecoveryPromotionMapping {
+                    sequence: 2,
+                    item_id: "first".into(),
+                    outgoing_display_id: "tk-1".into(),
+                    item_class: ItemClass::Ticket
+                },
+                RecoveryPromotionMapping {
+                    sequence: 4,
+                    item_id: "second".into(),
+                    outgoing_display_id: "tk-2".into(),
+                    item_class: ItemClass::Ticket
+                },
+            ]
+        );
+        conn.execute(
+            "update mutations set state = 'applying' where sequence = 2",
+            [],
+        )
+        .unwrap();
+        let target = recoverable_promotion(&conn, "second").unwrap();
+        let workflow = RemoteWorkflowGuard::for_test();
+        assert!(matches!(
+            retry_promotion(&mut conn, &workflow, &target, NOW),
+            Err(RecoveryPromotionError::EarlierNonterminal {
+                sequence: 2,
+                state: MutationState::Applying
+            })
+        ));
+    }
+
+    #[test]
+    fn reconcile_rolls_back_on_remote_change_or_display_collision() {
+        let mut conn = open_seeded();
+        seed_recovery(
+            &conn,
+            "target",
+            "tk-1",
+            4,
+            "applying",
+            ItemClass::Ticket,
+            Some("op-1"),
+        );
+        let target = recoverable_promotion(&conn, "target").unwrap();
+        conn.execute("update remotes set backend_kind = 'jira'", [])
+            .unwrap();
+        let workflow = RemoteWorkflowGuard::for_test();
+        assert!(matches!(
+            reconcile_promotion(
+                &mut conn,
+                &workflow,
+                &target,
+                &receipt("42", "gh-42"),
+                false,
+                NOW
+            ),
+            Err(RecoveryPromotionError::RemoteChanged { .. })
+        ));
+        assert_eq!(
+            conn.query_row("select state from mutations where sequence = 4", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap(),
+            "applying"
+        );
+
+        conn.execute("update remotes set backend_kind = 'github'", [])
+            .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "squatter",
+                display: "gh-42",
+                title: "taken",
+                created_seq: 5,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            reconcile_promotion(
+                &mut conn,
+                &workflow,
+                &target,
+                &receipt("42", "gh-42"),
+                false,
+                NOW
+            ),
+            // A claimed identity is diagnosed before any write, so the
+            // operator never sees the underlying uniqueness constraint.
+            Err(RecoveryPromotionError::BackendIdentityTaken { ref display_id })
+                if display_id == "gh-42"
+        ));
+        let row: (String, String) = conn.query_row(
+            "select i.origin, m.state from items i join mutations m on m.sequence = 4 where i.id = 'target'",
+            [], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        assert_eq!(row, ("local".into(), "applying".into()));
+    }
+
+    #[test]
+    fn reconcile_refuses_an_identity_another_item_already_holds() {
+        for (id, display, backend_key) in [
+            // Adopt imported the same object under its own Display ID.
+            ("adopted", "gh-9", Some("https://github.com/o/r/issues/42")),
+            // A different object already owns the incoming Display ID.
+            ("other", "gh-42", Some("https://github.com/o/r/issues/9")),
+        ] {
+            let mut conn = open_seeded();
+            seed_recovery(
+                &conn,
+                "target",
+                "tk-1",
+                4,
+                "applying",
+                ItemClass::Ticket,
+                Some("op-1"),
+            );
+            insert_fixture_item(
+                &conn,
+                FixtureItem {
+                    id,
+                    display,
+                    title: "Already tracked",
+                    origin: "backend",
+                    backend_kind: Some("github"),
+                    backend_key,
+                    created_seq: 5,
+                    ..FixtureItem::default()
+                },
+            )
+            .unwrap();
+            let target = recoverable_promotion(&conn, "target").unwrap();
+            let workflow = RemoteWorkflowGuard::for_test();
+
+            let err = reconcile_promotion(
+                &mut conn,
+                &workflow,
+                &target,
+                &receipt("https://github.com/o/r/issues/42", "gh-42"),
+                // Force cannot buy past a claimed identity.
+                true,
+                NOW,
+            )
+            .unwrap_err();
+
+            assert!(
+                matches!(
+                    err,
+                    RecoveryPromotionError::BackendIdentityTaken { ref display_id }
+                        if display_id == "gh-42"
+                ),
+                "{id} should claim the identity, got {err:?}"
+            );
+            let state: String = conn
+                .query_row("select state from mutations where sequence = 4", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(state, "applying", "{id}: the Promotion is untouched");
+        }
+    }
+
+    #[test]
+    fn reconcile_refuses_a_target_that_is_no_longer_local() {
+        let mut conn = open_seeded();
+        seed_recovery(
+            &conn,
+            "target",
+            "tk-1",
+            4,
+            "applying",
+            ItemClass::Ticket,
+            Some("op-1"),
+        );
+        let target = recoverable_promotion(&conn, "target").unwrap();
+        conn.execute(
+            "update items set origin = 'backend', backend_kind = 'github', \
+                    backend_key = 'existing' where id = 'target'",
+            [],
+        )
+        .unwrap();
+        let workflow = RemoteWorkflowGuard::for_test();
+
+        assert!(matches!(
+            reconcile_promotion(
+                &mut conn,
+                &workflow,
+                &target,
+                &receipt("42", "gh-42"),
+                false,
+                NOW,
+            ),
+            Err(RecoveryPromotionError::TargetNotLocal { sequence: 4 })
+        ));
+        let state: String = conn
+            .query_row("select state from mutations where sequence = 4", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(state, "applying");
+    }
+
+    #[test]
+    fn forced_reconciliation_rolls_back_when_convergence_cannot_append() {
+        let mut conn = open_seeded();
+        seed_recovery(
+            &conn,
+            "target",
+            "tk-1",
+            4,
+            "applying",
+            ItemClass::Ticket,
+            Some("op-1"),
+        );
+        let target = recoverable_promotion(&conn, "target").unwrap();
+        conn.execute("delete from sequences where name = 'mutation_seq'", [])
+            .unwrap();
+        let workflow = RemoteWorkflowGuard::for_test();
+
+        assert!(matches!(
+            reconcile_promotion(
+                &mut conn,
+                &workflow,
+                &target,
+                &receipt("42", "gh-42"),
+                true,
+                NOW,
+            ),
+            Err(RecoveryPromotionError::Append(
+                mutations::AppendError::Sequence(_)
+            ))
+        ));
+        let row: (String, String, String, i64, i64) = conn
+            .query_row(
+                "select i.display_value, i.origin, m.state, \
+                        c.last_applied_sequence, \
+                        (select count(*) from item_ids \
+                          where item_id = 'target' and source = 'alias') \
+                   from items i join mutations m on m.sequence = 4 \
+                   join sync_cursors c on c.remote_name = 'primary' \
+                  where i.id = 'target'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            ("tk-1".into(), "local".into(), "applying".into(), 0, 0)
+        );
+        assert_eq!(mutation_count(&conn).unwrap(), 1);
+    }
+
     #[test]
     fn commit_promotion_plan_on_an_empty_plan_mints_no_operation() {
         let mut conn = open_seeded();
 
-        let result = commit_plan(
+        let result = commit_plan_for_test(
             &mut conn,
             &PromotionPlan::default(),
             BackendKind::Github,
@@ -957,7 +2147,7 @@ mod tests {
         };
         crate::store::sync::clear_remote(&mut conn).unwrap();
 
-        let error = commit_plan(
+        let error = commit_plan_for_test(
             &mut conn,
             &plan,
             BackendKind::Github,
@@ -998,7 +2188,7 @@ mod tests {
             mutations: vec![draft("t2")],
         };
 
-        let error = commit_plan(
+        let error = commit_plan_for_test(
             &mut conn,
             &plan,
             BackendKind::Github,
@@ -1032,7 +2222,7 @@ mod tests {
             mutations: vec![draft("t3"), draft("t1"), draft("t2")],
         };
 
-        commit_plan(
+        commit_plan_for_test(
             &mut conn,
             &plan,
             BackendKind::Github,
@@ -1053,7 +2243,7 @@ mod tests {
     }
 
     #[test]
-    fn commit_promotion_plan_refuses_while_creation_is_applying() {
+    fn commit_promotion_plan_can_queue_behind_an_applying_creation() {
         let mut conn = open_seeded();
         seed_ticket(&conn, "t1", "tk-1", 1);
         seed_ticket(&conn, "t2", "tk-2", 2);
@@ -1070,8 +2260,13 @@ mod tests {
             },
         )
         .unwrap();
+        conn.execute(
+            "update sequences set value = 1 where name = 'mutation_seq'",
+            [],
+        )
+        .unwrap();
 
-        let error = commit_plan(
+        let operation_id = commit_plan_for_test(
             &mut conn,
             &PromotionPlan {
                 mutations: vec![draft("t2")],
@@ -1080,10 +2275,40 @@ mod tests {
             &mut seeded_rng(),
             NOW,
         )
-        .unwrap_err();
+        .unwrap()
+        .unwrap();
 
-        assert!(matches!(error, CommitPlanError::ApplyingMutation(1)));
-        assert_eq!(mutation_count(&conn).unwrap(), 1);
+        let rows: Vec<(i64, String, String, String, Option<String>)> = conn
+            .prepare(
+                "select sequence, item_id, state, mutation_type, promotion_operation_id \
+                   from mutations order by sequence",
+            )
+            .unwrap()
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    1,
+                    "t1".into(),
+                    "applying".into(),
+                    "promote_ticket".into(),
+                    Some("op-1".into()),
+                ),
+                (
+                    2,
+                    "t2".into(),
+                    "pending".into(),
+                    "promote_ticket".into(),
+                    Some(operation_id),
+                ),
+            ]
+        );
     }
 
     #[test]
@@ -1095,7 +2320,7 @@ mod tests {
             mutations: vec![draft("t1"), draft("t2")],
         };
 
-        let operation_id = commit_plan(
+        let operation_id = commit_plan_for_test(
             &mut conn,
             &plan,
             BackendKind::Github,
@@ -1131,7 +2356,7 @@ mod tests {
         };
 
         let before = mutation_seq(&conn).unwrap();
-        let err = commit_plan(
+        let err = commit_plan_for_test(
             &mut conn,
             &plan,
             BackendKind::Github,
@@ -1193,7 +2418,7 @@ mod tests {
         let plan = PromotionPlan {
             mutations: vec![draft("t2")],
         };
-        commit_plan(
+        commit_plan_for_test(
             &mut conn,
             &plan,
             BackendKind::Github,
@@ -1283,6 +2508,29 @@ mod tests {
                 sequence: 1,
                 state: MutationState::Failed,
                 target_display_id: "tk-1".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn an_applying_mutation_is_the_earliest_applicable_blocker() {
+        let conn = open_seeded();
+        seed_recovery(
+            &conn,
+            "t1",
+            "tk-1",
+            3,
+            "applying",
+            ItemClass::Ticket,
+            Some("op-1"),
+        );
+
+        assert_eq!(
+            earliest_applicable_mutation(&conn).unwrap(),
+            Some(MutationSummary {
+                sequence: 3,
+                state: MutationState::Applying,
+                target_display_id: "tk-1".into(),
             })
         );
     }

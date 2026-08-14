@@ -375,6 +375,42 @@ returns exit status 1 and writes
 to standard error. If Workspace Scope was applied, it instead writes
 .B tk next: no ready Tickets in Workspace Scope
 to standard error.
+.SS Backend Promotion and recovery
+.TP
+\fBtk promote\fR \fIid\fR [\fB\-\-children\fR]
+Create a Backend object for a Local Ticket or Epic through the configured
+Remote. The outgoing local Display ID remains an Alias after the Backend
+Display ID replaces it.
+.PP
+.B \-\-children
+includes an Epic's directly contained Local Tickets in the same Promotion
+Operation. Promotion preflight rejects the whole operation before any Backend
+write when its Item classes, Ticket Kinds, Dependencies, or Epic membership
+cannot be represented.
+.TP
+\fBtk promote reconcile\fR \fIid\fR \fIbackend-key\fR [\fB\-\-force\fR]
+Recover a Promotion whose Backend creation outcome is indeterminate. tk
+inspects the candidate Backend object and by default requires its title and
+body to match the retained Promotion snapshot exactly.
+.PP
+.B \-\-force
+accepts a content mismatch only after the operator confirms the candidate.
+The confirmed identity is attached atomically and current local title and body
+are queued to converge the Backend object. Normal Backend Pull remains
+authoritative for lifecycle state after attachment. A Backend object another
+Item already tracks is refused with or without
+.BR \-\-force .
+.TP
+\fBtk promote retry\fR \fIid\fR
+Explicitly return a Promotion with an indeterminate creation outcome to pending
+and run normal ordered sync. Use this only when creating the Backend object
+again is safe; automatic sync never replays an indeterminate creation. A failed
+Promotion is refused, because ordinary sync already retries it.
+.PP
+Recovery cannot pass an earlier pending, failed, or applying Mutation. Both
+forms hold the Remote workflow lock through Backend access, Store changes, and
+nested sync, then print every Promotion Display ID replacement that nested
+sync landed.
 .SS Agent briefing
 .TP
 .B tk prime

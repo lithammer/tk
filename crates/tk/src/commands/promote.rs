@@ -1,13 +1,14 @@
 //! `tk promote` — convert a Local Ticket or Local Epic into a backend-backed
 //! object through the configured Remote (CONTEXT.md Promotion).
 //!
-//! One invocation is one Promotion Operation. The whole operation is
-//! preflighted against a Repository Store snapshot before a byte is written
-//! (ADR-0035): a refused Promotion leaves the outbox empty and calls no
-//! Backend. What survives preflight commits to the Mutation Log in a single
+//! One `tk promote <id>` invocation is one Promotion Operation. The whole
+//! operation is preflighted against a Repository Store snapshot before a byte
+//! is written (ADR-0035): a refused Promotion leaves the outbox empty and calls
+//! no Backend. What survives preflight commits to the Mutation Log in a single
 //! local transaction and is then drained by the same [`crate::sync::run_sync`]
 //! engine `tk sync` drives, so a Promotion applies behind whatever the outbox
-//! already held.
+//! already held. The ADR-0037 `reconcile` and `retry` subcommands recover an
+//! existing Promotion Operation instead of minting a new one.
 //!
 //! Preflight reports every finding at once rather than the first (ADR-0036);
 //! [`crate::promotion::plan`] carries them as typed parts and this module owns
@@ -21,7 +22,7 @@
 use std::collections::HashSet;
 use std::io::Write;
 
-use clap::Args as ClapArgs;
+use clap::{Args as ClapArgs, Subcommand};
 
 use crate::cli::{CommandError, Deps, Exit};
 use crate::commands::resolver;
@@ -33,30 +34,75 @@ use crate::domain::mutation_state::MutationState;
 use crate::domain::promotion_graph::{GraphItem, PromotionGraph};
 use crate::domain::promotion_plan::PromotionPlan;
 use crate::promotion::plan::{PromotionFinding, plan_promotion};
-use crate::remote::adapter::Adapter;
+use crate::remote::adapter::{Adapter, AdapterReadError};
 use crate::remote::factory::{self, OpenError as FactoryOpenError};
 use crate::store::mutations::AppendError;
 use crate::store::promotion::{
-    self as store_promotion, CommitPlanError, MutationSummary, ReadGraphError,
+    self as store_promotion, CommitPlanError, MutationSummary, ReadGraphError, RecoveryPromotion,
+    RecoveryPromotionError, RecoveryPromotionMapping,
 };
 use crate::store::repository::RemoteWorkflowGuard;
 use crate::store::repository::{ResolvedItemRefWithDisplay, Store};
-use crate::store::sync::BackendCohortError;
+use crate::store::sync::{
+    BackendCohortError, LoadApplicableError, PersistMutationOutcomeError, RefreshStoreError,
+};
 use crate::sync::{self, RunSyncError};
 
 /// Flags for `tk promote`.
 #[derive(Debug, ClapArgs)]
+#[command(subcommand_negates_reqs = true, args_conflicts_with_subcommands = true)]
 pub struct Args {
+    #[command(subcommand)]
+    pub subcommand: Option<Sub>,
     /// Display ID or Alias of the Ticket or Epic to promote.
-    #[arg(value_name = "ID")]
-    pub id: String,
+    #[arg(value_name = "ID", required = true)]
+    pub id: Option<String>,
     /// Also promote the Epic's directly contained Local Tickets — its
     /// Promotion Children. Epics only.
     #[arg(long)]
     pub children: bool,
 }
 
+/// Explicit recovery workflows for a nonterminal Promotion.
+#[derive(Debug, Subcommand)]
+pub enum Sub {
+    /// Attach a confirmed Backend object to an indeterminate Promotion.
+    Reconcile(ReconcileArgs),
+    /// Explicitly risk creating the Backend object again.
+    Retry(RetryArgs),
+}
+
+/// Arguments for `tk promote reconcile`.
+#[derive(Debug, ClapArgs)]
+pub struct ReconcileArgs {
+    /// Display ID or Alias of the Pending Promotion.
+    #[arg(value_name = "ID")]
+    pub id: String,
+    /// Backend-native key or URL of the object to inspect.
+    #[arg(value_name = "BACKEND-KEY")]
+    pub backend_key: String,
+    /// Accept a content mismatch and converge the Backend to current local content.
+    #[arg(long)]
+    pub force: bool,
+}
+
+/// Arguments for `tk promote retry`.
+#[derive(Debug, ClapArgs)]
+pub struct RetryArgs {
+    /// Display ID or Alias of the Pending Promotion.
+    #[arg(value_name = "ID")]
+    pub id: String,
+}
+
 pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
+    match args.subcommand {
+        Some(Sub::Reconcile(args)) => return run_reconcile(deps, args),
+        Some(Sub::Retry(args)) => return run_retry(deps, args),
+        None => {}
+    }
+    let id = args
+        .id
+        .expect("clap requires ID when no promote subcommand is present");
     let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
         .map_err(|err| resolver::open_error(&err))?;
     let now = deps.clock.now_iso();
@@ -64,12 +110,11 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         .lock_remote_workflow()
         .map_err(CommandError::failure)?;
 
-    let target = match resolver::resolve_with_display(&store, &args.id) {
+    let target = match resolver::resolve_with_display(&store, &id) {
         Ok(r) => r,
         Err(resolver::ResolveError::NotFound) => {
             return Err(CommandError::failure(format!(
-                "'{id}' is not a known Display ID or Alias",
-                id = args.id
+                "'{id}' is not a known Display ID or Alias"
             )));
         }
         Err(resolver::ResolveError::Storage(err)) => return Err(resolver::storage_error(&err)),
@@ -79,8 +124,7 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     // malformed invocation rather than an operation to refuse.
     if args.children && target.item_class != ItemClass::Epic {
         return Err(CommandError::usage(format!(
-            "'{id}' is not an Epic; --children promotes the Promotion Children of an Epic",
-            id = args.id
+            "'{id}' is not an Epic; --children promotes the Promotion Children of an Epic"
         )));
     }
 
@@ -101,6 +145,461 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         args.children,
         &now,
     )
+}
+
+fn run_reconcile(deps: &mut Deps<'_>, args: ReconcileArgs) -> Result<Exit, CommandError> {
+    let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
+        .map_err(|err| resolver::open_error(&err))?;
+    let now = deps.clock.now_iso();
+    let workflow = store
+        .lock_remote_workflow()
+        .map_err(CommandError::failure)?;
+    let target = resolve_recovery_target(&store, &args.id)?;
+    let recovery = store_promotion::recoverable_promotion(store.conn(), &target.id)
+        .map_err(|err| recovery_error(err, &target.display_id))?;
+    let mut adapter = open_recovery_adapter(deps.runner, deps.cwd, &store)?;
+    reconcile(
+        deps,
+        &mut store,
+        &mut *adapter,
+        &workflow,
+        &recovery,
+        &args,
+        &now,
+    )
+}
+
+fn run_retry(deps: &mut Deps<'_>, args: RetryArgs) -> Result<Exit, CommandError> {
+    let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
+        .map_err(|err| resolver::open_error(&err))?;
+    let now = deps.clock.now_iso();
+    let workflow = store
+        .lock_remote_workflow()
+        .map_err(CommandError::failure)?;
+    let target = resolve_recovery_target(&store, &args.id)?;
+    let recovery = store_promotion::recoverable_promotion(store.conn(), &target.id)
+        .map_err(|err| recovery_error(err, &target.display_id))?;
+    let mut adapter = open_recovery_adapter(deps.runner, deps.cwd, &store)?;
+    retry(deps, &mut store, &mut *adapter, &workflow, &recovery, &now)
+}
+
+fn resolve_recovery_target(
+    store: &Store,
+    id: &str,
+) -> Result<ResolvedItemRefWithDisplay, CommandError> {
+    match resolver::resolve_with_display(store, id) {
+        Ok(target) => Ok(target),
+        Err(resolver::ResolveError::NotFound) => Err(CommandError::failure(format!(
+            "'{id}' is not a known Display ID or Alias"
+        ))),
+        Err(resolver::ResolveError::Storage(err)) => Err(resolver::storage_error(&err)),
+    }
+}
+
+fn open_recovery_adapter<'a>(
+    runner: &'a dyn crate::proc::ProcRunner,
+    cwd: &'a std::path::Path,
+    store: &Store,
+) -> Result<Box<dyn Adapter + 'a>, CommandError> {
+    match factory::open_configured(store.conn(), runner, cwd) {
+        Ok(Some(adapter)) => Ok(adapter),
+        Ok(None) => Err(no_remote()),
+        Err(err @ FactoryOpenError::NotImplemented) => Err(CommandError::failure(err)),
+        Err(FactoryOpenError::Storage(err)) => Err(resolver::storage_error(&err)),
+    }
+}
+
+fn reconcile(
+    deps: &mut Deps<'_>,
+    store: &mut Store,
+    adapter: &mut dyn Adapter,
+    workflow: &RemoteWorkflowGuard,
+    recovery: &RecoveryPromotion,
+    args: &ReconcileArgs,
+    now: &str,
+) -> Result<Exit, CommandError> {
+    ensure_recovery_backend(adapter, recovery)?;
+    // Ordering is a local precondition, so refuse before spending a Backend
+    // round trip — and before a content mismatch sends the operator after
+    // '--force' for a refusal that would not have applied anyway.
+    store_promotion::ensure_no_earlier_nonterminal(store.conn(), recovery.sequence)
+        .map_err(|err| recovery_error(err, &recovery.outgoing_display_id))?;
+    let inspection = adapter
+        .inspect_item(&args.backend_key)
+        .map_err(|err| inspection_error(&args.backend_key, err))?;
+    let title_matches = inspection.title == recovery.promotion.title;
+    let body_matches = inspection.body == recovery.promotion.body;
+    let exact = title_matches && body_matches;
+    if !exact && !args.force {
+        let mut fields = Vec::new();
+        if !title_matches {
+            fields.push("title");
+        }
+        if !body_matches {
+            fields.push("body");
+        }
+        return Err(CommandError::failure(format!(
+            "Backend item {} does not match the retained Promotion snapshot ({})\nRe-run with '--force' only after confirming it is the object this Promotion created.",
+            inspection.identity.display_id,
+            fields.join(" and ")
+        )));
+    }
+
+    let mappings = store_promotion::capture_recovery_mappings(store.conn())
+        .map_err(|err| recovery_error(err, &recovery.outgoing_display_id))?;
+    store_promotion::reconcile_promotion(
+        store.conn_mut(),
+        workflow,
+        recovery,
+        &inspection.identity,
+        !exact,
+        now,
+    )
+    .map_err(|err| recovery_error(err, &recovery.outgoing_display_id))?;
+    let sync_result = sync::run_sync(store.conn_mut(), adapter, workflow, now);
+    let mapping_result = render_recovery_mappings(deps.stdout, store, &mappings);
+    finish_recovery(sync_result, mapping_result, RecoveryAction::Reconcile)
+}
+
+fn retry(
+    deps: &mut Deps<'_>,
+    store: &mut Store,
+    adapter: &mut dyn Adapter,
+    workflow: &RemoteWorkflowGuard,
+    recovery: &RecoveryPromotion,
+    now: &str,
+) -> Result<Exit, CommandError> {
+    ensure_recovery_backend(adapter, recovery)?;
+    let mappings = store_promotion::capture_recovery_mappings(store.conn())
+        .map_err(|err| recovery_error(err, &recovery.outgoing_display_id))?;
+    store_promotion::retry_promotion(store.conn_mut(), workflow, recovery, now)
+        .map_err(|err| recovery_error(err, &recovery.outgoing_display_id))?;
+    let sync_result = sync::run_sync(store.conn_mut(), adapter, workflow, now);
+    let mapping_result = render_recovery_mappings(deps.stdout, store, &mappings);
+    finish_recovery(sync_result, mapping_result, RecoveryAction::Retry)
+}
+
+fn ensure_recovery_backend(
+    adapter: &dyn Adapter,
+    recovery: &RecoveryPromotion,
+) -> Result<(), CommandError> {
+    if adapter.backend_kind() == recovery.backend_kind {
+        return Ok(());
+    }
+    Err(CommandError::failure(format!(
+        "the configured Remote no longer matches the Promotion for {}",
+        recovery.outgoing_display_id
+    )))
+}
+
+fn inspection_error(backend_key: &str, err: AdapterReadError) -> CommandError {
+    CommandError::failure(format!(
+        "could not inspect Backend item '{backend_key}': {err}"
+    ))
+}
+
+/// Recovery result vocabulary whose rendering stays verbatim under ADR-0017.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryAction {
+    Reconcile,
+    Retry,
+}
+
+impl RecoveryAction {
+    fn stopped_at_mutation(self, sequence: i64) -> String {
+        match self {
+            Self::Reconcile => format!(
+                "the Promotion was reconciled, but sync stopped at Mutation {sequence}\nInspect it with 'tk sync log {sequence}'; fix the cause, then run 'tk sync' to continue the queue."
+            ),
+            Self::Retry => format!(
+                "the Promotion was retried, but sync stopped at Mutation {sequence}\nInspect it with 'tk sync log {sequence}'; fix the cause, then run 'tk sync' to continue the queue."
+            ),
+        }
+    }
+
+    fn indeterminate_creation(self, sequence: i64) -> String {
+        match self {
+            Self::Reconcile => format!(
+                "the Promotion was reconciled, but Mutation {sequence} has an indeterminate Backend creation outcome\nUse 'tk promote reconcile <id> <backend-key>' if the object exists, or 'tk promote retry <id>' only when creating it again is safe."
+            ),
+            Self::Retry => format!(
+                "the Promotion was retried, but Mutation {sequence} has an indeterminate Backend creation outcome\nUse 'tk promote reconcile <id> <backend-key>' if the object exists, or 'tk promote retry <id>' only when creating it again is safe."
+            ),
+        }
+    }
+
+    fn created_identity_not_stored(
+        self,
+        sequence: i64,
+        error: &RunSyncError,
+        detail: Option<&str>,
+    ) -> String {
+        match (self, detail) {
+            (Self::Reconcile, Some(detail)) => format!(
+                "the Promotion was reconciled, but sync could not save a created Backend identity\n{error}\n{detail}\nMutation {sequence} remains applying; use 'tk promote reconcile <id> <backend-key>' after confirming the created object."
+            ),
+            (Self::Retry, Some(detail)) => format!(
+                "the Promotion was retried, but sync could not save a created Backend identity\n{error}\n{detail}\nMutation {sequence} remains applying; use 'tk promote reconcile <id> <backend-key>' after confirming the created object."
+            ),
+            (Self::Reconcile, None) => format!(
+                "the Promotion was reconciled, but sync could not save a created Backend identity\n{error}\nMutation {sequence} remains applying; use 'tk promote reconcile <id> <backend-key>' after confirming the created object."
+            ),
+            (Self::Retry, None) => format!(
+                "the Promotion was retried, but sync could not save a created Backend identity\n{error}\nMutation {sequence} remains applying; use 'tk promote reconcile <id> <backend-key>' after confirming the created object."
+            ),
+        }
+    }
+
+    fn sync_did_not_finish(self, detail: &str) -> String {
+        match self {
+            Self::Reconcile => {
+                format!("the Promotion was reconciled, but sync did not finish\n{detail}")
+            }
+            Self::Retry => format!("the Promotion was retried, but sync did not finish\n{detail}"),
+        }
+    }
+
+    fn remote_changed(self) -> String {
+        match self {
+            Self::Reconcile => "the Promotion was reconciled, but the configured Remote changed while contacting the Backend; retry 'tk sync'".into(),
+            Self::Retry => "the Promotion was retried, but the configured Remote changed while contacting the Backend; retry 'tk sync'".into(),
+        }
+    }
+
+    fn reporting_failed(self, body: &str) -> String {
+        match self {
+            Self::Reconcile => format!(
+                "the Promotion was reconciled, but could not report every Display ID replacement\n{body}"
+            ),
+            Self::Retry => format!(
+                "the Promotion was retried, but could not report every Display ID replacement\n{body}"
+            ),
+        }
+    }
+}
+
+fn finish_recovery_sync(
+    result: Result<sync::SyncReport, RunSyncError>,
+    action: RecoveryAction,
+) -> Result<Exit, CommandError> {
+    match result {
+        Ok(report) if report.stopped_at_sequence.is_none() => Ok(Exit::Ok),
+        Ok(report) => Err(CommandError::failure(
+            action.stopped_at_mutation(
+                report
+                    .stopped_at_sequence
+                    .expect("the guarded branch has a stopping Mutation"),
+            ),
+        )),
+        Err(
+            RunSyncError::ApplyingMutation(sequence)
+            | RunSyncError::Refresh(RefreshStoreError::ApplyingMutation(sequence))
+            | RunSyncError::Outcome(PersistMutationOutcomeError::ApplyingMutation(sequence)),
+        ) => Err(CommandError::failure(
+            action.indeterminate_creation(sequence),
+        )),
+        Err(
+            err @ RunSyncError::CreatedIdentityNotStored {
+                sequence,
+                source: PersistMutationOutcomeError::TargetNotLocal { .. },
+                ..
+            },
+        ) => Err(CommandError::failure(action.created_identity_not_stored(
+            sequence,
+            &err,
+            Some("This is Repository Store corruption or a Ticket bug — please report it."),
+        ))),
+        Err(
+            err @ RunSyncError::CreatedIdentityNotStored {
+                sequence,
+                source: PersistMutationOutcomeError::Storage(_),
+                ..
+            },
+        ) => {
+            let RunSyncError::CreatedIdentityNotStored { source, .. } = &err else {
+                unreachable!("the match arm fixes the error variant")
+            };
+            let PersistMutationOutcomeError::Storage(storage) = source else {
+                unreachable!("the match arm fixes the source variant")
+            };
+            let detail = created_identity_storage_detail(storage);
+            Err(CommandError::failure(action.created_identity_not_stored(
+                sequence,
+                &err,
+                Some(&detail),
+            )))
+        }
+        Err(err @ RunSyncError::CreatedIdentityNotStored { sequence, .. }) => Err(
+            CommandError::failure(action.created_identity_not_stored(sequence, &err, None)),
+        ),
+        Err(
+            RunSyncError::Refresh(
+                RefreshStoreError::Storage(storage)
+                | RefreshStoreError::BackendCohort(BackendCohortError::Storage(storage)),
+            )
+            | RunSyncError::Load(LoadApplicableError::Storage(storage))
+            | RunSyncError::Outcome(PersistMutationOutcomeError::Storage(storage)),
+        ) => Err(recovery_storage_error(action, &storage)),
+        Err(
+            err @ (RunSyncError::Load(
+                LoadApplicableError::UnknownMutationType(_)
+                | LoadApplicableError::PayloadVariantMissing(_)
+                | LoadApplicableError::PayloadJson(_)
+                | LoadApplicableError::OperationShapeMismatch { .. }
+                | LoadApplicableError::MissingBackendIdentity { .. }
+                | LoadApplicableError::CounterpartClassMismatch { .. },
+            )
+            | RunSyncError::Outcome(
+                PersistMutationOutcomeError::PayloadJson(_)
+                | PersistMutationOutcomeError::OperationShapeMismatch { .. }
+                | PersistMutationOutcomeError::TargetNotLocal { .. },
+            )),
+        ) => Err(CommandError::failure(action.sync_did_not_finish(&format!(
+            "{err}; this is a Ticket bug — please report it"
+        )))),
+        Err(
+            err @ RunSyncError::Refresh(RefreshStoreError::BackendCohort(
+                BackendCohortError::MultipleBackendKinds
+                | BackendCohortError::UnknownBackendKind(_)
+                | BackendCohortError::BackendKindMismatch { .. },
+            )),
+        ) => Err(CommandError::failure(action.sync_did_not_finish(&format!(
+            "{err}; this is a Repository Store invariant failure"
+        )))),
+        Err(RunSyncError::Refresh(RefreshStoreError::RemoteChanged { .. })) => {
+            Err(CommandError::failure(action.remote_changed()))
+        }
+        Err(RunSyncError::Pull(AdapterReadError::Failed(detail))) => {
+            Err(CommandError::failure(action.sync_did_not_finish(&detail)))
+        }
+        Err(
+            err @ (RunSyncError::Pull(AdapterReadError::Env(_))
+            | RunSyncError::Apply(_)
+            | RunSyncError::Outcome(
+                PersistMutationOutcomeError::MutationNotFound(_)
+                | PersistMutationOutcomeError::MutationNotApplicable(_),
+            )),
+        ) => Err(CommandError::failure(
+            action.sync_did_not_finish(&err.to_string()),
+        )),
+    }
+}
+
+fn finish_recovery(
+    sync_result: Result<sync::SyncReport, RunSyncError>,
+    mapping_result: Result<(), CommandError>,
+    action: RecoveryAction,
+) -> Result<Exit, CommandError> {
+    let sync_result = finish_recovery_sync(sync_result, action);
+    match (sync_result, mapping_result) {
+        (Ok(exit), Ok(())) => Ok(exit),
+        (Err(sync_error), Ok(())) => Err(sync_error),
+        (Ok(_), Err(mapping_error)) => Err(with_partial_recovery_context(action, mapping_error)),
+        (Err(sync_error), Err(mapping_error)) => {
+            Err(append_secondary_error(sync_error, mapping_error))
+        }
+    }
+}
+
+fn with_partial_recovery_context(action: RecoveryAction, error: CommandError) -> CommandError {
+    let CommandError::Failure { body, tail } = error else {
+        unreachable!("recovery mapping errors are operation failures")
+    };
+    CommandError::Failure {
+        body: action.reporting_failed(&body),
+        tail,
+    }
+}
+
+fn append_secondary_error(primary: CommandError, secondary: CommandError) -> CommandError {
+    let CommandError::Failure {
+        body: primary_body,
+        tail,
+    } = primary
+    else {
+        unreachable!("recovery sync errors are operation failures")
+    };
+    let CommandError::Failure {
+        body: secondary_body,
+        ..
+    } = secondary
+    else {
+        unreachable!("recovery mapping errors are operation failures")
+    };
+    CommandError::Failure {
+        body: format!(
+            "{primary_body}\nAdditionally, tk could not report every Display ID replacement: {secondary_body}"
+        ),
+        tail,
+    }
+}
+
+fn created_identity_storage_detail(storage: &rusqlite::Error) -> String {
+    if resolver::is_busy_error(storage) {
+        "The Repository Store was busy while saving the created identity.".into()
+    } else {
+        format!("The created identity could not be saved in the Repository Store: {storage}")
+    }
+}
+
+fn recovery_storage_error(action: RecoveryAction, storage: &rusqlite::Error) -> CommandError {
+    let classified = resolver::storage_error(storage);
+    let CommandError::Failure { body, tail } = classified else {
+        unreachable!("storage errors are operation failures")
+    };
+    CommandError::Failure {
+        body: action.sync_did_not_finish(&body),
+        tail,
+    }
+}
+
+fn render_recovery_mappings<W: Write + ?Sized>(
+    stdout: &mut W,
+    store: &Store,
+    captured: &[RecoveryPromotionMapping],
+) -> Result<(), CommandError> {
+    // Nested sync drains the whole queue, so a corruption finding on one
+    // captured Promotion must not hide the replacements that did land. Report
+    // every mapping first and surface the finding afterwards; only an
+    // unreadable Store aborts, because the next row would fail the same way.
+    let mut corruption: Option<CommandError> = None;
+    for item in captured {
+        let current = match resolver::resolve_with_display(store, &item.outgoing_display_id) {
+            Ok(current) => current,
+            Err(resolver::ResolveError::NotFound) => {
+                corruption.get_or_insert_with(|| {
+                    CommandError::failure(format!(
+                        "Repository Store corruption: Promotion alias {} disappeared",
+                        item.outgoing_display_id
+                    ))
+                });
+                continue;
+            }
+            Err(resolver::ResolveError::Storage(err)) => return Err(resolver::storage_error(&err)),
+        };
+        if current.id != item.item_id {
+            corruption.get_or_insert_with(|| {
+                CommandError::failure(format!(
+                    "Repository Store corruption: Promotion alias {} changed ownership",
+                    item.outgoing_display_id
+                ))
+            });
+            continue;
+        }
+        if current.display_id != item.outgoing_display_id {
+            let _ = writeln!(
+                stdout,
+                "Promoted {}: {} -> {}",
+                item.item_class.label(),
+                item.outgoing_display_id,
+                current.display_id
+            );
+        }
+    }
+    match corruption {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
 }
 
 /// Preflight, commit, sync, report — the operation itself, once the Repository
@@ -125,9 +624,15 @@ fn promote(
         .map_err(|findings| refusal(&target.display_id, &findings, backend))?;
 
     let captured = capture_display_ids(&graph, &plan);
-    let operation_id =
-        store_promotion::commit_plan(store.conn_mut(), &plan, backend, &mut *deps.rng, now)
-            .map_err(commit_error)?;
+    let operation_id = store_promotion::commit_plan(
+        store.conn_mut(),
+        workflow,
+        &plan,
+        backend,
+        &mut *deps.rng,
+        now,
+    )
+    .map_err(commit_error)?;
     if plan.is_empty() {
         render_nothing_to_promote(deps.stdout, target_item(&graph));
     }
@@ -298,8 +803,14 @@ fn unresolved_failure(
                     "Resolve that Mutation — 'tk sync log {}' shows why it stopped — then run 'tk sync' to apply the Promotion.",
                     blocker.sequence
                 ),
-                // Never attempted, so there is nothing recorded against it and
-                // nothing to resolve — see `recovery_guidance`.
+                // Automatic sync can never clear the blocker, so naming it is
+                // the only actionable guidance — see `recovery_guidance`.
+                MutationState::Applying => format!(
+                    "Inspect it with 'tk sync log {}'. Then use 'tk promote reconcile {} <backend-key>' if the Backend object exists, or 'tk promote retry {}' only when creating it again is safe.",
+                    blocker.sequence, blocker.target_display_id, blocker.target_display_id
+                ),
+                // Still `pending`: never attempted, so there is nothing
+                // recorded against it and nothing to resolve.
                 _ => "Fix the cause above, then run 'tk sync' to apply the Promotion.".to_owned(),
             },
         ),
@@ -337,8 +848,8 @@ fn recovery_guidance(mutation: &MutationSummary) -> String {
             mutation.sequence
         ),
         MutationState::Applying => format!(
-            "Inspect it with 'tk sync log {}'; do not run 'tk sync' while it remains applying.",
-            mutation.sequence
+            "Inspect it with 'tk sync log {}'. Then use 'tk promote reconcile <id> <backend-key>' if the Backend object exists, or 'tk promote retry <id>' only when creating it again is safe.",
+            mutation.sequence,
         ),
         _ => {
             "Fix the cause above, then run 'tk sync' to apply the rest of the Promotion.".to_owned()
@@ -443,9 +954,57 @@ fn commit_error(err: CommitPlanError) -> CommandError {
         CommitPlanError::BackendCohort(e) => {
             CommandError::failure(format!("Repository Store corruption: {e}"))
         }
-        CommitPlanError::ApplyingMutation(sequence) => CommandError::failure(format!(
-            "Mutation {sequence} has an indeterminate Backend creation outcome; resolve it before starting another Promotion"
+    }
+}
+
+fn recovery_error(err: RecoveryPromotionError, display_id: &str) -> CommandError {
+    match err {
+        RecoveryPromotionError::Storage(err)
+        | RecoveryPromotionError::Receipt(store_promotion::ApplyReceiptError::Storage(err))
+        | RecoveryPromotionError::Append(AppendError::Sqlite(err))
+        | RecoveryPromotionError::BackendCohort(BackendCohortError::Storage(err)) => {
+            resolver::storage_error(&err)
+        }
+        RecoveryPromotionError::NoRecoverablePromotion(_)
+        | RecoveryPromotionError::TerminalPromotion { .. } => CommandError::failure(format!(
+            "'{display_id}' has no nonterminal Promotion to recover"
         )),
+        RecoveryPromotionError::EarlierNonterminal { sequence, state } => {
+            CommandError::failure(format!(
+                "Mutation {sequence} ({state}) must resolve before recovering the Promotion for {display_id}"
+            ))
+        }
+        RecoveryPromotionError::RemoteChanged { .. } => CommandError::failure(format!(
+            "the configured Remote changed while recovering the Promotion for {display_id}; retry the command"
+        )),
+        RecoveryPromotionError::BackendIdentityTaken {
+            display_id: backend_display_id,
+        } => CommandError::failure(format!(
+            "Backend object {backend_display_id} is already tracked by tk, so the Promotion for {display_id} was left unchanged\nConfirm the Backend object this Promotion created, or resolve the duplicate first."
+        )),
+        RecoveryPromotionError::RetryNotApplying { sequence, state } => {
+            CommandError::failure(format!(
+                "the Promotion for {display_id} is {state}, not an indeterminate creation; Mutation {sequence} is retried by 'tk sync'"
+            ))
+        }
+        // Named exhaustively rather than caught by `_`, so a variant added
+        // later has to be classified here instead of inheriting a corruption
+        // diagnosis it may not deserve.
+        RecoveryPromotionError::MultipleNonterminalPromotions { first, second, .. } => {
+            CommandError::failure(format!(
+                "Repository Store corruption: '{display_id}' has multiple nonterminal Promotion Mutations ({first} and {second})"
+            ))
+        }
+        err @ (RecoveryPromotionError::MalformedPayload { .. }
+        | RecoveryPromotionError::MalformedBackendKind { .. }
+        | RecoveryPromotionError::MissingOperationId(_)
+        | RecoveryPromotionError::WrongMutationShape { .. }
+        | RecoveryPromotionError::TargetNotLocal { .. }
+        | RecoveryPromotionError::BackendCohort(_)
+        | RecoveryPromotionError::Receipt(_)
+        | RecoveryPromotionError::Append(_)) => {
+            CommandError::failure(format!("Repository Store corruption: {err}"))
+        }
     }
 }
 
@@ -453,13 +1012,18 @@ fn commit_error(err: CommitPlanError) -> CommandError {
 mod tests {
     use super::*;
     use crate::clock::FakeClock;
-    use crate::domain::backend_operation::BackendEdit;
+    use crate::domain::backend_operation::{
+        BackendEdit, BackendItemIdentity, BackendItemInspection, BackendItemRefresh,
+    };
     use crate::domain::mutation_state::MutationState;
     use crate::domain::promotion_capability::PromotionCapabilities;
+    use crate::domain::status::ItemStatus;
     use crate::domain::ticket_kind::TicketKind;
     use crate::proc::{FakeRunner, RunOutput};
     use crate::promotion::plan::ItemRef;
-    use crate::remote::fake::{CreateResponse, EditResponse, FakeAdapter, RefreshResponse};
+    use crate::remote::fake::{
+        CreateResponse, EditResponse, FakeAdapter, InspectionResponse, RefreshResponse,
+    };
     use crate::render::Styler;
     use crate::store::migrations;
     use crate::store::testing::{
@@ -601,8 +1165,26 @@ mod tests {
     fn run_rendered(h: &mut Harness<'_>, id: &str, children: bool) -> Exit {
         let mut deps = h.deps();
         let args = Args {
-            id: id.into(),
+            subcommand: None,
+            id: Some(id.into()),
             children,
+        };
+        match run(&mut deps, args) {
+            Ok(exit) => exit,
+            Err(err) => {
+                let exit = err.exit();
+                err.render(deps.stderr, "promote");
+                exit
+            }
+        }
+    }
+
+    fn run_subcommand_rendered(h: &mut Harness<'_>, subcommand: Sub) -> Exit {
+        let mut deps = h.deps();
+        let args = Args {
+            subcommand: Some(subcommand),
+            id: None,
+            children: false,
         };
         match run(&mut deps, args) {
             Ok(exit) => exit,
@@ -651,6 +1233,77 @@ mod tests {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap()
+    }
+
+    fn inspection(display_id: &str, key: &str, title: &str, body: &str) -> InspectionResponse {
+        InspectionResponse::Item(BackendItemInspection {
+            identity: BackendItemIdentity {
+                backend_key: key.into(),
+                display_id: display_id.into(),
+            },
+            title: title.into(),
+            body: body.into(),
+        })
+    }
+
+    fn refresh(title: &str, body: &str, status: ItemStatus) -> RefreshResponse {
+        RefreshResponse::Item(BackendItemRefresh {
+            title: title.into(),
+            body: body.into(),
+            status,
+            ticket_kind: Some(TicketKind::Task),
+        })
+    }
+
+    fn reconcile_rendered(
+        h: &mut Harness<'_>,
+        store: &mut Store,
+        fake: &mut FakeAdapter,
+        id: &str,
+        backend_key: &str,
+        force: bool,
+    ) -> Exit {
+        let target = resolver::resolve_with_display(store, id).expect("the target resolves");
+        let recovery = store_promotion::recoverable_promotion(store.conn(), &target.id)
+            .expect("the Promotion is recoverable");
+        let workflow = store.lock_remote_workflow().unwrap();
+        let mut deps = h.deps();
+        let now = deps.clock.now_iso();
+        let args = ReconcileArgs {
+            id: id.into(),
+            backend_key: backend_key.into(),
+            force,
+        };
+        match reconcile(&mut deps, store, fake, &workflow, &recovery, &args, &now) {
+            Ok(exit) => exit,
+            Err(err) => {
+                let exit = err.exit();
+                err.render(deps.stderr, "promote");
+                exit
+            }
+        }
+    }
+
+    fn retry_rendered(
+        h: &mut Harness<'_>,
+        store: &mut Store,
+        fake: &mut FakeAdapter,
+        id: &str,
+    ) -> Exit {
+        let target = resolver::resolve_with_display(store, id).expect("the target resolves");
+        let recovery = store_promotion::recoverable_promotion(store.conn(), &target.id)
+            .expect("the Promotion is recoverable");
+        let workflow = store.lock_remote_workflow().unwrap();
+        let mut deps = h.deps();
+        let now = deps.clock.now_iso();
+        match retry(&mut deps, store, fake, &workflow, &recovery, &now) {
+            Ok(exit) => exit,
+            Err(err) => {
+                let exit = err.exit();
+                err.render(deps.stderr, "promote");
+                exit
+            }
+        }
     }
 
     // ---- argument and Remote validation (no Adapter reached) -------------
@@ -902,6 +1555,512 @@ mod tests {
         assert_eq!(item_state(&conn, "e1"), ("gh-1".into(), "backend".into()));
         assert_eq!(item_state(&conn, "c1"), ("gh-2".into(), "backend".into()));
         h.runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn public_reconcile_dispatch_uses_the_configured_github_adapter() {
+        let fixture = TmpStore::new("repo");
+        let mut conn = seed_store(&fixture);
+        local_ticket(&conn, "t1", "tk-1", 1);
+        commit_promotion(&mut conn, "t1");
+        conn.execute("update mutations set state = 'applying'", [])
+            .unwrap();
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &fixture);
+        let issue = br#"{"number":42,"title":"Local work","body":"","state":"OPEN","issueType":null,"url":"https://github.com/o/r/issues/42"}"#;
+        for key in ["42", "https://github.com/o/r/issues/42"] {
+            h.runner.expect_exact(
+                &[
+                    "gh",
+                    "issue",
+                    "view",
+                    key,
+                    "--json",
+                    "number,title,body,state,issueType,url",
+                ],
+                RunOutput {
+                    exit_code: 0,
+                    stdout: issue.to_vec(),
+                    stderr: Vec::new(),
+                },
+            );
+        }
+
+        let code = run_subcommand_rendered(
+            &mut h,
+            Sub::Reconcile(ReconcileArgs {
+                id: "tk-1".into(),
+                backend_key: "42".into(),
+                force: false,
+            }),
+        );
+
+        assert_eq!(code, Exit::Ok, "{}", h.err());
+        assert_eq!(h.out(), "Promoted Ticket: tk-1 -> gh-42\n");
+        assert_eq!(item_state(&conn, "t1"), ("gh-42".into(), "backend".into()));
+        h.runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn public_retry_dispatch_uses_the_configured_github_adapter() {
+        let fixture = TmpStore::new("repo");
+        let mut conn = seed_store(&fixture);
+        local_ticket(&conn, "t1", "tk-1", 1);
+        commit_promotion(&mut conn, "t1");
+        conn.execute("update mutations set state = 'applying'", [])
+            .unwrap();
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &fixture);
+        h.runner.expect_exact(
+            &[
+                "gh",
+                "issue",
+                "create",
+                "--title",
+                "Local work",
+                "--body",
+                "",
+            ],
+            RunOutput {
+                exit_code: 0,
+                stdout: b"https://github.com/o/r/issues/42\n".to_vec(),
+                stderr: Vec::new(),
+            },
+        );
+
+        let code = run_subcommand_rendered(&mut h, Sub::Retry(RetryArgs { id: "tk-1".into() }));
+
+        assert_eq!(code, Exit::Ok, "{}", h.err());
+        assert_eq!(h.out(), "Promoted Ticket: tk-1 -> gh-42\n");
+        assert_eq!(item_state(&conn, "t1"), ("gh-42".into(), "backend".into()));
+        h.runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn public_reconcile_stops_at_remote_workflow_contention() {
+        let fixture = TmpStore::new("repo");
+        let _conn = seed_store(&fixture);
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        let blocking_store = open_store(&h, &fixture, &cwd_path);
+        let _guard = blocking_store.lock_remote_workflow().unwrap();
+        expect_git(&h, &fixture);
+
+        let code = run_subcommand_rendered(
+            &mut h,
+            Sub::Reconcile(ReconcileArgs {
+                id: "tk-1".into(),
+                backend_key: "42".into(),
+                force: false,
+            }),
+        );
+
+        assert_eq!(code, Exit::Failure);
+        assert_eq!(
+            h.err(),
+            "tk promote: another remote-changing command is running; retry when it finishes\n"
+        );
+        h.runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn public_retry_stops_at_remote_workflow_contention() {
+        let fixture = TmpStore::new("repo");
+        let _conn = seed_store(&fixture);
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        let blocking_store = open_store(&h, &fixture, &cwd_path);
+        let _guard = blocking_store.lock_remote_workflow().unwrap();
+        expect_git(&h, &fixture);
+
+        let code = run_subcommand_rendered(&mut h, Sub::Retry(RetryArgs { id: "tk-1".into() }));
+
+        assert_eq!(code, Exit::Failure);
+        assert_eq!(
+            h.err(),
+            "tk promote: another remote-changing command is running; retry when it finishes\n"
+        );
+        h.runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn public_retry_reports_a_known_item_without_recoverable_promotion() {
+        let fixture = TmpStore::new("repo");
+        let conn = seed_store(&fixture);
+        local_ticket(&conn, "t1", "tk-1", 1);
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &fixture);
+
+        let code = run_subcommand_rendered(&mut h, Sub::Retry(RetryArgs { id: "tk-1".into() }));
+
+        assert_eq!(code, Exit::Failure);
+        assert_eq!(
+            h.err(),
+            "tk promote: 'tk-1' has no nonterminal Promotion to recover\n"
+        );
+        h.runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn exact_reconcile_attaches_then_imports_backend_status() {
+        let fixture = TmpStore::new("repo");
+        let mut conn = seed_store(&fixture);
+        local_ticket(&conn, "t1", "tk-1", 1);
+        commit_promotion(&mut conn, "t1");
+        conn.execute("update mutations set state = 'applying'", [])
+            .unwrap();
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        let mut store = open_store(&h, &fixture, &cwd_path);
+        let mut fake = FakeAdapter::new()
+            .with_inspections(vec![inspection(
+                "gh-42",
+                "https://github.com/o/r/issues/42",
+                "Local work",
+                "",
+            )])
+            .with_refreshes(vec![refresh("Local work", "", ItemStatus::Done)]);
+
+        let code = reconcile_rendered(&mut h, &mut store, &mut fake, "tk-1", "42", false);
+
+        assert_eq!(code, Exit::Ok, "{}", h.err());
+        assert_eq!(h.out(), "Promoted Ticket: tk-1 -> gh-42\n");
+        let row: (String, String, String) = conn
+            .query_row(
+                "select display_value, origin, status from items where id = 't1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row, ("gh-42".into(), "backend".into(), "done".into()));
+        assert_eq!(fake.captured_inspection_keys, vec!["42"]);
+        assert_eq!(
+            fake.captured_refresh_keys,
+            vec!["https://github.com/o/r/issues/42"]
+        );
+    }
+
+    #[test]
+    fn reconcile_refuses_content_mismatch_without_writing() {
+        let fixture = TmpStore::new("repo");
+        let mut conn = seed_store(&fixture);
+        local_ticket(&conn, "t1", "tk-1", 1);
+        commit_promotion(&mut conn, "t1");
+        conn.execute("update mutations set state = 'applying'", [])
+            .unwrap();
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        let mut store = open_store(&h, &fixture, &cwd_path);
+        let mut fake = FakeAdapter::new().with_inspections(vec![inspection(
+            "gh-42",
+            "42",
+            "Other title",
+            "Other body",
+        )]);
+
+        let code = reconcile_rendered(&mut h, &mut store, &mut fake, "tk-1", "42", false);
+
+        assert_eq!(code, Exit::Failure);
+        assert_eq!(h.out(), "");
+        assert_eq!(
+            h.err(),
+            "tk promote: Backend item gh-42 does not match the retained Promotion snapshot (title and body)\n\
+             Re-run with '--force' only after confirming it is the object this Promotion created.\n"
+        );
+        assert_eq!(item_state(&conn, "t1"), ("tk-1".into(), "local".into()));
+        let state: String = conn
+            .query_row("select state from mutations where sequence = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(state, "applying");
+    }
+
+    #[test]
+    fn forced_reconcile_converges_current_local_content_with_the_same_operation() {
+        let fixture = TmpStore::new("repo");
+        let mut conn = seed_store(&fixture);
+        local_ticket(&conn, "t1", "tk-1", 1);
+        commit_promotion(&mut conn, "t1");
+        conn.execute_batch(
+            "update mutations set state = 'applying'; update items set title = 'Current local', body = 'Current body' where id = 't1'",
+        )
+        .unwrap();
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        let mut store = open_store(&h, &fixture, &cwd_path);
+        let mut fake = FakeAdapter::new()
+            .with_inspections(vec![inspection(
+                "gh-42",
+                "42",
+                "Different Backend title",
+                "Different Backend body",
+            )])
+            .with_refreshes(vec![refresh(
+                "Different Backend title",
+                "Different Backend body",
+                ItemStatus::Open,
+            )])
+            .with_edits(vec![EditResponse::Success]);
+
+        let code = reconcile_rendered(&mut h, &mut store, &mut fake, "tk-1", "42", true);
+
+        assert_eq!(code, Exit::Ok, "{}", h.err());
+        assert_eq!(h.out(), "Promoted Ticket: tk-1 -> gh-42\n");
+        let BackendEdit::UpdateTicket { snapshot, .. } = &fake.captured_edits[0] else {
+            panic!("forced convergence must append a Ticket update")
+        };
+        assert_eq!(snapshot.title, "Current local");
+        assert_eq!(snapshot.body, "Current body");
+        let operations: Vec<String> = {
+            let mut stmt = conn
+                .prepare("select promotion_operation_id from mutations order by sequence")
+                .unwrap();
+            stmt.query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        assert_eq!(operations.len(), 2);
+        assert_eq!(operations[0], operations[1]);
+    }
+
+    #[test]
+    fn reconcile_reports_every_promotion_that_nested_sync_lands() {
+        let fixture = TmpStore::new("repo");
+        let mut conn = seed_store(&fixture);
+        local_ticket(&conn, "t1", "tk-1", 1);
+        local_ticket(&conn, "t2", "tk-2", 2);
+        commit_promotion(&mut conn, "t1");
+        commit_promotion(&mut conn, "t2");
+        conn.execute(
+            "update mutations set state = 'applying' where sequence = 1",
+            [],
+        )
+        .unwrap();
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        let mut store = open_store(&h, &fixture, &cwd_path);
+        let mut fake = FakeAdapter::new()
+            .with_inspections(vec![inspection("gh-1", "1", "Local work", "")])
+            .with_refreshes(vec![refresh("Local work", "", ItemStatus::Open)])
+            .with_creates(vec![CreateResponse::Created {
+                backend_key: "2".into(),
+                display_id: "gh-2".into(),
+            }]);
+
+        let code = reconcile_rendered(&mut h, &mut store, &mut fake, "tk-1", "1", false);
+
+        assert_eq!(code, Exit::Ok, "{}", h.err());
+        assert_eq!(
+            h.out(),
+            "Promoted Ticket: tk-1 -> gh-1\nPromoted Ticket: tk-2 -> gh-2\n"
+        );
+    }
+
+    #[test]
+    fn reconcile_renders_landed_mapping_before_a_later_certified_rejection() {
+        let fixture = TmpStore::new("repo");
+        let mut conn = seed_store(&fixture);
+        local_ticket(&conn, "t1", "tk-1", 1);
+        local_ticket(&conn, "t2", "tk-2", 2);
+        commit_promotion(&mut conn, "t1");
+        commit_promotion(&mut conn, "t2");
+        conn.execute(
+            "update mutations set state = 'applying' where sequence = 1",
+            [],
+        )
+        .unwrap();
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        let mut store = open_store(&h, &fixture, &cwd_path);
+        let mut fake = FakeAdapter::new()
+            .with_inspections(vec![inspection("gh-1", "1", "Local work", "")])
+            .with_refreshes(vec![refresh("Local work", "", ItemStatus::Open)])
+            .with_creates(vec![CreateResponse::Rejected(
+                "Backend validation rejected tk-2".into(),
+            )]);
+
+        let code = reconcile_rendered(&mut h, &mut store, &mut fake, "tk-1", "1", false);
+
+        assert_eq!(code, Exit::Failure);
+        assert_eq!(h.out(), "Promoted Ticket: tk-1 -> gh-1\n");
+        assert!(h.err().contains("sync stopped at Mutation 2"));
+        assert!(h.err().contains("tk sync log 2"));
+        assert!(h.err().contains("run 'tk sync' to continue the queue"));
+    }
+
+    #[test]
+    fn retry_reenters_normal_sync_and_reports_the_mapping() {
+        let fixture = TmpStore::new("repo");
+        let mut conn = seed_store(&fixture);
+        local_ticket(&conn, "t1", "tk-1", 1);
+        commit_promotion(&mut conn, "t1");
+        conn.execute("update mutations set state = 'applying'", [])
+            .unwrap();
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        let mut store = open_store(&h, &fixture, &cwd_path);
+        let mut fake = FakeAdapter::new().with_creates(vec![CreateResponse::Created {
+            backend_key: "42".into(),
+            display_id: "gh-42".into(),
+        }]);
+
+        let code = retry_rendered(&mut h, &mut store, &mut fake, "tk-1");
+
+        assert_eq!(code, Exit::Ok, "{}", h.err());
+        assert_eq!(h.out(), "Promoted Ticket: tk-1 -> gh-42\n");
+        assert_eq!(fake.captured_creates.len(), 1);
+    }
+
+    #[test]
+    fn retry_that_is_still_indeterminate_restores_safe_recovery_guidance() {
+        let fixture = TmpStore::new("repo");
+        let mut conn = seed_store(&fixture);
+        local_ticket(&conn, "t1", "tk-1", 1);
+        commit_promotion(&mut conn, "t1");
+        conn.execute("update mutations set state = 'applying'", [])
+            .unwrap();
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        let mut store = open_store(&h, &fixture, &cwd_path);
+        let mut fake = FakeAdapter::new().with_creates(vec![CreateResponse::Indeterminate(
+            "request outcome unknown".into(),
+        )]);
+
+        let code = retry_rendered(&mut h, &mut store, &mut fake, "tk-1");
+
+        assert_eq!(code, Exit::Failure);
+        assert!(h.err().contains("indeterminate Backend creation outcome"));
+        assert!(h.err().contains("tk promote reconcile"));
+        let state: String = conn
+            .query_row("select state from mutations where sequence = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(state, "applying");
+    }
+
+    #[test]
+    fn recovery_sync_created_identity_failure_preserves_reconcile_only_guidance() {
+        let error = RunSyncError::CreatedIdentityNotStored {
+            sequence: 7,
+            identity: BackendItemIdentity {
+                backend_key: "https://github.com/o/r/issues/42".into(),
+                display_id: "gh-42".into(),
+            },
+            source: PersistMutationOutcomeError::TargetNotLocal {
+                sequence: 7,
+                item_id: "item-1".into(),
+            },
+        };
+
+        let failure = finish_recovery_sync(Err(error), RecoveryAction::Retry).unwrap_err();
+        let mut rendered = Vec::new();
+        failure.render(&mut rendered, "promote");
+        let rendered = String::from_utf8(rendered).unwrap();
+
+        assert!(rendered.contains("the Promotion was retried"));
+        assert!(rendered.contains("Backend created gh-42"));
+        assert!(rendered.contains("Repository Store corruption or a Ticket bug"));
+        assert!(rendered.contains("Mutation 7 remains applying"));
+        assert!(rendered.contains("tk promote reconcile"));
+        assert!(!rendered.contains("tk promote retry <id>"));
+    }
+
+    #[test]
+    fn created_identity_busy_failure_never_recommends_retrying_creation() {
+        let busy = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            None,
+        );
+        let error = RunSyncError::CreatedIdentityNotStored {
+            sequence: 7,
+            identity: BackendItemIdentity {
+                backend_key: "https://github.com/o/r/issues/42".into(),
+                display_id: "gh-42".into(),
+            },
+            source: PersistMutationOutcomeError::Storage(busy),
+        };
+
+        let failure = finish_recovery_sync(Err(error), RecoveryAction::Retry).unwrap_err();
+        let mut rendered = Vec::new();
+        failure.render(&mut rendered, "promote");
+        let rendered = String::from_utf8(rendered).unwrap();
+
+        assert!(rendered.contains("Backend created gh-42"));
+        assert!(rendered.contains("Repository Store was busy while saving"));
+        assert!(rendered.contains("Mutation 7 remains applying"));
+        assert!(rendered.contains("tk promote reconcile"));
+        assert!(!rendered.contains("retry the command"));
+        assert!(!rendered.contains("tk promote retry <id>"));
+    }
+
+    #[test]
+    fn recovery_sync_storage_failure_preserves_busy_retry_classification() {
+        let busy = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            None,
+        );
+
+        let failure = finish_recovery_sync(
+            Err(RunSyncError::Outcome(PersistMutationOutcomeError::Storage(
+                busy,
+            ))),
+            RecoveryAction::Reconcile,
+        )
+        .unwrap_err();
+        let mut rendered = Vec::new();
+        failure.render(&mut rendered, "promote");
+
+        assert_eq!(
+            String::from_utf8(rendered).unwrap(),
+            "tk promote: the Promotion was reconciled, but sync did not finish\n\
+             Repository Store is busy; retry the command\n"
+        );
+    }
+
+    #[test]
+    fn recovery_sync_generic_failure_keeps_the_partial_success_context() {
+        let failure = finish_recovery_sync(
+            Err(RunSyncError::Outcome(
+                PersistMutationOutcomeError::MutationNotFound(8),
+            )),
+            RecoveryAction::Retry,
+        )
+        .unwrap_err();
+        let mut rendered = Vec::new();
+        failure.render(&mut rendered, "promote");
+        assert_eq!(
+            String::from_utf8(rendered).unwrap(),
+            "tk promote: the Promotion was retried, but sync did not finish\n\
+             mutation 8 not found\n"
+        );
+    }
+
+    #[test]
+    fn mapping_failure_cannot_hide_an_indeterminate_creation() {
+        let mapping_error =
+            CommandError::failure("Repository Store corruption: Promotion alias tk-2 disappeared");
+
+        let failure = finish_recovery(
+            Err(RunSyncError::ApplyingMutation(7)),
+            Err(mapping_error),
+            RecoveryAction::Retry,
+        )
+        .unwrap_err();
+        let mut rendered = Vec::new();
+        failure.render(&mut rendered, "promote");
+        let rendered = String::from_utf8(rendered).unwrap();
+
+        assert!(rendered.contains("indeterminate Backend creation outcome"));
+        assert!(rendered.contains("tk promote reconcile"));
+        assert!(rendered.contains("tk promote retry"));
+        assert!(rendered.contains("Additionally"));
+        assert!(rendered.contains("Promotion alias tk-2 disappeared"));
     }
 
     // ---- finding rendering ----------------------------------------------
@@ -1347,8 +2506,112 @@ mod tests {
             h.err(),
             "tk promote: the Promotion did not finish: Mutation 1 (applying) for tk-1 is unresolved\n\
              Sync stopped: Mutation 1 has an indeterminate Backend creation outcome\n\
-             Inspect it with 'tk sync log 1'; do not run 'tk sync' while it remains applying.\n"
+             Inspect it with 'tk sync log 1'. Then use 'tk promote reconcile <id> <backend-key>' if the Backend object exists, or 'tk promote retry <id>' only when creating it again is safe.\n"
         );
+    }
+
+    /// ADR-0037 lets a Promotion commit behind an unresolved creation, so this
+    /// diagnostic has to name the recovery commands. Automatic sync can never
+    /// clear an `applying` blocker, and recommending it would loop the operator.
+    #[test]
+    fn an_older_applying_mutation_points_at_promotion_recovery() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        local_ticket(&conn, "t0", "tk-9", 1);
+        local_ticket(&conn, "t1", "tk-1", 2);
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "promote_ticket",
+                item_id: "t0",
+                payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
+                state: "applying",
+                failure_json: Some(r#"{"detail":"gh timed out"}"#),
+                promotion_operation_id: Some("op-old"),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "update sequences set value = 1 where name = 'mutation_seq'",
+            [],
+        )
+        .unwrap();
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        let mut st = open_store(&h, &store, &cwd_path);
+        let mut fake = adapter_with_refresh(vec![], vec![]);
+
+        let code = promote_rendered(&mut h, &mut st, &mut fake, "tk-1", false);
+
+        assert_eq!(code, Exit::Failure);
+        assert_eq!(
+            h.err(),
+            "tk promote: the Promotion is committed and remains pending behind Mutation 1 (applying) for tk-9\n\
+             Sync stopped: Mutation 1 has an indeterminate Backend creation outcome\n\
+             Inspect it with 'tk sync log 1'. Then use 'tk promote reconcile tk-9 <backend-key>' if the Backend object exists, or 'tk promote retry tk-9' only when creating it again is safe.\n"
+        );
+        let state: String = conn
+            .query_row("select state from mutations where sequence = 2", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            state, "pending",
+            "the Promotion is durable behind the barrier"
+        );
+    }
+
+    /// The operator's most likely mistake is naming an object tk already
+    /// tracks — often one Adopt imported while the Promotion hung. That must
+    /// read as a collision, not as the uniqueness constraint underneath.
+    #[test]
+    fn reconcile_refuses_a_backend_object_tk_already_tracks() {
+        let fixture = TmpStore::new("repo");
+        let mut conn = seed_store(&fixture);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "adopted",
+                display: "gh-42",
+                title: "Already tracked",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("42"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        local_ticket(&conn, "t1", "tk-1", 2);
+        commit_promotion(&mut conn, "t1");
+        conn.execute("update mutations set state = 'applying'", [])
+            .unwrap();
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        let mut store = open_store(&h, &fixture, &cwd_path);
+        let mut fake =
+            FakeAdapter::new().with_inspections(vec![inspection("gh-42", "42", "Local work", "")]);
+
+        let code = reconcile_rendered(&mut h, &mut store, &mut fake, "tk-1", "42", false);
+
+        assert_eq!(code, Exit::Failure);
+        assert_eq!(h.out(), "");
+        assert_eq!(
+            h.err(),
+            "tk promote: Backend object gh-42 is already tracked by tk, so the Promotion for tk-1 was left unchanged\n\
+             Confirm the Backend object this Promotion created, or resolve the duplicate first.\n"
+        );
+        let row: (String, String) = conn
+            .query_row(
+                "select i.origin, m.state from items i join mutations m on m.item_id = i.id \
+                   where i.id = 't1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row, ("local".into(), "applying".into()));
     }
 
     #[test]
