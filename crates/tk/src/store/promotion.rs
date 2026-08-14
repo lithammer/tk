@@ -846,9 +846,8 @@ pub enum CancelPromotionError {
         sequence: i64,
         source: serde_json::Error,
     },
-    /// Reading an item's Backend Binding hit Repository Store corruption.
     #[error(transparent)]
-    BackendBinding(Box<mutations::BackendBindingError>),
+    BackendBinding(#[from] mutations::BackendBindingError),
     #[error(transparent)]
     Transition(#[from] mutations::IllegalTransition),
 }
@@ -1160,12 +1159,7 @@ fn post_cancellation_binding(
     if cancelled_items.contains(item_id) {
         return Ok(BackendBinding::Local);
     }
-    mutations::resolve_backend_binding(conn, item_id).map_err(|error| match error {
-        // A busy Repository Store keeps the retry guidance the Storage arm
-        // renders; the rest is corruption.
-        mutations::BackendBindingError::Sqlite(error) => CancelPromotionError::Storage(error),
-        other => CancelPromotionError::BackendBinding(Box::new(other)),
-    })
+    Ok(mutations::resolve_backend_binding(conn, item_id)?)
 }
 
 fn display_id(conn: &Connection, item_id: &str) -> rusqlite::Result<String> {

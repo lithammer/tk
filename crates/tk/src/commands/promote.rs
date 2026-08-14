@@ -1065,8 +1065,8 @@ fn cancel_error(err: CancelPromotionError, display_id: &str) -> CommandError {
         CancelPromotionError::NothingToWithdraw(_) => CommandError::failure(format!(
             "the Promotion Operation for {display_id} has already resolved; there is no Promotion left to withdraw"
         )),
+        CancelPromotionError::BackendBinding(err) => resolver::backend_binding_error(&err),
         err @ (CancelPromotionError::MalformedPayload { .. }
-        | CancelPromotionError::BackendBinding(_)
         | CancelPromotionError::Transition(_)) => {
             CommandError::failure(format!("Repository Store corruption: {err}"))
         }
