@@ -233,6 +233,13 @@ pending and lets normal ordered sync attempt Backend creation again. A failed
 **Promotion** is not a Promotion Retry input; ordinary sync already retries it.
 _Avoid_: Automatic Retry, Replay
 
+**Promotion Cancellation**:
+The explicit recovery that withdraws a **Promotion Operation**'s unresolved
+**Promotions**, together with every **Mutation** ordered behind them that cannot
+be applied without a withdrawn item's backend identity, returning those items to
+**Local Tickets** and **Local Epics**. It reaches no **Backend**.
+_Avoid_: Unpromote, Promotion Rollback, Promotion Abandon, Promotion Delete
+
 **Mutation**:
 A durable local intent to modify **tk** domain state through a **Backend**. Its
 target is a **Backend Ticket** or **Backend Epic**, or a **Pending Promotion**
@@ -282,8 +289,15 @@ A **Mutation Failure** as produced and classified by a **Backend Adapter**, carr
 _Avoid_: Adapter Error
 
 **Skipped Mutation**:
-A **Mutation** explicitly bypassed during sync without being applied to a **Backend**.
-_Avoid_: Ignored Mutation
+A **Mutation** explicitly bypassed during sync without being applied to a
+**Backend**, produced only by **Sync Skip**.
+_Avoid_: Ignored Mutation, Cancelled Mutation
+
+**Cancelled Mutation**:
+A **Mutation** terminally withdrawn by **Promotion Cancellation**, never applied
+and never attempted. Distinct from a **Skipped Mutation**, which sync failed on
+before a human bypassed it.
+_Avoid_: Skipped Mutation, Deleted Mutation, Aborted Mutation
 
 **Sync Skip**:
 The **`tk sync`** mode that marks one failed **Mutation** as skipped and continues sync.
@@ -454,12 +468,45 @@ _Avoid_: ticket, tickets
   already holds, with or without force.
 - Backend status is authoritative after reconciliation. The nested sync may
   import a closed Backend object as a `done` Item.
+- **Promotion Cancellation** withdraws the whole **Promotion Operation** the
+  named item's **Promotion** belongs to, not one **Mutation**.
+- A `pending` or `failed` **Promotion** may be cancelled, because both are
+  certified to have created no Backend object. An `applying` **Promotion**
+  anywhere in the **Promotion Operation** refuses the whole cancellation, which
+  **Promotion Reconciliation** or **Promotion Retry** must resolve first. An
+  already applied **Promotion** is reported rather than undone.
+- **Promotion Cancellation** withdraws every **Mutation** that cannot be applied
+  without a cancelled item's backend identity: the **Promotions** themselves,
+  **Mutations** targeting a cancelled item, a **Dependency** naming one as
+  **Blocking Item**, and an **Epic Membership** addition naming a cancelled
+  **Epic**. Clearing **Epic Membership** survives, because it names no **Epic**
+  the **Backend** must address.
+- Cancellation reaches one hop, never transitively: only the cancelled items lose
+  their prospective identity, so another item's **Promotion** survives with just
+  its references to a cancelled item withdrawn.
+- **Promotion Cancellation** refuses while a cancelled **Blocking Item** would
+  leave a backend-bound **Blocked Item** waiting on it, the same graph
+  **Promotion** rejects; the **Dependency** must be removed first. **Epic
+  Membership** degrades to local instead, as it does under **Promotion**.
+- **Promotion Cancellation** leaves current **Ticket** and **Epic** state
+  untouched, including **Display IDs** and **Aliases**, and returns each
+  cancelled item's **Backend Binding** to unbound. Promoting it again is
+  ordinary **Promotion**.
+- **Promotion Cancellation** reaches no **Backend**, so unlike
+  **Promotion Reconciliation** and **Promotion Retry** it may resolve a
+  **Promotion** that an earlier nonterminal **Mutation** precedes.
 - A **Sync Conflict** is a kind of **Mutation Failure**.
 - v1 has no automatic merge or local conflict resolution model.
 - A failed **Mutation** may become a **Skipped Mutation** only through **Sync Skip**.
+- A **Mutation** may become a **Cancelled Mutation** only through **Promotion
+  Cancellation**, from `pending` as readily as from `failed`. A **Promotion**
+  itself can only ever be cancelled, never skipped.
 - Sync output warns when **Skipped Mutations** exist.
-- **Sync Log** inspects pending, failed, applying, skipped, and applied
-  **Mutations**.
+- **Sync Log** inspects pending, failed, applying, skipped, cancelled, and
+  applied **Mutations**, and reports every state but applied without a flag.
+- A **Promotion Operation** has resolved once none of its **Mutations** is
+  pending, failed, or applying; a **Skipped Mutation** or **Cancelled Mutation**
+  is a resolved outcome, not a waiting one.
 - Force-applying conflicting **Mutations** is deferred from v1.
 - **Backend Adapters** use injectable subprocess runners for external CLIs such as `gh` and `acli`.
 - A repository may have zero or one **Primary Backend**.
@@ -697,6 +744,15 @@ _Avoid_: ticket, tickets
 > **Dev:** "If every **Ticket** in an **Epic** is done, should the **Epic** close automatically?"
 > **Domain expert:** "No — **Epic** closure is explicit because completion criteria may exist outside the current child tickets."
 >
+> **Dev:** "The **Backend** rejected a **Promotion** and always will. How does that repository get unstuck?"
+> **Domain expert:** "**Promotion Cancellation**. It withdraws that whole **Promotion Operation** and the **Mutations** waiting on its missing backend identity, and the items go back to being **Local**."
+>
+> **Dev:** "Does cancelling delete anything — the backend issue, or the local **Ticket**?"
+> **Domain expert:** "Neither. A cancelled **Promotion** never created a backend object, and current **Ticket** and **Epic** state is untouched, **Display ID** included. Only the intent is withdrawn."
+>
+> **Dev:** "Can it cancel a **Promotion** whose creation call may already have run?"
+> **Domain expert:** "No — that is an `applying` **Promotion**, and it needs **Promotion Reconciliation** or **Promotion Retry** first. Cancellation only withdraws intent that is certain to have created nothing."
+>
 > **Dev:** "Does an `active` **Ticket** have to be assigned to someone?"
 > **Domain expert:** "No — `active` means current work; **Assignee** support is deferred and may be omitted entirely."
 
@@ -756,6 +812,31 @@ _Avoid_: ticket, tickets
   it rejects an unrepresentable **Dependency**, was considered — resolved:
   membership stays local, because losing grouping is not the same failure as a
   backend-backed item exposing an incomplete blocking constraint (ADR-0035).
+- Withdrawing a single **Promotion** rather than its whole **Promotion
+  Operation** was considered (tk-134) — resolved: **Promotion Cancellation** is
+  operation-wide, because cancelling only a `--children` **Epic** would still
+  create every child upstream as a bare **Ticket**, which is not what abandoning
+  that invocation asks for (ADR-0038).
+- Extending **Sync Skip** to accept a **Promotion** was considered (tk-134) —
+  resolved: rejected. **Sync Skip** bypasses one failed **Mutation** during sync;
+  cancellation names an item, spans many **Mutations**, withdraws untried intent
+  as readily as failed intent, and reaches no **Backend** (ADR-0038).
+- Recording withdrawn intent as a **Skipped Mutation** was considered (tk-134) —
+  resolved: a **Cancelled Mutation** is a separate outcome. Reuse would make
+  **Sync Skip**'s own definition untrue and leave the two provenances
+  distinguishable only by whether a **Mutation Failure** happened to be attached
+  (ADR-0038).
+- Requiring a force flag for a cancellation that withdraws queued **Mutations**
+  was considered (tk-134) — resolved: no gate. Promoting the item again
+  re-snapshots title, body, **Item Status**, and same-**Backend** **Epic
+  Membership**, so cancellation is reversible, and friction on the exit of last
+  resort only makes a stopped queue harder to clear (ADR-0038).
+- Letting cancellation leave a withdrawn **Dependency**'s edge local, the way
+  **Epic Membership** degrades, was considered (tk-134) — resolved: it refuses
+  instead. A backend-bound **Blocked Item** waiting on a **Local** **Blocking
+  Item** is the one graph **Promotion** rejects outright, and reaching it by
+  withdrawal rather than by **Promotion** does not make it acceptable
+  (ADR-0035, ADR-0038).
 - Gating relationship **Mutations** on **Backend** repository identity rather
   than **Backend** kind was considered (tk-132) — resolved: a **Repository
   Store** syncs with one **Backend** repository (ADR-0033), so a
