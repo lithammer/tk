@@ -90,6 +90,19 @@ and Epics use the typeless command `gh issue create --title <title> --body
   result without a trustworthy issue URL are indeterminate. A trustworthy
   receipt certifies creation even if the process also reports failure.
 
+Probed again 2026-08-18 (tk-142) for the shape of a validation rejection:
+
+- **The advertised 256-character title limit is not what is enforced.** A
+  257-character title was accepted and stored intact, as was 1024. A
+  70000-character title was rejected. The boundary sits somewhere above 1024 and
+  was not pinned.
+- The rejection arrives **GraphQL-shaped**, not HTTP-shaped: exit 1, empty
+  stdout, stderr `GraphQL: Title is too long (maximum is 256 characters)
+  (createIssue)`. `gh issue create` drives the `createIssue` mutation, so there
+  is no `HTTP 422:` prefix to match — see the classifier table below.
+- The same text appears from `updateIssue` when an edit carries the over-long
+  title.
+
 The Adapter consequently never sends `--type`, parent, Dependency, Label, or
 Assignee flags during creation. Reconciliation and explicit-risk retry are
 separate recovery work; an indeterminate Promotion remains `applying` and is
@@ -128,6 +141,26 @@ value, matching the argv the Adapter builds from stored Backend keys.
   stays field-only, so this is the mechanism a future reconciliation slice
   would build on.
 
+### Dependencies — `--add-blocked-by` / `--remove-blocked-by`
+
+Probed 2026-08-18 on `gh` 2.97.0 (tk-142, issues 9 and 10). The Adapter has
+always used these flags for `add_dependency` / `remove_dependency`, but until
+this probe they were source-derived only — the 2026-08-10 pass above covered the
+Epic-membership flags alone.
+
+- Issue dependencies **are** available on this personal private repo, like
+  sub-issues and unlike issue types.
+- `gh issue edit <blocked> --add-blocked-by <blocking>` attaches. All calls
+  exited **0** with empty stderr and the edited issue's URL on stdout, matching
+  the membership flags.
+- `gh issue view <blocked> --json blockedBy` reads back
+  `{"nodes":[{"id","number","state","title","url"}],"totalCount":1}`; the
+  counterpart reads back symmetrically under `--json blocking`.
+- `--remove-blocked-by <blocking>` clears the edge.
+- **Removal is a silent no-op when the relationship is absent** — exit 0, no
+  stderr — the same trap the membership removal forms have. A divergent
+  dependency graph therefore cannot be detected from the exit code either.
+
 ## Failure modes — the `FailureClass` classifier
 
 | class | observed? | evidence |
@@ -135,7 +168,7 @@ value, matching the argv the Adapter builds from stored Backend keys.
 | `auth` | ✅ | bad `GH_TOKEN` → exit 1, stderr `HTTP 401: Bad credentials (https://api.github.com/graphql)` + `Try authenticating with:  gh auth login -h github.com`. All three anchors (`HTTP 401`, `Bad credentials`, `gh auth login`) present. |
 | not-found | ✅ (→ `unknown` by design) | `gh issue view 999999` → exit 1, stderr `GraphQL: Could not resolve to an issue or pull request with the number of 999999. (repository.issue)`. Note the **lowercase** "an issue or pull request" — this *validates* dropping `sync_conflict`: the classifier deliberately does not match this brittle, variable string, so a deleted Adopted issue → `unknown`. |
 | `rate_limited` | ❌ not provokable on demand | source-derived anchors (`rate limit exceeded` / `secondary rate limit`). |
-| `validation` | ❌ not provokable on demand | source-derived anchor (`HTTP 422`). |
+| `validation` | ❌ still unobserved, though now provokable (tk-142, 2026-08-18) | A genuine validation failure was provoked — over-long title on `createIssue` — but its stderr carries no `HTTP <code>:` prefix, so the `HTTP 422` anchor does not fire and the failure classifies `unknown`. The anchor stays source-derived. |
 | `transient` | ❌ not provokable on demand | source-derived anchors (`HTTP 502/503/504`). |
 
 Every observed `gh` error exited **1** (never a discriminating code), confirming
@@ -153,3 +186,9 @@ for auth is unreliable — cli/cli#9338).
   anchors. Re-probe against an org repo with issue types, or when those failure
   modes occur in the wild — the `tk-gh-playground` repo is kept for exactly
   this.
+- Corrected 2026-08-18 (tk-142): the Dependency flags are no longer
+  source-derived, and `validation` is provokable but does not match its anchor —
+  a real validation failure classifies `unknown`, so the `HTTP 422` anchor is
+  unreached on the create path. tk's own Promotion Operation behaviour is
+  recorded separately in
+  [promotion-operation-canary.md](./promotion-operation-canary.md).
