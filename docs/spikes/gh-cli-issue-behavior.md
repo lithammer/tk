@@ -1,10 +1,14 @@
 # Spike: `gh issue` CLI behaviour (tk-34 adapter)
 
-Observed behaviour of the `gh issue` subcommands the GitHub Backend Adapter
-(`crates/tk/src/remote/github.rs`) drives, captured against a real
-authenticated `gh` so the adapter's `FakeRunner` fixtures and the
-`FailureClass` classifier rest on observation, not source-reading (ADR-0016:
-the classifier must be spike-grounded, not designed from imagination).
+Behaviour of the `gh issue` subcommands the GitHub Backend Adapter
+(`crates/tk/src/remote/github.rs`) drives, so the adapter's `FakeRunner`
+fixtures and the `FailureClass` classifier rest on evidence rather than on
+what tk's own code assumes (ADR-0016: the classifier must be spike-grounded,
+not designed from imagination). Two kinds of evidence appear here and each
+claim says which it is: behaviour captured against a real authenticated `gh`,
+and — where one observation cannot settle what is *possible* — `gh`'s own
+source, which is open. Both beat inferring gh's behaviour from tk's
+expectations of it.
 
 - **gh version:** 2.94.0 (2026-06-10)
 - **Sandbox:** private repo `lithammer/tk-gh-playground` — kept, not deleted
@@ -163,13 +167,35 @@ Epic-membership flags alone.
 
 ## Failure modes — the `FailureClass` classifier
 
-| class | observed? | evidence |
+### The two error shapes, read from gh's source
+
+`gh` renders an API failure in one of exactly two shapes, and which one a caller
+sees is decided by the transport, not by the kind of mistake. Read at cli/cli
+`v2.97.0` with `go-gh` `v2.13.0` (`pkg/api/errors.go`,
+`pkg/api/graphql_client.go`):
+
+- A **non-2xx** response becomes `HTTPError`, rendered
+  `HTTP <code>: <message> (<url>)`.
+- A **2xx response carrying an `errors` array** becomes `GraphQLError`, rendered
+  `GraphQL: <message> (<path>)`, with no status code anywhere in it.
+
+GitHub reports GraphQL validation failures with HTTP 200 and an `errors` array,
+so they always take the second shape. Every issue operation this Adapter drives
+is a GraphQL mutation — `createIssue`, `updateIssue`, `AddSubIssue`,
+`RemoveSubIssue`, `AddBlockedBy`, `RemoveBlockedBy`, `IssueClose` — and there are
+no REST calls in gh's issue command tree at that tag.
+
+⇒ An anchor keyed on an `HTTP <code>:` prefix can only ever match a failure that
+happened at the transport layer. An anchor keyed on message text matches in
+either shape. The table below rests on that distinction.
+
+| class | status | evidence |
 |---|---|---|
 | `auth` | ✅ | bad `GH_TOKEN` → exit 1, stderr `HTTP 401: Bad credentials (https://api.github.com/graphql)` + `Try authenticating with:  gh auth login -h github.com`. All three anchors (`HTTP 401`, `Bad credentials`, `gh auth login`) present. |
 | not-found | ✅ (→ `unknown` by design) | `gh issue view 999999` → exit 1, stderr `GraphQL: Could not resolve to an issue or pull request with the number of 999999. (repository.issue)`. Note the **lowercase** "an issue or pull request" — this *validates* dropping `sync_conflict`: the classifier deliberately does not match this brittle, variable string, so a deleted Adopted issue → `unknown`. |
-| `rate_limited` | ❌ not provokable on demand | source-derived anchors (`rate limit exceeded` / `secondary rate limit`). |
-| `validation` | ❌ still unobserved, though now provokable (tk-142, 2026-08-18) | A genuine validation failure was provoked — over-long title on `createIssue` — but its stderr carries no `HTTP <code>:` prefix, so the `HTTP 422` anchor does not fire and the failure classifies `unknown`. The anchor stays source-derived. |
-| `transient` | ❌ not provokable on demand | source-derived anchors (`HTTP 502/503/504`). |
+| `rate_limited` | ❌ unobserved, anchor sound | The anchors match message text (`rate limit exceeded` / `secondary rate limit`), so they fire in either shape. GitHub reports a primary GraphQL rate limit as 200-with-errors and a secondary one as 403; the anchors are indifferent to which. |
+| `validation` | ⛔ **structurally unreachable** | Provoked 2026-08-18 (tk-142): an over-long title on `createIssue` → exit 1, stderr `GraphQL: Title is too long (maximum is 256 characters) (createIssue)`, which matches no anchor and classifies `unknown`. Per the shapes above a validation failure is reported at HTTP 200, so the `HTTP 422` anchor can never fire for any operation the Adapter performs. Tracked in tk-148. |
+| `transient` | ❌ unobserved, anchor sound | 502/503/504 are transport-level, so they arrive HTTP-shaped and the `HTTP 502/503/504` anchors can fire. |
 
 Every observed `gh` error exited **1** (never a discriminating code), confirming
 the classifier correctly gates on stderr substrings, not the exit code (exit-4
@@ -181,14 +207,19 @@ for auth is unreliable — cli/cli#9338).
   required**.
 - Fixture fidelity: the not-found and auth `FakeRunner`/classifier fixtures were
   updated to the observed verbatim strings.
-- Stays source-derived (unverifiable on this sandbox): the `issueType` object
-  form (Bug kind), and the `rate_limited` / `validation` / `transient` stderr
-  anchors. Re-probe against an org repo with issue types, or when those failure
-  modes occur in the wild — the `tk-gh-playground` repo is kept for exactly
-  this.
-- Corrected 2026-08-18 (tk-142): the Dependency flags are no longer
-  source-derived, and `validation` is provokable but does not match its anchor —
-  a real validation failure classifies `unknown`, so the `HTTP 422` anchor is
-  unreached on the create path. tk's own Promotion Operation behaviour is
-  recorded separately in
+- Unverified on this sandbox: the `issueType` object form (Bug kind), and the
+  `rate_limited` / `transient` anchors — both sound per the shapes above, neither
+  provokable here. Re-probe against an org repo with issue types, or when those
+  failure modes occur in the wild — the `tk-gh-playground` repo is kept for
+  exactly this.
+- Corrected 2026-08-18, first by canary (tk-142) and then from gh's source: the
+  Dependency flags are observed rather than inferred, and `validation` is
+  structurally unreachable rather than merely unobserved.
+- **Fixture defect, tracked in tk-148**: the `FakeRunner` and classifier cases in
+  `remote/github.rs` that assert `HTTP 422: …` for `createIssue` and for the
+  `--parent` edit encode a shape gh cannot emit for those mutations. ADR-0016
+  requires fixtures rest on observation, so an invented shape there is a defect
+  rather than untidiness. The `HTTP 422` strings elsewhere in the tree are opaque
+  detail payloads in persistence and rendering tests and make no claim about gh.
+- tk's own Promotion Operation behaviour is recorded separately in
   [promotion-operation-canary.md](./promotion-operation-canary.md).

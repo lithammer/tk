@@ -142,9 +142,12 @@ title was rejected. Enforcement sits somewhere above 1024; the exact boundary wa
 not pinned, and 70000 is what this canary used to provoke a validation failure
 reliably.
 
-**A validation rejection does not arrive HTTP-shaped.** See the companion
-document; the consequence for tk is that the failure classified as `Unknown`, and
-the Ticket's expected `HTTP 422` never appeared.
+**A validation rejection does not arrive HTTP-shaped.** The failure classified as
+`Unknown` and the Ticket's expected `HTTP 422` never appeared. Reading gh's source
+afterwards showed this is structural rather than particular to the create path:
+every issue operation the Adapter drives is a GraphQL mutation, and GitHub reports
+GraphQL validation failures at HTTP 200, so no status-code prefix exists to match.
+The companion document carries the rule; tk-148 carries the consequence.
 
 ## The `applying` dead end
 
