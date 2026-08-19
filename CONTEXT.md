@@ -501,7 +501,6 @@ _Avoid_: ticket, tickets
 - A **Mutation** may become a **Cancelled Mutation** only through **Promotion
   Cancellation**, from `pending` as readily as from `failed`. A **Promotion**
   itself can only ever be cancelled, never skipped.
-- Sync output warns when **Skipped Mutations** exist.
 - **Sync Log** inspects pending, failed, applying, skipped, cancelled, and
   applied **Mutations**, and reports every state but applied without a flag.
 - A **Promotion Operation** has resolved once none of its **Mutations** is
