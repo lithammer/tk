@@ -29,9 +29,10 @@ use crate::domain::backend_outcome::{BackendCreateOutcome, BackendEditOutcome};
 use crate::remote::adapter::{Adapter, AdapterReadError, ApplyError};
 use crate::store::repository::RemoteWorkflowGuard;
 use crate::store::sync::{
-    LoadApplicableError, PersistMutationOutcomeError, RefreshStoreError, active_backend_keys,
-    applying_mutation_sequence, begin_create, load_applicable_mutations, merge_backend_refreshes,
-    persist_create_outcome, persist_edit_outcome, resolve_backend_operation,
+    BackendCohortError, LoadApplicableError, PersistMutationOutcomeError, RefreshStoreError,
+    active_backend_keys, applying_mutation_sequence, begin_create, load_applicable_mutations,
+    merge_backend_refreshes, persist_create_outcome, persist_edit_outcome,
+    resolve_backend_operation,
 };
 
 /// Summary of one sync run for the calling command to render.
@@ -82,6 +83,116 @@ pub enum RunSyncError {
     },
     #[error("Mutation {0} has an indeterminate Backend creation outcome")]
     ApplyingMutation(i64),
+}
+
+/// Command-independent meaning of a [`RunSyncError`].
+///
+/// The sync engine owns this exhaustive classification under ADR-0009. Command
+/// modules retain their own message bodies and framing under ADR-0017 and
+/// ADR-0032, so categories carry evidence rather than rendered prose.
+#[derive(Debug)]
+pub(crate) enum RunSyncErrorCategory<'a> {
+    BackendDetail(&'a str),
+    MutationSchemaDrift(&'a RunSyncError),
+    TicketBug(&'a RunSyncError),
+    Storage(&'a rusqlite::Error),
+    CreatedIdentityNotStored {
+        error: &'a RunSyncError,
+        sequence: i64,
+        cause: CreatedIdentityNotStoredCause<'a>,
+    },
+    Direct(&'a RunSyncError),
+    IndeterminateCreation(i64),
+    RemoteChanged,
+    RepositoryInvariant(&'a RunSyncError),
+}
+
+/// Cause retained when Backend creation succeeded but its identity could not
+/// be committed to the Repository Store.
+#[derive(Debug)]
+pub(crate) enum CreatedIdentityNotStoredCause<'a> {
+    Storage(&'a rusqlite::Error),
+    TargetNotLocal,
+    Direct,
+}
+
+impl RunSyncError {
+    /// Classify the error once for every command that renders sync failures.
+    pub(crate) fn category(&self) -> RunSyncErrorCategory<'_> {
+        match self {
+            Self::Pull(AdapterReadError::Failed(detail)) => {
+                RunSyncErrorCategory::BackendDetail(detail)
+            }
+            Self::Load(
+                LoadApplicableError::UnknownMutationType(_)
+                | LoadApplicableError::PayloadVariantMissing(_),
+            ) => RunSyncErrorCategory::MutationSchemaDrift(self),
+            Self::Load(
+                LoadApplicableError::PayloadJson(_)
+                | LoadApplicableError::OperationShapeMismatch { .. }
+                | LoadApplicableError::MissingBackendIdentity { .. }
+                | LoadApplicableError::CounterpartClassMismatch { .. },
+            )
+            | Self::Outcome(
+                PersistMutationOutcomeError::PayloadJson(_)
+                | PersistMutationOutcomeError::OperationShapeMismatch { .. }
+                | PersistMutationOutcomeError::TargetNotLocal { .. }
+                | PersistMutationOutcomeError::Transition(_),
+            ) => RunSyncErrorCategory::TicketBug(self),
+            Self::Refresh(
+                RefreshStoreError::Storage(error)
+                | RefreshStoreError::BackendCohort(BackendCohortError::Storage(error)),
+            )
+            | Self::Load(LoadApplicableError::Storage(error))
+            | Self::Outcome(PersistMutationOutcomeError::Storage(error)) => {
+                RunSyncErrorCategory::Storage(error)
+            }
+            Self::CreatedIdentityNotStored {
+                sequence, source, ..
+            } => {
+                let cause = match source {
+                    PersistMutationOutcomeError::Storage(error) => {
+                        CreatedIdentityNotStoredCause::Storage(error)
+                    }
+                    PersistMutationOutcomeError::TargetNotLocal { .. } => {
+                        CreatedIdentityNotStoredCause::TargetNotLocal
+                    }
+                    PersistMutationOutcomeError::MutationNotFound(_)
+                    | PersistMutationOutcomeError::MutationNotApplicable(_)
+                    | PersistMutationOutcomeError::ApplyingMutation(_)
+                    | PersistMutationOutcomeError::OperationShapeMismatch { .. }
+                    | PersistMutationOutcomeError::PayloadJson(_)
+                    | PersistMutationOutcomeError::Transition(_) => {
+                        CreatedIdentityNotStoredCause::Direct
+                    }
+                };
+                RunSyncErrorCategory::CreatedIdentityNotStored {
+                    error: self,
+                    sequence: *sequence,
+                    cause,
+                }
+            }
+            Self::Pull(AdapterReadError::Env(_))
+            | Self::Apply(_)
+            | Self::Outcome(
+                PersistMutationOutcomeError::MutationNotFound(_)
+                | PersistMutationOutcomeError::MutationNotApplicable(_),
+            ) => RunSyncErrorCategory::Direct(self),
+            Self::ApplyingMutation(sequence)
+            | Self::Refresh(RefreshStoreError::ApplyingMutation(sequence))
+            | Self::Outcome(PersistMutationOutcomeError::ApplyingMutation(sequence)) => {
+                RunSyncErrorCategory::IndeterminateCreation(*sequence)
+            }
+            Self::Refresh(RefreshStoreError::RemoteChanged { .. }) => {
+                RunSyncErrorCategory::RemoteChanged
+            }
+            Self::Refresh(RefreshStoreError::BackendCohort(
+                BackendCohortError::MultipleBackendKinds
+                | BackendCohortError::UnknownBackendKind(_)
+                | BackendCohortError::BackendKindMismatch { .. },
+            )) => RunSyncErrorCategory::RepositoryInvariant(self),
+        }
+    }
 }
 
 /// Run one sync against a configured Adapter.

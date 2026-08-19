@@ -44,10 +44,8 @@ use crate::store::promotion::{
 };
 use crate::store::repository::RemoteWorkflowGuard;
 use crate::store::repository::{ResolvedItemRefWithDisplay, Store};
-use crate::store::sync::{
-    BackendCohortError, LoadApplicableError, PersistMutationOutcomeError, RefreshStoreError,
-};
-use crate::sync::{self, RunSyncError};
+use crate::store::sync::BackendCohortError;
+use crate::sync::{self, CreatedIdentityNotStoredCause, RunSyncError, RunSyncErrorCategory};
 
 /// Flags for `tk promote`.
 #[derive(Debug, ClapArgs)]
@@ -278,6 +276,7 @@ fn reconcile(
 
     let mappings = store_promotion::capture_recovery_mappings(store.conn())
         .map_err(|err| recovery_error(err, &recovery.outgoing_display_id))?;
+    let mappings = project_recovery_mappings(mappings);
     store_promotion::reconcile_promotion(
         store.conn_mut(),
         workflow,
@@ -288,7 +287,7 @@ fn reconcile(
     )
     .map_err(|err| recovery_error(err, &recovery.outgoing_display_id))?;
     let sync_result = sync::run_sync(store.conn_mut(), adapter, workflow, now);
-    let mapping_result = render_recovery_mappings(deps.stdout, store, &mappings);
+    let mapping_result = render_mappings(deps.stdout, store, &mappings);
     finish_recovery(sync_result, mapping_result, RecoveryAction::Reconcile)
 }
 
@@ -303,10 +302,11 @@ fn retry(
     ensure_recovery_backend(adapter, recovery)?;
     let mappings = store_promotion::capture_recovery_mappings(store.conn())
         .map_err(|err| recovery_error(err, &recovery.outgoing_display_id))?;
+    let mappings = project_recovery_mappings(mappings);
     store_promotion::retry_promotion(store.conn_mut(), workflow, recovery, now)
         .map_err(|err| recovery_error(err, &recovery.outgoing_display_id))?;
     let sync_result = sync::run_sync(store.conn_mut(), adapter, workflow, now);
-    let mapping_result = render_recovery_mappings(deps.stdout, store, &mappings);
+    let mapping_result = render_mappings(deps.stdout, store, &mappings);
     finish_recovery(sync_result, mapping_result, RecoveryAction::Retry)
 }
 
@@ -422,98 +422,60 @@ fn finish_recovery_sync(
                     .expect("the guarded branch has a stopping Mutation"),
             ),
         )),
-        Err(
-            RunSyncError::ApplyingMutation(sequence)
-            | RunSyncError::Refresh(RefreshStoreError::ApplyingMutation(sequence))
-            | RunSyncError::Outcome(PersistMutationOutcomeError::ApplyingMutation(sequence)),
-        ) => Err(CommandError::failure(
-            action.indeterminate_creation(sequence),
-        )),
-        Err(
-            err @ RunSyncError::CreatedIdentityNotStored {
+        Err(error) => match error.category() {
+            RunSyncErrorCategory::BackendDetail(detail) => {
+                Err(CommandError::failure(action.sync_did_not_finish(detail)))
+            }
+            RunSyncErrorCategory::MutationSchemaDrift(error)
+            | RunSyncErrorCategory::TicketBug(error) => {
+                Err(CommandError::failure(action.sync_did_not_finish(&format!(
+                    "{error}; this is a Ticket bug — please report it"
+                ))))
+            }
+            RunSyncErrorCategory::Storage(storage) => Err(recovery_storage_error(action, storage)),
+            RunSyncErrorCategory::CreatedIdentityNotStored {
+                error,
                 sequence,
-                source: PersistMutationOutcomeError::TargetNotLocal { .. },
-                ..
-            },
-        ) => Err(CommandError::failure(action.created_identity_not_stored(
-            sequence,
-            &err,
-            Some("This is Repository Store corruption or a Ticket bug — please report it."),
-        ))),
-        Err(
-            err @ RunSyncError::CreatedIdentityNotStored {
+                cause: CreatedIdentityNotStoredCause::TargetNotLocal,
+            } => Err(CommandError::failure(action.created_identity_not_stored(
                 sequence,
-                source: PersistMutationOutcomeError::Storage(_),
-                ..
-            },
-        ) => {
-            let RunSyncError::CreatedIdentityNotStored { source, .. } = &err else {
-                unreachable!("the match arm fixes the error variant")
-            };
-            let PersistMutationOutcomeError::Storage(storage) = source else {
-                unreachable!("the match arm fixes the source variant")
-            };
-            let detail = created_identity_storage_detail(storage);
-            Err(CommandError::failure(action.created_identity_not_stored(
+                error,
+                Some("This is Repository Store corruption or a Ticket bug — please report it."),
+            ))),
+            RunSyncErrorCategory::CreatedIdentityNotStored {
+                error,
                 sequence,
-                &err,
-                Some(&detail),
-            )))
-        }
-        Err(err @ RunSyncError::CreatedIdentityNotStored { sequence, .. }) => Err(
-            CommandError::failure(action.created_identity_not_stored(sequence, &err, None)),
-        ),
-        Err(
-            RunSyncError::Refresh(
-                RefreshStoreError::Storage(storage)
-                | RefreshStoreError::BackendCohort(BackendCohortError::Storage(storage)),
-            )
-            | RunSyncError::Load(LoadApplicableError::Storage(storage))
-            | RunSyncError::Outcome(PersistMutationOutcomeError::Storage(storage)),
-        ) => Err(recovery_storage_error(action, &storage)),
-        Err(
-            err @ (RunSyncError::Load(
-                LoadApplicableError::UnknownMutationType(_)
-                | LoadApplicableError::PayloadVariantMissing(_)
-                | LoadApplicableError::PayloadJson(_)
-                | LoadApplicableError::OperationShapeMismatch { .. }
-                | LoadApplicableError::MissingBackendIdentity { .. }
-                | LoadApplicableError::CounterpartClassMismatch { .. },
-            )
-            | RunSyncError::Outcome(
-                PersistMutationOutcomeError::PayloadJson(_)
-                | PersistMutationOutcomeError::OperationShapeMismatch { .. }
-                | PersistMutationOutcomeError::TargetNotLocal { .. }
-                | PersistMutationOutcomeError::Transition(_),
+                cause: CreatedIdentityNotStoredCause::Storage(storage),
+            } => {
+                let detail = created_identity_storage_detail(storage);
+                Err(CommandError::failure(action.created_identity_not_stored(
+                    sequence,
+                    error,
+                    Some(&detail),
+                )))
+            }
+            RunSyncErrorCategory::CreatedIdentityNotStored {
+                error,
+                sequence,
+                cause: CreatedIdentityNotStoredCause::Direct,
+            } => Err(CommandError::failure(
+                action.created_identity_not_stored(sequence, error, None),
             )),
-        ) => Err(CommandError::failure(action.sync_did_not_finish(&format!(
-            "{err}; this is a Ticket bug — please report it"
-        )))),
-        Err(
-            err @ RunSyncError::Refresh(RefreshStoreError::BackendCohort(
-                BackendCohortError::MultipleBackendKinds
-                | BackendCohortError::UnknownBackendKind(_)
-                | BackendCohortError::BackendKindMismatch { .. },
+            RunSyncErrorCategory::Direct(error) => Err(CommandError::failure(
+                action.sync_did_not_finish(&error.to_string()),
             )),
-        ) => Err(CommandError::failure(action.sync_did_not_finish(&format!(
-            "{err}; this is a Repository Store invariant failure"
-        )))),
-        Err(RunSyncError::Refresh(RefreshStoreError::RemoteChanged { .. })) => {
-            Err(CommandError::failure(action.remote_changed()))
-        }
-        Err(RunSyncError::Pull(AdapterReadError::Failed(detail))) => {
-            Err(CommandError::failure(action.sync_did_not_finish(&detail)))
-        }
-        Err(
-            err @ (RunSyncError::Pull(AdapterReadError::Env(_))
-            | RunSyncError::Apply(_)
-            | RunSyncError::Outcome(
-                PersistMutationOutcomeError::MutationNotFound(_)
-                | PersistMutationOutcomeError::MutationNotApplicable(_),
+            RunSyncErrorCategory::IndeterminateCreation(sequence) => Err(CommandError::failure(
+                action.indeterminate_creation(sequence),
             )),
-        ) => Err(CommandError::failure(
-            action.sync_did_not_finish(&err.to_string()),
-        )),
+            RunSyncErrorCategory::RemoteChanged => {
+                Err(CommandError::failure(action.remote_changed()))
+            }
+            RunSyncErrorCategory::RepositoryInvariant(error) => {
+                Err(CommandError::failure(action.sync_did_not_finish(&format!(
+                    "{error}; this is a Repository Store invariant failure"
+                ))))
+            }
+        },
     }
 }
 
@@ -585,55 +547,6 @@ fn recovery_storage_error(action: RecoveryAction, storage: &rusqlite::Error) -> 
     }
 }
 
-fn render_recovery_mappings<W: Write + ?Sized>(
-    stdout: &mut W,
-    store: &Store,
-    captured: &[RecoveryPromotionMapping],
-) -> Result<(), CommandError> {
-    // Nested sync drains the whole queue, so a corruption finding on one
-    // captured Promotion must not hide the replacements that did land. Report
-    // every mapping first and surface the finding afterwards; only an
-    // unreadable Store aborts, because the next row would fail the same way.
-    let mut corruption: Option<CommandError> = None;
-    for item in captured {
-        let current = match resolver::resolve_with_display(store, &item.outgoing_display_id) {
-            Ok(current) => current,
-            Err(resolver::ResolveError::NotFound) => {
-                corruption.get_or_insert_with(|| {
-                    CommandError::failure(format!(
-                        "Repository Store corruption: Promotion alias {} disappeared",
-                        item.outgoing_display_id
-                    ))
-                });
-                continue;
-            }
-            Err(resolver::ResolveError::Storage(err)) => return Err(resolver::storage_error(&err)),
-        };
-        if current.id != item.item_id {
-            corruption.get_or_insert_with(|| {
-                CommandError::failure(format!(
-                    "Repository Store corruption: Promotion alias {} changed ownership",
-                    item.outgoing_display_id
-                ))
-            });
-            continue;
-        }
-        if current.display_id != item.outgoing_display_id {
-            let _ = writeln!(
-                stdout,
-                "Promoted {}: {} -> {}",
-                item.item_class.label(),
-                item.outgoing_display_id,
-                current.display_id
-            );
-        }
-    }
-    match corruption {
-        Some(err) => Err(err),
-        None => Ok(()),
-    }
-}
-
 /// Preflight, commit, sync, report — the operation itself, once the Repository
 /// Store and the Backend Adapter are open.
 ///
@@ -655,7 +568,7 @@ fn promote(
     let plan = plan_promotion(&graph, adapter.promotion_capabilities(), backend)
         .map_err(|findings| refusal(&target.display_id, &findings, backend))?;
 
-    let captured = capture_display_ids(&graph, &plan);
+    let captured = capture_promotion_mappings(&graph, &plan);
     let operation_id = store_promotion::commit_plan(
         store.conn_mut(),
         workflow,
@@ -728,21 +641,45 @@ fn sync_stop(result: &Result<sync::SyncReport, RunSyncError>) -> Option<SyncStop
     }
 }
 
-/// An Item's Display ID as it stood before sync, with the Item Class the
-/// mapping line names.
-struct CapturedItem {
-    display_id: String,
+/// Command-owned projection of the identity facts needed to report a Promotion
+/// receipt and verify the outgoing Display ID still belongs to the same Item.
+struct PromotionMapping {
+    item_id: String,
+    outgoing_display_id: String,
     item_class: ItemClass,
 }
 
-/// Capture the Display IDs a receipt could replace during this sync.
+impl From<RecoveryPromotionMapping> for PromotionMapping {
+    fn from(mapping: RecoveryPromotionMapping) -> Self {
+        let RecoveryPromotionMapping {
+            sequence: _,
+            item_id,
+            outgoing_display_id,
+            item_class,
+        } = mapping;
+        Self {
+            item_id,
+            outgoing_display_id,
+            item_class,
+        }
+    }
+}
+
+fn project_recovery_mappings(mappings: Vec<RecoveryPromotionMapping>) -> Vec<PromotionMapping> {
+    mappings.into_iter().map(PromotionMapping::from).collect()
+}
+
+/// Capture the Item identities whose Display IDs a receipt could replace.
 ///
 /// A Promotion receipt replaces the Display ID in place, so the old value has
 /// to be held before the drain for the mapping to be renderable afterwards. The
 /// target rides along even when the plan promotes nothing: an already Pending
 /// Promotion can apply in this very invocation. Order follows `graph.items`,
 /// which is creation order.
-fn capture_display_ids(graph: &PromotionGraph, plan: &PromotionPlan) -> Vec<CapturedItem> {
+fn capture_promotion_mappings(
+    graph: &PromotionGraph,
+    plan: &PromotionPlan,
+) -> Vec<PromotionMapping> {
     let promoted: HashSet<&str> = plan
         .mutations
         .iter()
@@ -753,8 +690,9 @@ fn capture_display_ids(graph: &PromotionGraph, plan: &PromotionPlan) -> Vec<Capt
         .items
         .iter()
         .filter(|item| item.id == graph.target_id || promoted.contains(item.id.as_str()))
-        .map(|item| CapturedItem {
-            display_id: item.display_id.clone(),
+        .map(|item| PromotionMapping {
+            item_id: item.id.clone(),
+            outgoing_display_id: item.display_id.clone(),
             item_class: item.item_class,
         })
         .collect()
@@ -770,34 +708,54 @@ fn target_item(graph: &PromotionGraph) -> &GraphItem {
 
 /// Print one line per Item whose Display ID a Promotion receipt replaced.
 ///
-/// The outgoing Display ID stays resolvable as an Alias (CONTEXT.md Promotion),
-/// so re-resolving what was captured before sync reaches the same Item and
-/// yields its current Display ID. An unchanged Display ID means no receipt
-/// landed for it, and nothing speculative is printed.
+/// The outgoing Display ID must remain an Alias for the same Item (CONTEXT.md
+/// Promotion). Missing or reassigned Aliases are Repository Store corruption,
+/// but one finding does not hide later mappings that did land during the same
+/// sync. An unreadable Store stops reporting because later resolutions would
+/// fail for the same reason.
 fn render_mappings<W: Write + ?Sized>(
     stdout: &mut W,
     store: &Store,
-    captured: &[CapturedItem],
+    captured: &[PromotionMapping],
 ) -> Result<(), CommandError> {
+    let mut corruption = None;
     for item in captured {
-        let current = match resolver::resolve_with_display(store, &item.display_id) {
+        let current = match resolver::resolve_with_display(store, &item.outgoing_display_id) {
             Ok(current) => current,
-            // Unreachable: Promotion preserves the outgoing Display ID as an
-            // Alias, and an unpromoted Item still owns it.
-            Err(resolver::ResolveError::NotFound) => continue,
+            Err(resolver::ResolveError::NotFound) => {
+                corruption.get_or_insert_with(|| {
+                    CommandError::failure(format!(
+                        "Repository Store corruption: Promotion alias {} disappeared",
+                        item.outgoing_display_id
+                    ))
+                });
+                continue;
+            }
             Err(resolver::ResolveError::Storage(err)) => return Err(resolver::storage_error(&err)),
         };
-        if current.display_id != item.display_id {
+        if current.id != item.item_id {
+            corruption.get_or_insert_with(|| {
+                CommandError::failure(format!(
+                    "Repository Store corruption: Promotion alias {} changed ownership",
+                    item.outgoing_display_id
+                ))
+            });
+            continue;
+        }
+        if current.display_id != item.outgoing_display_id {
             let _ = writeln!(
                 stdout,
                 "Promoted {}: {} -> {}",
                 item.item_class.label(),
-                item.display_id,
+                item.outgoing_display_id,
                 current.display_id
             );
         }
     }
-    Ok(())
+    match corruption {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
 }
 
 /// Report the idempotent no-op an empty plan means.
@@ -1152,9 +1110,11 @@ mod tests {
     };
     use crate::render::Styler;
     use crate::store::migrations;
+    use crate::store::sync::{LoadApplicableError, PersistMutationOutcomeError, RefreshStoreError};
     use crate::store::testing::{
-        FixtureItem, FixtureMutation, FixtureRemote, TmpStore, commit_promotion, insert_dependency,
-        insert_fixture_item, insert_fixture_mutation, insert_fixture_remote, mutation_count,
+        FixtureItem, FixtureMutation, FixtureRemote, TmpStore, commit_promotion, insert_alias,
+        insert_dependency, insert_fixture_item, insert_fixture_mutation, insert_fixture_remote,
+        mutation_count,
     };
     use rand::SeedableRng;
     use rand::rngs::StdRng;
@@ -2370,6 +2330,51 @@ mod tests {
     }
 
     #[test]
+    fn recovery_sync_preserves_the_remaining_shared_categories() {
+        let cases = [
+            (
+                RunSyncError::Pull(AdapterReadError::Failed("gh: HTTP 502".into())),
+                "tk promote: the Promotion was reconciled, but sync did not finish\n\
+                 gh: HTTP 502\n",
+            ),
+            (
+                RunSyncError::Load(LoadApplicableError::UnknownMutationType("weird".into())),
+                "tk promote: the Promotion was reconciled, but sync did not finish\n\
+                 unrecognised mutation_type: weird; this is a Ticket bug — please report it\n",
+            ),
+            (
+                RunSyncError::Outcome(PersistMutationOutcomeError::TargetNotLocal {
+                    sequence: 4,
+                    item_id: "item-1".into(),
+                }),
+                "tk promote: the Promotion was reconciled, but sync did not finish\n\
+                 Promotion Mutation 4 targets non-Local Item item-1; this is a Ticket bug — please report it\n",
+            ),
+            (
+                RunSyncError::Refresh(RefreshStoreError::RemoteChanged {
+                    expected: BackendKind::Github,
+                    actual: Some(BackendKind::Jira),
+                }),
+                "tk promote: the Promotion was reconciled, but the configured Remote changed while contacting the Backend; retry 'tk sync'\n",
+            ),
+            (
+                RunSyncError::Refresh(RefreshStoreError::BackendCohort(
+                    BackendCohortError::UnknownBackendKind("gitlab".into()),
+                )),
+                "tk promote: the Promotion was reconciled, but sync did not finish\n\
+                 Repository Store contains unknown Backend kind 'gitlab'; this is a Repository Store invariant failure\n",
+            ),
+        ];
+
+        for (error, expected) in cases {
+            let failure = finish_recovery_sync(Err(error), RecoveryAction::Reconcile).unwrap_err();
+            let mut rendered = Vec::new();
+            failure.render(&mut rendered, "promote");
+            assert_eq!(String::from_utf8(rendered).unwrap(), expected);
+        }
+    }
+
+    #[test]
     fn mapping_failure_cannot_hide_an_indeterminate_creation() {
         let mapping_error =
             CommandError::failure("Repository Store corruption: Promotion alias tk-2 disappeared");
@@ -2389,6 +2394,107 @@ mod tests {
         assert!(rendered.contains("tk promote retry"));
         assert!(rendered.contains("Additionally"));
         assert!(rendered.contains("Promotion alias tk-2 disappeared"));
+    }
+
+    #[test]
+    fn a_missing_normal_promotion_alias_is_reported_as_corruption() {
+        let fixture = TmpStore::new("repo");
+        let _conn = seed_store(&fixture);
+        let cwd_path = cwd();
+        let h = Harness::new(&cwd_path);
+        let store = open_store(&h, &fixture, &cwd_path);
+        let captured = [PromotionMapping {
+            item_id: "missing".into(),
+            outgoing_display_id: "tk-404".into(),
+            item_class: ItemClass::Ticket,
+        }];
+        let mut stdout = Vec::new();
+
+        let error = render_mappings(&mut stdout, &store, &captured).unwrap_err();
+        let mut stderr = Vec::new();
+        error.render(&mut stderr, "promote");
+
+        assert!(stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            "tk promote: Repository Store corruption: Promotion alias tk-404 disappeared\n"
+        );
+    }
+
+    #[test]
+    fn a_reassigned_normal_promotion_alias_is_reported_as_corruption() {
+        let fixture = TmpStore::new("repo");
+        let conn = seed_store(&fixture);
+        local_ticket(&conn, "other", "tk-2", 1);
+        let cwd_path = cwd();
+        let h = Harness::new(&cwd_path);
+        let store = open_store(&h, &fixture, &cwd_path);
+        let captured = [PromotionMapping {
+            item_id: "expected".into(),
+            outgoing_display_id: "tk-2".into(),
+            item_class: ItemClass::Ticket,
+        }];
+        let mut stdout = Vec::new();
+
+        let error = render_mappings(&mut stdout, &store, &captured).unwrap_err();
+        let mut stderr = Vec::new();
+        error.render(&mut stderr, "promote");
+
+        assert!(stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            "tk promote: Repository Store corruption: Promotion alias tk-2 changed ownership\n"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_mapping_does_not_hide_a_later_valid_replacement() {
+        let fixture = TmpStore::new("repo");
+        let conn = seed_store(&fixture);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "landed",
+                display: "gh-2",
+                title: "Landed",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("2"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_alias(&conn, "tk-2", "landed").unwrap();
+        let cwd_path = cwd();
+        let h = Harness::new(&cwd_path);
+        let store = open_store(&h, &fixture, &cwd_path);
+        let captured = [
+            PromotionMapping {
+                item_id: "missing".into(),
+                outgoing_display_id: "tk-1".into(),
+                item_class: ItemClass::Ticket,
+            },
+            PromotionMapping {
+                item_id: "landed".into(),
+                outgoing_display_id: "tk-2".into(),
+                item_class: ItemClass::Ticket,
+            },
+        ];
+        let mut stdout = Vec::new();
+
+        let error = render_mappings(&mut stdout, &store, &captured).unwrap_err();
+        let mut stderr = Vec::new();
+        error.render(&mut stderr, "promote");
+
+        assert_eq!(
+            String::from_utf8(stdout).unwrap(),
+            "Promoted Ticket: tk-2 -> gh-2\n"
+        );
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            "tk promote: Repository Store corruption: Promotion alias tk-1 disappeared\n"
+        );
     }
 
     // ---- finding rendering ----------------------------------------------
