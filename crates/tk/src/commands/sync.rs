@@ -21,13 +21,13 @@ use clap::{Args as ClapArgs, Subcommand};
 use crate::cli::{Deps, Exit};
 use crate::commands::resolver;
 use crate::domain::backend_outcome::FailureClass;
-use crate::remote::adapter::AdapterReadError;
 use crate::remote::factory::{self, OpenError as FactoryOpenError};
 use crate::store::sync::{
-    self as store_sync, BackendCohortError, LoadApplicableError, LogDetailRow, LogError,
-    LogListFilter, LogListRow, MarkSkippedError, PersistMutationOutcomeError, RefreshStoreError,
+    self as store_sync, LogDetailRow, LogError, LogListFilter, LogListRow, MarkSkippedError,
 };
-use crate::sync::{self, RunSyncError, SyncReport};
+use crate::sync::{
+    self, CreatedIdentityNotStoredCause, RunSyncError, RunSyncErrorCategory, SyncReport,
+};
 
 const COMMAND: &str = "sync";
 const LOG_COMMAND: &str = "sync log";
@@ -290,103 +290,65 @@ fn render_skip_error<W: Write + ?Sized>(stderr: &mut W, err: &MarkSkippedError) 
 /// Dispatch a [`RunSyncError`] to its verbatim stderr line. Storage-class and
 /// environment failures fall through to the generic frame.
 fn render_run_sync_error<W: Write + ?Sized>(stderr: &mut W, err: &RunSyncError) {
-    match err {
-        RunSyncError::Pull(AdapterReadError::Failed(detail)) => {
+    match err.category() {
+        RunSyncErrorCategory::BackendDetail(detail) => {
             let _ = writeln!(stderr, "tk sync: {detail}");
         }
-        RunSyncError::Load(
-            LoadApplicableError::UnknownMutationType(_)
-            | LoadApplicableError::PayloadVariantMissing(_),
-        ) => {
+        RunSyncErrorCategory::MutationSchemaDrift(_) => {
             let _ = writeln!(
                 stderr,
                 "tk sync: Mutation Log row has an unrecognised mutation kind; this is a Ticket bug — please report it"
             );
         }
-        // The same shape one level down: a Mutation Log row or an Adapter that
-        // contradicts a contract tk owns. Neither is recoverable and both leave
-        // the Mutation applicable, so every later `tk sync` reproduces the
-        // abort — say it is a bug rather than printing the raw fault.
-        RunSyncError::Load(
-            LoadApplicableError::PayloadJson(_)
-            | LoadApplicableError::OperationShapeMismatch { .. }
-            | LoadApplicableError::MissingBackendIdentity { .. }
-            | LoadApplicableError::CounterpartClassMismatch { .. },
-        )
-        | RunSyncError::Outcome(
-            PersistMutationOutcomeError::PayloadJson(_)
-            | PersistMutationOutcomeError::OperationShapeMismatch { .. }
-            | PersistMutationOutcomeError::TargetNotLocal { .. }
-            | PersistMutationOutcomeError::Transition(_),
-        ) => {
+        RunSyncErrorCategory::TicketBug(error) => {
             let _ = writeln!(
                 stderr,
-                "tk sync: {err}; this is a Ticket bug — please report it"
+                "tk sync: {error}; this is a Ticket bug — please report it"
             );
         }
-        RunSyncError::Refresh(
-            RefreshStoreError::Storage(e)
-            | RefreshStoreError::BackendCohort(BackendCohortError::Storage(e)),
-        )
-        | RunSyncError::Load(LoadApplicableError::Storage(e))
-        | RunSyncError::Outcome(PersistMutationOutcomeError::Storage(e)) => {
-            resolver::storage_error(e).render(stderr, COMMAND);
+        RunSyncErrorCategory::Storage(error) => {
+            resolver::storage_error(error).render(stderr, COMMAND);
         }
-        RunSyncError::CreatedIdentityNotStored {
+        RunSyncErrorCategory::CreatedIdentityNotStored {
+            error,
             sequence,
-            source: PersistMutationOutcomeError::TargetNotLocal { .. },
-            ..
+            cause,
         } => {
-            let _ = writeln!(stderr, "tk sync: {err}");
-            let _ = writeln!(
-                stderr,
-                "This is Repository Store corruption or a Ticket bug — please report it"
-            );
+            let _ = writeln!(stderr, "tk sync: {error}");
+            match cause {
+                CreatedIdentityNotStoredCause::TargetNotLocal => {
+                    let _ = writeln!(
+                        stderr,
+                        "This is Repository Store corruption or a Ticket bug — please report it"
+                    );
+                }
+                CreatedIdentityNotStoredCause::Storage(_)
+                | CreatedIdentityNotStoredCause::Direct => {}
+            }
             let _ = writeln!(
                 stderr,
                 "Mutation {sequence} remains applying; use 'tk promote reconcile <id> <backend-key>' after confirming the created Backend object"
             );
         }
-        RunSyncError::CreatedIdentityNotStored { sequence, .. } => {
-            let _ = writeln!(stderr, "tk sync: {err}");
-            let _ = writeln!(
-                stderr,
-                "Mutation {sequence} remains applying; use 'tk promote reconcile <id> <backend-key>' after confirming the created Backend object"
-            );
+        RunSyncErrorCategory::Direct(error) => {
+            let _ = writeln!(stderr, "tk sync: {error}");
         }
-        // Named exhaustively rather than caught by `_`, so a variant added
-        // later has to choose a line here instead of falling through to the
-        // bare technical one.
-        RunSyncError::Pull(AdapterReadError::Env(_))
-        | RunSyncError::Apply(_)
-        | RunSyncError::Outcome(
-            PersistMutationOutcomeError::MutationNotFound(_)
-            | PersistMutationOutcomeError::MutationNotApplicable(_),
-        ) => {
-            let _ = writeln!(stderr, "tk sync: {err}");
-        }
-        RunSyncError::ApplyingMutation(sequence)
-        | RunSyncError::Refresh(RefreshStoreError::ApplyingMutation(sequence))
-        | RunSyncError::Outcome(PersistMutationOutcomeError::ApplyingMutation(sequence)) => {
+        RunSyncErrorCategory::IndeterminateCreation(sequence) => {
             let _ = writeln!(
                 stderr,
                 "tk sync: Mutation {sequence} has an indeterminate Backend creation outcome; use 'tk promote reconcile <id> <backend-key>' if the object exists, or 'tk promote retry <id>' only when creating it again is safe"
             );
         }
-        RunSyncError::Refresh(RefreshStoreError::RemoteChanged { .. }) => {
+        RunSyncErrorCategory::RemoteChanged => {
             let _ = writeln!(
                 stderr,
                 "tk sync: the configured Remote changed while contacting the Backend; retry 'tk sync'"
             );
         }
-        RunSyncError::Refresh(RefreshStoreError::BackendCohort(
-            BackendCohortError::MultipleBackendKinds
-            | BackendCohortError::UnknownBackendKind(_)
-            | BackendCohortError::BackendKindMismatch { .. },
-        )) => {
+        RunSyncErrorCategory::RepositoryInvariant(error) => {
             let _ = writeln!(
                 stderr,
-                "tk sync: {err}; this is a Repository Store invariant failure"
+                "tk sync: {error}; this is a Repository Store invariant failure"
             );
         }
     }
@@ -440,8 +402,12 @@ mod tests {
     use crate::domain::mutation_payload::Promotion;
     use crate::domain::mutation_type::MutationType;
     use crate::proc::{FakeRunner, ProcError, RunOutput};
+    use crate::remote::adapter::AdapterReadError;
     use crate::render::Styler;
     use crate::store::migrations;
+    use crate::store::sync::{
+        BackendCohortError, LoadApplicableError, PersistMutationOutcomeError, RefreshStoreError,
+    };
     use crate::store::testing::{
         FixtureItem, FixtureMutation, FixtureRemote, TmpStore, insert_fixture_item,
         insert_fixture_mutation, insert_fixture_remote,
@@ -1372,5 +1338,39 @@ mod tests {
         assert!(rendered.contains("gh-42"));
         assert!(rendered.contains("remains applying"));
         assert!(rendered.contains("tk promote reconcile"));
+    }
+
+    #[test]
+    fn render_run_sync_error_preserves_storage_classification() {
+        let busy = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            None,
+        );
+        let mut stderr = Vec::new();
+
+        render_run_sync_error(
+            &mut stderr,
+            &RunSyncError::Outcome(PersistMutationOutcomeError::Storage(busy)),
+        );
+
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            "tk sync: Repository Store is busy; retry the command\n"
+        );
+    }
+
+    #[test]
+    fn render_run_sync_error_preserves_direct_technical_errors() {
+        let mut stderr = Vec::new();
+
+        render_run_sync_error(
+            &mut stderr,
+            &RunSyncError::Outcome(PersistMutationOutcomeError::MutationNotFound(8)),
+        );
+
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            "tk sync: mutation 8 not found\n"
+        );
     }
 }
