@@ -1227,7 +1227,7 @@ pub enum ClearRemoteError {
     /// Remote would orphan them (CONTEXT.md). Carries the count for the
     /// verbatim diagnostic.
     #[error(
-        "{0} pending or failed Mutation(s) would be orphaned; resolve them before clearing the Remote. Run 'tk sync' to apply them, or 'tk sync --skip <mutation-id>' to abandon a failed one"
+        "{0} pending or failed Mutation(s) would be orphaned; resolve them before clearing the Remote. Run 'tk sync' to apply them, or 'tk sync --skip <mutation-id>' to bypass a failed one"
     )]
     WouldOrphan(i64),
     /// The same refusal with a Promotion among the in-flight rows. Sync Skip
@@ -1238,7 +1238,7 @@ pub enum ClearRemoteError {
     )]
     WouldOrphanPromotion { count: i64, promotion: i64 },
     /// A creation whose outcome tk never observed is unresolved intent against
-    /// this Remote, so clearing it is refused (CONTEXT.md). Carries the Mutation
+    /// this Remote, so tk refuses to clear it (CONTEXT.md). Carries the Mutation
     /// Sequence for the verbatim diagnostic.
     #[error(
         "Mutation {0} has an indeterminate Backend creation outcome; resolve it before clearing the Remote. Run 'tk promote reconcile <id> <backend-key>' if the Backend object exists, 'tk promote retry <id>' only when creating it again is safe, or 'tk promote cancel <id>' to withdraw the Promotion Operation, leaving any object it created untracked"

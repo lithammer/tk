@@ -1279,8 +1279,8 @@ mod tests {
 
     #[test]
     fn only_an_unobserved_creation_is_abandoned_and_nothing_leaves_it() {
-        // Seeded as a Promotion because the `mutations` CHECK admits
-        // `abandoned` for nothing else.
+        // Seed a Promotion: the `mutations` CHECK admits `abandoned` for
+        // nothing else.
         for (from, to) in [
             (MutationState::Pending, MutationState::Abandoned),
             (MutationState::Failed, MutationState::Abandoned),

@@ -582,8 +582,8 @@ fn promote(
         render_nothing_to_promote(deps.stdout, target_item(&graph));
     }
 
-    // Reported before the drain reaches a Backend: this invocation is where an
-    // object an earlier withdrawal abandoned would be duplicated.
+    // Report before the drain reaches a Backend: this invocation is where a
+    // promotion would duplicate an object an earlier withdrawal abandoned.
     let abandoned = store_promotion::abandoned_promotions(store.conn(), &plan.promoted_item_ids())
         .map_err(|err| resolver::storage_error(&err))?;
     render_abandoned_promotions(deps.stdout, &abandoned);
@@ -712,7 +712,7 @@ fn render_abandoned_promotions<W: Write + ?Sized>(
     for promotion in abandoned {
         let _ = writeln!(
             stdout,
-            "Possible duplicate: the previous Promotion for {} was abandoned without observing its Backend creation outcome (Mutation {}). If that creation succeeded, this one creates a second Backend object.",
+            "Possible duplicate: the previous Promotion for {} was abandoned before tk observed its Backend creation outcome (Mutation {}). If that creation succeeded, this one creates a second Backend object.",
             promotion.display_id, promotion.sequence
         );
     }
@@ -2682,7 +2682,7 @@ mod tests {
         assert_eq!(code, Exit::Ok, "stderr={}", h.err());
         assert_eq!(
             h.out(),
-            "Possible duplicate: the previous Promotion for tk-1 was abandoned without observing its Backend creation outcome (Mutation 1). If that creation succeeded, this one creates a second Backend object.\nPromoted Ticket: tk-1 -> gh-42\n"
+            "Possible duplicate: the previous Promotion for tk-1 was abandoned before tk observed its Backend creation outcome (Mutation 1). If that creation succeeded, this one creates a second Backend object.\nPromoted Ticket: tk-1 -> gh-42\n"
         );
     }
 

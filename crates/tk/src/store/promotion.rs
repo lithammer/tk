@@ -773,10 +773,10 @@ pub fn retry_promotion(
 // Promotion Cancellation (ADR-0038, ADR-0039)
 // ──────────────────────────────────────────────────────────────────────────
 
-/// One item whose Promotion the cancellation touched. Which group of the
+/// One Promotion of the operation a cancellation reports on. Which group of the
 /// report it lands in says what became of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WithdrawnPromotion {
+pub struct ReportedPromotion {
     pub sequence: i64,
     pub display_id: String,
     pub item_class: ItemClass,
@@ -801,14 +801,14 @@ pub struct CancellationReport {
     /// Promotions the withdrawal resolved, in Mutation Sequence order. Their
     /// items are back to Local Backend Binding, and nothing they would have
     /// created exists on the Backend.
-    pub cancelled_promotions: Vec<WithdrawnPromotion>,
+    pub cancelled_promotions: Vec<ReportedPromotion>,
     /// Promotions withdrawn while their Backend creation outcome was
     /// indeterminate. Their items are Local too, but a Backend object may
     /// exist that tk holds no identity for (ADR-0039).
-    pub abandoned_promotions: Vec<WithdrawnPromotion>,
+    pub abandoned_promotions: Vec<ReportedPromotion>,
     /// Promotions the Backend already accepted. tk never compensates by
     /// deleting a Backend object, so these are reported, not undone.
-    pub applied_promotions: Vec<WithdrawnPromotion>,
+    pub applied_promotions: Vec<ReportedPromotion>,
     /// Everything else the withdrawal took, in Mutation Sequence order.
     pub withdrawn: Vec<WithdrawnMutation>,
 }
@@ -1014,7 +1014,7 @@ struct OperationPromotion {
     item_class: ItemClass,
 }
 
-impl From<OperationPromotion> for WithdrawnPromotion {
+impl From<OperationPromotion> for ReportedPromotion {
     fn from(promotion: OperationPromotion) -> Self {
         Self {
             sequence: promotion.sequence,
@@ -1065,9 +1065,9 @@ struct WithdrawnRow {
 /// no third item's Mutations become unresolvable (ADR-0038). Only `pending` and
 /// `failed` rows can qualify — global Mutation Sequence order holds every later
 /// Mutation behind a nonterminal Promotion, so collateral was never attempted.
-/// The Promotions themselves are excluded because a withdrawal reaches two
-/// different states, `cancelled` and `abandoned`, decided per Promotion by the
-/// caller (ADR-0039).
+/// This skips the Promotions themselves: a withdrawal reaches two states,
+/// `cancelled` and `abandoned`, and the caller picks which one per Promotion
+/// (ADR-0039).
 fn withdrawn_mutations(
     conn: &Connection,
     cancelled_items: &BTreeSet<String>,
@@ -1213,10 +1213,10 @@ pub struct AbandonedPromotion {
 /// have one.
 ///
 /// Asks for the latest *abandonment*, not the latest Promotion: every other
-/// state a later Promotion could hold is certified to have created nothing, so
-/// none of them clears the risk this warns about. Only an `applied` Promotion
-/// would, and an Item the Backend already accepted is never planned for
-/// Promotion again, so it never reaches this query (ADR-0039).
+/// state a later Promotion could hold created nothing, so none of them clears
+/// the risk this warns about. Only an `applied` Promotion would, and an Item the
+/// Backend already accepted is never planned for Promotion again, so it never
+/// reaches this query (ADR-0039).
 pub fn abandoned_promotions(
     conn: &Connection,
     item_ids: &[String],
@@ -3458,7 +3458,7 @@ mod tests {
     }
 
     #[test]
-    fn the_latest_abandonment_is_what_a_later_promotion_warns_about() {
+    fn a_later_promotion_warns_about_the_latest_abandonment() {
         let conn = open_seeded();
         seed_recovery(
             &conn,
@@ -3494,8 +3494,8 @@ mod tests {
 
     #[test]
     fn a_later_cancelled_promotion_does_not_clear_an_abandonment() {
-        // A cancelled Promotion is certified to have created nothing, so it
-        // cannot supersede an earlier withdrawal whose object may exist.
+        // A cancelled Promotion created nothing, so it cannot clear an earlier
+        // withdrawal whose object may still exist.
         let conn = open_seeded();
         seed_recovery(
             &conn,

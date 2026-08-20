@@ -8,7 +8,7 @@
 //!
 //! `tk sync --skip <id>` curates a failed Mutation under the repository's
 //! Remote workflow guard. The skip commits BEFORE the adapter is opened so a
-//! broken / unimplemented Remote cannot block an operator from abandoning a
+//! broken / unimplemented Remote cannot block an operator from bypassing a
 //! Mutation the backend already rejected.
 //!
 //! `tk sync log` reads the Mutation Log through [`crate::store::sync`]; it
@@ -112,7 +112,7 @@ fn run_sync(deps: Deps<'_>, skip: Option<i64>) -> Exit {
     };
 
     // Commit the skip before opening the adapter: a broken or unimplemented
-    // Remote must not block an operator from abandoning a failed Mutation.
+    // Remote must not block an operator from bypassing a failed Mutation.
     if let Some(seq) = skip {
         if let Err(err) = store_sync::mark_mutation_skipped(store.conn_mut(), &workflow, seq, &now)
         {
