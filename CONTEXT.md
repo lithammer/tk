@@ -237,8 +237,10 @@ _Avoid_: Automatic Retry, Replay
 The explicit recovery that withdraws a **Promotion Operation**'s unresolved
 **Promotions**, together with every **Mutation** ordered behind them that cannot
 be applied without a withdrawn item's backend identity, returning those items to
-**Local Tickets** and **Local Epics**. It reaches no **Backend**.
-_Avoid_: Unpromote, Promotion Rollback, Promotion Abandon, Promotion Delete
+**Local Tickets** and **Local Epics**. It reaches no **Backend**, so it withdraws
+a **Promotion** whose Backend creation outcome tk never observed without learning
+what that creation did.
+_Avoid_: Unpromote, Promotion Rollback, Promotion Delete
 
 **Mutation**:
 A durable local intent to modify **tk** domain state through a **Backend**. Its
@@ -288,6 +290,13 @@ _Avoid_: Error Log
 A **Mutation Failure** as produced and classified by a **Backend Adapter**, carrying a failure classification (rate-limited, validation, sync conflict, auth, transient, or unknown) used to render **Sync Log** summaries and, later, to drive retry and recovery policy.
 _Avoid_: Adapter Error
 
+**Indeterminate**:
+The **Promotion** creation outcome where tk cannot tell whether a Backend object
+was created, because no trustworthy receipt arrived and the failure certifies
+nothing. The other two outcomes are **Created**, carrying a Backend identity, and
+**Rejected**, certified to have had no effect.
+_Avoid_: Unknown Outcome, Ambiguous Creation, In Doubt
+
 **Skipped Mutation**:
 A **Mutation** explicitly bypassed during sync without being applied to a
 **Backend**, produced only by **Sync Skip**.
@@ -295,9 +304,16 @@ _Avoid_: Ignored Mutation, Cancelled Mutation
 
 **Cancelled Mutation**:
 A **Mutation** terminally withdrawn by **Promotion Cancellation**, never applied
-and never attempted. Distinct from a **Skipped Mutation**, which sync failed on
-before a human bypassed it.
-_Avoid_: Skipped Mutation, Deleted Mutation, Aborted Mutation
+and never attempted, so nothing it would have created exists on the **Backend**.
+Distinct from a **Skipped Mutation**, which sync failed on before a human
+bypassed it.
+_Avoid_: Skipped Mutation, Abandoned Mutation, Deleted Mutation, Aborted Mutation
+
+**Abandoned Mutation**:
+A **Promotion** terminally withdrawn by **Promotion Cancellation** while its
+Backend creation outcome was **Indeterminate**, so a Backend object may exist
+that tk holds no identity for and will never refresh.
+_Avoid_: Cancelled Mutation, Orphaned Mutation, Stranded Promotion
 
 **Sync Skip**:
 The **`tk sync`** mode that marks one failed **Mutation** as skipped and continues sync.
@@ -470,11 +486,22 @@ _Avoid_: ticket, tickets
   import a closed Backend object as a `done` Item.
 - **Promotion Cancellation** withdraws the whole **Promotion Operation** the
   named item's **Promotion** belongs to, not one **Mutation**.
-- A `pending` or `failed` **Promotion** may be cancelled, because both are
-  certified to have created no Backend object. An `applying` **Promotion**
-  anywhere in the **Promotion Operation** refuses the whole cancellation, which
-  **Promotion Reconciliation** or **Promotion Retry** must resolve first. An
-  already applied **Promotion** is reported rather than undone.
+- Any unresolved **Promotion** may be cancelled. A `pending` or `failed` one
+  becomes a **Cancelled Mutation**, because both are certified to have created no
+  Backend object. An `applying` one becomes an **Abandoned Mutation**, because
+  its outcome was never observed. An already applied **Promotion** is reported
+  rather than undone.
+- **Promotion Reconciliation**, **Promotion Retry**, and **Promotion
+  Cancellation** are one exit per belief an operator can hold about an
+  **Indeterminate** creation: it exists, so bind it; it does not and the
+  **Promotion** is still wanted, so create it again; the **Promotion** is no
+  longer wanted, so withdraw it.
+- Cancellation reports an **Abandoned Mutation** as an outcome tk never learned.
+  It names no Backend identity, because none was ever observed, so recovering an
+  object the creation did make means finding it and **Adopting** or closing it.
+- **Promotion** warns once when an item's most recent **Promotion** is an
+  **Abandoned Mutation**, because that promotion is where a duplicate Backend
+  object would be created. It does not refuse.
 - **Promotion Cancellation** withdraws every **Mutation** that cannot be applied
   without a cancelled item's backend identity: the **Promotions** themselves,
   **Mutations** targeting a cancelled item, a **Dependency** naming one as
@@ -500,12 +527,17 @@ _Avoid_: ticket, tickets
 - A failed **Mutation** may become a **Skipped Mutation** only through **Sync Skip**.
 - A **Mutation** may become a **Cancelled Mutation** only through **Promotion
   Cancellation**, from `pending` as readily as from `failed`. A **Promotion**
-  itself can only ever be cancelled, never skipped.
-- **Sync Log** inspects pending, failed, applying, skipped, cancelled, and
-  applied **Mutations**, and reports every state but applied without a flag.
+  itself can only ever be cancelled or abandoned, never skipped.
+- Only a **Promotion** may become an **Abandoned Mutation**, and only from
+  `applying`. The **Mutations** withdrawn alongside it were never attempted, so
+  they are cancelled.
+- **Sync Log** inspects pending, failed, applying, skipped, cancelled,
+  abandoned, and applied **Mutations**, and reports every state but applied
+  without a flag. Abandoned **Mutations** are also listable alone, because they
+  are the only ones that mean tk may have left a Backend object behind.
 - A **Promotion Operation** has resolved once none of its **Mutations** is
-  pending, failed, or applying; a **Skipped Mutation** or **Cancelled Mutation**
-  is a resolved outcome, not a waiting one.
+  pending, failed, or applying; a **Skipped Mutation**, **Cancelled Mutation**,
+  or **Abandoned Mutation** is a resolved outcome, not a waiting one.
 - Force-applying conflicting **Mutations** is deferred from v1.
 - **Backend Adapters** use injectable subprocess runners for external CLIs such as `gh` and `acli`.
 - A repository may have zero or one **Primary Backend**.
@@ -750,7 +782,7 @@ _Avoid_: ticket, tickets
 > **Domain expert:** "Neither. A cancelled **Promotion** never created a backend object, and current **Ticket** and **Epic** state is untouched, **Display ID** included. Only the intent is withdrawn."
 >
 > **Dev:** "Can it cancel a **Promotion** whose creation call may already have run?"
-> **Domain expert:** "No — that is an `applying` **Promotion**, and it needs **Promotion Reconciliation** or **Promotion Retry** first. Cancellation only withdraws intent that is certain to have created nothing."
+> **Domain expert:** "Yes, and the withdrawal is recorded as an **Abandoned Mutation** rather than a **Cancelled Mutation**, because tk never learned what that call did. If it did create an issue, tk holds no identity for it and will never refresh it — the exit is honest about that rather than refusing."
 >
 > **Dev:** "Does an `active` **Ticket** have to be assigned to someone?"
 > **Domain expert:** "No — `active` means current work; **Assignee** support is deferred and may be omitted entirely."
@@ -825,6 +857,31 @@ _Avoid_: ticket, tickets
   **Sync Skip**'s own definition untrue and leave the two provenances
   distinguishable only by whether a **Mutation Failure** happened to be attached
   (ADR-0038).
+- Refusing to cancel an `applying` **Promotion** was decided first (tk-134) and
+  reversed (tk-147) — resolved: any unresolved **Promotion** may be withdrawn.
+  The refusal rested on avoiding an operation whose **Epic** may exist upstream
+  while its children are gone, but that shape was already accepted, and reported,
+  for an applied **Promotion**; certainty was never what gated a withdrawal
+  (ADR-0039).
+- Naming forced **Promotion Reconciliation** against an unrelated Backend object
+  as the last resort out of an **Indeterminate** creation was considered
+  (tk-147) — resolved: never. A wrong forced binding is permanent and edits a
+  foreign Backend object; a wrong withdrawal leaves an orphan the operator can
+  **Adopt** or close (ADR-0039).
+- Requiring a flag or an operator attestation to withdraw an `applying`
+  **Promotion** was considered (tk-147) — resolved: no gate. **Promotion Retry**
+  already accepts an outward-facing duplicate-creation risk unflagged, and
+  cancellation already accepts a *certain* orphan with only a report (ADR-0039).
+- Recording an unobserved withdrawal as a **Cancelled Mutation** with a marker
+  distinguishing it was considered (tk-147) — resolved: an **Abandoned
+  Mutation** is a separate state. Reuse would make **Promotion Cancellation**'s
+  own definition untrue, which is the argument that separated cancellation from
+  **Sync Skip** in the first place (ADR-0039).
+- Treating a GitHub validation rejection as a certified **Rejected** outcome so
+  it would land `failed` was considered (tk-147) — resolved: no. `gh` renders a
+  validation error, which commits nothing, in the same shape as an execution
+  error, which may, and no readable primary source settles the difference
+  (ADR-0039).
 - Requiring a force flag for a cancellation that withdraws queued **Mutations**
   was considered (tk-134) — resolved: no gate. Promoting the item again
   re-snapshots title, body, **Item Status**, and same-**Backend** **Epic

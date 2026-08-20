@@ -166,9 +166,14 @@ Important stable contracts:
   `cancelled` records intent Promotion Cancellation withdrew: an
   operation-wide exit that opens no Adapter, so it is exempt from that ordering
   rule. The `skipped` clause is Mutation-Type-restricted in the same schema, so
-  a Promotion can only ever reach `cancelled`; whether a Promotion Operation has
+  a Promotion never reaches it; whether a Promotion Operation has
   resolved asks the nonterminal set rather than "not applied" ([ADR
   0038](./docs/adr/0038-promotion-cancellation-withdraws-an-operation.md)).
+  Withdrawing an `applying` Promotion records `abandoned` rather than
+  `cancelled`, restricted by its own CHECK clause to Promotion Mutation Types,
+  because tk never observed what that creation did and may have left a Backend
+  object it holds no identity for ([ADR
+  0039](./docs/adr/0039-cancellation-withdraws-an-unobserved-promotion.md)).
 - `Store::lock_remote_workflow` owns an exclusive OS lock on the stable
   `<git-common-dir>/tk/remote.lock` file. Sync, Adopt, Promotion, and Remote
   configuration hold one guard across Backend access and Store persistence;
