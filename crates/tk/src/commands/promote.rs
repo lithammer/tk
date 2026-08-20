@@ -351,10 +351,10 @@ impl RecoveryAction {
     fn indeterminate_creation(self, sequence: i64) -> String {
         match self {
             Self::Reconcile => format!(
-                "the Promotion was reconciled, but Mutation {sequence} has an indeterminate Backend creation outcome\nUse 'tk promote reconcile <id> <backend-key>' if the object exists, or 'tk promote retry <id>' only when creating it again is safe."
+                "the Promotion was reconciled, but Mutation {sequence} has an indeterminate Backend creation outcome\nUse 'tk promote reconcile <id> <backend-key>' if the object exists, 'tk promote retry <id>' only when creating it again is safe, or 'tk promote cancel <id>' to withdraw the Promotion Operation, leaving any object it created untracked."
             ),
             Self::Retry => format!(
-                "the Promotion was retried, but Mutation {sequence} has an indeterminate Backend creation outcome\nUse 'tk promote reconcile <id> <backend-key>' if the object exists, or 'tk promote retry <id>' only when creating it again is safe."
+                "the Promotion was retried, but Mutation {sequence} has an indeterminate Backend creation outcome\nUse 'tk promote reconcile <id> <backend-key>' if the object exists, 'tk promote retry <id>' only when creating it again is safe, or 'tk promote cancel <id>' to withdraw the Promotion Operation, leaving any object it created untracked."
             ),
         }
     }
@@ -569,6 +569,10 @@ fn promote(
         .map_err(|findings| refusal(&target.display_id, &findings, backend))?;
 
     let captured = capture_promotion_mappings(&graph, &plan);
+    // Read before committing: `commit_plan` appends this operation's own
+    // Promotions, and they would then be the most recent ones.
+    let abandoned = store_promotion::abandoned_promotions(store.conn(), &plan.promoted_item_ids())
+        .map_err(|err| resolver::storage_error(&err))?;
     let operation_id = store_promotion::commit_plan(
         store.conn_mut(),
         workflow,
@@ -581,6 +585,10 @@ fn promote(
     if plan.is_empty() {
         render_nothing_to_promote(deps.stdout, target_item(&graph));
     }
+
+    // Reported before the drain reaches a Backend: this invocation is where an
+    // object an earlier withdrawal abandoned would be duplicated.
+    render_abandoned_promotions(deps.stdout, &abandoned);
 
     // Sync runs even when nothing was appended: an earlier invocation's
     // Promotion may still be pending, and this is the drain that applies it.
@@ -698,6 +706,25 @@ fn capture_promotion_mappings(
         .collect()
 }
 
+/// Warn that this promotion may duplicate an object an earlier withdrawal
+/// abandoned.
+///
+/// The withdrawal recorded that tk never observed the earlier creation, so this
+/// invocation is where a second Backend object would appear. It warns rather
+/// than refusing: a refusal would restore the dead end ADR-0039 removed.
+fn render_abandoned_promotions<W: Write + ?Sized>(
+    stdout: &mut W,
+    abandoned: &[store_promotion::AbandonedPromotion],
+) {
+    for promotion in abandoned {
+        let _ = writeln!(
+            stdout,
+            "Possible duplicate: the previous Promotion for {} was abandoned without observing its Backend creation outcome (Mutation {}). If that creation succeeded, this one creates a second Backend object.",
+            promotion.display_id, promotion.sequence
+        );
+    }
+}
+
 fn target_item(graph: &PromotionGraph) -> &GraphItem {
     graph
         .items
@@ -796,8 +823,9 @@ fn unresolved_failure(
                 // Automatic sync can never clear the blocker, so naming it is
                 // the only actionable guidance — see `recovery_guidance`.
                 MutationState::Applying => format!(
-                    "Inspect it with 'tk sync log {}'. Then use 'tk promote reconcile {} <backend-key>' if the Backend object exists, or 'tk promote retry {}' only when creating it again is safe.",
-                    blocker.sequence, blocker.target_display_id, blocker.target_display_id
+                    "Inspect it with 'tk sync log {sequence}'. Then use 'tk promote reconcile {id} <backend-key>' if the Backend object exists, 'tk promote retry {id}' only when creating it again is safe, or 'tk promote cancel {id}' to withdraw the Promotion Operation, leaving any object it created untracked.",
+                    sequence = blocker.sequence,
+                    id = blocker.target_display_id,
                 ),
                 // Still `pending`: never attempted, so there is nothing
                 // recorded against it and nothing to resolve.
@@ -838,7 +866,7 @@ fn recovery_guidance(mutation: &MutationSummary) -> String {
             mutation.sequence
         ),
         MutationState::Applying => format!(
-            "Inspect it with 'tk sync log {}'. Then use 'tk promote reconcile <id> <backend-key>' if the Backend object exists, or 'tk promote retry <id>' only when creating it again is safe.",
+            "Inspect it with 'tk sync log {}'. Then use 'tk promote reconcile <id> <backend-key>' if the Backend object exists, 'tk promote retry <id>' only when creating it again is safe, or 'tk promote cancel <id>' to withdraw the Promotion Operation, leaving any object it created untracked.",
             mutation.sequence,
         ),
         _ => {
@@ -1003,12 +1031,6 @@ fn cancel_error(err: CancelPromotionError, display_id: &str) -> CommandError {
     match err {
         CancelPromotionError::Storage(err) => resolver::storage_error(&err),
         CancelPromotionError::Recovery(err) => recovery_error(*err, display_id),
-        CancelPromotionError::ApplyingPromotion {
-            sequence,
-            display_id: applying_display_id,
-        } => CommandError::failure(format!(
-            "the Promotion for {applying_display_id} has an indeterminate Backend creation outcome, so the Promotion Operation cannot be withdrawn\nInspect it with 'tk sync log {sequence}'. Then use 'tk promote reconcile {applying_display_id} <backend-key>' if the Backend object exists, or 'tk promote retry {applying_display_id}' only when creating it again is safe."
-        )),
         // ADR-0035 asks a rejected Dependency to name both endpoints, the
         // reason, and a remedy; a withdrawal reaches the same graph from the
         // other direction and says the same thing.
@@ -1055,6 +1077,10 @@ fn render_withdrawn_dependency(edge: &UnrepresentableDependency) -> String {
 /// Mutation whose target survives — that last group is intent lost for an object
 /// that really exists upstream. Mutations targeting a withdrawn item follow
 /// from the withdrawal itself, so they are a count.
+///
+/// An abandoned Promotion says the outcome was never observed and cannot name
+/// the object: no Backend identity was ever received, which is the whole reason
+/// it was indeterminate (ADR-0039).
 fn render_cancellation<W: Write + ?Sized>(stdout: &mut W, report: &CancellationReport) {
     for promotion in &report.cancelled_promotions {
         let _ = writeln!(
@@ -1062,6 +1088,18 @@ fn render_cancellation<W: Write + ?Sized>(stdout: &mut W, report: &CancellationR
             "Cancelled Promotion: {} {}",
             promotion.item_class.label(),
             promotion.display_id
+        );
+    }
+    for promotion in &report.abandoned_promotions {
+        let _ = writeln!(
+            stdout,
+            "Abandoned Promotion: {} {} — its Backend creation outcome was never observed",
+            promotion.item_class.label(),
+            promotion.display_id
+        );
+        let _ = writeln!(
+            stdout,
+            "  If it did create an object, tk no longer tracks it. Find it upstream, then adopt or close it."
         );
     }
     for promotion in &report.applied_promotions {
@@ -2136,7 +2174,7 @@ mod tests {
     }
 
     #[test]
-    fn cancel_refuses_an_indeterminate_creation_and_names_both_recoveries() {
+    fn cancel_abandons_an_indeterminate_creation_and_says_it_cannot_name_the_object() {
         let fixture = TmpStore::new("repo");
         let mut conn = seed_store(&fixture);
         local_ticket(&conn, "t1", "tk-1", 1);
@@ -2150,10 +2188,11 @@ mod tests {
 
         let code = cancel_rendered(&mut h, "tk-1");
 
-        assert_eq!(code, Exit::Failure);
-        assert!(h.err().contains("indeterminate Backend creation outcome"));
-        assert!(h.err().contains("tk promote reconcile tk-1"));
-        assert!(h.err().contains("tk promote retry tk-1"));
+        assert_eq!(code, Exit::Ok);
+        assert_eq!(
+            h.out(),
+            "Abandoned Promotion: Ticket tk-1 — its Backend creation outcome was never observed\n  If it did create an object, tk no longer tracks it. Find it upstream, then adopt or close it.\n"
+        );
     }
 
     #[test]
@@ -2625,6 +2664,36 @@ mod tests {
     // ---- the operation, against a scripted Adapter -----------------------
 
     #[test]
+    fn re_promoting_after_an_abandonment_warns_about_the_object_it_may_duplicate() {
+        let store = TmpStore::new("repo");
+        let mut conn = seed_store(&store);
+        local_ticket(&conn, "t1", "tk-1", 1);
+        commit_promotion(&mut conn, "t1");
+        // The state the withdrawal left behind: tk never learned whether the
+        // first creation landed, so this promotion may make a second object.
+        conn.execute("update mutations set state = 'abandoned'", [])
+            .unwrap();
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        let mut st = open_store(&h, &store, &cwd_path);
+        let mut fake = adapter(
+            vec![],
+            vec![CreateResponse::Created {
+                backend_key: "42".into(),
+                display_id: "gh-42".into(),
+            }],
+        );
+
+        let code = promote_rendered(&mut h, &mut st, &mut fake, "tk-1", false);
+
+        assert_eq!(code, Exit::Ok, "stderr={}", h.err());
+        assert_eq!(
+            h.out(),
+            "Possible duplicate: the previous Promotion for tk-1 was abandoned without observing its Backend creation outcome (Mutation 1). If that creation succeeded, this one creates a second Backend object.\nPromoted Ticket: tk-1 -> gh-42\n"
+        );
+    }
+
+    #[test]
     fn a_local_ticket_promotes_and_reports_its_backend_display_id() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
@@ -2940,7 +3009,7 @@ mod tests {
             h.err(),
             "tk promote: the Promotion did not finish: Mutation 1 (applying) for tk-1 is unresolved\n\
              Sync stopped: Mutation 1 has an indeterminate Backend creation outcome\n\
-             Inspect it with 'tk sync log 1'. Then use 'tk promote reconcile <id> <backend-key>' if the Backend object exists, or 'tk promote retry <id>' only when creating it again is safe.\n"
+             Inspect it with 'tk sync log 1'. Then use 'tk promote reconcile <id> <backend-key>' if the Backend object exists, 'tk promote retry <id>' only when creating it again is safe, or 'tk promote cancel <id>' to withdraw the Promotion Operation, leaving any object it created untracked.\n"
         );
     }
 
@@ -2984,7 +3053,7 @@ mod tests {
             h.err(),
             "tk promote: the Promotion is committed and remains pending behind Mutation 1 (applying) for tk-9\n\
              Sync stopped: Mutation 1 has an indeterminate Backend creation outcome\n\
-             Inspect it with 'tk sync log 1'. Then use 'tk promote reconcile tk-9 <backend-key>' if the Backend object exists, or 'tk promote retry tk-9' only when creating it again is safe.\n"
+             Inspect it with 'tk sync log 1'. Then use 'tk promote reconcile tk-9 <backend-key>' if the Backend object exists, 'tk promote retry tk-9' only when creating it again is safe, or 'tk promote cancel tk-9' to withdraw the Promotion Operation, leaving any object it created untracked.\n"
         );
         let state: String = conn
             .query_row("select state from mutations where sequence = 2", [], |r| {

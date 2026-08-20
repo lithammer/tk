@@ -146,7 +146,7 @@ fn adopt_store_error(err: AdoptStoreError) -> CommandError {
             CommandError::failure(format!("Repository Store corruption: {other}"))
         }
         AdoptStoreError::ApplyingMutation(sequence) => CommandError::failure(format!(
-            "Mutation {sequence} has an indeterminate Backend creation outcome; resolve it before adopting another Item"
+            "Mutation {sequence} has an indeterminate Backend creation outcome; resolve it before adopting another Item\nUse 'tk promote reconcile <id> <backend-key>' if the Backend object exists, 'tk promote retry <id>' only when creating it again is safe, or 'tk promote cancel <id>' to withdraw the Promotion Operation, leaving any object it created untracked."
         )),
     }
 }
@@ -360,7 +360,8 @@ mod tests {
         assert_eq!(code, Exit::Failure);
         assert_eq!(
             String::from_utf8(h.stderr).unwrap(),
-            "tk adopt: Mutation 9 has an indeterminate Backend creation outcome; resolve it before adopting another Item\n"
+            "tk adopt: Mutation 9 has an indeterminate Backend creation outcome; resolve it before adopting another Item\n\
+             Use 'tk promote reconcile <id> <backend-key>' if the Backend object exists, 'tk promote retry <id>' only when creating it again is safe, or 'tk promote cancel <id>' to withdraw the Promotion Operation, leaving any object it created untracked.\n"
         );
     }
 

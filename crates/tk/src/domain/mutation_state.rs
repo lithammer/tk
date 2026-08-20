@@ -28,14 +28,14 @@ use std::fmt;
 /// | `pending`, `failed`, `applying` | `failed` | recorded | a certified Backend rejection |
 /// | `failed` | `skipped` | preserved | Sync Skip |
 /// | `pending`, `failed` | `cancelled` | preserved | Promotion Cancellation |
+/// | `applying` | `abandoned` | preserved | Promotion Cancellation |
 /// | `pending`, `failed`, `applying` | `applied` | cleared | a persisted Backend effect |
 ///
-/// `skipped`, `cancelled`, and `applied` are terminal: nothing leaves them.
-/// `applying` is the only self-edge, and it exists because an indeterminate
-/// creation records why without resolving the doubt. `applying` also has no
-/// edge to `cancelled`: an indeterminate creation is not certified to have
-/// created nothing, so Promotion Reconciliation or Promotion Retry must settle
-/// it first (ADR-0038).
+/// `skipped`, `cancelled`, `abandoned`, and `applied` are terminal: nothing
+/// leaves them. `applying` is the only self-edge, and it exists because an
+/// indeterminate creation records why without resolving the doubt. Promotion
+/// Cancellation withdraws from `applying` too, but into `abandoned` rather than
+/// `cancelled`, because tk never observed what that creation did (ADR-0039).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MutationState {
     /// Queued and not yet attempted.
@@ -46,8 +46,13 @@ pub enum MutationState {
     Applying,
     /// Human-curated terminal omission after sync failed on the Mutation.
     Skipped,
-    /// Terminally withdrawn by Promotion Cancellation, never attempted.
+    /// Terminally withdrawn by Promotion Cancellation, never attempted, so
+    /// nothing it would have created exists on the Backend.
     Cancelled,
+    /// Terminally withdrawn by Promotion Cancellation before any Backend
+    /// identity was recorded, so a Backend object may exist that tk cannot
+    /// address.
+    Abandoned,
     /// Backend effect and any resulting identity were persisted.
     Applied,
 }
@@ -65,6 +70,7 @@ impl MutationState {
             Self::Applying => "applying",
             Self::Skipped => "skipped",
             Self::Cancelled => "cancelled",
+            Self::Abandoned => "abandoned",
             Self::Applied => "applied",
         }
     }
@@ -90,6 +96,8 @@ mod tests {
         assert_eq!(MutationState::Failed.text(), "failed");
         assert_eq!(MutationState::Applying.text(), "applying");
         assert_eq!(MutationState::Skipped.text(), "skipped");
+        assert_eq!(MutationState::Cancelled.text(), "cancelled");
+        assert_eq!(MutationState::Abandoned.text(), "abandoned");
         assert_eq!(MutationState::Applied.text(), "applied");
     }
 

@@ -823,7 +823,7 @@ impl From<mutations::TransitionError> for MarkSkippedError {
 /// transaction. Refuses a Mutation that is not `failed`, or whose Mutation
 /// Type is `promote_ticket` / `promote_epic` ([`MarkSkippedError::CannotSkipPromotion`]).
 /// The edge preserves `failure_json`, so `tk sync log` can still show why the
-/// Mutation was abandoned.
+/// Mutation was bypassed.
 pub fn mark_mutation_skipped(
     conn: &mut Connection,
     _workflow: &RemoteWorkflowGuard,
@@ -1237,7 +1237,12 @@ pub enum ClearRemoteError {
         "{count} pending or failed Mutation(s) would be orphaned, including Promotion Mutation {promotion}; resolve them before clearing the Remote. Run 'tk promote cancel <id>' to withdraw a Promotion Operation the Backend will never accept"
     )]
     WouldOrphanPromotion { count: i64, promotion: i64 },
-    #[error("Mutation {0} has an indeterminate Backend creation outcome")]
+    /// A creation whose outcome tk never observed is unresolved intent against
+    /// this Remote, so clearing it is refused (CONTEXT.md). Carries the Mutation
+    /// Sequence for the verbatim diagnostic.
+    #[error(
+        "Mutation {0} has an indeterminate Backend creation outcome; resolve it before clearing the Remote. Run 'tk promote reconcile <id> <backend-key>' if the Backend object exists, 'tk promote retry <id>' only when creating it again is safe, or 'tk promote cancel <id>' to withdraw the Promotion Operation, leaving any object it created untracked"
+    )]
     ApplyingMutation(i64),
 }
 
@@ -1312,6 +1317,11 @@ pub enum LogListFilter {
     Failed,
     Skipped,
     Cancelled,
+    /// Only Promotions withdrawn while their outcome was unobserved. These are
+    /// the only rows that mean tk may have left a Backend object behind, and
+    /// unlike `applying` they accumulate, so listing them alone is a question
+    /// someone asks (ADR-0039).
+    Abandoned,
 }
 
 /// One row of the `tk sync log` list view.
@@ -1364,12 +1374,13 @@ pub fn list_mutation_log(
 ) -> Result<Vec<LogListRow>, LogError> {
     let where_clause = match filter {
         LogListFilter::Default => {
-            "where m.state in ('pending', 'failed', 'applying', 'skipped', 'cancelled')"
+            "where m.state in ('pending', 'failed', 'applying', 'skipped', 'cancelled', 'abandoned')"
         }
         LogListFilter::Pending => "where m.state = 'pending'",
         LogListFilter::Failed => "where m.state = 'failed'",
         LogListFilter::Skipped => "where m.state = 'skipped'",
         LogListFilter::Cancelled => "where m.state = 'cancelled'",
+        LogListFilter::Abandoned => "where m.state = 'abandoned'",
     };
     let sql = format!(
         "select m.sequence, m.state, m.mutation_type, i.display_value, m.created_at, m.failure_json \
@@ -3686,6 +3697,17 @@ mod tests {
             },
         )
         .unwrap();
+        insert_fixture_item(
+            conn,
+            FixtureItem {
+                id: "t5",
+                display: "tk-5",
+                title: "Withdrawn work",
+                created_seq: 5,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
         insert_fixture_mutation(
             conn,
             FixtureMutation {
@@ -3749,6 +3771,20 @@ mod tests {
             },
         )
         .unwrap();
+        insert_fixture_mutation(
+            conn,
+            FixtureMutation {
+                sequence: 6,
+                mutation_type: "promote_ticket",
+                item_id: "t5",
+                payload_json: r#"{"title":"Withdrawn work","body":"","backend_kind":"github"}"#,
+                state: "abandoned",
+                failure_json: Some(r#"{"detail":"unknown effect"}"#),
+                promotion_operation_id: Some("op-2"),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
     }
 
     #[test]
@@ -3759,7 +3795,7 @@ mod tests {
 
         let rows = list_mutation_log(&conn, LogListFilter::Default).unwrap();
         let seqs: Vec<i64> = rows.iter().map(|r| r.sequence).collect();
-        assert_eq!(seqs, vec![1, 2, 3, 4, 5]);
+        assert_eq!(seqs, vec![1, 2, 3, 4, 5, 6]);
         assert_eq!(rows[0].failure_detail, None);
         assert_eq!(
             rows[1].failure_detail.as_deref(),
@@ -3769,6 +3805,12 @@ mod tests {
         assert_eq!(rows[3].state, MutationState::Applying);
         assert_eq!(rows[3].failure_detail.as_deref(), Some("unknown effect"));
         assert_eq!(rows[4].state, MutationState::Cancelled);
+        assert_eq!(rows[5].state, MutationState::Abandoned);
+        assert_eq!(
+            rows[5].failure_detail.as_deref(),
+            Some("unknown effect"),
+            "the indeterminate diagnostic survives the withdrawal"
+        );
     }
 
     #[test]
@@ -3799,6 +3841,12 @@ mod tests {
             cancelled.iter().map(|r| r.sequence).collect::<Vec<_>>(),
             vec![5],
             "a Cancelled Mutation is separable from a Skipped one"
+        );
+        let abandoned = list_mutation_log(&conn, LogListFilter::Abandoned).unwrap();
+        assert_eq!(
+            abandoned.iter().map(|r| r.sequence).collect::<Vec<_>>(),
+            vec![6],
+            "an Abandoned Mutation is the one state that means tk may have left an object behind"
         );
     }
 

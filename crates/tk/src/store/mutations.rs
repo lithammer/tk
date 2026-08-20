@@ -190,20 +190,27 @@ pub(crate) fn transition(
             | MutationState::Failed
             | MutationState::Skipped
             | MutationState::Cancelled
+            | MutationState::Abandoned
             | MutationState::Applied => return Err(illegal()),
         },
         MutationState::Failed => match req.from {
             MutationState::Pending | MutationState::Failed | MutationState::Applying => {
                 FailureColumn::Record(evidence()?)
             }
-            MutationState::Skipped | MutationState::Cancelled | MutationState::Applied => {
+            MutationState::Skipped
+            | MutationState::Cancelled
+            | MutationState::Abandoned
+            | MutationState::Applied => {
                 return Err(illegal());
             }
         },
         MutationState::Applying => match req.from {
             MutationState::Pending | MutationState::Failed => FailureColumn::Clear,
             MutationState::Applying => FailureColumn::Record(evidence()?),
-            MutationState::Skipped | MutationState::Cancelled | MutationState::Applied => {
+            MutationState::Skipped
+            | MutationState::Cancelled
+            | MutationState::Abandoned
+            | MutationState::Applied => {
                 return Err(illegal());
             }
         },
@@ -213,22 +220,38 @@ pub(crate) fn transition(
             | MutationState::Applying
             | MutationState::Skipped
             | MutationState::Cancelled
+            | MutationState::Abandoned
             | MutationState::Applied => return Err(illegal()),
         },
-        // An `applying` Promotion is not certified to have created nothing, so
-        // reconcile or retry settles it before anything may be withdrawn.
+        // Withdrawing an unobserved creation lands in `abandoned` instead, so
+        // `cancelled` keeps meaning that nothing was created (ADR-0039).
         MutationState::Cancelled => match req.from {
             MutationState::Pending | MutationState::Failed => FailureColumn::Preserve,
             MutationState::Applying
             | MutationState::Skipped
             | MutationState::Cancelled
+            | MutationState::Abandoned
+            | MutationState::Applied => return Err(illegal()),
+        },
+        // The indeterminate creation's evidence is why the withdrawal
+        // happened, so it survives the edge.
+        MutationState::Abandoned => match req.from {
+            MutationState::Applying => FailureColumn::Preserve,
+            MutationState::Pending
+            | MutationState::Failed
+            | MutationState::Skipped
+            | MutationState::Cancelled
+            | MutationState::Abandoned
             | MutationState::Applied => return Err(illegal()),
         },
         MutationState::Applied => match req.from {
             MutationState::Pending | MutationState::Failed | MutationState::Applying => {
                 FailureColumn::Clear
             }
-            MutationState::Skipped | MutationState::Cancelled | MutationState::Applied => {
+            MutationState::Skipped
+            | MutationState::Cancelled
+            | MutationState::Abandoned
+            | MutationState::Applied => {
                 return Err(illegal());
             }
         },
@@ -1170,9 +1193,38 @@ mod tests {
     }
 
     #[test]
-    fn an_indeterminate_creation_cannot_be_withdrawn() {
-        // Cancellation only withdraws intent certified to have created
-        // nothing; reconcile or retry has to settle `applying` first.
+    fn withdrawing_an_indeterminate_creation_abandons_it_and_keeps_its_evidence() {
+        let conn = open_seeded();
+        seed_row(
+            &conn,
+            MutationType::PromoteTicket,
+            MutationState::Applying,
+            Some(r#"{"detail":"?"}"#),
+        );
+
+        transition_row(
+            &conn,
+            MutationState::Applying,
+            MutationState::Abandoned,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_row(&conn),
+            (
+                MutationState::Abandoned,
+                Some(r#"{"detail":"?"}"#.to_string()),
+                LATER.to_string()
+            ),
+            "the indeterminate diagnostic is why the withdrawal happened"
+        );
+    }
+
+    #[test]
+    fn an_indeterminate_creation_is_abandoned_rather_than_cancelled() {
+        // `cancelled` means nothing was created. An unobserved outcome has to
+        // land in its own state or that meaning stops holding (ADR-0039).
         let conn = open_seeded();
         seed_row(
             &conn,
@@ -1212,6 +1264,37 @@ mod tests {
         ] {
             let conn = open_seeded();
             seed_row(&conn, MutationType::UpdateTicket, from, None);
+
+            let err = transition_row(&conn, from, to, Some(&failure())).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    TransitionError::Illegal(IllegalTransition::Edge { .. })
+                ),
+                "{from} -> {to} is not a legal edge, got {err:?}"
+            );
+            assert_eq!(read_row(&conn).0, from, "a refused edge writes nothing");
+        }
+    }
+
+    #[test]
+    fn only_an_unobserved_creation_is_abandoned_and_nothing_leaves_it() {
+        // Seeded as a Promotion because the `mutations` CHECK admits
+        // `abandoned` for nothing else.
+        for (from, to) in [
+            (MutationState::Pending, MutationState::Abandoned),
+            (MutationState::Failed, MutationState::Abandoned),
+            (MutationState::Applied, MutationState::Abandoned),
+            (MutationState::Abandoned, MutationState::Pending),
+            (MutationState::Abandoned, MutationState::Applied),
+        ] {
+            let conn = open_seeded();
+            // A `failed` row must carry evidence to satisfy the CHECK.
+            let seeded = match from {
+                MutationState::Failed => Some(r#"{"detail":"boom"}"#),
+                _ => None,
+            };
+            seed_row(&conn, MutationType::PromoteTicket, from, seeded);
 
             let err = transition_row(&conn, from, to, Some(&failure())).unwrap_err();
             assert!(

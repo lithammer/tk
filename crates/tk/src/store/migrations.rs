@@ -53,6 +53,7 @@ const MIGRATION_6_SQL: &str = include_str!("migrations/006_require_accepted_for_
 const MIGRATION_7_SQL: &str = include_str!("migrations/007_promotion_operation.sql");
 const MIGRATION_8_SQL: &str = include_str!("migrations/008_mutation_applying.sql");
 const MIGRATION_9_SQL: &str = include_str!("migrations/009_mutation_cancelled.sql");
+const MIGRATION_10_SQL: &str = include_str!("migrations/010_mutation_abandoned.sql");
 
 /// V1 Repository Store schema skeleton.
 pub const MIGRATION_1: Migration = Migration {
@@ -142,6 +143,18 @@ pub const MIGRATION_9: Migration = Migration {
     foreign_keys: ForeignKeys::Off,
 };
 
+/// Rebuilds `mutations` to add the terminal `abandoned` state Promotion
+/// Cancellation writes for a Promotion whose Backend creation outcome was never
+/// observed (ADR-0039). The clause admits Promotion Mutation Types alone, the
+/// way `applying` does, since `applying` is the only edge into it. Runs with
+/// foreign keys disabled because the table-level State x Failure CHECK cannot
+/// be altered in place.
+pub const MIGRATION_10: Migration = Migration {
+    version: 10,
+    sql: MIGRATION_10_SQL,
+    foreign_keys: ForeignKeys::Off,
+};
+
 /// Ordered migration list applied by [`apply_all`].
 pub const ALL_MIGRATIONS: &[Migration] = &[
     MIGRATION_1,
@@ -153,13 +166,14 @@ pub const ALL_MIGRATIONS: &[Migration] = &[
     MIGRATION_7,
     MIGRATION_8,
     MIGRATION_9,
+    MIGRATION_10,
 ];
 
 /// Highest schema version this binary can apply. Named so future migrations
 /// surface the threshold to `grep` instead of hiding it behind `.last()`.
 /// Adding a migration is a two-line patch: append to `ALL_MIGRATIONS`, bump
 /// this constant, with a debug_assert below catching the drift.
-pub const MAX_KNOWN_VERSION: u32 = MIGRATION_9.version;
+pub const MAX_KNOWN_VERSION: u32 = MIGRATION_10.version;
 
 /// Errors returned while applying migrations.
 ///
@@ -1324,6 +1338,63 @@ mod tests {
             .expect("Sync Skip still curates an ordinary Mutation");
         insert(4, "update_ticket", "cancelled")
             .expect("collateral of a withdrawn operation is cancelled whatever its kind");
+    }
+
+    #[test]
+    fn only_a_promotion_may_be_abandoned() {
+        use crate::store::testing::{FixtureItem, insert_fixture_item};
+
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Ticket",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "e1",
+                display: "tk-2",
+                title: "Epic",
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                selection_state: None,
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+
+        let insert = |sequence: i64, mutation_type: &str, item: &str, class: &str, state: &str| {
+            conn.execute(
+                "insert into mutations(\
+                    sequence, mutation_type, item_id, item_class, payload_json, state, \
+                    failure_json, created_at, state_changed_at\
+                 ) values (?1, ?2, ?3, ?4, '{}', ?5, null, 'now', 'now')",
+                rusqlite::params![sequence, mutation_type, item, class, state],
+            )
+        };
+
+        insert(1, "promote_ticket", "t1", "ticket", "abandoned")
+            .expect("an unobserved Ticket creation is abandoned");
+        insert(2, "promote_epic", "e1", "epic", "abandoned")
+            .expect("an unobserved Epic creation is abandoned");
+        assert!(
+            insert(3, "update_ticket", "t1", "ticket", "abandoned").is_err(),
+            "only a creation can have an unobserved outcome, so only a Promotion is abandoned"
+        );
+        assert!(
+            insert(4, "promote_epic", "t1", "ticket", "abandoned").is_err(),
+            "the clause pins the Mutation Type to the Item Class, as `applying` does"
+        );
     }
 
     #[test]

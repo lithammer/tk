@@ -310,9 +310,10 @@ bypassed it.
 _Avoid_: Skipped Mutation, Abandoned Mutation, Deleted Mutation, Aborted Mutation
 
 **Abandoned Mutation**:
-A **Promotion** terminally withdrawn by **Promotion Cancellation** while its
-Backend creation outcome was **Indeterminate**, so a Backend object may exist
-that tk holds no identity for and will never refresh.
+A **Promotion** terminally withdrawn by **Promotion Cancellation** before tk
+recorded a Backend identity for it, so a Backend object may exist that tk cannot
+address and will never refresh. Usually the outcome was **Indeterminate**; a
+**Created** outcome whose identity could not be stored reaches the same state.
 _Avoid_: Cancelled Mutation, Orphaned Mutation, Stranded Promotion
 
 **Sync Skip**:
@@ -499,9 +500,10 @@ _Avoid_: ticket, tickets
 - Cancellation reports an **Abandoned Mutation** as an outcome tk never learned.
   It names no Backend identity, because none was ever observed, so recovering an
   object the creation did make means finding it and **Adopting** or closing it.
-- **Promotion** warns once when an item's most recent **Promotion** is an
-  **Abandoned Mutation**, because that promotion is where a duplicate Backend
-  object would be created. It does not refuse.
+- **Promotion** warns when an item has an **Abandoned Mutation** that no later
+  **Promotion** resolved, because that promotion is where a duplicate Backend
+  object would be created. Only a **Promotion** the **Backend** accepted resolves
+  it; every other outcome created nothing. It does not refuse.
 - **Promotion Cancellation** withdraws every **Mutation** that cannot be applied
   without a cancelled item's backend identity: the **Promotions** themselves,
   **Mutations** targeting a cancelled item, a **Dependency** naming one as
