@@ -488,12 +488,18 @@ fn init_refuses_outside_git_repository() {
     });
 }
 
-/// Vocabulary ADR-0022 retired must not reappear in the manual. Each phrase
-/// names a subsystem tk no longer has: the stored-and-inferred Workspace Scope
-/// (Scope is now an explicit Epic argument or `TK_SCOPE`) and the `tk worktree`
-/// command (checkouts are `git worktree`'s job). A failure means the manual
-/// describes behaviour the binary does not have — fix the prose rather than
-/// relaxing this list.
+/// `tk manpage` writes the embedded bytes verbatim. The binary embeds this
+/// same file, so a failure here means the build is stale — not that two
+/// copies of the manual drifted apart.
+#[test]
+fn manpage_emits_embedded_manpage() {
+    let p = Repo::new("repo");
+    let expected = fs::read_to_string(repo_root().join("man/tk.1")).expect("read man/tk.1");
+    assert_eq!(p.run("manpage"), expected);
+}
+
+/// A failure means tk(1) still describes a subsystem ADR-0022 removed — fix
+/// the prose, don't relax the list.
 #[test]
 fn manpage_uses_no_retired_vocabulary() {
     let manpage = fs::read_to_string(repo_root().join("man/tk.1")).expect("read man/tk.1");
@@ -503,16 +509,6 @@ fn manpage_uses_no_retired_vocabulary() {
             "man/tk.1 still says {phrase:?}, retired by ADR-0022"
         );
     }
-}
-
-/// `tk manpage` writes the embedded bytes verbatim. The binary embeds this
-/// same file, so a failure here means the build is stale — not that two
-/// copies of the manual drifted apart.
-#[test]
-fn manpage_emits_embedded_manpage() {
-    let p = Repo::new("repo");
-    let expected = fs::read_to_string(repo_root().join("man/tk.1")).expect("read man/tk.1");
-    assert_eq!(p.run("manpage"), expected);
 }
 
 #[test]

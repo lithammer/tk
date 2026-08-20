@@ -27,27 +27,26 @@ backend intent.
 .PP
 A
 .B Scope
-is the Epic that narrows
+narrows
 .B tk next
 and
-.BR "tk list" .
-It is supplied as an optional positional
+.B tk list
+to one Epic. Pass it as the optional positional
 .I epic-id
-argument or through the
-.B TK_SCOPE
-environment variable, and the argument wins when both are present. A Scope
-names exactly one Epic and covers that Epic and its child Tickets; passing a
-Ticket is an error. An absent Scope means the whole Repository Store.
+argument or set
+.BR TK_SCOPE ;
+the argument wins. A Scope covers the named Epic and its child Tickets, and
+naming a Ticket instead is an error. Absent a Scope, both commands consider the
+whole Repository Store.
 .B tk
-never stores a Scope or infers one from git state, so a command's Scope is
-always visible in the command itself or the environment it ran in.
+neither stores a Scope nor infers one from git state, so a command's Scope is
+visible in the command line or its environment.
 .PP
 .B tk search
 and
 .B tk grep
-are deliberately outside this: a lookup covers the whole Repository Store and
-is never narrowed by a Scope, so an ID or phrase never fails to match because
-of an active Scope.
+ignore Scope. Both cover the whole Repository Store, so a lookup never misses
+because a Scope was active.
 .SH GLOBAL OPTIONS
 .TP
 .B \-\-help
