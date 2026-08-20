@@ -16,7 +16,11 @@ use rand::Rng;
 use crate::cli::{CommandError, Deps, Exit};
 use crate::platform;
 
-const MANPAGE_BYTES: &[u8] = include_bytes!("tk.1");
+/// The hand-authored `man/tk.1` at the repository root, embedded per
+/// ADR-0018. The path reaches out of the crate so the manual has exactly
+/// one copy: the file a maintainer edits and the file `man -l man/tk.1`
+/// renders are the bytes this binary ships.
+const MANPAGE_BYTES: &[u8] = include_bytes!("../../../../man/tk.1");
 
 const STAGE_NAME_PREFIX: &str = ".tk.1.tmp.";
 
