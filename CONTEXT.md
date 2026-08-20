@@ -229,8 +229,9 @@ _Avoid_: Promotion Repair, Manual Receipt
 
 **Promotion Retry**:
 The explicit-risk recovery that returns an indeterminate **Promotion** to
-pending and lets normal ordered sync attempt Backend creation again. A failed
-**Promotion** is not a Promotion Retry input; ordinary sync already retries it.
+pending and lets normal ordered sync attempt Backend creation again, replaying
+the retained **Promotion** snapshot. A failed **Promotion** is not a Promotion
+Retry input; ordinary sync already retries it.
 _Avoid_: Automatic Retry, Replay
 
 **Promotion Cancellation**:
@@ -884,6 +885,12 @@ _Avoid_: ticket, tickets
   validation error, which commits nothing, in the same shape as an execution
   error, which may, and no readable primary source settles the difference
   (ADR-0039).
+- Re-snapshotting title and body on **Promotion Retry** was considered
+  (tk-152) — resolved: no. The retained **Promotion** snapshot is **Promotion
+  Reconciliation**'s default identity proof, and retry is only taken while
+  an object bearing that content may exist upstream; a **Promotion** the
+  **Backend** refuses on its content exits through **Promotion Cancellation**
+  and a fresh **Promotion** instead (ADR-0037).
 - Requiring a force flag for a cancellation that withdraws queued **Mutations**
   was considered (tk-134) — resolved: no gate. Promoting the item again
   re-snapshots title, body, **Item Status**, and same-**Backend** **Epic
