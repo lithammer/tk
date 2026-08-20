@@ -230,24 +230,39 @@ fn run_log(deps: Deps<'_>, args: LogArgs) -> Exit {
     };
 
     if rows.is_empty() {
-        let _ = writeln!(stdout, "{}", empty_log_message(filter));
+        let message = match filter {
+            // The default list is the only filter that leaves a state out, so
+            // it is the only one whose empty result can still sit on a log
+            // that holds rows. Every other filter names the state it looked
+            // for, so its own empty line already says everything.
+            LogListFilter::Default => match store_sync::mutation_log_is_empty(store.conn()) {
+                Ok(true) => "No Mutations recorded.",
+                Ok(false) => "All Mutations applied.",
+                Err(LogError::Storage(err)) => {
+                    resolver::storage_error(&err).render(stderr, LOG_COMMAND);
+                    return Exit::Failure;
+                }
+                Err(err) => {
+                    let _ = writeln!(
+                        stderr,
+                        "tk sync log: failed to read Repository Store\n{err}"
+                    );
+                    return Exit::Failure;
+                }
+            },
+            LogListFilter::Pending => "No pending Mutations.",
+            LogListFilter::Failed => "No failed Mutations.",
+            LogListFilter::Skipped => "No skipped Mutations.",
+            LogListFilter::Cancelled => "No cancelled Mutations.",
+            LogListFilter::Abandoned => "No abandoned Mutations.",
+        };
+        let _ = writeln!(stdout, "{message}");
         return Exit::Ok;
     }
     for row in &rows {
         render_log_row(stdout, row);
     }
     Exit::Ok
-}
-
-fn empty_log_message(filter: LogListFilter) -> &'static str {
-    match filter {
-        LogListFilter::Default => "No Mutations recorded.",
-        LogListFilter::Pending => "No pending Mutations.",
-        LogListFilter::Failed => "No failed Mutations.",
-        LogListFilter::Skipped => "No skipped Mutations.",
-        LogListFilter::Cancelled => "No cancelled Mutations.",
-        LogListFilter::Abandoned => "No abandoned Mutations.",
-    }
 }
 
 /// Render the one-line sync summary: `Sync complete: <p> pulled, <a> applied`
@@ -933,6 +948,51 @@ mod tests {
             String::from_utf8(h.stdout)
                 .unwrap()
                 .contains("No Mutations recorded.")
+        );
+    }
+
+    #[test]
+    fn sync_log_drained_reports_all_applied() {
+        // The default list leaves applied Mutations out, so an empty result
+        // there does not mean an empty log. A failure here tells an agent its
+        // work never reached the Backend when it had already synced.
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        backend_ticket(&conn, "t1", "tk-1", "1", 1);
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "update_ticket",
+                item_id: "t1",
+                state: "applied",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+
+        let code = run(
+            h.deps(),
+            Args {
+                subcommand: Some(Sub::Log(LogArgs {
+                    pending: false,
+                    failed: false,
+                    skipped: false,
+                    cancelled: false,
+                    abandoned: false,
+                    id: None,
+                })),
+                skip: None,
+            },
+        );
+
+        assert_eq!(code, Exit::Ok);
+        assert_eq!(
+            String::from_utf8(h.stdout).unwrap(),
+            "All Mutations applied.\n"
         );
     }
 
