@@ -1374,6 +1374,18 @@ pub enum LogError {
     FailureJson(#[from] serde_json::Error),
 }
 
+/// Whether the Mutation Log holds no rows at all.
+///
+/// [`LogListFilter::Default`] omits `applied` Mutations, so an empty list from
+/// it does not mean an empty log. `tk sync log` asks this to tell a store that
+/// never recorded a Mutation from one whose Mutations have all applied.
+pub fn mutation_log_is_empty(conn: &Connection) -> Result<bool, LogError> {
+    let any: Option<i64> = conn
+        .query_row("select 1 from mutations limit 1", [], |row| row.get(0))
+        .optional()?;
+    Ok(any.is_none())
+}
+
 /// Return Mutation Log rows matching `filter` in ascending sequence order.
 pub fn list_mutation_log(
     conn: &Connection,
@@ -3871,6 +3883,22 @@ mod tests {
             },
         )
         .unwrap();
+        // The one state the default list leaves out. Without a row in it, a
+        // filter that started returning `applied` would still pass every
+        // assertion below, and `tk sync log`'s drained-log line rests on that
+        // exclusion.
+        insert_fixture_mutation(
+            conn,
+            FixtureMutation {
+                sequence: 7,
+                mutation_type: "update_ticket",
+                item_id: "t3",
+                payload_json: r#"{"title":"Landed","body":""}"#,
+                state: "applied",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
     }
 
     #[test]
@@ -3881,7 +3909,11 @@ mod tests {
 
         let rows = list_mutation_log(&conn, LogListFilter::Default).unwrap();
         let seqs: Vec<i64> = rows.iter().map(|r| r.sequence).collect();
-        assert_eq!(seqs, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(
+            seqs,
+            vec![1, 2, 3, 4, 5, 6],
+            "Mutation 7 is applied, the one state this list leaves out"
+        );
         assert_eq!(rows[0].failure_detail, None);
         assert_eq!(
             rows[1].failure_detail.as_deref(),
