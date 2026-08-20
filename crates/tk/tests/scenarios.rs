@@ -498,6 +498,21 @@ fn manpage_emits_embedded_manpage() {
     assert_eq!(p.run("manpage"), expected);
 }
 
+/// A failure means tk(1) still describes a subsystem ADR-0022 removed — fix
+/// the prose, don't relax the list. Whitespace collapses first because groff
+/// prose wraps mid-phrase, so a retired term can straddle two source lines.
+#[test]
+fn manpage_uses_no_retired_vocabulary() {
+    let manpage = fs::read_to_string(repo_root().join("man/tk.1")).expect("read man/tk.1");
+    let flattened = manpage.split_whitespace().collect::<Vec<_>>().join(" ");
+    for phrase in ["Workspace Scope", "tk worktree"] {
+        assert!(
+            !flattened.contains(phrase),
+            "man/tk.1 still says {phrase:?}, retired by ADR-0022"
+        );
+    }
+}
+
 #[test]
 fn prime_emits_workflow_briefing() {
     let p = Repo::new("repo");

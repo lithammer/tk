@@ -3,10 +3,10 @@
 //! A ready Ticket is one with `status = open`, no unresolved Dependencies,
 //! and no unresolved External Blockers. Each ready candidate's *Effective
 //! Priority* is the lowest Priority reachable through unresolved
-//! Dependency edges or Epic-membership edges, walked only within the
-//! active Workspace Scope. Selection sorts by `(effective_priority,
-//! own_priority, created_seq)` so a ticket inherits urgency from work that
-//! transitively waits on it.
+//! Dependency edges or Epic-membership edges, walked only within the active
+//! Scope. Selection sorts by `(effective_priority, own_priority,
+//! created_seq)` so a ticket inherits urgency from work that transitively
+//! waits on it.
 //!
 //! The Repository Store owns readiness, scope interpretation, Effective
 //! Priority computation, and creation-order tie breaks. The command
