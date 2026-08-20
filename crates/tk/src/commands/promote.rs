@@ -569,10 +569,6 @@ fn promote(
         .map_err(|findings| refusal(&target.display_id, &findings, backend))?;
 
     let captured = capture_promotion_mappings(&graph, &plan);
-    // Read before committing: `commit_plan` appends this operation's own
-    // Promotions, and they would then be the most recent ones.
-    let abandoned = store_promotion::abandoned_promotions(store.conn(), &plan.promoted_item_ids())
-        .map_err(|err| resolver::storage_error(&err))?;
     let operation_id = store_promotion::commit_plan(
         store.conn_mut(),
         workflow,
@@ -588,6 +584,8 @@ fn promote(
 
     // Reported before the drain reaches a Backend: this invocation is where an
     // object an earlier withdrawal abandoned would be duplicated.
+    let abandoned = store_promotion::abandoned_promotions(store.conn(), &plan.promoted_item_ids())
+        .map_err(|err| resolver::storage_error(&err))?;
     render_abandoned_promotions(deps.stdout, &abandoned);
 
     // Sync runs even when nothing was appended: an earlier invocation's
@@ -688,12 +686,7 @@ fn capture_promotion_mappings(
     graph: &PromotionGraph,
     plan: &PromotionPlan,
 ) -> Vec<PromotionMapping> {
-    let promoted: HashSet<&str> = plan
-        .mutations
-        .iter()
-        .filter(|m| m.mutation_type.is_promotion())
-        .map(|m| m.item_id.as_str())
-        .collect();
+    let promoted: HashSet<String> = plan.promoted_item_ids().into_iter().collect();
     graph
         .items
         .iter()
@@ -2669,8 +2662,8 @@ mod tests {
         let mut conn = seed_store(&store);
         local_ticket(&conn, "t1", "tk-1", 1);
         commit_promotion(&mut conn, "t1");
-        // The state the withdrawal left behind: tk never learned whether the
-        // first creation landed, so this promotion may make a second object.
+        // tk never learned whether the first creation landed, so this
+        // promotion may make a second object.
         conn.execute("update mutations set state = 'abandoned'", [])
             .unwrap();
         let cwd_path = cwd();

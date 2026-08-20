@@ -1317,10 +1317,8 @@ pub enum LogListFilter {
     Failed,
     Skipped,
     Cancelled,
-    /// Only Promotions withdrawn while their outcome was unobserved. These are
-    /// the only rows that mean tk may have left a Backend object behind, and
-    /// unlike `applying` they accumulate, so listing them alone is a question
-    /// someone asks (ADR-0039).
+    /// Only Promotions withdrawn while their outcome was unobserved — the only
+    /// rows that mean tk may have left a Backend object behind (ADR-0039).
     Abandoned,
 }
 

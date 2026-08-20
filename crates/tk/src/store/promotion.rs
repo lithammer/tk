@@ -868,8 +868,9 @@ impl From<mutations::TransitionError> for CancelPromotionError {
 /// Withdraw the Promotion Operation the Promotion of `item_id` belongs to.
 ///
 /// A `pending` or `failed` Promotion is cancelled; an `applying` one is
-/// abandoned, because tk never observed what its creation did (ADR-0039). Both
-/// return their item to Local, so both contribute to the withdrawn set.
+/// abandoned, because tk recorded no Backend identity for its creation
+/// (ADR-0039). Both return their item to Local, so both contribute the item
+/// whose collateral is withdrawn alongside them.
 ///
 /// Plans and commits in one transaction under the caller's Remote workflow
 /// guard: the whole decision reads Mutation Log state a concurrent sync could
@@ -918,6 +919,18 @@ pub fn cancel_promotion(
         .collect();
     ensure_dependencies_representable(&tx, &cancelled_items)?;
 
+    for promotion in &cancelled_promotions {
+        mutations::transition(
+            &tx,
+            mutations::TransitionRequest {
+                sequence: promotion.sequence,
+                from: promotion.state,
+                to: MutationState::Cancelled,
+                failure: None,
+                now,
+            },
+        )?;
+    }
     for promotion in &abandoned_promotions {
         mutations::transition(
             &tx,
@@ -949,10 +962,8 @@ pub fn cancel_promotion(
         cancelled_promotions: cancelled_promotions.into_iter().map(Into::into).collect(),
         abandoned_promotions: abandoned_promotions.into_iter().map(Into::into).collect(),
         applied_promotions: applied_promotions.into_iter().map(Into::into).collect(),
-        // The Promotions themselves have their own two fields.
         withdrawn: withdrawn
             .into_iter()
-            .filter(|row| !row.mutation_type.is_promotion())
             .map(|row| WithdrawnMutation {
                 target_cancelled: cancelled_items.contains(&row.item_id),
                 sequence: row.sequence,
@@ -1046,15 +1057,17 @@ struct WithdrawnRow {
     display_id: String,
 }
 
-/// Every Mutation that cannot resolve once `cancelled_items` lose their
-/// prospective Backend identity, in Mutation Sequence order.
+/// The collateral of a withdrawal: every non-Promotion Mutation that cannot
+/// resolve once `cancelled_items` lose their prospective Backend identity, in
+/// Mutation Sequence order.
 ///
 /// One hop and never transitive: only the cancelled items lose an identity, so
 /// no third item's Mutations become unresolvable (ADR-0038). Only `pending` and
 /// `failed` rows can qualify — global Mutation Sequence order holds every later
 /// Mutation behind a nonterminal Promotion, so collateral was never attempted.
-/// A withdrawn Promotion that was itself `applying` is transitioned by the
-/// caller, into `abandoned` rather than `cancelled` (ADR-0039).
+/// The Promotions themselves are excluded because a withdrawal reaches two
+/// different states, `cancelled` and `abandoned`, decided per Promotion by the
+/// caller (ADR-0039).
 fn withdrawn_mutations(
     conn: &Connection,
     cancelled_items: &BTreeSet<String>,
@@ -1063,6 +1076,7 @@ fn withdrawn_mutations(
         "select m.sequence, m.state, m.mutation_type, m.item_id, i.display_value, m.payload_json \
            from mutations m join items i on i.id = m.item_id \
           where m.state in ('pending', 'failed') \
+            and m.mutation_type not in ('promote_ticket', 'promote_epic') \
           order by m.sequence asc",
     )?;
     let rows = stmt
@@ -1893,6 +1907,18 @@ mod tests {
             },
         )
         .unwrap();
+        seed_promotion_mutation(conn, id, sequence, state, item_class, operation_id);
+    }
+
+    /// Append a Promotion Mutation without creating its Item.
+    fn seed_promotion_mutation(
+        conn: &Connection,
+        item_id: &str,
+        sequence: i64,
+        state: &str,
+        item_class: ItemClass,
+        operation_id: Option<&str>,
+    ) {
         insert_fixture_mutation(
             conn,
             FixtureMutation {
@@ -1901,11 +1927,11 @@ mod tests {
                     ItemClass::Ticket => "promote_ticket",
                     ItemClass::Epic => "promote_epic",
                 },
-                item_id: id,
+                item_id,
                 item_class: item_class.text(),
                 payload_json: r#"{"title":"Original title","body":"Original body","backend_kind":"github"}"#,
                 state,
-                failure_json: (state == "failed" || state == "applying")
+                failure_json: (state == "failed" || state == "applying" || state == "abandoned")
                     .then_some(r#"{"detail":"prior"}"#),
                 promotion_operation_id: operation_id,
                 ..FixtureMutation::default()
@@ -3443,20 +3469,7 @@ mod tests {
             ItemClass::Ticket,
             Some("op-1"),
         );
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 2,
-                mutation_type: "promote_ticket",
-                item_id: "t1",
-                payload_json: r#"{"title":"T","body":"","backend_kind":"github"}"#,
-                state: "abandoned",
-                failure_json: Some(r#"{"detail":"prior"}"#),
-                promotion_operation_id: Some("op-2"),
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
+        seed_promotion_mutation(&conn, "t1", 2, "abandoned", ItemClass::Ticket, Some("op-2"));
         seed_recovery(
             &conn,
             "t2",
@@ -3493,19 +3506,7 @@ mod tests {
             ItemClass::Ticket,
             Some("op-1"),
         );
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 2,
-                mutation_type: "promote_ticket",
-                item_id: "t1",
-                payload_json: r#"{"title":"T","body":"","backend_kind":"github"}"#,
-                state: "cancelled",
-                promotion_operation_id: Some("op-2"),
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
+        seed_promotion_mutation(&conn, "t1", 2, "cancelled", ItemClass::Ticket, Some("op-2"));
 
         let warned = abandoned_promotions(&conn, &["t1".to_owned()]).unwrap();
 
