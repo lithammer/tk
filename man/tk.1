@@ -463,6 +463,32 @@ Usage error.
 .TP
 .B 3
 Unexpected internal error.
+.SH ENVIRONMENT
+.TP
+.B TK_SCOPE
+Supplies a Scope to
+.B tk next
+and
+.BR "tk list" .
+The value is the Display ID or Alias of an Epic. A positional
+.I epic-id
+argument overrides it; unset or empty means no Scope.
+.TP
+.B NO_COLOR
+Any non-empty value suppresses styled output.
+.TP
+.B CLICOLOR_FORCE
+Any non-empty value forces styled output even when the stream is not a
+terminal.
+.PP
+Styling is resolved separately for standard output and standard error, so
+piping one stream does not silence the other.
+.B NO_COLOR
+wins over
+.BR CLICOLOR_FORCE ,
+which wins over terminal detection; a stream that is not a terminal is
+unstyled by default. A terminal that cannot render SGR escape sequences
+receives plain text rather than literal escape bytes.
 .SH EXAMPLES
 Initialize a repository-local store:
 .PP
