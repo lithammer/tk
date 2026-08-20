@@ -8,7 +8,7 @@
 //!
 //! `tk sync --skip <id>` curates a failed Mutation under the repository's
 //! Remote workflow guard. The skip commits BEFORE the adapter is opened so a
-//! broken / unimplemented Remote cannot block an operator from abandoning a
+//! broken / unimplemented Remote cannot block an operator from bypassing a
 //! Mutation the backend already rejected.
 //!
 //! `tk sync log` reads the Mutation Log through [`crate::store::sync`]; it
@@ -44,13 +44,14 @@ pub struct Args {
 
 #[derive(Debug, Subcommand)]
 pub enum Sub {
-    /// Inspect pending, failed, applying, skipped, and cancelled Mutations.
+    /// Inspect pending, failed, applying, skipped, cancelled, and abandoned
+    /// Mutations.
     Log(LogArgs),
 }
 
 /// Flags for `tk sync log`. The state flags are a filter; if more than one is
-/// given, precedence is pending → failed → skipped → cancelled. Applying
-/// Mutations appear in the default view.
+/// given, precedence is pending → failed → skipped → cancelled → abandoned.
+/// Applying Mutations appear in the default view.
 #[derive(Debug, ClapArgs)]
 // One bool per CLI flag at the parser layer; `run_log` collapses them into
 // `LogListFilter` before anything reasons over them.
@@ -68,6 +69,9 @@ pub struct LogArgs {
     /// Only cancelled Mutations.
     #[arg(long)]
     pub cancelled: bool,
+    /// Only abandoned Mutations.
+    #[arg(long)]
+    pub abandoned: bool,
     /// Show one Mutation in detail (Mutation Sequence).
     pub id: Option<i64>,
 }
@@ -108,7 +112,7 @@ fn run_sync(deps: Deps<'_>, skip: Option<i64>) -> Exit {
     };
 
     // Commit the skip before opening the adapter: a broken or unimplemented
-    // Remote must not block an operator from abandoning a failed Mutation.
+    // Remote must not block an operator from bypassing a failed Mutation.
     if let Some(seq) = skip {
         if let Err(err) = store_sync::mark_mutation_skipped(store.conn_mut(), &workflow, seq, &now)
         {
@@ -204,6 +208,8 @@ fn run_log(deps: Deps<'_>, args: LogArgs) -> Exit {
         LogListFilter::Skipped
     } else if args.cancelled {
         LogListFilter::Cancelled
+    } else if args.abandoned {
+        LogListFilter::Abandoned
     } else {
         LogListFilter::Default
     };
@@ -240,6 +246,7 @@ fn empty_log_message(filter: LogListFilter) -> &'static str {
         LogListFilter::Failed => "No failed Mutations.",
         LogListFilter::Skipped => "No skipped Mutations.",
         LogListFilter::Cancelled => "No cancelled Mutations.",
+        LogListFilter::Abandoned => "No abandoned Mutations.",
     }
 }
 
@@ -265,7 +272,7 @@ fn render_skip_error<W: Write + ?Sized>(stderr: &mut W, err: &MarkSkippedError) 
         MarkSkippedError::MutationNotFailed(seq) => {
             let _ = writeln!(
                 stderr,
-                "tk sync --skip: Mutation {seq} is not in the failed state; --skip only abandons failed Mutations"
+                "tk sync --skip: Mutation {seq} is not in the failed state; --skip only bypasses failed Mutations"
             );
         }
         MarkSkippedError::MutationNotFound(seq) => {
@@ -336,7 +343,7 @@ fn render_run_sync_error<W: Write + ?Sized>(stderr: &mut W, err: &RunSyncError) 
         RunSyncErrorCategory::IndeterminateCreation(sequence) => {
             let _ = writeln!(
                 stderr,
-                "tk sync: Mutation {sequence} has an indeterminate Backend creation outcome; use 'tk promote reconcile <id> <backend-key>' if the object exists, or 'tk promote retry <id>' only when creating it again is safe"
+                "tk sync: Mutation {sequence} has an indeterminate Backend creation outcome; use 'tk promote reconcile <id> <backend-key>' if the object exists, 'tk promote retry <id>' only when creating it again is safe, or 'tk promote cancel <id>' to withdraw the Promotion Operation, leaving any object it created untracked"
             );
         }
         RunSyncErrorCategory::RemoteChanged => {
@@ -915,6 +922,7 @@ mod tests {
                     failed: false,
                     skipped: false,
                     cancelled: false,
+                    abandoned: false,
                     id: None,
                 })),
                 skip: None,
@@ -972,6 +980,7 @@ mod tests {
                     failed: false,
                     skipped: false,
                     cancelled: false,
+                    abandoned: false,
                     id: None,
                 })),
                 skip: None,
@@ -1015,6 +1024,7 @@ mod tests {
                     failed: false,
                     skipped: false,
                     cancelled: false,
+                    abandoned: false,
                     id: Some(7),
                 })),
                 skip: None,
@@ -1060,6 +1070,7 @@ mod tests {
                     failed: false,
                     skipped: false,
                     cancelled: false,
+                    abandoned: false,
                     id: None,
                 })),
                 skip: None,
@@ -1106,6 +1117,7 @@ mod tests {
                     failed: false,
                     skipped: false,
                     cancelled: false,
+                    abandoned: false,
                     id: Some(3),
                 })),
                 skip: None,
@@ -1135,6 +1147,7 @@ mod tests {
                     failed: false,
                     skipped: false,
                     cancelled: false,
+                    abandoned: false,
                     id: Some(99),
                 })),
                 skip: None,
@@ -1291,7 +1304,7 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(stderr).unwrap(),
-            "tk sync: Mutation 7 has an indeterminate Backend creation outcome; use 'tk promote reconcile <id> <backend-key>' if the object exists, or 'tk promote retry <id>' only when creating it again is safe\n"
+            "tk sync: Mutation 7 has an indeterminate Backend creation outcome; use 'tk promote reconcile <id> <backend-key>' if the object exists, 'tk promote retry <id>' only when creating it again is safe, or 'tk promote cancel <id>' to withdraw the Promotion Operation, leaving any object it created untracked\n"
         );
     }
 

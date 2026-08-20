@@ -419,13 +419,11 @@ item's backend identity. Cancelled items become Local again, keeping their
 current state, Display IDs, and Aliases; promoting them again is an ordinary
 Promotion.
 .PP
-A pending or failed Promotion may be cancelled, because neither created a
-Backend object. An applying Promotion anywhere in the operation refuses the
-whole cancellation; resolve it with
-.B tk promote reconcile
-or
-.B tk promote retry
-first. A Promotion the Backend already accepted is reported and left in place —
+A pending or failed Promotion is cancelled, because neither created a Backend
+object. An applying Promotion is abandoned instead: tk never observed what its
+creation did, so the withdrawal reports that any object it created is now
+untracked and cannot name it. Find such an object upstream and adopt or close
+it. A Promotion the Backend already accepted is reported and left in place —
 tk never deletes a Backend object.
 .PP
 Cancellation is refused while a withdrawal would leave a backend-backed Blocked
@@ -435,7 +433,13 @@ first. Epic membership degrades to local instead. Cancellation reaches no
 Backend, so it works with a broken or unconfigured Remote and is not held back
 by an earlier unresolved Mutation. Withdrawn Mutations are recorded as
 cancelled and listed by
-.BR "tk sync log \-\-cancelled" .
+.BR "tk sync log \-\-cancelled" ;
+a Promotion withdrawn while its outcome was unobserved is recorded as abandoned
+and listed by
+.BR "tk sync log \-\-abandoned" .
+.PP
+Promoting an item again after an abandonment reports that this promotion may
+create a second Backend object, because the first outcome was never observed.
 .SS Agent briefing
 .TP
 .B tk prime

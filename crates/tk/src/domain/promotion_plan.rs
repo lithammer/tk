@@ -49,4 +49,14 @@ impl PromotionPlan {
     pub fn is_empty(&self) -> bool {
         self.mutations.is_empty()
     }
+
+    /// The Items this plan creates on the Backend, in plan order.
+    #[must_use]
+    pub fn promoted_item_ids(&self) -> Vec<String> {
+        self.mutations
+            .iter()
+            .filter(|mutation| mutation.mutation_type.is_promotion())
+            .map(|mutation| mutation.item_id.clone())
+            .collect()
+    }
 }

@@ -12,7 +12,7 @@ Run `tk prime` after compaction, clear, or a new agent session.
 - Use `tk next` to choose agent work.
 - Scope `tk next` / `tk list` to an Epic with `tk next <epic-id>` / `tk list <epic-id>` or the `TK_SCOPE` environment variable; absent a Scope they cover the whole store.
 - Scope is not an implicit item target; pass explicit Display IDs to item commands.
-- Use `tk sync log` to inspect pending, failed, applying, skipped, and applied Mutations.
+- Use `tk sync log` to inspect pending, failed, applying, skipped, cancelled, abandoned, and applied Mutations.
 - Do not run `git push` unless the user explicitly asks for it.
 
 ## Session Start
@@ -38,6 +38,7 @@ tk sync log
 - Use `tk add` for follow-ups, deferred decisions, or context that should
   survive a fresh session.
 - Surface pending, failed, applying, or skipped Mutations from `tk sync log`.
+- Surface an abandoned Mutation too: tk may have left a Backend object behind.
 - State whether code is uncommitted, committed, or waiting for an explicit push.
 
 ## Essential Commands
@@ -104,15 +105,20 @@ tk sync --skip <mutation-id>
 tk remote
 ```
 
-Agents should surface promotion, sync failures, and skipped or cancelled
-Mutations rather than quietly repairing upstream state.
+Agents should surface promotion, sync failures, and skipped, cancelled, or
+abandoned Mutations rather than quietly repairing upstream state.
 
 An `applying` Mutation means tk could not observe whether Backend creation
-succeeded. Resolving it is a human decision, so surface it rather than choosing:
-`tk promote reconcile` attaches a Backend object the human has confirmed
-already exists, and `tk promote retry` accepts the risk of creating a duplicate.
+succeeded. Resolving it is a human decision, so surface it rather than choosing.
+There is one exit per belief a human can hold about it: `tk promote reconcile`
+attaches a Backend object they have confirmed already exists, `tk promote retry`
+accepts the risk of creating a duplicate, and `tk promote cancel` withdraws the
+Promotion Operation.
 
 `tk promote cancel` withdraws a whole Promotion Operation the Backend will never
 accept, returning those items to Local. Withdrawing intent is a human decision
 in the same way reconcile and retry are, so report the stuck Promotion rather
-than cancelling it.
+than cancelling it. That holds even harder for an `applying` Promotion:
+withdrawing one records `abandoned` rather than `cancelled`, because tk never
+learned what the creation did and may leave an object behind that nothing
+tracks.

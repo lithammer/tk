@@ -892,12 +892,13 @@ fn cancelling_an_item_with_no_promotion_intent_is_refused() {
 }
 
 #[test]
-fn sync_log_reports_cancelled_mutations_without_a_flag() {
+fn sync_log_reports_withdrawn_mutations_without_a_flag() {
     let p = Repo::new("project");
     p.run("init");
 
     tk!(p, "sync log", @"No Mutations recorded.");
     tk!(p, "sync log --cancelled", @"No cancelled Mutations.");
+    tk!(p, "sync log --abandoned", @"No abandoned Mutations.");
 }
 
 #[test]

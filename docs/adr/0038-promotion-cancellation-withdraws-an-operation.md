@@ -1,5 +1,10 @@
 # Promotion cancellation withdraws an operation without a Backend call
 
+> **Amended by ADR-0039.** The precondition below — that only a `pending` or
+> `failed` Promotion may be cancelled, because both are certified no-effect —
+> no longer holds. An `applying` Promotion may be withdrawn too, reaching the
+> distinct terminal state `abandoned`. Every other rule here stands as written.
+
 A Promotion the Backend will never accept has no exit. `tk sync --skip` refuses
 a Promotion, `tk remote clear` refuses while one is pending and recommends the
 `--skip` that just refused, and `tk promote` recommends a `tk sync` that can

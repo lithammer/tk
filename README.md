@@ -59,13 +59,16 @@ tk promote tk-1
 ```
 
 If Backend creation has an indeterminate outcome, inspect the Mutation with
-`tk sync log`, then use `tk promote reconcile <id> <backend-key>` after
-confirming the created object. Use `tk promote retry <id>` only when creating
-the Backend object again is safe.
+`tk sync log`, then pick the exit that matches what you find upstream. Use
+`tk promote reconcile <id> <backend-key>` after confirming the created object,
+`tk promote retry <id>` only when creating the Backend object again is safe, or
+`tk promote cancel <id>` to give up on it.
 
-When the Backend will never accept a Promotion, `tk promote cancel <id>`
-withdraws the whole `tk promote` invocation it belongs to and returns those
-items to local. It reaches no Backend, so it works even with a broken Remote.
+`tk promote cancel <id>` withdraws the whole `tk promote` invocation the item
+belongs to and returns those items to local. It reaches no Backend, so it works
+even with a broken Remote. Withdrawing a Promotion whose creation outcome was
+never observed reports that any object it created is now untracked — tk holds no
+identity for it, so finding and adopting or closing it is yours to do.
 
 Use `tk --help`, `tk <command> --help`, or `man tk` for the command
 reference.
