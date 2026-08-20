@@ -24,6 +24,30 @@ New
 are local by default. A configured Remote does not make new Tickets
 backend-backed; Promotion is the explicit boundary where local state becomes
 backend intent.
+.PP
+A
+.B Scope
+is the Epic that narrows
+.B tk next
+and
+.BR "tk list" .
+It is supplied as an optional positional
+.I epic-id
+argument or through the
+.B TK_SCOPE
+environment variable, and the argument wins when both are present. A Scope
+names exactly one Epic and covers that Epic and its child Tickets; passing a
+Ticket is an error. An absent Scope means the whole Repository Store.
+.B tk
+never stores a Scope or infers one from git state, so a command's Scope is
+always visible in the command itself or the environment it ran in.
+.PP
+.B tk search
+and
+.B tk grep
+are deliberately outside this: a lookup covers the whole Repository Store and
+is never narrowed by a Scope, so an ID or phrase never fails to match because
+of an active Scope.
 .SH GLOBAL OPTIONS
 .TP
 .B \-\-help
@@ -129,7 +153,7 @@ Status: open
 .RE
 .SS Reading the List Tree
 .TP
-\fBtk list\fR [\fB\-\-ready\fR | \fB\-\-blocked\fR | \fB\-\-active\fR | \fB\-\-triage\fR | \fB\-\-parked\fR] [\fB\-\-local\fR | \fB\-\-remote\fR] [\fB\-\-epic\fR]
+\fBtk list\fR [\fB\-\-ready\fR | \fB\-\-blocked\fR | \fB\-\-active\fR | \fB\-\-triage\fR | \fB\-\-parked\fR] [\fB\-\-local\fR | \fB\-\-remote\fR] [\fB\-\-epic\fR] [\fIepic-id\fR]
 Render the Repository Store List Tree.
 .PP
 The default view shows open and active Tickets and Epics. Epics render as
@@ -157,6 +181,26 @@ Store through Adopt or Promotion.
 .PP
 .B \-\-epic
 restricts the listing to Epics and composes with any view or Origin filter.
+.PP
+.B \-\-epic
+and the positional
+.I epic-id
+are different tools despite the shared word.
+.B \-\-epic
+filters by item class \(em it shows Epics instead of Tickets.
+.I epic-id
+is a Scope \(em it narrows the listing to one Epic and its child Tickets.
+.PP
+When a Scope is active,
+.B tk list
+prints a hint above the tree so a narrowed view never reads as the whole
+store:
+.PP
+.RS 4
+.nf
+Scope: project-1 (Epic + child Tickets)
+.fi
+.RE
 .PP
 In every view a Ticket whose Selection State is not the default
 .B accepted
@@ -297,7 +341,7 @@ On success it prints one
 .RE
 .SS Selecting Ready Work
 .TP
-.B tk next
+\fBtk next\fR [\fIepic-id\fR]
 Select the next ready Ticket.
 .PP
 .B tk next
@@ -307,7 +351,8 @@ Store created_seq, and never selects Epics. Effective Priority is the lowest
 of a candidate's own Priority and the Priorities of every unfinished item it
 transitively blocks through Dependencies and Epic-membership, so a ready
 Ticket that gates a higher-Priority Blocked Item outranks lower-priority
-direct work. Effective Priority does not cross the Workspace Scope boundary.
+direct work. Effective Priority does not cross the Scope boundary, so the same
+Ticket can rank differently scoped and unscoped.
 Backend Tickets use local import order for the created_seq tie break, not
 backend-native creation time. Selection is deterministic and does not
 randomize among candidates. Ticket Kind and Assignees do not affect ordering.
@@ -340,18 +385,21 @@ selection, and
 does not emit sync-health warnings.
 .PP
 .B tk next
-is read-only and does not change Item Status. Starting work belongs to
-.BR "tk worktree start" .
+is read-only and does not change Item Status. Use
+.B tk start
+to begin work on the selected Ticket.
+.PP
+An optional positional
+.I epic-id
+scopes selection to that Epic and its child Tickets, falling back to
+.B TK_SCOPE
+when the argument is absent. Absent both,
+.B tk next
+considers every ready Ticket in the Repository Store. A Ticket supplied where
+an Epic is expected is a failure, not a single-item selection.
 .PP
 .B tk next
-takes no scope argument; scoped selection comes only from Workspace Scope.
-.PP
-When Workspace Scope support lands,
-.B tk next
-will default to the active Workspace Scope. In the current binary, Workspace
-Scope discovery has not landed yet, so
-.B tk next
-searches all ready Tickets. Global ready-work inspection uses
+answers with one Ticket. To inspect the whole ready set instead, use
 .BR "tk list --ready" .
 .PP
 On success,
@@ -370,11 +418,10 @@ machine interface.
 .PP
 If no ready Ticket matches,
 .B tk next
-returns exit status 1 and writes
-.B tk next: no ready Tickets
-to standard error. If Workspace Scope was applied, it instead writes
-.B tk next: no ready Tickets in Workspace Scope
-to standard error.
+returns exit status 1 and reports on standard error that nothing is ready,
+naming the Epic when a Scope was active. A Scope that names no known item, or
+names a Ticket rather than an Epic, fails the same way without selecting
+anything.
 .SS Backend Promotion and recovery
 .TP
 \fBtk promote\fR \fIid\fR [\fB\-\-children\fR]
@@ -537,11 +584,35 @@ tk list --ready
 .fi
 .RE
 .PP
+Narrow the same views to one Epic and its child Tickets:
+.PP
+.RS 4
+.nf
+tk list project-1
+tk next project-1
+.fi
+.RE
+.PP
 Select the next ready Ticket:
 .PP
 .RS 4
 .nf
 tk next
+.fi
+.RE
+.PP
+Work through one Epic without restating it on every command. Exporting the
+Scope keeps it in the environment, so it survives across a long unattended
+run:
+.PP
+.RS 4
+.nf
+export TK_SCOPE=project-1
+while id=$(tk next); do
+    tk start "$id"
+    # ... implement ...
+    tk done "$id"
+done
 .fi
 .RE
 .PP

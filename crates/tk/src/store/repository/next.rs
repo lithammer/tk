@@ -4,7 +4,7 @@
 //! and no unresolved External Blockers. Each ready candidate's *Effective
 //! Priority* is the lowest Priority reachable through unresolved
 //! Dependency edges or Epic-membership edges, walked only within the
-//! active Workspace Scope. Selection sorts by `(effective_priority,
+//! active Scope. Selection sorts by `(effective_priority,
 //! own_priority, created_seq)` so a ticket inherits urgency from work that
 //! transitively waits on it.
 //!

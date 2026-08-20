@@ -28,7 +28,7 @@ impl ItemClass {
     }
 
     /// Capitalized noun for user-facing diagnostics, e.g.
-    /// `Created worktree for Ticket: …` or `cannot start a done Epic`.
+    /// `Ticket 'tk-1' is done and cannot be reopened`.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
