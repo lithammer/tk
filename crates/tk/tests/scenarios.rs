@@ -488,6 +488,9 @@ fn init_refuses_outside_git_repository() {
     });
 }
 
+/// `tk manpage` writes the embedded bytes verbatim. The binary embeds this
+/// same file, so a failure here means the build is stale — not that two
+/// copies of the manual drifted apart.
 #[test]
 fn manpage_emits_embedded_manpage() {
     let p = Repo::new("repo");

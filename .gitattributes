@@ -1,4 +1,3 @@
 crates/tk/src/commands/*.md text eol=lf
-crates/tk/src/commands/*.1 text eol=lf
 crates/tk/src/store/migrations/*.sql text eol=lf
 man/*.1 text eol=lf
