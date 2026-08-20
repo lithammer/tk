@@ -1036,10 +1036,19 @@ pub fn merge_backend_refreshes(
         if in_flight.is_some() {
             continue;
         }
+        // Two guards on the imported Item Status, in CASE order. `active`
+        // implies `accepted` (ADR-0029): an incoming `active` on a non-accepted
+        // Ticket clamps to `open`, so a Backend signal cannot flip held work
+        // into progress. `open` and `active` are one Backend state (ADR-0021):
+        // an incoming `open` is no evidence that started work stopped, so it
+        // leaves a local `active` alone.
         tx.execute(
             "update items set title = ?2, body = ?3, updated_at = ?5, \
               ticket_kind = case when item_class = 'ticket' then coalesce(?6, ticket_kind) else ticket_kind end, \
-              status = case when ?4 = 'active' and selection_state <> 'accepted' then 'open' else ?4 end \
+              status = case \
+                when ?4 = 'active' and selection_state <> 'accepted' then 'open' \
+                when ?4 = 'open' and status = 'active' then 'active' \
+                else ?4 end \
               where id = ?1",
             params![item_id, refresh.title, refresh.body, refresh.status.text(), now,
                 refresh.ticket_kind.map(TicketKind::text)],
@@ -2228,6 +2237,85 @@ mod tests {
         );
         assert_eq!(selection, "parked", "local Selection State preserved");
         assert_eq!(priority, "P1", "local Priority preserved");
+    }
+
+    #[test]
+    fn refresh_keeps_active_when_the_backend_reports_open() {
+        // `open` and `active` are one Backend state (ADR-0021), so an imported
+        // OPEN must not reset a start. A failure here loses `tk start` on a
+        // Backend Ticket at the next sync (tk-108). The test pins the merge
+        // rather than a whole sync because in the field the reset lands on the
+        // *second* one: the first skips this item while its own status Mutation
+        // is still queued.
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "gh-1",
+                title: "Old",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("1"),
+                status: "active",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+
+        merge_backend_refreshes(
+            &mut conn,
+            BackendKind::Github,
+            &[("1".into(), refresh("Backend Title", ItemStatus::Open))],
+            "2026-05-20T00:00:00Z",
+        )
+        .unwrap();
+
+        let (title, status): (String, String) = conn
+            .query_row("select title, status from items where id = 't1'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(title, "Backend Title", "non-status fields still merge");
+        assert_eq!(status, "active", "an incoming open must not stop the work");
+    }
+
+    #[test]
+    fn refresh_closes_an_active_ticket() {
+        // The other half of the two-state axis: CLOSED is a real state change,
+        // so keeping `active` must not swallow an incoming `done`.
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "gh-1",
+                title: "Old",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("1"),
+                status: "active",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+
+        merge_backend_refreshes(
+            &mut conn,
+            BackendKind::Github,
+            &[("1".into(), refresh("Closed Upstream", ItemStatus::Done))],
+            "2026-05-20T00:00:00Z",
+        )
+        .unwrap();
+
+        let status: String = conn
+            .query_row("select status from items where id = 't1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "done", "a Backend close still lands");
     }
 
     // ---- load_applicable_mutations --------------------------------------

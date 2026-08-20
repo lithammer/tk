@@ -65,9 +65,10 @@ The original deferral rested on scope, not capability:
 - Dependency and Epic-membership Apply use the native `gh issue` flags above
   rather than raw `gh api`. Backend Pull does not read either relationship;
   reconciliation remains a separate concern.
-- `active` has no GitHub representation; Pull normalises it toward `open`.
-  The resulting clobber of a locally-`active` Ticket is a defect tracked by
-  tk-108. Remote reopens of an item already imported as `done` remain
+- `active` has no GitHub representation, so an incoming OPEN says only that
+  the issue is not closed. Pull therefore never resets a locally-`active`
+  Ticket; it writes `open` only where the local status was already `open`
+  (tk-108). Remote reopens of an item already imported as `done` remain
   deferred per ADR-0006.
 
 ## History
@@ -145,3 +146,13 @@ The original deferral rested on scope, not capability:
   out of scope.
   Adopt and Promotion retain the canonical issue URL as the GitHub backend key;
   future view/edit/relationship calls therefore stay pinned to that repository.
+- (tk-108, 2026-08) The `active` clobber this ADR recorded as a defect is
+  fixed. Because `open` and `active` are one Backend state, an incoming OPEN
+  carries no evidence that locally started work stopped, so Backend Pull's
+  merge keeps a local `active` instead of resetting it; CLOSED still
+  lands `done` from either local status. The `active` implies `accepted`
+  clamp (ADR-0029) is unchanged and still takes precedence for an incoming
+  `active` on a non-accepted Ticket. In the field the clobber appeared on the
+  *second* `tk sync` after `tk start`: the first is protected by the merge's
+  in-flight guard while the Ticket's own status Mutation is still queued,
+  which is why it survived earlier lifecycle checks.
