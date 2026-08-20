@@ -55,8 +55,17 @@ as `skipped`. `abandoned` keeps both meanings intact:
 
 - Cancelled from `pending` or `failed`: tk either never called the Backend or
   observed its refusal. Nothing exists upstream.
-- Abandoned from `applying`: tk called the Backend and never learned the
-  answer. Something may exist upstream, and tk will never look again.
+- Abandoned from `applying`: tk called the Backend and recorded no identity
+  for what came back. Something may exist upstream, and tk will never look
+  again.
+
+The state is defined by that missing identity rather than by an Indeterminate
+outcome, because one other route reaches `applying` without one: a creation
+whose receipt arrived but whose identity could not be committed to the
+Repository Store. That row is Created, not Indeterminate, and cancelling it
+abandons an object tk saw but cannot address. Its own diagnostic prints the
+Backend key and names reconcile alone — offering a withdrawal there would send
+the operator to discard an object they can name.
 
 `applying → abandoned` is the only edge into the state, so only a Promotion can
 reach it — the `mutations.state` CHECK carries that restriction the way it
@@ -85,13 +94,20 @@ which is the whole reason the Promotion was indeterminate. Recovery means the
 operator finding the object themselves and adopting or closing it. That is a
 real limit of this exit, not a rendering gap.
 
-### Re-promotion warns once
+### Re-promotion warns while an abandonment is unresolved
 
-Promoting an Item whose most recent Promotion is `abandoned` is where the
+Promoting an Item that has an abandoned Promotion is where the
 duplicate-creation risk is actually incurred — the risk Promotion Retry refuses
-to take silently, reached by a longer road. `tk promote` warns, scoped to the
-most recent Promotion so it fires on the next promotion only, and does not
+to take silently, reached by a longer road. `tk promote` warns and does not
 refuse: refusing would restore a dead end one decision after removing one.
+
+The scope is the latest *abandonment*, not the latest Promotion. Only a
+Promotion the Backend accepted resolves the risk, and such an Item is never
+planned for Promotion again, so it never reaches the question. Every other
+later outcome created nothing, so none may mask a live risk — scoping to the
+latest Promotion would let a cancelled one do exactly that. In practice the
+warning therefore fires once, on the promotion that follows the withdrawal,
+and keeps firing only while that promotion keeps failing.
 
 ## Considered Options
 

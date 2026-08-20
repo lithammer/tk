@@ -171,8 +171,8 @@ Important stable contracts:
   0038](./docs/adr/0038-promotion-cancellation-withdraws-an-operation.md)).
   Withdrawing an `applying` Promotion records `abandoned` rather than
   `cancelled`, restricted by its own CHECK clause to Promotion Mutation Types,
-  because tk never observed what that creation did and may have left a Backend
-  object it holds no identity for ([ADR
+  because tk recorded no Backend identity for that creation and may have left an
+  object it cannot address ([ADR
   0039](./docs/adr/0039-cancellation-withdraws-an-unobserved-promotion.md)).
 - `Store::lock_remote_workflow` owns an exclusive OS lock on the stable
   `<git-common-dir>/tk/remote.lock` file. Sync, Adopt, Promotion, and Remote
