@@ -36,6 +36,11 @@ sync engine. A pending Promotion is an idempotent input to the command. A
 `failed` Promotion is refused: ordinary sync already retries it, so accepting it
 here would ask the operator to accept a duplicate-creation risk that does not
 apply. Retry never records an identity or advances the cursor by itself.
+Retry replays the retained Promotion snapshot and never rewrites it: the
+snapshot is reconciliation's default identity proof, and retry is only taken
+while an object bearing that content may exist upstream. A Promotion the
+Backend refuses on its content exits through Promotion Cancellation and a
+fresh Promotion instead (ADR-0039, tk-152).
 
 Recovery preserves global Mutation Sequence order. Reconcile or retry may act
 only on the earliest `pending`, `failed`, or `applying` Mutation; terminal rows

@@ -147,13 +147,15 @@ invocation's rows in one state. But it widens what `cancelled` means, so every
 reader who learned "cancelled means nothing exists upstream" becomes wrong some
 of the time, and a marker is not something `tk sync log` can list by.
 
-**Re-snapshot title and body on Promotion Retry.** Deferred to its own Ticket.
-It would give a fixable rejection a forward exit and would resolve the
-asymmetry that forced reconciliation re-reads current local content while retry
-does not. With this decision in place the forward path already exists —
-withdraw, fix, promote again, which re-snapshots by ADR-0038's rule — so retry
-re-snapshotting would only preserve the original Promotion Operation identity,
-at the cost of softening ADR-0036's frozen-plan model.
+**Re-snapshot title and body on Promotion Retry.** Deferred to its own
+Ticket; resolved as no (tk-152): retry stays a pure state transition
+(ADR-0037). It would give a fixable rejection a forward exit and would
+resolve the asymmetry that forced reconciliation re-reads current local
+content while retry does not. With this decision in place the forward path
+already exists — withdraw, fix, promote again, which re-snapshots by
+ADR-0038's rule — so retry re-snapshotting would only preserve the original
+Promotion Operation identity, at the cost of softening ADR-0036's frozen-plan
+model.
 
 ## Consequences
 

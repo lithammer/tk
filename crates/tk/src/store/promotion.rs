@@ -729,6 +729,12 @@ fn ensure_identity_unclaimed(
 
 /// Return an indeterminate Promotion to pending so the normal ordered sync may
 /// attempt it again. Retrying never records an identity or advances the cursor.
+///
+/// The Promotion snapshot replays as committed, never rewritten: it is
+/// Promotion Reconciliation's default identity proof for the object the first
+/// attempt may have created (ADR-0037). A Promotion the Backend refuses on its
+/// content exits through Promotion Cancellation and a fresh Promotion instead
+/// (ADR-0039).
 pub fn retry_promotion(
     conn: &mut Connection,
     _workflow: &RemoteWorkflowGuard,
