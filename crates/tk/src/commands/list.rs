@@ -15,7 +15,7 @@ use std::io::Write;
 use clap::Args as ClapArgs;
 
 use crate::cli::{self, CommandError, Deps, Exit};
-use crate::commands::item_row::{MarkersShown, render_chrome, render_row};
+use crate::commands::item_row::{MutationMarkers, render_chrome, render_row};
 use crate::commands::{resolver, scope};
 use crate::domain::mutation_state::MutationState;
 use crate::render::palette;
@@ -89,13 +89,13 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         }
     }
 
-    // `earliest_applicable_mutation` lives in `store/promotion.rs`, though
-    // ARCHITECTURE.md assigns Mutation Log inspection to `store/sync.rs`;
-    // reused here rather than duplicated because it is already the read
-    // `tk promote` relies on to report the same queue head.
+    // This read is store-wide, but it lives in `store/promotion.rs`, which
+    // ARCHITECTURE.md scopes to `tk promote`. Reused rather than duplicated;
+    // tk-166 moves it to `store/sync.rs`, where the equivalent
+    // `applying_mutation_sequence` already sits.
     let queue_head = store_promotion::earliest_applicable_mutation(store.conn())
         .map_err(|err| resolver::storage_error(&err))?;
-    if let Err(err) = render_queue_head_banner(deps.stdout, queue_head.as_ref(), out) {
+    if let Err(err) = render_sync_banner(deps.stdout, queue_head.as_ref(), out) {
         return cli::write_error(&err);
     }
 
@@ -128,17 +128,14 @@ fn render_scope_hint<W: Write + ?Sized>(
 ///
 /// Fires only for a `Failed` or `Applying` head — the two states that need a
 /// human. A `Pending` head is the ordinary state between syncs for a
-/// local-first tracker with opt-in Backend support, so an unconditional
-/// banner would print on nearly every invocation, and a signal always on is
-/// a signal nobody reads. This is the same informational/actionable split
-/// the row markers draw between `~` and `⚑`.
+/// local-first tracker with opt-in Backend support, so printing it always
+/// would put a line on nearly every invocation.
 ///
 /// Never claims a cause: `sync_cursors` has no last-error column, and an
-/// Apply that hits an environment failure leaves the in-flight row `pending`
-/// with no outcome recorded (see `earliest_applicable_mutation`'s doc
-/// comment), so the store cannot tell "sync could not reach the Backend"
-/// from "sync has not run yet" — the common case. The banner says where the
-/// queue is stuck, not why.
+/// Apply that fails on the environment leaves its row `pending` with no
+/// outcome written, so the store cannot tell "sync could not reach the
+/// Backend" from "sync has not run yet" — the common case. The banner says
+/// where the queue is stuck, not why.
 ///
 /// Never carries an item count: a store-wide rollup would count Items that
 /// Scope, `--local` / `--remote`, and `--epic` deliberately exclude,
@@ -163,7 +160,7 @@ fn render_scope_hint<W: Write + ?Sized>(
 /// always has a matching banner, because sync stops at the first rejection
 /// so a failed Mutation is always the head. That coupling comes from the
 /// write path, not from this function.
-fn render_queue_head_banner<W: Write + ?Sized>(
+fn render_sync_banner<W: Write + ?Sized>(
     stdout: &mut W,
     head: Option<&MutationSummary>,
     styler: SubStyler,
@@ -237,7 +234,7 @@ fn render<W: Write + ?Sized>(
 
     // Walk roots first; embed children inline so the renderer can lay
     // out a tree without a second pass over the row vector.
-    let mut markers = MarkersShown::default();
+    let mut markers = MutationMarkers::default();
     for row in rows {
         if parent_is_in_rows(rows, row) {
             continue;
@@ -254,10 +251,10 @@ fn render_children<W: Write + ?Sized>(
     rows: &[ListRow],
     parent: &ListRow,
     styler: SubStyler,
-) -> std::io::Result<MarkersShown> {
+) -> std::io::Result<MutationMarkers> {
     let child_count = count_rendered_children(rows, &parent.id);
     let mut child_index = 0usize;
-    let mut markers = MarkersShown::default();
+    let mut markers = MutationMarkers::default();
     for child in rows {
         let Some(container_id) = child.container_id.as_deref() else {
             continue;

@@ -38,12 +38,12 @@ fn selection_badge(selection_state: Option<SelectionState>) -> Option<&'static s
 /// flags they were derived from. Those two can part company: `render_row`
 /// already suppresses `⊘` on a `done` row despite the flag being set.
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct MarkersShown {
+pub(crate) struct MutationMarkers {
     failed: bool,
     pending: bool,
 }
 
-impl MarkersShown {
+impl MutationMarkers {
     /// Union, for accumulating across rows.
     pub(crate) fn merge(self, other: Self) -> Self {
         Self {
@@ -70,7 +70,7 @@ pub(crate) fn render_row<W: Write + ?Sized>(
     row: &ListRow,
     tree_prefix: &str,
     styler: SubStyler,
-) -> std::io::Result<MarkersShown> {
+) -> std::io::Result<MutationMarkers> {
     stdout.write_all(tree_prefix.as_bytes())?;
 
     let show_blocked = row.has_unresolved_blocker && row.status != ItemStatus::Done;
@@ -123,7 +123,7 @@ pub(crate) fn render_row<W: Write + ?Sized>(
     // comes first — and both render on a `done` row (ADR-0040): a `done`
     // Backend Item with a queued Mutation is exactly the case where the
     // Backend does not yet agree the Item is done.
-    let mut markers = MarkersShown::default();
+    let mut markers = MutationMarkers::default();
     if row.has_failed_mutation {
         write!(
             stdout,
@@ -157,11 +157,11 @@ pub(crate) fn render_row<W: Write + ?Sized>(
 /// a condition most stores never hit would be noise, and the omission is why
 /// every pre-existing scenario snapshot — none of which carries a marked
 /// row — stays byte-identical. `markers` is what the rows actually rendered;
-/// see [`MarkersShown`].
+/// see [`MutationMarkers`].
 pub(crate) fn render_chrome<W: Write + ?Sized>(
     stdout: &mut W,
     rows: &[ListRow],
-    markers: MarkersShown,
+    markers: MutationMarkers,
     styler: SubStyler,
 ) -> std::io::Result<()> {
     let counts = StatusCounts::tally(rows);
@@ -211,7 +211,7 @@ pub(crate) fn render_chrome<W: Write + ?Sized>(
 /// suppresses `⊘` on a `done` row.
 fn render_mutation_legend<W: Write + ?Sized>(
     stdout: &mut W,
-    markers: MarkersShown,
+    markers: MutationMarkers,
     styler: SubStyler,
 ) -> std::io::Result<()> {
     let mut entries = Vec::new();

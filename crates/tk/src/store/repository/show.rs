@@ -150,7 +150,7 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
     let blocked_by = read_blocked_by(&store.conn, &id)?;
     let blocking = read_blocking(&store.conn, &id)?;
     let external_blockers = read_external_blockers(&store.conn, &id)?;
-    let mutations = read_item_mutations(&store.conn, &id, item_class)?;
+    let mutations = read_mutations(&store.conn, &id, item_class)?;
 
     Ok(Some(ItemDetail {
         id,
@@ -256,7 +256,7 @@ fn read_external_blockers(
     .collect()
 }
 
-fn read_item_mutations(
+fn read_mutations(
     conn: &rusqlite::Connection,
     item_id: &str,
     item_class: ItemClass,

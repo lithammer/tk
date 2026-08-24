@@ -465,7 +465,7 @@ mod tests {
     }
 
     #[test]
-    fn ready_view_still_surfaces_a_done_epic_parent_pending_tk_163() {
+    fn ready_view_still_surfaces_a_done_epic_parent() {
         // Characterizes what LIST_ROWS_SQL does today, not what it should
         // do: the epic-parent-inclusion branch above carries no status
         // predicate on the parent, so a `done` Epic with a ready child still
