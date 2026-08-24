@@ -151,6 +151,20 @@ fn render_scope_hint<W: Write + ?Sized>(
 /// Never restates recovery guidance: `unresolved_failure` in
 /// `commands/promote.rs` owns the verbatim ADR-0017 wording for `tk promote
 /// reconcile` / `retry` / `cancel`. This banner only points at `tk sync log`.
+///
+/// Disagrees with the row markers on one case, deliberately: this read
+/// applies no Mutation Type filter, while the markers exclude Promotions. So
+/// a rejected Promotion — the first thing that goes wrong on a fresh
+/// Backend — names an Item whose row then carries no marker, and a reader
+/// following the banner to that row finds nothing on it. Surfacing a Pending
+/// Promotion as such is tk-160; until it lands, `tk sync log <sequence>` is
+/// the only place that case is legible.
+///
+/// The converse coherence — a failed row marker always comes with a banner
+/// naming that same Item — is emergent, not enforced: sync stops at the
+/// first rejection, so nothing pending can sit below a failed Mutation and a
+/// failed row is always the queue head. A second write path to `failed`
+/// outside that ordered loop would separate the two surfaces silently.
 fn render_queue_head_banner<W: Write + ?Sized>(
     stdout: &mut W,
     head: Option<&MutationSummary>,

@@ -680,6 +680,11 @@ _Avoid_: ticket, tickets
   the current view entirely — the banner reports where the **Mutation Log**
   is stuck, not which rows are in view. A `pending` head prints no banner,
   since that is the ordinary state between syncs.
+- The banner names any **Mutation** at the head, including a **Promotion**,
+  while the row markers exclude **Promotions**. So a rejected **Promotion**
+  produces a banner whose named **Item** carries no row marker; **`tk sync
+  log`** is where that case is legible until a **Pending Promotion** is
+  surfaced in its own right.
 - **`tk show`** groups every **Mutation** targeting the **Item** into two
   sections: one for a `pending`, `failed`, or `applying` **Mutation**, and one
   for a `skipped`, `cancelled`, or `abandoned` **Mutation**; an `applied`
