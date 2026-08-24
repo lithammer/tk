@@ -973,7 +973,7 @@ mod tests {
             "row with both should show ⚑ ~, failed first: {stdout:?}"
         );
         assert!(
-            stdout.contains("Mutations: \u{2691} failed  ~ unsent\n"),
+            stdout.contains("Mutations: \u{2691} failed  ~ pending\n"),
             "legend should name both glyphs once any row carries them: {stdout:?}"
         );
     }
@@ -1042,7 +1042,7 @@ mod tests {
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(
-            stdout.contains("Mutations: ~ unsent\n"),
+            stdout.contains("Mutations: ~ pending\n"),
             "legend should show only the pending entry: {stdout:?}"
         );
         assert!(

@@ -203,7 +203,7 @@ fn render_mutation_legend<W: Write + ?Sized>(
     if pending {
         write!(
             stdout,
-            "{} unsent",
+            "{} pending",
             styler.wrap(palette::MUTATION_PENDING, "~")
         )?;
     }
