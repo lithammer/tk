@@ -247,9 +247,6 @@ pub fn list_rows(store: &Store, options: ListOptions<'_>) -> Result<Vec<ListRow>
 }
 
 pub(super) fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<ListRow> {
-    let has_unresolved_blocker: i64 = row.get(11)?;
-    let has_pending_mutation: i64 = row.get(12)?;
-    let has_failed_mutation: i64 = row.get(13)?;
     Ok(ListRow {
         id: row.get(0)?,
         display_id: row.get(1)?,
@@ -262,9 +259,9 @@ pub(super) fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<ListRow>
         container_id: row.get(8)?,
         selection_state: row.get(9)?,
         created_seq: row.get(10)?,
-        has_unresolved_blocker: has_unresolved_blocker != 0,
-        has_pending_mutation: has_pending_mutation != 0,
-        has_failed_mutation: has_failed_mutation != 0,
+        has_unresolved_blocker: row.get(11)?,
+        has_pending_mutation: row.get(12)?,
+        has_failed_mutation: row.get(13)?,
     })
 }
 
@@ -847,11 +844,10 @@ mod tests {
         // Driven off `MutationState::ALL` so a state added later fails here
         // rather than going silently untested. `applying` and `abandoned` are
         // seeded on `promote_ticket` because migration 010's CHECK confines
-        // them there — for those two the assertion exercises the Promotion
-        // exclusion rather than the state arm, which is the other half of the
-        // same predicate. A bare state check would pass with
-        // `mutation_type not in (...)` dropped entirely; these rows are what
-        // catch that.
+        // them there; they cover those two states, not the Promotion
+        // exclusion — neither state matches either subquery, so both flags
+        // stay clear whether the exclusion is there or not. The exclusion is
+        // guarded by `every_promotion_mutation_type_is_excluded_from_the_flags`.
         let store = open_seeded();
         let mut expected = Vec::new();
         for (i, state) in MutationState::ALL.into_iter().enumerate() {
@@ -902,27 +898,37 @@ mod tests {
             .collect();
         assert!(!promotions.is_empty(), "no Promotion types to check");
 
-        for (i, mutation_type) in promotions.into_iter().enumerate() {
-            let seq = i64::try_from(i).unwrap() + 1;
+        // Both states the flags key on, because the two subqueries carry the
+        // exclusion separately: seeding only `pending` leaves the `failed`
+        // one unguarded.
+        let mut seq = 0;
+        for mutation_type in promotions {
             // The composite foreign key pins item_class to the target's class.
             let (item_id, item_class) = match mutation_type {
+                MutationType::PromoteTicket => ("t", "ticket"),
                 MutationType::PromoteEpic => ("e", "epic"),
-                _ => ("t", "ticket"),
+                other => panic!(
+                    "new Promotion type {} needs a fixture target Item here",
+                    other.text()
+                ),
             };
-            seed_mutation(
-                &store,
-                seq,
-                item_id,
-                item_class,
-                mutation_type.text(),
-                "pending",
-            );
+            for state in ["pending", "failed"] {
+                seq += 1;
+                seed_mutation(
+                    &store,
+                    seq,
+                    item_id,
+                    item_class,
+                    mutation_type.text(),
+                    state,
+                );
+            }
         }
 
         let rows = list_rows(&store, ListOptions::default()).unwrap();
         for row in &rows {
             assert!(
-                !row.has_pending_mutation,
+                !row.has_pending_mutation && !row.has_failed_mutation,
                 "{} lit a marker from a Promotion alone",
                 row.display_id
             );

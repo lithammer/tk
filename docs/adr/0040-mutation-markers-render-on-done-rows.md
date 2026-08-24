@@ -5,10 +5,9 @@ failed one — so `tk list` and `tk search` can say a row carries work the
 Backend has not received. No `tk list` view predicate matches a `done`
 Ticket, but its epic-parent-inclusion branch can surface a `done` Epic as a
 container, and `tk search` matches every Item Status including `done`.
-Either path can
-feed a `done` row to the shared renderer carrying a pending or failed
-Mutation, so the marker needs an explicit answer for that row the way the
-blocked treatment (`⊘`) already has one.
+Either path can feed a `done` row to the shared renderer carrying a pending
+or failed Mutation, so the marker needs an explicit answer for that row the
+way the blocked treatment (`⊘`) already has one.
 
 ## Considered Options
 

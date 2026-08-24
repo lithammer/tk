@@ -463,5 +463,10 @@ mod tests {
             "a done row with a queued Mutation should still show the pending \
              marker: {line:?}"
         );
+        assert!(
+            stdout.contains("Mutations: ~ pending\n"),
+            "the marker on the row must be explained by the legend; a missing \
+             legend means search's marker fold never reached render_chrome: {stdout:?}"
+        );
     }
 }

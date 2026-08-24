@@ -80,6 +80,16 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
 
     let rows = list::list_rows(&store, options).map_err(|err| resolver::storage_error(&err))?;
 
+    // Read before writing anything: a storage failure here must not leave a
+    // Scope hint on stdout promising a tree that never arrives.
+    //
+    // This read is store-wide, but it lives in `store/promotion.rs`, which
+    // ARCHITECTURE.md scopes to `tk promote`. Reused rather than duplicated;
+    // tk-166 moves it to `store/sync.rs`, where the equivalent
+    // `applying_mutation_sequence` already sits.
+    let queue_head = store_promotion::earliest_applicable_mutation(store.conn())
+        .map_err(|err| resolver::storage_error(&err))?;
+
     let out = deps.styler.for_stdout();
 
     // Hint so a Scope-filtered tree never reads as the full store (ADR-0022).
@@ -89,12 +99,6 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         }
     }
 
-    // This read is store-wide, but it lives in `store/promotion.rs`, which
-    // ARCHITECTURE.md scopes to `tk promote`. Reused rather than duplicated;
-    // tk-166 moves it to `store/sync.rs`, where the equivalent
-    // `applying_mutation_sequence` already sits.
-    let queue_head = store_promotion::earliest_applicable_mutation(store.conn())
-        .map_err(|err| resolver::storage_error(&err))?;
     if let Err(err) = render_sync_banner(deps.stdout, queue_head.as_ref(), out) {
         return cli::write_error(&err);
     }
@@ -896,6 +900,64 @@ mod tests {
     }
 
     #[test]
+    fn nested_child_row_reaches_the_legend_through_render_children() {
+        // `render`'s top-level loop and `render_children` each merge their own
+        // `MutationMarkers` into the running total (list.rs's fold has two
+        // call sites, unlike search.rs's one). This Epic is open, so its
+        // child nests under it instead of falling through to top level the
+        // way the orphaned-child test's `done` Epic does — the only path
+        // that exercises the `render_children` half of the fold.
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "e1",
+                display: "tk-1",
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                title: "Open epic",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "child",
+                display: "tk-2",
+                title: "Open child",
+                container_id: Some("e1"),
+                container_class: Some("epic"),
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        seed_mutation(&conn, 1, "child", "ticket", "update_ticket", "pending");
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run_rendered(&mut h, default_args());
+        assert_eq!(code, Exit::Ok);
+        let stdout = String::from_utf8(h.stdout).unwrap();
+        insta::assert_snapshot!(stdout, @"
+        ○ tk-1 [epic] Open epic
+        └── ○ tk-2 ● P2 ~ Open child
+        --------------------------------------------------------------------------------
+        Total: 2 items (2 open)
+
+        Status: ○ open  ◐ active  ✓ done
+        Blocked: ⊘ blocked
+        Mutations: ~ pending
+        ");
+    }
+
+    #[test]
     fn mutation_markers_pin_exact_byte_placement_and_spare_clean_rows() {
         // A substring check proves a marker glyph appears somewhere in the
         // line, not that it sits in the right place in a renderer shared
@@ -905,7 +967,7 @@ mod tests {
         insert_fixture_item(
             &conn,
             FixtureItem {
-                id: "clean",
+                id: "row-clean",
                 display: "tk-1",
                 title: "Clean row",
                 created_seq: 1,
@@ -916,7 +978,7 @@ mod tests {
         insert_fixture_item(
             &conn,
             FixtureItem {
-                id: "pending",
+                id: "row-pending",
                 display: "tk-2",
                 title: "Pending row",
                 created_seq: 2,
@@ -927,7 +989,7 @@ mod tests {
         insert_fixture_item(
             &conn,
             FixtureItem {
-                id: "failed",
+                id: "row-failed",
                 display: "tk-3",
                 title: "Failed row",
                 created_seq: 3,
@@ -938,7 +1000,7 @@ mod tests {
         insert_fixture_item(
             &conn,
             FixtureItem {
-                id: "both",
+                id: "row-both",
                 display: "tk-4",
                 title: "Both markers",
                 created_seq: 4,
@@ -949,10 +1011,17 @@ mod tests {
         // Pending at sequence 1 keeps the queue head pending, so `run` prints
         // no `Sync:` banner and this snapshot stays a pure row/chrome contract
         // (a failed queue head would prepend a banner line here instead).
-        seed_mutation(&conn, 1, "pending", "ticket", "update_ticket", "pending");
-        seed_mutation(&conn, 2, "failed", "ticket", "update_ticket", "failed");
-        seed_mutation(&conn, 3, "both", "ticket", "update_ticket", "pending");
-        seed_mutation(&conn, 4, "both", "ticket", "set_item_status", "failed");
+        seed_mutation(
+            &conn,
+            1,
+            "row-pending",
+            "ticket",
+            "update_ticket",
+            "pending",
+        );
+        seed_mutation(&conn, 2, "row-failed", "ticket", "update_ticket", "failed");
+        seed_mutation(&conn, 3, "row-both", "ticket", "update_ticket", "pending");
+        seed_mutation(&conn, 4, "row-both", "ticket", "set_item_status", "failed");
         drop(conn);
 
         let cwd_path = cwd();
@@ -961,15 +1030,9 @@ mod tests {
         let code = run_rendered(&mut h, default_args());
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
-        let clean_line = stdout
-            .lines()
-            .find(|l| l.contains("tk-1"))
-            .unwrap_or_else(|| panic!("no row for tk-1 in {stdout:?}"));
-        assert!(
-            !clean_line.contains('~') && !clean_line.contains('\u{2691}'),
-            "a marker on a row with no Mutation means the rollup joined on \
-             the wrong key: {clean_line:?}"
-        );
+        // tk-1 carries no Mutation; a marker on its row would mean the
+        // rollup joined on the wrong key. The snapshot below pins its
+        // bytes as `○ tk-1 ● P2 Clean row` with no `~`/`⚑`.
         insta::assert_snapshot!(stdout, @"
         ○ tk-1 ● P2 Clean row
         ○ tk-2 ● P2 ~ Pending row
@@ -1054,7 +1117,7 @@ mod tests {
         insert_fixture_item(
             &conn,
             FixtureItem {
-                id: "epic",
+                id: "e1",
                 display: "tk-1",
                 item_class: "epic",
                 ticket_kind: None,
@@ -1065,7 +1128,7 @@ mod tests {
             },
         )
         .unwrap();
-        seed_mutation(&conn, 1, "epic", "epic", "update_epic", "failed");
+        seed_mutation(&conn, 1, "e1", "epic", "update_epic", "failed");
         drop(conn);
 
         let cwd_path = cwd();
@@ -1081,11 +1144,13 @@ mod tests {
     }
 
     #[test]
-    fn mutation_marker_nests_inside_the_blocked_row_dim_without_resetting_it() {
+    fn mutation_markers_nest_inside_the_blocked_row_dim_without_resetting_it() {
         // ADR-0014 nesting: BLOCKED_ROW's dim closes with SGR 22, the same
-        // family a bold or dimmed inner span would close with. MUTATION_PENDING
-        // is a foreground colour (close 39) precisely so it can sit inside the
-        // dim span without releasing it before the row ends.
+        // family a bold or dimmed inner span would close with. MUTATION_FAILED
+        // and MUTATION_PENDING are both foreground colours (close 39)
+        // precisely so either can sit inside the dim span without releasing
+        // it before the row ends. Both markers are seeded here so both
+        // claims are exercised, not just the pending one.
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_item(
@@ -1112,6 +1177,7 @@ mod tests {
         .unwrap();
         insert_dependency(&conn, "blocker", "blocked").unwrap();
         seed_mutation(&conn, 1, "blocked", "ticket", "update_ticket", "pending");
+        seed_mutation(&conn, 2, "blocked", "ticket", "set_item_status", "failed");
         drop(conn);
 
         let cwd_path = cwd();
@@ -1129,13 +1195,19 @@ mod tests {
             "row should open the BLOCKED_ROW dim span: {line:?}"
         );
         assert!(
+            line.contains("\u{1b}[91m\u{2691}\u{1b}[39m"),
+            "failed marker should open bright-red and close with 39; a dim-family \
+             close would release BLOCKED_ROW mid-row: {line:?}"
+        );
+        assert!(
             line.contains("\u{1b}[90m~\u{1b}[39m"),
             "pending marker should open bright-black and close with 39: {line:?}"
         );
-        assert!(
-            line.ends_with("\u{1b}[22m"),
-            "the dim close should be the row's last byte sequence, proving the \
-             marker's own close (39) did not reset it early: {line:?}"
+        assert_eq!(
+            line.matches("\u{1b}[22m").count(),
+            1,
+            "a second SGR 22 means an inner span closes in the dim family and \
+             releases BLOCKED_ROW before the row ends: {line:?}"
         );
     }
 
@@ -1326,6 +1398,49 @@ mod tests {
     }
 
     #[test]
+    fn failed_promotion_prints_the_banner_but_marks_no_row() {
+        // `render_sync_banner`'s doc comment names this as the case a reader
+        // hits first: the banner applies no Mutation Type filter, but the row
+        // markers exclude Promotions (`has_pending_mutation` /
+        // `has_failed_mutation` filter out promote_ticket/promote_epic). So a
+        // failed Promotion names its Item in the `Sync:` banner while the
+        // matching row stays unmarked and no `Mutations:` legend appears — a
+        // failure here means the two surfaces stopped disagreeing on the
+        // documented case, so check which one moved.
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Row",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        seed_mutation(&conn, 1, "t1", "ticket", "promote_ticket", "failed");
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run_rendered(&mut h, default_args());
+        assert_eq!(code, Exit::Ok);
+        let stdout = String::from_utf8(h.stdout).unwrap();
+        insta::assert_snapshot!(stdout, @"
+        Sync: Mutation 1 failed on tk-1 (tk sync log 1)
+        ○ tk-1 ● P2 Row
+        --------------------------------------------------------------------------------
+        Total: 1 item (1 open)
+
+        Status: ○ open  ◐ active  ✓ done
+        Blocked: ⊘ blocked
+        ");
+    }
+
+    #[test]
     fn pending_queue_head_prints_no_banner() {
         // Pending is the ordinary state between syncs; a banner here would
         // fire on nearly every invocation and stop meaning anything.
@@ -1383,7 +1498,7 @@ mod tests {
     #[test]
     fn failed_queue_head_banner_still_prints_above_an_empty_row_set() {
         // The queue head can be a `done` Ticket the Default view never
-        // renders (WHEN IT FIRES, tk-158): the banner still has to appear,
+        // renders (tk-158): the banner still has to appear,
         // above the empty-view line, or a stuck queue on a done Ticket would
         // be invisible.
         let store = TmpStore::new("repo");

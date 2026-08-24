@@ -345,6 +345,34 @@ mod tests {
         conn
     }
 
+    /// `ItemDetail` with every relationship empty and `mutations` supplied by
+    /// the caller, for tests that vary only the Mutation section. Adding a
+    /// field to `ItemDetail` should only require touching one full literal —
+    /// `render_pins_every_section_header_glyph_and_order`'s, which is
+    /// exhaustive on purpose — not this one too.
+    fn minimal_item_detail(mutations: Vec<ItemMutation>) -> ItemDetail {
+        ItemDetail {
+            id: "t1".into(),
+            display_id: "tk-1".into(),
+            item_class: ItemClass::Ticket,
+            ticket_kind: Some(crate::domain::ticket_kind::TicketKind::Task),
+            priority: Some(crate::domain::priority::Priority::P2),
+            selection_state: Some(crate::domain::selection_state::SelectionState::Accepted),
+            title: "Ticket".into(),
+            body: String::new(),
+            closing_reason: None,
+            status: crate::domain::status::ItemStatus::Open,
+            created_at: "2026-05-09T00:00:00.000Z".into(),
+            updated_at: "2026-05-09T00:00:00.000Z".into(),
+            parent: None,
+            children: Vec::new(),
+            blocked_by: Vec::new(),
+            blocking: Vec::new(),
+            external_blockers: Vec::new(),
+            mutations,
+        }
+    }
+
     struct Harness<'a> {
         stdout: Vec<u8>,
         stderr: Vec<u8>,
@@ -928,30 +956,11 @@ mod tests {
         // `applied_mutations_come_back_from_the_read` proves it), so this
         // empty output can only be the renderer's `Applied` match arm at
         // work, not a filtered-away query result.
-        let detail = ItemDetail {
-            id: "t1".into(),
-            display_id: "tk-1".into(),
-            item_class: ItemClass::Ticket,
-            ticket_kind: Some(crate::domain::ticket_kind::TicketKind::Task),
-            priority: Some(crate::domain::priority::Priority::P2),
-            selection_state: Some(crate::domain::selection_state::SelectionState::Accepted),
-            title: "Ticket".into(),
-            body: String::new(),
-            closing_reason: None,
-            status: crate::domain::status::ItemStatus::Open,
-            created_at: "2026-05-09T00:00:00.000Z".into(),
-            updated_at: "2026-05-09T00:00:00.000Z".into(),
-            parent: None,
-            children: Vec::new(),
-            blocked_by: Vec::new(),
-            blocking: Vec::new(),
-            external_blockers: Vec::new(),
-            mutations: vec![ItemMutation {
-                sequence: 1,
-                state: MutationState::Applied,
-                mutation_type: crate::domain::mutation_type::MutationType::UpdateTicket,
-            }],
-        };
+        let detail = minimal_item_detail(vec![ItemMutation {
+            sequence: 1,
+            state: MutationState::Applied,
+            mutation_type: crate::domain::mutation_type::MutationType::UpdateTicket,
+        }]);
 
         let mut out = Vec::new();
         render(&mut out, &detail, Styler::plain().for_stdout()).unwrap();

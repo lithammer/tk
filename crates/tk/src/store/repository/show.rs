@@ -45,7 +45,10 @@ pub struct ItemMutation {
     pub mutation_type: MutationType,
 }
 
-/// Full current-state view of one Ticket or Epic.
+/// Everything `tk show` renders for one Ticket or Epic: its current state,
+/// its relationships, and the Mutation Log entries targeting it. The store
+/// keeps current state and the Mutation Log as separate concerns; this view
+/// model is where one command joins them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemDetail {
     pub id: String,
@@ -511,41 +514,23 @@ mod tests {
 
     #[test]
     fn mutations_are_ordered_by_sequence_not_insertion_order() {
+        // Inserted 5, 1, 3 — a failure means the read dropped its `order by`
+        // and is handing the renderer rows in physical order.
         let store = open_seeded();
         seed_ticket(&store, "t", "tk-1", "Subject", 1);
-        insert_fixture_mutation(
-            &store.conn,
-            FixtureMutation {
-                sequence: 5,
-                mutation_type: "update_ticket",
-                item_id: "t",
-                item_class: "ticket",
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
-        insert_fixture_mutation(
-            &store.conn,
-            FixtureMutation {
-                sequence: 1,
-                mutation_type: "update_ticket",
-                item_id: "t",
-                item_class: "ticket",
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
-        insert_fixture_mutation(
-            &store.conn,
-            FixtureMutation {
-                sequence: 3,
-                mutation_type: "update_ticket",
-                item_id: "t",
-                item_class: "ticket",
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
+        for sequence in [5, 1, 3] {
+            insert_fixture_mutation(
+                &store.conn,
+                FixtureMutation {
+                    sequence,
+                    mutation_type: "update_ticket",
+                    item_id: "t",
+                    item_class: "ticket",
+                    ..FixtureMutation::default()
+                },
+            )
+            .unwrap();
+        }
 
         let detail = show_item(&store, "tk-1").unwrap().unwrap();
         let sequences: Vec<i64> = detail.mutations.iter().map(|m| m.sequence).collect();

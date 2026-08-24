@@ -62,15 +62,18 @@ small boundary module after the second caller proves the shape.
   phrasing out of command modules.
 - `store/` owns Repository Store opening, migrations, current-state reads and
   writes, Display ID / Alias resolution, sequence allocation, and Mutation Log
-  persistence. `store/sync.rs` owns Remote configuration, retained Backend
-  cohort validation, canonical Adopt insertion, Pull refresh, and Mutation Log
-  replay and inspection helpers. `store/promotion.rs` exposes the SQL half of
-  `tk promote` — the preflight graph read, the one-transaction outbox commit,
-  receipt application, and the post-sync Mutation Log reads. Promotion
-  recovery also lives here: unique-target lookup, queue-wide mapping capture,
-  and atomic reconcile/retry transitions. `commands/promote.rs` owns Backend
-  inspection, snapshot comparison, recovery guidance, and the nested sync
-  report.
+  persistence. A Mutation Log read projected onto an item read — the
+  `tk list` / `tk search` row markers, and the per-Item Mutation list
+  `tk show` renders — belongs beside that item read in `store/repository/`;
+  the log-oriented views belong to `store/sync.rs`, which owns Remote
+  configuration, retained Backend cohort validation, canonical Adopt
+  insertion, Pull refresh, and Mutation Log replay and inspection helpers.
+  `store/promotion.rs` exposes the SQL half of `tk promote` — the preflight
+  graph read, the one-transaction outbox commit, receipt application, and the
+  post-sync Mutation Log reads. Promotion recovery also lives here:
+  unique-target lookup, queue-wide mapping capture, and atomic reconcile/retry
+  transitions. `commands/promote.rs` owns Backend inspection, snapshot
+  comparison, recovery guidance, and the nested sync report.
 - `remote/` owns the type-erased Backend Adapter trait (mirroring
   `ProcRunner`), the factory that dispatches by configured backend kind, and
   the FakeAdapter used by engine tests. It imports `store/`, `proc`, and
