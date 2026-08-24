@@ -236,19 +236,20 @@ it names a
 .B Mutations:
 line only when at least one row carries a marker.
 .PP
-On success with one local Ticket carrying a failed and a pending Mutation,
+On success with one local Ticket carrying an edit queued behind a Promotion
+that has not applied yet,
 .B tk list
 prints:
 .PP
 .RS 4
 .nf
-○ project-1 ● P2 ⚑ ~ Investigate flaky login retry
+○ project-1 ● P2 ~ Investigate flaky login retry
 --------------------------------------------------------------------------------
 Total: 1 item (1 open)
 
 Status: ○ open  ◐ active  ✓ done
 Blocked: ⊘ blocked
-Mutations: ⚑ failed  ~ unsent
+Mutations: ~ unsent
 .fi
 .RE
 .SS Searching by title
