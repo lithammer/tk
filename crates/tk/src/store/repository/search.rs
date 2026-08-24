@@ -17,8 +17,9 @@ use super::list::{ListRow, row_from_sql};
 /// the query). `instr(lower(title), lower(?1)) > 0` is a case-insensitive
 /// *literal* substring test — the query is never interpreted as a `LIKE`
 /// pattern or regex, so `%` and `_` match themselves. The
-/// `has_unresolved_blocker` expression mirrors the List Tree read so both
-/// commands feed the shared row renderer the same derived flag.
+/// `has_unresolved_blocker`, `has_pending_mutation`, and `has_failed_mutation`
+/// expressions mirror the List Tree read so both commands feed the shared row
+/// renderer the same derived flags.
 const SEARCH_ROWS_SQL: &str = "\
 select i.id, i.display_value, i.item_class, i.ticket_kind, i.priority, i.title, \
        i.status, i.origin, i.container_id, i.selection_state, i.created_seq, \
@@ -36,7 +37,21 @@ select i.id, i.display_value, i.item_class, i.ticket_kind, i.priority, i.title, 
                 where eb.item_id = i.id \
                   and eb.resolved_at is null \
            ) \
-       ) as has_unresolved_blocker \
+       ) as has_unresolved_blocker, \
+       exists ( \
+           select 1 \
+             from mutations m \
+            where m.item_id = i.id \
+              and m.state = 'pending' \
+              and m.mutation_type not in ('promote_ticket', 'promote_epic') \
+       ) as has_pending_mutation, \
+       exists ( \
+           select 1 \
+             from mutations m \
+            where m.item_id = i.id \
+              and m.state = 'failed' \
+              and m.mutation_type not in ('promote_ticket', 'promote_epic') \
+       ) as has_failed_mutation \
   from items i \
  where instr(lower(i.title), lower(?1)) > 0 \
  order by i.created_seq asc";
@@ -54,9 +69,13 @@ pub fn search_rows(store: &Store, query: &str) -> Result<Vec<ListRow>, rusqlite:
 
 #[cfg(test)]
 mod tests {
+    use super::super::list::{ListOptions, list_rows};
     use super::*;
     use crate::store::migrations;
-    use crate::store::testing::{FixtureItem, insert_external_blocker, insert_fixture_item};
+    use crate::store::testing::{
+        FixtureItem, FixtureMutation, insert_external_blocker, insert_fixture_item,
+        insert_fixture_mutation,
+    };
     use rusqlite::Connection;
 
     fn open_seeded() -> Store {
@@ -187,5 +206,65 @@ mod tests {
         let rows = search_rows(&store, "auth").unwrap();
         assert_eq!(rows.len(), 1);
         assert!(rows[0].has_unresolved_blocker);
+    }
+
+    #[test]
+    fn done_match_still_reports_its_pending_mutation() {
+        // Same split as `done_match_still_reports_its_unresolved_blocker`: a
+        // `done` Backend Item can carry a queued Mutation the Backend has not
+        // received (ADR-0040), and the store reports that truthfully;
+        // suppressing it for done rows is the renderer's job.
+        let store = open_seeded();
+        seed_ticket(
+            &store,
+            "t1",
+            "tk-1",
+            "Auth shipped via workaround",
+            "done",
+            1,
+        );
+        insert_fixture_mutation(
+            &store.conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "set_item_status",
+                item_id: "t1",
+                item_class: "ticket",
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        let rows = search_rows(&store, "auth").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].has_pending_mutation);
+        assert!(!rows[0].has_failed_mutation);
+    }
+
+    #[test]
+    fn search_rows_and_list_rows_agree_on_mutation_flags() {
+        // Nothing else guards these two hand-mirrored queries against drift.
+        let store = open_seeded();
+        seed_ticket(&store, "t1", "tk-1", "Auth rework", "open", 1);
+        insert_fixture_mutation(
+            &store.conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "update_ticket",
+                item_id: "t1",
+                item_class: "ticket",
+                state: "failed",
+                failure_json: Some(r#"{"detail":"prior"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        let search = search_rows(&store, "auth").unwrap();
+        let list = list_rows(&store, ListOptions::default()).unwrap();
+        assert_eq!(search.len(), 1);
+        assert_eq!(list.len(), 1);
+        assert!(search[0].has_failed_mutation);
+        assert_eq!(search[0].has_pending_mutation, list[0].has_pending_mutation);
+        assert_eq!(search[0].has_failed_mutation, list[0].has_failed_mutation);
     }
 }
