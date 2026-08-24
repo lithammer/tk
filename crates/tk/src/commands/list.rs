@@ -318,8 +318,8 @@ mod tests {
     use crate::render::Styler;
     use crate::store::migrations;
     use crate::store::testing::{
-        FixtureItem, FixtureMutation, TmpStore, insert_dependency, insert_fixture_item,
-        insert_fixture_mutation,
+        FixtureItem, FixtureMutation, TmpStore, commit_promotion, insert_dependency,
+        insert_fixture_item, insert_fixture_mutation,
     };
     use rand::SeedableRng;
     use rand::rngs::StdRng;
@@ -993,6 +993,137 @@ mod tests {
     }
 
     #[test]
+    fn mutation_markers_pin_exact_byte_placement_and_spare_clean_rows() {
+        // A substring check proves a marker glyph appears somewhere in the
+        // line, not that it sits in the right place in a renderer shared
+        // with `tk search`; this pins the full row set's bytes instead.
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "clean",
+                display: "tk-1",
+                title: "Clean row",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "pending",
+                display: "tk-2",
+                title: "Pending row",
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "failed",
+                display: "tk-3",
+                title: "Failed row",
+                created_seq: 3,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "both",
+                display: "tk-4",
+                title: "Both markers",
+                created_seq: 4,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        // Pending at sequence 1 keeps the queue head pending, so `run` prints
+        // no `Sync:` banner and this snapshot stays a pure row/chrome contract
+        // (a failed queue head would prepend a banner line here instead).
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "update_ticket",
+                item_id: "pending",
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 2,
+                mutation_type: "update_ticket",
+                item_id: "failed",
+                state: "failed",
+                failure_json: Some(r#"{"detail":"boom"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 3,
+                mutation_type: "update_ticket",
+                item_id: "both",
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 4,
+                mutation_type: "set_item_status",
+                item_id: "both",
+                state: "failed",
+                failure_json: Some(r#"{"detail":"boom"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run_rendered(&mut h, default_args());
+        assert_eq!(code, Exit::Ok);
+        let stdout = String::from_utf8(h.stdout).unwrap();
+        let clean_line = stdout
+            .lines()
+            .find(|l| l.contains("tk-1"))
+            .unwrap_or_else(|| panic!("no row for tk-1 in {stdout:?}"));
+        assert!(
+            !clean_line.contains('~') && !clean_line.contains('\u{2691}'),
+            "a marker on a row with no Mutation means the rollup joined on \
+             the wrong key: {clean_line:?}"
+        );
+        insta::assert_snapshot!(stdout, @"
+        ○ tk-1 ● P2 Clean row
+        ○ tk-2 ● P2 ~ Pending row
+        ○ tk-3 ● P2 ⚑ Failed row
+        ○ tk-4 ● P2 ⚑ ~ Both markers
+        --------------------------------------------------------------------------------
+        Total: 4 items (4 open)
+
+        Status: ○ open  ◐ active  ✓ done
+        Blocked: ⊘ blocked
+        Mutations: ⚑ failed  ~ pending
+        ");
+    }
+
+    #[test]
     fn row_set_with_no_marked_rows_emits_no_mutations_legend() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
@@ -1176,6 +1307,150 @@ mod tests {
             line.ends_with("\u{1b}[22m"),
             "the dim close should be the row's last byte sequence, proving the \
              marker's own close (39) did not reset it early: {line:?}"
+        );
+    }
+
+    #[test]
+    fn queued_edit_behind_a_pending_promotion_marks_but_the_promotion_alone_does_not() {
+        // `has_pending_mutation` excludes the Promotion's own Mutation type;
+        // this drives a real Promotion through `commit_promotion` rather
+        // than fixturing a `promote_ticket` row by hand, so the exclusion
+        // is proven against the outbox `tk promote` actually writes.
+        let store = TmpStore::new("repo");
+        let mut conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "promoted",
+                display: "tk-1",
+                title: "Edit queued behind the Promotion",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "promotion_only",
+                display: "tk-2",
+                title: "Promotion pending, nothing queued behind it",
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        // Each call consumes the real `mutation_seq` counter (1, then 2);
+        // the fixture edit below must sequence after both.
+        commit_promotion(&mut conn, "promoted");
+        commit_promotion(&mut conn, "promotion_only");
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 3,
+                mutation_type: "update_ticket",
+                item_id: "promoted",
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run_rendered(&mut h, default_args());
+        assert_eq!(code, Exit::Ok);
+        let stdout = String::from_utf8(h.stdout).unwrap();
+        let line_of = |id: &str| {
+            stdout
+                .lines()
+                .find(|l| l.contains(id))
+                .unwrap_or_else(|| panic!("no row for {id} in {stdout:?}"))
+                .to_owned()
+        };
+        assert!(
+            line_of("tk-1").contains(" ~ Edit queued"),
+            "a queued edit behind a Pending Promotion is genuinely unsent \
+             and must still mark: {stdout:?}"
+        );
+        let promotion_only_line = line_of("tk-2");
+        assert!(
+            !promotion_only_line.contains('~') && !promotion_only_line.contains('\u{2691}'),
+            "a Pending Promotion is the Item's own creation, not a queued \
+             edit; marking it would conflate the two: {promotion_only_line:?}"
+        );
+    }
+
+    #[test]
+    fn orphaned_child_of_an_excluded_epic_still_reaches_the_legend() {
+        // The default view excludes a `done` Epic outright (no matching-child
+        // fallback the way `--ready`/`--blocked`/etc. have one), so its open
+        // child reaches `render` with its parent absent from `rows` and falls
+        // through to top level — the case `render_mutation_legend`'s fold
+        // assumes never drops a row's flags. A failure here means a row was
+        // rendered whose flags the legend never saw — the fold's premise
+        // broken.
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "epic",
+                display: "tk-1",
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                status: "done",
+                title: "Done epic",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "child",
+                display: "tk-2",
+                title: "Open child of a done Epic",
+                container_id: Some("epic"),
+                container_class: Some("epic"),
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "update_ticket",
+                item_id: "child",
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run_rendered(&mut h, default_args());
+        assert_eq!(code, Exit::Ok);
+        let stdout = String::from_utf8(h.stdout).unwrap();
+        assert!(!stdout.contains("Done epic"), "stdout={stdout:?}");
+        let line = stdout
+            .lines()
+            .find(|l| l.contains("tk-2"))
+            .unwrap_or_else(|| panic!("no row for tk-2 in {stdout:?}"));
+        assert!(line.contains(" ~ Open child"), "stdout={stdout:?}");
+        assert!(
+            stdout.contains("Mutations: ~ pending\n"),
+            "the child's flags must reach the legend even though its parent \
+             is absent from rows: {stdout:?}"
         );
     }
 

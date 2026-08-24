@@ -176,9 +176,19 @@ pub(crate) fn render_chrome<W: Write + ?Sized>(
 }
 
 /// The `Mutations:` legend, or nothing when no row in `rows` carries a
-/// pending or failed Mutation. `rows` is exactly the set already put on
-/// screen, with nothing filtered a second time, so folding the two flags
-/// directly over it can never name a marker glyph that never rendered.
+/// pending or failed Mutation.
+///
+/// Folding the two flags directly over `rows` is correct only under an
+/// invariant the callers hold, not one this function can check: every row
+/// in `rows` is rendered exactly once. `render` emits roots and
+/// `render_children` emits the rest, and a row whose parent is absent from
+/// `rows` (a `done` Epic excluded from the default view, for instance)
+/// falls through and renders at top level rather than being skipped. If a
+/// future change starts suppressing a marker at render time — the way
+/// `render_row`'s `show_blocked` gates `⊘` on a `done` row — this fold
+/// would name a glyph that never actually appeared on screen, and would
+/// have to move to reporting what `render_row` actually emitted instead of
+/// folding the raw flags.
 fn render_mutation_legend<W: Write + ?Sized>(
     stdout: &mut W,
     rows: &[ListRow],
