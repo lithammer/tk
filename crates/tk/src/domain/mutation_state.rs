@@ -58,6 +58,22 @@ pub enum MutationState {
 }
 
 impl MutationState {
+    /// Every state, written out rather than derived for the same reason
+    /// [`text`] is: a caller that has to reason over the whole set — checking
+    /// a stored spelling, or walking the transition table above — reads this
+    /// list instead of maintaining its own.
+    ///
+    /// [`text`]: MutationState::text
+    pub const ALL: [Self; 7] = [
+        Self::Pending,
+        Self::Failed,
+        Self::Applying,
+        Self::Skipped,
+        Self::Cancelled,
+        Self::Abandoned,
+        Self::Applied,
+    ];
+
     /// SQLite storage and CLI rendering string. Matches the `mutations.state`
     /// CHECK constraint exactly. Written out explicitly rather than derived from
     /// the variant names so renaming a variant cannot silently break the SQL
@@ -72,6 +88,19 @@ impl MutationState {
             Self::Cancelled => "cancelled",
             Self::Abandoned => "abandoned",
             Self::Applied => "applied",
+        }
+    }
+
+    /// Whether the transition table above has any edge leaving this state.
+    ///
+    /// Per the table: `skipped`, `cancelled`, `abandoned`, and `applied` are
+    /// terminal. Written as an exhaustive match so a state added later has to
+    /// answer here instead of silently reading as non-terminal.
+    #[must_use]
+    pub fn is_terminal(self) -> bool {
+        match self {
+            Self::Skipped | Self::Cancelled | Self::Abandoned | Self::Applied => true,
+            Self::Pending | Self::Failed | Self::Applying => false,
         }
     }
 }
@@ -104,5 +133,31 @@ mod tests {
     #[test]
     fn display_writes_text() {
         assert_eq!(format!("{}", MutationState::Skipped), "skipped");
+    }
+
+    #[test]
+    fn all_lists_every_variant_exactly_once() {
+        // A missing or duplicated entry here means ALL has silently drifted
+        // from the enum, defeating its purpose as the caller's whole-set view.
+        let mut texts: Vec<&str> = MutationState::ALL.iter().map(|s| s.text()).collect();
+        texts.sort_unstable();
+        texts.dedup();
+        assert_eq!(texts.len(), MutationState::ALL.len());
+    }
+
+    #[test]
+    fn is_terminal_matches_the_transition_table() {
+        // The transition table above names skipped, cancelled, abandoned, and
+        // applied as terminal; a mismatch here means is_terminal disagrees
+        // with the table it claims to summarize.
+        let terminal: Vec<&str> = MutationState::ALL
+            .into_iter()
+            .filter(|s| s.is_terminal())
+            .map(MutationState::text)
+            .collect();
+        assert_eq!(
+            terminal,
+            vec!["skipped", "cancelled", "abandoned", "applied"]
+        );
     }
 }
