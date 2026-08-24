@@ -1,16 +1,19 @@
 //! `tk show` full-item read with parent / children / blocker sub-sections.
 //!
-//! Composed from one item row plus four narrow sub-queries — parent
+//! Composed from one item row plus six narrow sub-queries — parent
 //! summary, children (when the item is an Epic), `BLOCKED BY`,
-//! `BLOCKING`, and unresolved External Blockers. The Repository Store
-//! owns the SQL; the command-side renderer owns the tree-block layout
-//! and styled output. Each sub-section returns a typed [`ItemSummary`]
-//! or [`ExternalBlockerSummary`] so the renderer never deserializes
-//! text columns of its own.
+//! `BLOCKING`, unresolved External Blockers, and every Mutation Log entry
+//! targeting the item. The Repository Store owns the SQL; the command-side
+//! renderer owns the tree-block layout and styled output. Each sub-section
+//! returns a typed [`ItemSummary`], [`ExternalBlockerSummary`], or
+//! [`ItemMutation`] so the renderer never deserializes text columns of its
+//! own.
 
 use rusqlite::params;
 
 use crate::domain::item_class::ItemClass;
+use crate::domain::mutation_state::MutationState;
+use crate::domain::mutation_type::MutationType;
 use crate::domain::priority::Priority;
 use crate::domain::selection_state::SelectionState;
 use crate::domain::status::ItemStatus;
@@ -32,6 +35,14 @@ pub struct ItemSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalBlockerSummary {
     pub reason: String,
+}
+
+/// One Mutation Log entry targeting the Item rendered in `tk show`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ItemMutation {
+    pub sequence: i64,
+    pub state: MutationState,
+    pub mutation_type: MutationType,
 }
 
 /// Full current-state view of one Ticket or Epic.
@@ -58,6 +69,18 @@ pub struct ItemDetail {
     pub blocked_by: Vec<ItemSummary>,
     pub blocking: Vec<ItemSummary>,
     pub external_blockers: Vec<ExternalBlockerSummary>,
+    /// Every Mutation Log entry targeting this Item, in `sequence` order.
+    ///
+    /// Unlike the other sub-reads this one filters by nothing: no Origin
+    /// restriction, no Mutation Type restriction, `applied` rows included.
+    /// The store answers truthfully and rendering decides what to show, so
+    /// filtering `applied` here would both invert that split and leave the
+    /// renderer's `Applied` arm unreachable. And where the list-row markers
+    /// exclude Promotions to keep one glyph from carrying two meanings,
+    /// `tk show` is a deliberate single-Item read: a Pending Promotion's own
+    /// Promotion Mutation is what the reader came for, and `state` plus
+    /// `mutation_type` tell it apart from an ordinary Mutation.
+    pub mutations: Vec<ItemMutation>,
 }
 
 /// Read one item's full current state. Returns `Ok(None)` when the
@@ -127,6 +150,7 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
     let blocked_by = read_blocked_by(&store.conn, &id)?;
     let blocking = read_blocking(&store.conn, &id)?;
     let external_blockers = read_external_blockers(&store.conn, &id)?;
+    let mutations = read_item_mutations(&store.conn, &id, item_class)?;
 
     Ok(Some(ItemDetail {
         id,
@@ -146,6 +170,7 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
         blocked_by,
         blocking,
         external_blockers,
+        mutations,
     }))
 }
 
@@ -231,6 +256,28 @@ fn read_external_blockers(
     .collect()
 }
 
+fn read_item_mutations(
+    conn: &rusqlite::Connection,
+    item_id: &str,
+    item_class: ItemClass,
+) -> Result<Vec<ItemMutation>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "select sequence, state, mutation_type \
+           from mutations \
+          where item_id = ?1 \
+            and item_class = ?2 \
+          order by sequence asc",
+    )?;
+    stmt.query_map(params![item_id, item_class.text()], |row| {
+        Ok(ItemMutation {
+            sequence: row.get(0)?,
+            state: row.get(1)?,
+            mutation_type: row.get(2)?,
+        })
+    })?
+    .collect()
+}
+
 fn item_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemSummary> {
     Ok(ItemSummary {
         display_id: row.get(0)?,
@@ -246,7 +293,8 @@ mod tests {
     use super::*;
     use crate::store::migrations;
     use crate::store::testing::{
-        FixtureItem, insert_dependency, insert_external_blocker, insert_fixture_item,
+        FixtureItem, FixtureMutation, insert_dependency, insert_external_blocker,
+        insert_fixture_item, insert_fixture_mutation,
     };
     use rusqlite::Connection;
 
@@ -459,5 +507,102 @@ mod tests {
             .map(|eb| eb.reason.as_str())
             .collect();
         assert_eq!(reasons, vec!["fixture blocker"]);
+    }
+
+    #[test]
+    fn mutations_are_ordered_by_sequence_not_insertion_order() {
+        let store = open_seeded();
+        seed_ticket(&store, "t", "tk-1", "Subject", 1);
+        insert_fixture_mutation(
+            &store.conn,
+            FixtureMutation {
+                sequence: 5,
+                mutation_type: "update_ticket",
+                item_id: "t",
+                item_class: "ticket",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &store.conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "update_ticket",
+                item_id: "t",
+                item_class: "ticket",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &store.conn,
+            FixtureMutation {
+                sequence: 3,
+                mutation_type: "update_ticket",
+                item_id: "t",
+                item_class: "ticket",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        let detail = show_item(&store, "tk-1").unwrap().unwrap();
+        let sequences: Vec<i64> = detail.mutations.iter().map(|m| m.sequence).collect();
+        assert_eq!(sequences, vec![1, 3, 5]);
+    }
+
+    #[test]
+    fn applied_mutations_come_back_from_the_read() {
+        // The read filters by nothing (see ItemDetail::mutations' doc
+        // comment): rendering, not the store, drops `applied` rows. A
+        // filtered store here would make the renderer's `Applied` match arm
+        // unreachable dead code instead of a reachable no-op.
+        let store = open_seeded();
+        seed_ticket(&store, "t", "tk-1", "Subject", 1);
+        insert_fixture_mutation(
+            &store.conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "update_ticket",
+                item_id: "t",
+                item_class: "ticket",
+                state: "applied",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        let detail = show_item(&store, "tk-1").unwrap().unwrap();
+        assert_eq!(detail.mutations.len(), 1);
+        assert_eq!(detail.mutations[0].state, MutationState::Applied);
+    }
+
+    #[test]
+    fn a_pending_promotions_own_mutation_is_returned() {
+        // Unlike the list-row markers, this read is not restricted by
+        // Mutation Type: a Local Item under a Pending Promotion should see
+        // its own promote_ticket Mutation in `tk show`.
+        let store = open_seeded();
+        seed_ticket(&store, "t", "tk-1", "Subject", 1);
+        insert_fixture_mutation(
+            &store.conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "promote_ticket",
+                item_id: "t",
+                item_class: "ticket",
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        let detail = show_item(&store, "tk-1").unwrap().unwrap();
+        assert_eq!(detail.mutations.len(), 1);
+        assert_eq!(
+            detail.mutations[0].mutation_type,
+            MutationType::PromoteTicket
+        );
     }
 }

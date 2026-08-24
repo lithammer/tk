@@ -672,6 +672,11 @@ _Avoid_: ticket, tickets
 - The **List Tree** summary chrome adds a `Mutations:` legend naming only the
   marker glyphs present anywhere in the rendered row set, and omits the line
   entirely when no row carries either.
+- **`tk show`** groups every **Mutation** targeting the **Item** into two
+  sections: one for a `pending`, `failed`, or `applying` **Mutation**, and one
+  for a `skipped`, `cancelled`, or `abandoned` **Mutation**; an `applied`
+  **Mutation** appears in neither. Each section is omitted when it has none
+  and points the reader at **`tk sync log`** for detail.
 - **`tk next`** does not select **Epics**.
 - **`tk list --ready`** keeps the **List Tree** shape and includes non-empty **Epics** as containers for ready child **Tickets**.
 - **`tk search`** finds **Tickets** and **Epics** whose title contains the query as a case-insensitive literal substring.

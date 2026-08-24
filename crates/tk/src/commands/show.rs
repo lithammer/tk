@@ -13,6 +13,10 @@
 //!
 //! PARENT / TICKETS / BLOCKED BY / BLOCKING / EXTERNAL BLOCKERS
 //!   <glyph> <status-glyph> <display-id>: [(Epic) ]<title>[ ● <priority>]
+//!
+//! UNRESOLVED MUTATIONS / WITHDRAWN MUTATIONS
+//!   • <sequence> <state> <mutation-type>
+//!   Inspect with 'tk sync log <sequence>'.
 //! ```
 //!
 //! Empty sections are omitted. Output ends with a single trailing newline.
@@ -29,10 +33,13 @@ use crate::cli::{self, CommandError, Deps, Exit};
 use crate::commands::item_header::{self, Header};
 use crate::commands::resolver;
 use crate::domain::item_class::ItemClass;
+use crate::domain::mutation_state::MutationState;
 use crate::render::palette;
 use crate::render::sanitize;
 use crate::render::styler::SubStyler;
-use crate::store::repository::show::{self, ExternalBlockerSummary, ItemDetail, ItemSummary};
+use crate::store::repository::show::{
+    self, ExternalBlockerSummary, ItemDetail, ItemMutation, ItemSummary,
+};
 
 /// Flags for `tk show`.
 #[derive(Debug, ClapArgs)]
@@ -182,6 +189,59 @@ fn render<W: Write + ?Sized>(
         for eb in &detail.external_blockers {
             render_external_blocker(stdout, eb)?;
         }
+        has_section = true;
+    }
+
+    // Exhaustive over MutationState rather than a predicate like
+    // is_terminal(): applied is terminal too, so a predicate would only be
+    // correct because the renderer (not the store, see ItemMutation's doc
+    // comment) happens to drop it elsewhere. Writing out all seven variants
+    // means a state added later fails to compile here instead of silently
+    // landing in whichever bucket a predicate picked.
+    let mut unresolved = Vec::new();
+    let mut withdrawn = Vec::new();
+    for mutation in &detail.mutations {
+        match mutation.state {
+            MutationState::Pending | MutationState::Failed | MutationState::Applying => {
+                unresolved.push(mutation);
+            }
+            MutationState::Skipped | MutationState::Cancelled | MutationState::Abandoned => {
+                withdrawn.push(mutation);
+            }
+            MutationState::Applied => {}
+        }
+    }
+
+    if !unresolved.is_empty() {
+        if has_section {
+            stdout.write_all(b"\n")?;
+        }
+        write_section_header(stdout, styler, "UNRESOLVED MUTATIONS")?;
+        for mutation in &unresolved {
+            render_item_mutation(stdout, mutation)?;
+        }
+        has_section = true;
+    }
+
+    if !withdrawn.is_empty() {
+        if has_section {
+            stdout.write_all(b"\n")?;
+        }
+        write_section_header(stdout, styler, "WITHDRAWN MUTATIONS")?;
+        for mutation in &withdrawn {
+            render_item_mutation(stdout, mutation)?;
+        }
+    }
+
+    // One hint below whichever of the two Mutation sections rendered last,
+    // not one per section — a reader who sees both does not need to be told
+    // twice how to inspect a row.
+    if !unresolved.is_empty() || !withdrawn.is_empty() {
+        writeln!(
+            stdout,
+            "  {}",
+            styler.wrap(palette::SEPARATOR, "Inspect with 'tk sync log <sequence>'.")
+        )?;
     }
 
     Ok(())
@@ -237,6 +297,18 @@ fn render_external_blocker<W: Write + ?Sized>(
     stdout.write_all(b"\n")
 }
 
+fn render_item_mutation<W: Write + ?Sized>(
+    stdout: &mut W,
+    mutation: &ItemMutation,
+) -> std::io::Result<()> {
+    stdout.write_all(b"  \xe2\x80\xa2 ")?; // "  • "
+    writeln!(
+        stdout,
+        "{} {} {}",
+        mutation.sequence, mutation.state, mutation.mutation_type
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,7 +316,9 @@ mod tests {
     use crate::proc::{FakeRunner, RunOutput};
     use crate::render::Styler;
     use crate::store::migrations;
-    use crate::store::testing::{FixtureItem, TmpStore, insert_fixture_item};
+    use crate::store::testing::{
+        FixtureItem, FixtureMutation, TmpStore, insert_fixture_item, insert_fixture_mutation,
+    };
     use rand::SeedableRng;
     use rand::rngs::StdRng;
     use rusqlite::Connection;
@@ -759,6 +833,23 @@ mod tests {
             external_blockers: vec![ExternalBlockerSummary {
                 reason: "WAITING-ON-123: upstream fix".into(),
             }],
+            mutations: vec![
+                ItemMutation {
+                    sequence: 7,
+                    state: MutationState::Failed,
+                    mutation_type: crate::domain::mutation_type::MutationType::UpdateTicket,
+                },
+                ItemMutation {
+                    sequence: 9,
+                    state: MutationState::Pending,
+                    mutation_type: crate::domain::mutation_type::MutationType::SetItemStatus,
+                },
+                ItemMutation {
+                    sequence: 4,
+                    state: MutationState::Skipped,
+                    mutation_type: crate::domain::mutation_type::MutationType::AddDependency,
+                },
+            ],
         };
 
         let mut out = Vec::new();
@@ -789,6 +880,14 @@ mod tests {
 
         EXTERNAL BLOCKERS
           • WAITING-ON-123: upstream fix
+
+        UNRESOLVED MUTATIONS
+          • 7 failed update_ticket
+          • 9 pending set_item_status
+
+        WITHDRAWN MUTATIONS
+          • 4 skipped add_dependency
+          Inspect with 'tk sync log <sequence>'.
         ");
     }
 
@@ -817,5 +916,107 @@ mod tests {
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(stdout.contains("DESCRIPTION"));
         assert!(stdout.contains("Multi-line\nbody\n"));
+    }
+
+    #[test]
+    fn render_omits_mutation_sections_when_every_mutation_is_applied() {
+        // The store returns `applied` rows (store-level
+        // `applied_mutations_come_back_from_the_read` proves it), so this
+        // empty output can only be the renderer's `Applied` match arm at
+        // work, not a filtered-away query result.
+        let detail = ItemDetail {
+            id: "t1".into(),
+            display_id: "tk-1".into(),
+            item_class: ItemClass::Ticket,
+            ticket_kind: Some(crate::domain::ticket_kind::TicketKind::Task),
+            priority: Some(crate::domain::priority::Priority::P2),
+            selection_state: Some(crate::domain::selection_state::SelectionState::Accepted),
+            title: "Ticket".into(),
+            body: String::new(),
+            closing_reason: None,
+            status: crate::domain::status::ItemStatus::Open,
+            created_at: "2026-05-09T00:00:00.000Z".into(),
+            updated_at: "2026-05-09T00:00:00.000Z".into(),
+            parent: None,
+            children: Vec::new(),
+            blocked_by: Vec::new(),
+            blocking: Vec::new(),
+            external_blockers: Vec::new(),
+            mutations: vec![ItemMutation {
+                sequence: 1,
+                state: MutationState::Applied,
+                mutation_type: crate::domain::mutation_type::MutationType::UpdateTicket,
+            }],
+        };
+
+        let mut out = Vec::new();
+        render(&mut out, &detail, Styler::plain().for_stdout()).unwrap();
+        let stdout = String::from_utf8(out).unwrap();
+        assert!(!stdout.contains("MUTATIONS"), "stdout={stdout:?}");
+        assert!(!stdout.contains("Inspect with"), "stdout={stdout:?}");
+    }
+
+    #[test]
+    fn run_renders_unresolved_and_withdrawn_mutations_read_from_the_store() {
+        // The other Mutation-section tests build `ItemDetail` by hand; this
+        // one drives `show::run` end to end so the new SQL read is covered,
+        // not just the renderer's partition of an already-typed `Vec`.
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Ticket with mutations",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 7,
+                mutation_type: "update_ticket",
+                item_id: "t1",
+                item_class: "ticket",
+                state: "failed",
+                failure_json: Some(r#"{"detail":"boom"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 4,
+                mutation_type: "add_dependency",
+                item_id: "t1",
+                item_class: "ticket",
+                state: "skipped",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run_rendered(&mut h, Args { id: "tk-1".into() });
+        assert_eq!(code, Exit::Ok);
+        let stdout = String::from_utf8(h.stdout).unwrap();
+        insta::assert_snapshot!(stdout, @"
+        ○ tk-1 · Ticket with mutations
+          P2 · Task · Created: 2026-05-09
+          Selection: accepted
+        UNRESOLVED MUTATIONS
+          • 7 failed update_ticket
+
+        WITHDRAWN MUTATIONS
+          • 4 skipped add_dependency
+          Inspect with 'tk sync log <sequence>'.
+        ");
     }
 }
