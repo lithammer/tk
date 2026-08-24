@@ -235,7 +235,10 @@ mod tests {
     use crate::proc::{FakeRunner, RunOutput};
     use crate::render::Styler;
     use crate::store::migrations;
-    use crate::store::testing::{FixtureItem, TmpStore, insert_dependency, insert_fixture_item};
+    use crate::store::testing::{
+        FixtureItem, FixtureMutation, TmpStore, insert_dependency, insert_fixture_item,
+        insert_fixture_mutation,
+    };
     use rand::SeedableRng;
     use rand::rngs::StdRng;
     use rusqlite::Connection;
@@ -281,6 +284,10 @@ mod tests {
             }
         }
         fn deps(&mut self) -> Deps<'_> {
+            self.deps_with(Styler::plain())
+        }
+
+        fn deps_with(&mut self, styler: Styler) -> Deps<'_> {
             Deps {
                 stdout: &mut self.stdout,
                 stderr: &mut self.stderr,
@@ -289,7 +296,7 @@ mod tests {
                 clock: &self.clock,
                 rng: &mut self.rng,
                 cwd: self.cwd,
-                styler: Styler::plain(),
+                styler,
             }
         }
     }
@@ -309,6 +316,20 @@ mod tests {
     /// (ADR-0032: `tk list: <body>`), so a test asserts the framed bytes.
     fn run_rendered(h: &mut Harness<'_>, args: Args) -> Exit {
         let mut deps = h.deps();
+        match run(&mut deps, args) {
+            Ok(exit) => exit,
+            Err(err) => {
+                let exit = err.exit();
+                err.render(deps.stderr, "list");
+                exit
+            }
+        }
+    }
+
+    /// [`run_rendered`] with an explicit `Styler` so the colour-output test
+    /// can exercise `Styler::always()`.
+    fn run_rendered_with(h: &mut Harness<'_>, styler: Styler, args: Args) -> Exit {
+        let mut deps = h.deps_with(styler);
         match run(&mut deps, args) {
             Ok(exit) => exit,
             Err(err) => {
@@ -779,5 +800,300 @@ mod tests {
         // Epic line and the single └── child below it.
         assert!(stdout.contains("[epic] Epic"));
         assert!(stdout.contains("\u{2514}\u{2500}\u{2500} \u{25cb} tk-2"));
+    }
+
+    #[test]
+    fn pending_and_failed_mutations_render_their_markers() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        for (id, display, seq) in [
+            ("pending", "tk-1", 1),
+            ("failed", "tk-2", 2),
+            ("both", "tk-3", 3),
+        ] {
+            insert_fixture_item(
+                &conn,
+                FixtureItem {
+                    id,
+                    display,
+                    title: "Row",
+                    created_seq: seq,
+                    ..FixtureItem::default()
+                },
+            )
+            .unwrap();
+        }
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "update_ticket",
+                item_id: "pending",
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 2,
+                mutation_type: "update_ticket",
+                item_id: "failed",
+                state: "failed",
+                failure_json: Some(r#"{"detail":"boom"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 3,
+                mutation_type: "update_ticket",
+                item_id: "both",
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 4,
+                mutation_type: "set_item_status",
+                item_id: "both",
+                state: "failed",
+                failure_json: Some(r#"{"detail":"boom"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run_rendered(&mut h, default_args());
+        assert_eq!(code, Exit::Ok);
+        let stdout = String::from_utf8(h.stdout).unwrap();
+        let line_of = |id: &str| {
+            stdout
+                .lines()
+                .find(|l| l.contains(id))
+                .unwrap_or_else(|| panic!("no row for {id} in {stdout:?}"))
+                .to_owned()
+        };
+        assert!(
+            line_of("tk-1").contains(" ~ Row"),
+            "pending-only row should show ~: {stdout:?}"
+        );
+        assert!(
+            !line_of("tk-1").contains('\u{2691}'),
+            "pending-only row should not show ⚑: {stdout:?}"
+        );
+        assert!(
+            line_of("tk-2").contains(" \u{2691} Row"),
+            "failed-only row should show ⚑: {stdout:?}"
+        );
+        assert!(
+            !line_of("tk-2").contains('~'),
+            "failed-only row should not show ~: {stdout:?}"
+        );
+        assert!(
+            line_of("tk-3").contains(" \u{2691} ~ Row"),
+            "row with both should show ⚑ ~, failed first: {stdout:?}"
+        );
+        assert!(
+            stdout.contains("Mutations: \u{2691} failed  ~ unsent\n"),
+            "legend should name both glyphs once any row carries them: {stdout:?}"
+        );
+    }
+
+    #[test]
+    fn row_set_with_no_marked_rows_emits_no_mutations_legend() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Clean row",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run_rendered(&mut h, default_args());
+        assert_eq!(code, Exit::Ok);
+        let stdout = String::from_utf8(h.stdout).unwrap();
+        assert!(
+            !stdout.contains("Mutations:"),
+            "no row carries a Mutation; the legend must not appear: {stdout:?}"
+        );
+    }
+
+    #[test]
+    fn mutation_legend_names_only_the_glyphs_present_in_the_row_set() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Pending row",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "update_ticket",
+                item_id: "t1",
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run_rendered(&mut h, default_args());
+        assert_eq!(code, Exit::Ok);
+        let stdout = String::from_utf8(h.stdout).unwrap();
+        assert!(
+            stdout.contains("Mutations: ~ unsent\n"),
+            "legend should show only the pending entry: {stdout:?}"
+        );
+        assert!(
+            !stdout.contains("failed"),
+            "no row is failed; the legend must not mention it: {stdout:?}"
+        );
+    }
+
+    #[test]
+    fn epic_with_a_failed_mutation_renders_the_marker_after_the_epic_badge() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "epic",
+                display: "tk-1",
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                title: "Epic with unsent work",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "update_epic",
+                item_id: "epic",
+                item_class: "epic",
+                state: "failed",
+                failure_json: Some(r#"{"detail":"boom"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run_rendered(&mut h, default_args());
+        assert_eq!(code, Exit::Ok);
+        let stdout = String::from_utf8(h.stdout).unwrap();
+        assert!(
+            stdout.contains("[epic] \u{2691} Epic with unsent work"),
+            "marker should sit between [epic] and the title: {stdout:?}"
+        );
+    }
+
+    #[test]
+    fn mutation_marker_nests_inside_the_blocked_row_dim_without_resetting_it() {
+        // ADR-0014 nesting: BLOCKED_ROW's dim closes with SGR 22, the same
+        // family a bold or dimmed inner span would close with. MUTATION_PENDING
+        // is a foreground colour (close 39) precisely so it can sit inside the
+        // dim span without releasing it before the row ends.
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "blocked",
+                display: "tk-1",
+                title: "Blocked work",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "blocker",
+                display: "tk-2",
+                title: "Blocker",
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_dependency(&conn, "blocker", "blocked").unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "update_ticket",
+                item_id: "blocked",
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run_rendered_with(&mut h, Styler::always(), default_args());
+        assert_eq!(code, Exit::Ok);
+        let stdout = String::from_utf8(h.stdout).unwrap();
+        let line = stdout
+            .lines()
+            .find(|l| l.contains("tk-1"))
+            .unwrap_or_else(|| panic!("no row for tk-1 in {stdout:?}"));
+        assert!(
+            line.starts_with("\u{1b}[2m"),
+            "row should open the BLOCKED_ROW dim span: {line:?}"
+        );
+        assert!(
+            line.contains("\u{1b}[90m~\u{1b}[39m"),
+            "pending marker should open bright-black and close with 39: {line:?}"
+        );
+        assert!(
+            line.ends_with("\u{1b}[22m"),
+            "the dim close should be the row's last byte sequence, proving the \
+             marker's own close (39) did not reset it early: {line:?}"
+        );
     }
 }

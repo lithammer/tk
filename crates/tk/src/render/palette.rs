@@ -56,6 +56,25 @@ pub const KIND_EPIC: Style = fg(AnsiColor::Magenta);
 /// family — its close (`39`) must not reset the outer dim (ADR-0014 nesting).
 pub const SELECTION_BADGE: Style = fg(AnsiColor::BrightBlack);
 
+/// A Mutation the Backend failed to apply, rendered as `⚑` beside a list
+/// row's title. Bright red rather than the red proper `KIND_BUG` / `PRIORITY_P0`
+/// already use: `MATCH`'s entry records the rule that a token sharing their
+/// SGR reads as one of those badges, and `⚑`, `[bug]`, and `● P0` can all
+/// appear on the same row. A foreground colour, not `dimmed()`: it can
+/// render inside the dimmed `BLOCKED_ROW` span on a blocked row, so its
+/// close (`39`) must not reset the outer dim (ADR-0014 nesting) —
+/// `SELECTION_BADGE`'s comment records the same trap.
+pub const MUTATION_FAILED: Style = fg(AnsiColor::BrightRed);
+
+/// A Mutation still queued for the Backend, rendered as `~` beside a list
+/// row's title. Bright-black, the same muted class `SELECTION_BADGE`
+/// occupies — a deliberate SGR reuse, consistent with how this palette pairs
+/// one semantic class to one SGR (Red across `KIND_BUG` / `PRIORITY_P0`,
+/// Yellow across `PRIORITY_P1` / `STATUS_ACTIVE`) — kept as its own constant
+/// so a recolour is one edit. A foreground colour for the same nesting
+/// reason as `MUTATION_FAILED`.
+pub const MUTATION_PENDING: Style = fg(AnsiColor::BrightBlack);
+
 /// Open Item status (placeholder — uncoloured).
 pub const STATUS_OPEN: Style = Style::new();
 

@@ -663,9 +663,15 @@ _Avoid_: ticket, tickets
 - **`tk list`** takes an optional positional `<epic-id>` argument; absent it, **`tk list`** reads `TK_SCOPE`, then renders the whole **Repository Store**.
 - When a **Scope** is active, **`tk list`** renders only that **Epic** and its child **Tickets**, and prints a hint that the view is filtered.
 - **List Tree** renders **Epics** as top-level rows, child **Tickets** nested under their **Epic**, and unparented **Tickets** as top-level rows.
-- **List Tree** uses decorative tree glyphs and compact status, priority, and kind markers without column alignment.
+- **List Tree** uses decorative tree glyphs and compact status, priority, kind, and Mutation markers without column alignment.
 - **List Tree** status markers render **Item Status** as `○` for `open`, `◐`
   for `active`, and `✓` for `done`.
+- A row whose **Item** carries a pending or failed **Mutation** shows a
+  marker immediately before the title — `~` for pending, `⚑` for failed, or
+  `⚑ ~` when both apply.
+- The **List Tree** summary chrome adds a `Mutations:` legend naming only the
+  marker glyphs present anywhere in the rendered row set, and omits the line
+  entirely when no row carries either.
 - **`tk next`** does not select **Epics**.
 - **`tk list --ready`** keeps the **List Tree** shape and includes non-empty **Epics** as containers for ready child **Tickets**.
 - **`tk search`** finds **Tickets** and **Epics** whose title contains the query as a case-insensitive literal substring.

@@ -75,7 +75,7 @@ pub(crate) fn render_row<W: Write + ?Sized>(
     match row.item_class {
         ItemClass::Ticket => {
             // A triage Ticket carries no Priority (ADR-0027); omit the `● P_`
-            // marker. The `[bug]` marker and title still render.
+            // marker. The `[bug]` marker still renders.
             if let Some(priority) = row.priority {
                 let p_style = palette::priority_style(priority);
                 write!(stdout, " {} ", styler.wrap(p_style, "\u{25cf}"))?;
@@ -87,14 +87,32 @@ pub(crate) fn render_row<W: Write + ?Sized>(
             if let Some(badge) = selection_badge(row.selection_state) {
                 write!(stdout, " {}", styler.wrap(palette::SELECTION_BADGE, badge))?;
             }
-            stdout.write_all(b" ")?;
-            sanitize::write_sanitized_line(stdout, row.title.as_bytes())?;
         }
         ItemClass::Epic => {
-            write!(stdout, " {} ", styler.wrap(palette::KIND_EPIC, "[epic]"))?;
-            sanitize::write_sanitized_line(stdout, row.title.as_bytes())?;
+            write!(stdout, " {}", styler.wrap(palette::KIND_EPIC, "[epic]"))?;
         }
     }
+
+    // Mutation markers sit immediately before the title in both arms above:
+    // the Ticket arm's selection badge is not an anchor the Epic arm has
+    // (Selection State is Ticket-only, ADR-0027), and a Backend Epic can
+    // carry its own Mutation (`update_epic`, `set_item_status`,
+    // `add_ticket_to_epic`). Failed leads pending — the actionable marker
+    // comes first — and both render on a `done` row (ADR-0040): a `done`
+    // Backend Item with a queued Mutation is exactly the case where the
+    // Backend does not yet agree the Item is done.
+    if row.has_failed_mutation {
+        write!(
+            stdout,
+            " {}",
+            styler.wrap(palette::MUTATION_FAILED, "\u{2691}")
+        )?;
+    }
+    if row.has_pending_mutation {
+        write!(stdout, " {}", styler.wrap(palette::MUTATION_PENDING, "~"))?;
+    }
+    stdout.write_all(b" ")?;
+    sanitize::write_sanitized_line(stdout, row.title.as_bytes())?;
 
     if show_blocked {
         write!(stdout, "{}", styler.close(palette::BLOCKED_ROW))?;
@@ -103,7 +121,16 @@ pub(crate) fn render_row<W: Write + ?Sized>(
 }
 
 /// Render the summary chrome printed below a non-empty row set: a separator
-/// line, the `Total: N items (…)` tally, and the status / blocked legend.
+/// line, the `Total: N items (…)` tally, the status / blocked legend, and —
+/// only when at least one row carries one — a `Mutations:` legend naming the
+/// marker glyphs present.
+///
+/// The `Mutations:` line is conditional, unlike `Status:` / `Blocked:`,
+/// which print unconditionally even when no row matches (`Blocked: ⊘
+/// blocked` prints on a store with nothing blocked). An always-on legend for
+/// a condition most stores never hit would be noise, and the omission is why
+/// every pre-existing scenario snapshot — none of which carries a marked
+/// row — stays byte-identical.
 pub(crate) fn render_chrome<W: Write + ?Sized>(
     stdout: &mut W,
     rows: &[ListRow],
@@ -143,7 +170,44 @@ pub(crate) fn render_chrome<W: Write + ?Sized>(
         stdout,
         "Blocked: {} blocked",
         styler.wrap(palette::BLOCKED, "\u{2298}")
-    )
+    )?;
+
+    render_mutation_legend(stdout, rows, styler)
+}
+
+/// The `Mutations:` legend, or nothing when no row in `rows` carries a
+/// pending or failed Mutation. `rows` is exactly the set already put on
+/// screen, with nothing filtered a second time, so folding the two flags
+/// directly over it can never name a marker glyph that never rendered.
+fn render_mutation_legend<W: Write + ?Sized>(
+    stdout: &mut W,
+    rows: &[ListRow],
+    styler: SubStyler,
+) -> std::io::Result<()> {
+    let failed = rows.iter().any(|row| row.has_failed_mutation);
+    let pending = rows.iter().any(|row| row.has_pending_mutation);
+    if !failed && !pending {
+        return Ok(());
+    }
+    write!(stdout, "Mutations: ")?;
+    if failed {
+        write!(
+            stdout,
+            "{} failed",
+            styler.wrap(palette::MUTATION_FAILED, "\u{2691}")
+        )?;
+    }
+    if failed && pending {
+        write!(stdout, "  ")?;
+    }
+    if pending {
+        write!(
+            stdout,
+            "{} unsent",
+            styler.wrap(palette::MUTATION_PENDING, "~")
+        )?;
+    }
+    writeln!(stdout)
 }
 
 fn render_total<W: Write + ?Sized>(
