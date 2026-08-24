@@ -201,6 +201,23 @@ Scope: project-1 (Epic + child Tickets)
 .fi
 .RE
 .PP
+When the earliest unresolved Mutation in the Mutation Log is failed or
+applying,
+.B tk list
+prints a banner above the tree (or above the empty-view line) naming its
+Mutation Sequence, state, and target Display ID:
+.PP
+.RS 4
+.nf
+Sync: Mutation 7 failed on gh-12 (tk sync log 7)
+.fi
+.RE
+.PP
+A pending head prints no banner, since that is the ordinary state between
+syncs. The named item may sit outside the active Scope or outside the
+current view \(em the banner reports where the Mutation Log is stuck, not
+which rows are in view.
+.PP
 In every view a Ticket whose Selection State is not the default
 .B accepted
 carries a dim badge \(em
@@ -210,17 +227,29 @@ for captured work not yet accepted,
 for accepted work held out of automatic selection. Accepted Tickets carry no
 badge.
 .PP
-On success with one local Ticket,
+A row whose Item carries a Mutation the Backend has not yet received shows a
+marker immediately before the title \(em ~ for a pending Mutation, ⚑ for a
+failed one, or ⚑ ~ when both apply. The marker renders even on a done row,
+since a queued or failed Mutation means the Backend does not yet agree with
+the Item's current state; only the summary legend below is conditional \(em
+it names a
+.B Mutations:
+line only when at least one row carries a marker.
+.PP
+On success with one local Ticket carrying an edit queued behind a Promotion
+that has not applied yet,
 .B tk list
 prints:
 .PP
 .RS 4
 .nf
-○ project-1 ● P2 Investigate flaky login retry
+○ project-1 ● P2 ~ Investigate flaky login retry
 --------------------------------------------------------------------------------
 Total: 1 item (1 open)
 
 Status: ○ open  ◐ active  ✓ done
+Blocked: ⊘ blocked
+Mutations: ~ pending
 .fi
 .RE
 .SS Searching by title
@@ -257,17 +286,21 @@ No items match "auth".
 .fi
 .RE
 .PP
-On success it prints the matching rows followed by the List Tree summary:
+On success it prints the matching rows followed by the List Tree summary. A
+done Ticket queued for a status update to the Backend still carries its
+marker \(em closing it locally does not mean the Backend agrees yet:
 .PP
 .RS 4
 .nf
 ○ project-1 [epic] Auth rework
 ◐ project-2 ● P2 Add auth middleware
-✓ project-3 ● P2 Auth token refresh
+✓ project-3 ● P2 ~ Auth token refresh
 --------------------------------------------------------------------------------
 Total: 3 items (1 open, 1 active, 1 done)
 
 Status: ○ open  ◐ active  ✓ done
+Blocked: ⊘ blocked
+Mutations: ~ pending
 .fi
 .RE
 .SS Searching content

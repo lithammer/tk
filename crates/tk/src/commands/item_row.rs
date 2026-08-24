@@ -31,21 +31,46 @@ fn selection_badge(selection_state: Option<SelectionState>) -> Option<&'static s
     }
 }
 
+/// Which Mutation marker glyphs [`render_row`] actually put on a row.
+///
+/// Accumulated across the rendered rows and handed to [`render_chrome`], so
+/// the legend explains the glyphs that reached the screen rather than the
+/// flags they were derived from. Those two can part company: `render_row`
+/// already suppresses `⊘` on a `done` row despite the flag being set.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct MutationMarkers {
+    failed: bool,
+    pending: bool,
+}
+
+impl MutationMarkers {
+    /// Union, for accumulating across rows.
+    pub(crate) fn merge(self, other: Self) -> Self {
+        Self {
+            failed: self.failed || other.failed,
+            pending: self.pending || other.pending,
+        }
+    }
+}
+
 /// Render one row, prefixed by `tree_prefix` (empty for a flat layout, a
 /// tree glyph for a nested List Tree child).
 ///
 /// A `done` row never renders the blocked treatment (ADR-0025): closing an
 /// item resolves none of its blockers, so a finished item can still carry an
 /// unresolved blocker, but dimming it and printing `⊘` would read as nonsense.
-/// `tk list` never feeds a `done` row here (every list view is open/active
-/// only), so this gate changes only `tk search` output and keeps `tk list`
-/// byte-identical.
+/// `tk list` can feed a `done` row here too: `LIST_ROWS_SQL`'s
+/// epic-parent-inclusion branch carries no status predicate on the parent, so
+/// a `done` Epic with a matching child already reaches this gate through
+/// `--ready` / `--blocked` / `--active` / `--triage` / `--parked`. Whether
+/// that Epic should surface at all is tk-163's to decide; this gate's
+/// behaviour once it does is unaffected either way.
 pub(crate) fn render_row<W: Write + ?Sized>(
     stdout: &mut W,
     row: &ListRow,
     tree_prefix: &str,
     styler: SubStyler,
-) -> std::io::Result<()> {
+) -> std::io::Result<MutationMarkers> {
     stdout.write_all(tree_prefix.as_bytes())?;
 
     let show_blocked = row.has_unresolved_blocker && row.status != ItemStatus::Done;
@@ -72,7 +97,7 @@ pub(crate) fn render_row<W: Write + ?Sized>(
     match row.item_class {
         ItemClass::Ticket => {
             // A triage Ticket carries no Priority (ADR-0027); omit the `● P_`
-            // marker. The `[bug]` marker and title still render.
+            // marker. The `[bug]` marker still renders.
             if let Some(priority) = row.priority {
                 let p_style = palette::priority_style(priority);
                 write!(stdout, " {} ", styler.wrap(p_style, "\u{25cf}"))?;
@@ -84,26 +109,59 @@ pub(crate) fn render_row<W: Write + ?Sized>(
             if let Some(badge) = selection_badge(row.selection_state) {
                 write!(stdout, " {}", styler.wrap(palette::SELECTION_BADGE, badge))?;
             }
-            stdout.write_all(b" ")?;
-            sanitize::write_sanitized_line(stdout, row.title.as_bytes())?;
         }
         ItemClass::Epic => {
-            write!(stdout, " {} ", styler.wrap(palette::KIND_EPIC, "[epic]"))?;
-            sanitize::write_sanitized_line(stdout, row.title.as_bytes())?;
+            write!(stdout, " {}", styler.wrap(palette::KIND_EPIC, "[epic]"))?;
         }
     }
+
+    // Mutation markers sit immediately before the title in both arms above:
+    // the Ticket arm's selection badge is not an anchor the Epic arm has
+    // (Selection State is Ticket-only, ADR-0027), and a Backend Epic can
+    // carry its own Mutation (`update_epic`, `set_item_status`,
+    // `add_ticket_to_epic`). Failed leads pending — the actionable marker
+    // comes first — and both render on a `done` row (ADR-0040): a `done`
+    // Backend Item with a queued Mutation is exactly the case where the
+    // Backend does not yet agree the Item is done.
+    let mut markers = MutationMarkers::default();
+    if row.has_failed_mutation {
+        write!(
+            stdout,
+            " {}",
+            styler.wrap(palette::MUTATION_FAILED, "\u{2691}")
+        )?;
+        markers.failed = true;
+    }
+    if row.has_pending_mutation {
+        write!(stdout, " {}", styler.wrap(palette::MUTATION_PENDING, "~"))?;
+        markers.pending = true;
+    }
+    stdout.write_all(b" ")?;
+    sanitize::write_sanitized_line(stdout, row.title.as_bytes())?;
 
     if show_blocked {
         write!(stdout, "{}", styler.close(palette::BLOCKED_ROW))?;
     }
-    stdout.write_all(b"\n")
+    stdout.write_all(b"\n")?;
+    Ok(markers)
 }
 
 /// Render the summary chrome printed below a non-empty row set: a separator
-/// line, the `Total: N items (…)` tally, and the status / blocked legend.
+/// line, the `Total: N items (…)` tally, the status / blocked legend, and —
+/// only when at least one row carries one — a `Mutations:` legend naming the
+/// marker glyphs present.
+///
+/// The `Mutations:` line is conditional, unlike `Status:` / `Blocked:`,
+/// which print unconditionally even when no row matches (`Blocked: ⊘
+/// blocked` prints on a store with nothing blocked). An always-on legend for
+/// a condition most stores never hit would be noise, and the omission is why
+/// every pre-existing scenario snapshot — none of which carries a marked
+/// row — stays byte-identical. `markers` is what the rows actually rendered;
+/// see [`MutationMarkers`].
 pub(crate) fn render_chrome<W: Write + ?Sized>(
     stdout: &mut W,
     rows: &[ListRow],
+    markers: MutationMarkers,
     styler: SubStyler,
 ) -> std::io::Result<()> {
     let counts = StatusCounts::tally(rows);
@@ -140,7 +198,39 @@ pub(crate) fn render_chrome<W: Write + ?Sized>(
         stdout,
         "Blocked: {} blocked",
         styler.wrap(palette::BLOCKED, "\u{2298}")
-    )
+    )?;
+
+    render_mutation_legend(stdout, markers, styler)
+}
+
+/// The `Mutations:` legend, or nothing when no marker was rendered.
+///
+/// Takes what [`render_row`] emitted rather than re-reading the rows, so the
+/// legend cannot name a glyph that never reached the screen — a row's flags
+/// and the marker drawn from them can diverge, the way `show_blocked` already
+/// suppresses `⊘` on a `done` row.
+fn render_mutation_legend<W: Write + ?Sized>(
+    stdout: &mut W,
+    markers: MutationMarkers,
+    styler: SubStyler,
+) -> std::io::Result<()> {
+    let mut entries = Vec::new();
+    if markers.failed {
+        entries.push(format!(
+            "{} failed",
+            styler.wrap(palette::MUTATION_FAILED, "\u{2691}")
+        ));
+    }
+    if markers.pending {
+        entries.push(format!(
+            "{} pending",
+            styler.wrap(palette::MUTATION_PENDING, "~")
+        ));
+    }
+    if entries.is_empty() {
+        return Ok(());
+    }
+    writeln!(stdout, "Mutations: {}", entries.join("  "))
 }
 
 fn render_total<W: Write + ?Sized>(

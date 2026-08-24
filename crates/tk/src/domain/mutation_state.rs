@@ -58,6 +58,22 @@ pub enum MutationState {
 }
 
 impl MutationState {
+    /// Every state, written out rather than derived for the same reason
+    /// [`text`] is: a caller that has to reason over the whole set — checking
+    /// a stored spelling, or walking the transition table above — reads this
+    /// list instead of maintaining its own.
+    ///
+    /// [`text`]: MutationState::text
+    pub const ALL: [Self; 7] = [
+        Self::Pending,
+        Self::Failed,
+        Self::Applying,
+        Self::Skipped,
+        Self::Cancelled,
+        Self::Abandoned,
+        Self::Applied,
+    ];
+
     /// SQLite storage and CLI rendering string. Matches the `mutations.state`
     /// CHECK constraint exactly. Written out explicitly rather than derived from
     /// the variant names so renaming a variant cannot silently break the SQL
@@ -104,5 +120,15 @@ mod tests {
     #[test]
     fn display_writes_text() {
         assert_eq!(format!("{}", MutationState::Skipped), "skipped");
+    }
+
+    #[test]
+    fn all_lists_every_variant_exactly_once() {
+        // A missing or duplicated entry here means ALL has silently drifted
+        // from the enum, defeating its purpose as the caller's whole-set view.
+        let mut texts: Vec<&str> = MutationState::ALL.iter().map(|s| s.text()).collect();
+        texts.sort_unstable();
+        texts.dedup();
+        assert_eq!(texts.len(), MutationState::ALL.len());
     }
 }

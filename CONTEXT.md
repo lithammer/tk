@@ -654,16 +654,42 @@ _Avoid_: ticket, tickets
   code owns **Scope** resolution from argument or environment.
 - **`tk next`** takes only the optional **Scope** argument; it has no other
   flags in v1.
-- Done-item browsing through **`tk next`** / **`tk list`** is deferred; those
-  views do not surface `done` items. **`tk search`** is the sanctioned path for
-  finding a specific `done` **Ticket** or **Epic** by title, since it matches
-  every **Item Status**.
+- Done-item browsing through **`tk next`** is deferred; **`tk next`** selects
+  ready **Tickets** only and never surfaces a `done` item. **`tk list --ready`**
+  (and `--blocked`, `--active`, `--triage`, `--parked`) can surface a `done`
+  **Epic** as a container when it has a matching child **Ticket**.
+  **`tk search`** is the sanctioned path for finding a specific `done`
+  **Ticket** or **Epic** by title, since it matches every **Item Status**.
 - **`tk list`** takes an optional positional `<epic-id>` argument; absent it, **`tk list`** reads `TK_SCOPE`, then renders the whole **Repository Store**.
 - When a **Scope** is active, **`tk list`** renders only that **Epic** and its child **Tickets**, and prints a hint that the view is filtered.
 - **List Tree** renders **Epics** as top-level rows, child **Tickets** nested under their **Epic**, and unparented **Tickets** as top-level rows.
-- **List Tree** uses decorative tree glyphs and compact status, priority, and kind markers without column alignment.
+- **List Tree** uses decorative tree glyphs and compact status, priority, kind, and Mutation markers without column alignment.
 - **List Tree** status markers render **Item Status** as `○` for `open`, `◐`
   for `active`, and `✓` for `done`.
+- A row whose **Item** carries a pending or failed **Mutation** shows a
+  marker immediately before the title — `~` for pending, `⚑` for failed, or
+  `⚑ ~` when both apply.
+- The **List Tree** summary chrome adds a `Mutations:` legend naming only the
+  marker glyphs present anywhere in the rendered row set, and omits the line
+  entirely when no row carries either.
+- When the earliest nonterminal **Mutation** in the **Mutation Log** is
+  `failed` or `applying`, **`tk list`** prints a banner above the **List
+  Tree** (or the empty-view line) naming its **Mutation Sequence**, state,
+  and target **Display ID**, and pointing at **`tk sync log`**. It renders
+  even when the named **Item** sits outside the active **Scope** or outside
+  the current view entirely — the banner reports where the **Mutation Log**
+  is stuck, not which rows are in view. A `pending` head prints no banner,
+  since that is the ordinary state between syncs.
+- The banner names any **Mutation** at the head, including a **Promotion**,
+  while the row markers exclude **Promotions**. So a rejected **Promotion**
+  produces a banner whose named **Item** carries no row marker; **`tk sync
+  log`** is where that case is legible until a **Pending Promotion** is
+  surfaced in its own right.
+- **`tk show`** groups every **Mutation** targeting the **Item** into two
+  sections: one for a `pending`, `failed`, or `applying` **Mutation**, and one
+  for a `skipped`, `cancelled`, or `abandoned` **Mutation**; an `applied`
+  **Mutation** appears in neither. Each section is omitted when it has none
+  and points the reader at **`tk sync log`** for detail.
 - **`tk next`** does not select **Epics**.
 - **`tk list --ready`** keeps the **List Tree** shape and includes non-empty **Epics** as containers for ready child **Tickets**.
 - **`tk search`** finds **Tickets** and **Epics** whose title contains the query as a case-insensitive literal substring.
@@ -671,6 +697,11 @@ _Avoid_: ticket, tickets
 - **`tk search`** matches title text only. Exact **Display ID** / **Alias** lookup is **`tk show`**; title-or-body content search is **`tk grep`**.
 - **`tk search`** renders matches reusing **`tk list`** row rendering and chrome, laid out flat without **List Tree** nesting.
 - **`tk search`** takes a single required positional query and has no flags in v1; result limiting, **Origin** / **Ticket Kind** / **Priority** / status filtering, and sorting are deferred.
+- **`tk search`** shares **`tk list`**'s row markers and legend but not its
+  stuck-queue banner, so a `~` or `⚑` marker there carries no way to reach
+  the "queued behind someone else's problem" reading the banner provides.
+  The reader cannot tell an unsent edit of their own from someone else's
+  failure blocking the queue; **`tk list`** or **`tk sync log`** answers that.
 - **`tk grep`** finds **Tickets** and **Epics** whose title or body text matches a regular expression, rendering each match as a **`tk show`**-style block with the body collapsed to the matching lines plus surrounding context.
 - **`tk grep`** covers the whole **Repository Store** and every **Item Status**; like **`tk search`** it ignores **Scope** and is never narrowed by `TK_SCOPE`, because a lookup must not be silently narrowed.
 - **`tk grep`** matches title and body text; it is content search, distinct from **`tk search`** (title-only item lookup) and **`tk show`** (exact identifier lookup).
@@ -909,3 +940,9 @@ _Avoid_: ticket, tickets
   not police; the external CLI's own failure is the diagnostic. Silently keeping
   such a relationship local was rejected, since nothing would then tell the user
   their request was dropped.
+- Whether a `done` **Epic** should surface as a container in the filtered
+  **`tk list`** views was never considered when Epic-parent inclusion was
+  designed — open (tk-163): it does today, because the inclusion rule tests
+  only that the **Epic** has a matching child. ADR-0025's amendment records
+  that its byte-safety premise was wrong; the rendering decision that premise
+  was justifying stands.

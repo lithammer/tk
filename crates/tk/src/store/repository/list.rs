@@ -36,6 +36,17 @@ pub struct ListRow {
     pub selection_state: Option<SelectionState>,
     pub created_seq: i64,
     pub has_unresolved_blocker: bool,
+    /// True when the Item has a `pending` Mutation whose type is not a
+    /// Promotion (`promote_ticket` / `promote_epic`). The Promotion
+    /// exclusion is part of the flag's meaning, not a display choice: it
+    /// keeps "a queued edit to an existing Backend object" from being
+    /// conflated with "this Item is not on the Backend at all". There is no
+    /// Origin filter — `is_backend_bound()` is true for a Pending Promotion,
+    /// so a Local Item can carry non-Promotion Mutations queued behind it,
+    /// and those are genuinely unsent.
+    pub has_pending_mutation: bool,
+    /// Same contract as `has_pending_mutation`, for the `failed` state.
+    pub has_failed_mutation: bool,
 }
 
 /// Item-selection mode for `tk list`.
@@ -182,7 +193,21 @@ matching as ( \
 ) \
 select id, display_value, item_class, ticket_kind, priority, title, \
        status, origin, container_id, selection_state, created_seq, \
-       (has_unresolved_dependency or has_unresolved_external_blocker) as has_unresolved_blocker \
+       (has_unresolved_dependency or has_unresolved_external_blocker) as has_unresolved_blocker, \
+       exists ( \
+           select 1 \
+             from mutations m \
+            where m.item_id = parent.id \
+              and m.state = 'pending' \
+              and m.mutation_type not in ('promote_ticket', 'promote_epic') \
+       ) as has_pending_mutation, \
+       exists ( \
+           select 1 \
+             from mutations m \
+            where m.item_id = parent.id \
+              and m.state = 'failed' \
+              and m.mutation_type not in ('promote_ticket', 'promote_epic') \
+       ) as has_failed_mutation \
   from matching parent \
  where (?2 = 'any' or parent.origin = ?2) \
    and (?3 = 'any' or parent.item_class = ?3) \
@@ -222,7 +247,6 @@ pub fn list_rows(store: &Store, options: ListOptions<'_>) -> Result<Vec<ListRow>
 }
 
 pub(super) fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<ListRow> {
-    let has_unresolved_blocker: i64 = row.get(11)?;
     Ok(ListRow {
         id: row.get(0)?,
         display_id: row.get(1)?,
@@ -235,16 +259,21 @@ pub(super) fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<ListRow>
         container_id: row.get(8)?,
         selection_state: row.get(9)?,
         created_seq: row.get(10)?,
-        has_unresolved_blocker: has_unresolved_blocker != 0,
+        has_unresolved_blocker: row.get(11)?,
+        has_pending_mutation: row.get(12)?,
+        has_failed_mutation: row.get(13)?,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::mutation_state::MutationState;
+    use crate::domain::mutation_type::MutationType;
     use crate::store::migrations;
     use crate::store::testing::{
-        FixtureItem, insert_dependency, insert_external_blocker, insert_fixture_item,
+        FixtureItem, FixtureMutation, insert_dependency, insert_external_blocker,
+        insert_fixture_item, insert_fixture_mutation,
     };
     use rusqlite::Connection;
 
@@ -290,6 +319,29 @@ mod tests {
 
     fn display_ids(rows: &[ListRow]) -> Vec<&str> {
         rows.iter().map(|r| r.display_id.as_str()).collect()
+    }
+
+    fn seed_mutation(
+        store: &Store,
+        sequence: i64,
+        item_id: &str,
+        item_class: &str,
+        mutation_type: &str,
+        state: &str,
+    ) {
+        insert_fixture_mutation(
+            &store.conn,
+            FixtureMutation {
+                sequence,
+                mutation_type,
+                item_id,
+                item_class,
+                state,
+                failure_json: (state == "failed").then_some(r#"{"detail":"prior"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
     }
 
     #[test]
@@ -405,6 +457,41 @@ mod tests {
         .unwrap();
         // Parent Epic surfaces alongside the child Ticket; the renderer
         // uses the parent to plot the tree.
+        assert!(display_ids(&rows).contains(&"tk-1"));
+        assert!(display_ids(&rows).contains(&"tk-2"));
+    }
+
+    #[test]
+    fn ready_view_still_surfaces_a_done_epic_parent() {
+        // Characterizes what LIST_ROWS_SQL does today, not what it should
+        // do: the epic-parent-inclusion branch above carries no status
+        // predicate on the parent, so a `done` Epic with a ready child still
+        // surfaces here (tk-163). If this test starts failing, tk-163 added
+        // that predicate on purpose — invert the assertion, don't chase a
+        // regression.
+        let store = open_seeded();
+        seed_epic(&store, "epic", "tk-1", "done", 1);
+        insert_fixture_item(
+            &store.conn,
+            FixtureItem {
+                id: "child",
+                display: "tk-2",
+                title: "Child",
+                container_id: Some("epic"),
+                container_class: Some("epic"),
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        let rows = list_rows(
+            &store,
+            ListOptions {
+                view: ListView::Ready,
+                ..ListOptions::default()
+            },
+        )
+        .unwrap();
         assert!(display_ids(&rows).contains(&"tk-1"));
         assert!(display_ids(&rows).contains(&"tk-2"));
     }
@@ -750,5 +837,153 @@ mod tests {
             )
             .unwrap_or_else(|err| panic!("variant {view:?} failed: {err}"));
         }
+    }
+
+    #[test]
+    fn every_mutation_state_drives_the_pending_and_failed_flags() {
+        // Driven off `MutationState::ALL` so a state added later fails here
+        // rather than going silently untested. `applying` and `abandoned` are
+        // seeded on `promote_ticket` because migration 010's CHECK confines
+        // them there; they cover those two states, not the Promotion
+        // exclusion — neither state matches either subquery, so both flags
+        // stay clear whether the exclusion is there or not. The exclusion is
+        // guarded by `every_promotion_mutation_type_is_excluded_from_the_flags`.
+        let store = open_seeded();
+        let mut expected = Vec::new();
+        for (i, state) in MutationState::ALL.into_iter().enumerate() {
+            let seq = i64::try_from(i).unwrap() + 1;
+            let (mutation_type, expect_pending, expect_failed) = match state {
+                MutationState::Pending => ("update_ticket", true, false),
+                MutationState::Failed => ("update_ticket", false, true),
+                MutationState::Applied | MutationState::Skipped | MutationState::Cancelled => {
+                    ("update_ticket", false, false)
+                }
+                MutationState::Applying | MutationState::Abandoned => {
+                    ("promote_ticket", false, false)
+                }
+            };
+            let item_id = state.text();
+            seed_ticket(&store, item_id, &format!("tk-{seq}"), "open", seq);
+            seed_mutation(&store, seq, item_id, "ticket", mutation_type, state.text());
+            expected.push((state, mutation_type, expect_pending, expect_failed));
+        }
+
+        let rows = list_rows(&store, ListOptions::default()).unwrap();
+        for (state, mutation_type, expect_pending, expect_failed) in expected {
+            let row = rows.iter().find(|r| r.id == state.text()).unwrap();
+            assert_eq!(
+                row.has_pending_mutation, expect_pending,
+                "state={state} type={mutation_type}"
+            );
+            assert_eq!(
+                row.has_failed_mutation, expect_failed,
+                "state={state} type={mutation_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_promotion_mutation_type_is_excluded_from_the_flags() {
+        // The queries spell the excluded types as a literal; this drives the
+        // same set off `MutationType::is_promotion`, so a third Promotion kind
+        // added later fails here rather than silently lighting a marker on an
+        // Item that is not on the Backend at all.
+        let store = open_seeded();
+        seed_ticket(&store, "t", "tk-1", "open", 1);
+        seed_epic(&store, "e", "tk-2", "open", 2);
+
+        let promotions: Vec<MutationType> = MutationType::ALL
+            .into_iter()
+            .filter(|t| t.is_promotion())
+            .collect();
+        assert!(!promotions.is_empty(), "no Promotion types to check");
+
+        // Both states the flags key on, because the two subqueries carry the
+        // exclusion separately: seeding only `pending` leaves the `failed`
+        // one unguarded.
+        let mut seq = 0;
+        for mutation_type in promotions {
+            // The composite foreign key pins item_class to the target's class.
+            let (item_id, item_class) = match mutation_type {
+                MutationType::PromoteTicket => ("t", "ticket"),
+                MutationType::PromoteEpic => ("e", "epic"),
+                other => panic!(
+                    "new Promotion type {} needs a fixture target Item here",
+                    other.text()
+                ),
+            };
+            for state in ["pending", "failed"] {
+                seq += 1;
+                seed_mutation(
+                    &store,
+                    seq,
+                    item_id,
+                    item_class,
+                    mutation_type.text(),
+                    state,
+                );
+            }
+        }
+
+        let rows = list_rows(&store, ListOptions::default()).unwrap();
+        for row in &rows {
+            assert!(
+                !row.has_pending_mutation && !row.has_failed_mutation,
+                "{} lit a marker from a Promotion alone",
+                row.display_id
+            );
+        }
+    }
+
+    #[test]
+    fn pending_promotion_with_a_later_edit_sets_pending() {
+        // `is_backend_bound()` is true for a Pending Promotion, so nothing
+        // filters this Local Item's later edit out — it is unsent work
+        // exactly as pending as one queued behind a Backend Item.
+        let store = open_seeded();
+        seed_ticket(&store, "t1", "tk-1", "open", 1);
+        seed_mutation(&store, 1, "t1", "ticket", "promote_ticket", "pending");
+        seed_mutation(&store, 2, "t1", "ticket", "set_item_status", "pending");
+        let rows = list_rows(&store, ListOptions::default()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].has_pending_mutation);
+        assert!(!rows[0].has_failed_mutation);
+    }
+
+    #[test]
+    fn epic_with_its_own_failed_mutation_reports_failed() {
+        let store = open_seeded();
+        seed_epic(&store, "e1", "tk-1", "open", 1);
+        seed_mutation(&store, 1, "e1", "epic", "update_epic", "failed");
+        let rows = list_rows(&store, ListOptions::default()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].has_failed_mutation);
+        assert!(!rows[0].has_pending_mutation);
+    }
+
+    #[test]
+    fn epic_parent_does_not_inherit_a_childs_pending_mutation() {
+        // The flag is per-Item, not a subtree rollup: a child's unsent edit
+        // must not make the parent Epic's own row look unsent.
+        let store = open_seeded();
+        seed_epic(&store, "epic", "tk-1", "open", 1);
+        insert_fixture_item(
+            &store.conn,
+            FixtureItem {
+                id: "child",
+                display: "tk-2",
+                title: "Child",
+                container_id: Some("epic"),
+                container_class: Some("epic"),
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        seed_mutation(&store, 1, "child", "ticket", "update_ticket", "pending");
+        let rows = list_rows(&store, ListOptions::default()).unwrap();
+        let epic_row = rows.iter().find(|r| r.id == "epic").unwrap();
+        assert!(!epic_row.has_pending_mutation);
+        assert!(!epic_row.has_failed_mutation);
     }
 }

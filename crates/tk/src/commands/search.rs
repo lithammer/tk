@@ -11,7 +11,7 @@ use std::io::Write;
 use clap::Args as ClapArgs;
 
 use crate::cli::{self, CommandError, Deps, Exit};
-use crate::commands::item_row::{render_chrome, render_row};
+use crate::commands::item_row::{MutationMarkers, render_chrome, render_row};
 use crate::commands::resolver;
 use crate::render::styler::SubStyler;
 use crate::store::repository::list::ListRow;
@@ -63,10 +63,11 @@ fn render<W: Write + ?Sized>(
         return writeln!(stdout, "No items match \"{query}\".");
     }
 
+    let mut markers = MutationMarkers::default();
     for row in rows {
-        render_row(stdout, row, "", styler)?;
+        markers = markers.merge(render_row(stdout, row, "", styler)?);
     }
-    render_chrome(stdout, rows, styler)
+    render_chrome(stdout, rows, markers, styler)
 }
 
 #[cfg(test)]
@@ -77,7 +78,8 @@ mod tests {
     use crate::render::Styler;
     use crate::store::migrations;
     use crate::store::testing::{
-        FixtureItem, TmpStore, insert_dependency, insert_external_blocker, insert_fixture_item,
+        FixtureItem, FixtureMutation, TmpStore, insert_dependency, insert_external_blocker,
+        insert_fixture_item, insert_fixture_mutation,
     };
     use rand::SeedableRng;
     use rand::rngs::StdRng;
@@ -405,6 +407,66 @@ mod tests {
         assert!(
             stderr.contains("tk search: Repository Store not initialized; run 'tk init'"),
             "stderr={stderr:?}"
+        );
+    }
+
+    #[test]
+    fn done_row_renders_a_pending_mutation_marker() {
+        // ADR-0040: unlike the blocked treatment (suppressed on `done`), the
+        // Mutation markers render on a `done` row — a `done` Backend Item with
+        // a queued Mutation is exactly the case where the Backend does not yet
+        // agree the Item is done.
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "done",
+                display: "tk-1",
+                title: "Auth done",
+                status: "done",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "set_item_status",
+                item_id: "done",
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run_rendered(
+            &mut h,
+            Args {
+                query: "auth".to_owned(),
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        let stdout = String::from_utf8(h.stdout).unwrap();
+        let line = stdout
+            .lines()
+            .find(|l| l.contains("tk-1"))
+            .unwrap_or_else(|| panic!("no row for tk-1 in {stdout:?}"));
+        assert!(
+            line.contains('~'),
+            "a done row with a queued Mutation should still show the pending \
+             marker: {line:?}"
+        );
+        assert!(
+            stdout.contains("Mutations: ~ pending\n"),
+            "the marker on the row must be explained by the legend; a missing \
+             legend means search's marker fold never reached render_chrome: {stdout:?}"
         );
     }
 }
