@@ -201,6 +201,23 @@ Scope: project-1 (Epic + child Tickets)
 .fi
 .RE
 .PP
+When the earliest unresolved Mutation in the Mutation Log is failed or
+applying,
+.B tk list
+prints a banner above the tree (or above the empty-view line) naming its
+Mutation Sequence, state, and target Display ID:
+.PP
+.RS 4
+.nf
+Sync: Mutation 7 failed on gh-12 (tk sync log 7)
+.fi
+.RE
+.PP
+A pending head prints no banner, since that is the ordinary state between
+syncs. The named item may sit outside the active Scope or outside the
+current view \(em the banner reports where the Mutation Log is stuck, not
+which rows are in view.
+.PP
 In every view a Ticket whose Selection State is not the default
 .B accepted
 carries a dim badge \(em

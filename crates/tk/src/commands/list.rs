@@ -17,8 +17,10 @@ use clap::Args as ClapArgs;
 use crate::cli::{self, CommandError, Deps, Exit};
 use crate::commands::item_row::{render_chrome, render_row};
 use crate::commands::{resolver, scope};
+use crate::domain::mutation_state::MutationState;
 use crate::render::palette;
 use crate::render::styler::SubStyler;
+use crate::store::promotion::{self as store_promotion, MutationSummary};
 use crate::store::repository::list::{
     self, ListClassFilter, ListOptions, ListOriginFilter, ListRow, ListView,
 };
@@ -87,6 +89,16 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         }
     }
 
+    // `earliest_applicable_mutation` lives in `store/promotion.rs`, though
+    // ARCHITECTURE.md assigns Mutation Log inspection to `store/sync.rs`;
+    // reused here rather than duplicated because it is already the read
+    // `tk promote` relies on to report the same queue head.
+    let queue_head = store_promotion::earliest_applicable_mutation(store.conn())
+        .map_err(|err| resolver::storage_error(&err))?;
+    if let Err(err) = render_queue_head_banner(deps.stdout, queue_head.as_ref(), out) {
+        return cli::write_error(&err);
+    }
+
     if let Err(err) = render(deps.stdout, &rows, options, out) {
         return cli::write_error(&err);
     }
@@ -107,6 +119,62 @@ fn render_scope_hint<W: Write + ?Sized>(
         styler.wrap(palette::HEADER, "Scope:"),
         styler.wrap(palette::KIND_EPIC, display_id),
         styler.wrap(palette::SEPARATOR, "(Epic + child Tickets)"),
+    )
+}
+
+/// One-line banner naming the Mutation Log's queue head: its Mutation
+/// Sequence, state, and target Display ID, pointing at `tk sync log
+/// <sequence>` for detail. No-op when there is no queue head, or when it is
+/// not one of the two states below.
+///
+/// Fires only for a `Failed` or `Applying` head — the two states that need a
+/// human. A `Pending` head is the ordinary state between syncs for a
+/// local-first tracker with opt-in Backend support, so an unconditional
+/// banner would print on nearly every invocation, and a signal always on is
+/// a signal nobody reads. This is the same informational/actionable split
+/// the row markers draw between `~` and `⚑`.
+///
+/// Never claims a cause: `sync_cursors` has no last-error column, and an
+/// Apply that hits an environment failure leaves the in-flight row `pending`
+/// with no outcome recorded (see `earliest_applicable_mutation`'s doc
+/// comment), so the store cannot tell "sync could not reach the Backend"
+/// from "sync has not run yet" — the common case. The banner says where the
+/// queue is stuck, not why.
+///
+/// Never carries an item count: a store-wide rollup would count Items that
+/// Scope, `--local` / `--remote`, and `--epic` deliberately exclude,
+/// contradicting ADR-0022's confinement of this command. Naming the queue
+/// head is a statement about the Mutation Log, not the rows in view — so
+/// under an active Scope the banner may correctly name an Item outside that
+/// Scope, directly beneath the `Scope:` hint. That is not a bug.
+///
+/// Never restates recovery guidance: `unresolved_failure` in
+/// `commands/promote.rs` owns the verbatim ADR-0017 wording for `tk promote
+/// reconcile` / `retry` / `cancel`. This banner only points at `tk sync log`.
+fn render_queue_head_banner<W: Write + ?Sized>(
+    stdout: &mut W,
+    head: Option<&MutationSummary>,
+    styler: SubStyler,
+) -> std::io::Result<()> {
+    let Some(head) = head else {
+        return Ok(());
+    };
+    if !matches!(head.state, MutationState::Failed | MutationState::Applying) {
+        return Ok(());
+    }
+    let sync_log = format!("(tk sync log {})", head.sequence);
+    writeln!(
+        stdout,
+        "{} Mutation {} {} on {} {}",
+        styler.wrap(palette::HEADER, "Sync:"),
+        head.sequence,
+        head.state,
+        // MutationSummary carries no Item class, so ID_TICKET and ID_EPIC
+        // cannot be chosen between here; both resolve to cyan today, so the
+        // anchor renders identically either way. Revisit if the two colours
+        // ever diverge.
+        styler.wrap(palette::ID_TICKET, &head.target_display_id),
+        styler.wrap(palette::SEPARATOR, &sync_log),
     )
 }
 
@@ -1094,6 +1162,285 @@ mod tests {
             line.ends_with("\u{1b}[22m"),
             "the dim close should be the row's last byte sequence, proving the \
              marker's own close (39) did not reset it early: {line:?}"
+        );
+    }
+
+    #[test]
+    fn failed_queue_head_prints_the_sync_banner() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Row",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "update_ticket",
+                item_id: "t1",
+                state: "failed",
+                failure_json: Some(r#"{"detail":"boom"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run_rendered(&mut h, default_args());
+        assert_eq!(code, Exit::Ok);
+        let stdout = String::from_utf8(h.stdout).unwrap();
+        assert!(
+            stdout.contains("Sync: Mutation 1 failed on tk-1 (tk sync log 1)\n"),
+            "stdout={stdout:?}"
+        );
+    }
+
+    #[test]
+    fn applying_queue_head_prints_the_sync_banner() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Row",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        // `applying` is confined to promote_ticket/promote_epic with a
+        // matching item_class (migration 010's CHECK constraint).
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "promote_ticket",
+                item_id: "t1",
+                state: "applying",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run_rendered(&mut h, default_args());
+        assert_eq!(code, Exit::Ok);
+        let stdout = String::from_utf8(h.stdout).unwrap();
+        assert!(
+            stdout.contains("Sync: Mutation 1 applying on tk-1 (tk sync log 1)\n"),
+            "stdout={stdout:?}"
+        );
+    }
+
+    #[test]
+    fn pending_queue_head_prints_no_banner() {
+        // Pending is the ordinary state between syncs; a banner here would
+        // fire on nearly every invocation and stop meaning anything.
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Row",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "update_ticket",
+                item_id: "t1",
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run_rendered(&mut h, default_args());
+        assert_eq!(code, Exit::Ok);
+        let stdout = String::from_utf8(h.stdout).unwrap();
+        assert!(!stdout.contains("Sync:"), "stdout={stdout:?}");
+    }
+
+    #[test]
+    fn empty_mutation_log_prints_no_banner() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Row",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run_rendered(&mut h, default_args());
+        assert_eq!(code, Exit::Ok);
+        let stdout = String::from_utf8(h.stdout).unwrap();
+        assert!(!stdout.contains("Sync:"), "stdout={stdout:?}");
+    }
+
+    #[test]
+    fn failed_queue_head_banner_still_prints_above_an_empty_row_set() {
+        // The queue head can be a `done` Ticket the Default view never
+        // renders (WHEN IT FIRES, tk-158): the banner still has to appear,
+        // above the empty-view line, or a stuck queue on a done Ticket would
+        // be invisible.
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "d1",
+                display: "tk-1",
+                title: "Done row",
+                status: "done",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "update_ticket",
+                item_id: "d1",
+                state: "failed",
+                failure_json: Some(r#"{"detail":"boom"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run_rendered(&mut h, default_args());
+        assert_eq!(code, Exit::Ok);
+        let stdout = String::from_utf8(h.stdout).unwrap();
+        assert_eq!(
+            stdout,
+            "Sync: Mutation 1 failed on tk-1 (tk sync log 1)\nNo open or active items.\n"
+        );
+    }
+
+    #[test]
+    fn queue_head_banner_renders_below_the_scope_hint_and_may_name_an_out_of_scope_item() {
+        // The banner describes the Mutation Log, not the rows in view, so it
+        // may correctly name an Item the active Scope excludes (tk-158).
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "epic",
+                display: "tk-1",
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                title: "Epic",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "child",
+                display: "tk-2",
+                title: "Child",
+                container_id: Some("epic"),
+                container_class: Some("epic"),
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "loose",
+                display: "tk-3",
+                title: "Loose",
+                created_seq: 3,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "update_ticket",
+                item_id: "loose",
+                state: "failed",
+                failure_json: Some(r#"{"detail":"boom"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run_rendered(
+            &mut h,
+            Args {
+                epic_id: Some("tk-1".to_owned()),
+                ..default_args()
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        let stdout = String::from_utf8(h.stdout).unwrap();
+        let scope_at = stdout
+            .find("Scope: tk-1 (Epic + child Tickets)")
+            .unwrap_or_else(|| panic!("no Scope hint in {stdout:?}"));
+        let banner_at = stdout
+            .find("Sync: Mutation 1 failed on tk-3 (tk sync log 1)")
+            .unwrap_or_else(|| panic!("no Sync banner in {stdout:?}"));
+        let tree_at = stdout
+            .find("[epic] Epic")
+            .unwrap_or_else(|| panic!("no tree content in {stdout:?}"));
+        assert!(
+            scope_at < banner_at && banner_at < tree_at,
+            "expected Scope hint, then Sync banner, then the tree: {stdout:?}"
         );
     }
 }

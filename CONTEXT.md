@@ -672,6 +672,14 @@ _Avoid_: ticket, tickets
 - The **List Tree** summary chrome adds a `Mutations:` legend naming only the
   marker glyphs present anywhere in the rendered row set, and omits the line
   entirely when no row carries either.
+- When the earliest nonterminal **Mutation** in the **Mutation Log** is
+  `failed` or `applying`, **`tk list`** prints a banner above the **List
+  Tree** (or the empty-view line) naming its **Mutation Sequence**, state,
+  and target **Display ID**, and pointing at **`tk sync log`**. It renders
+  even when the named **Item** sits outside the active **Scope** or outside
+  the current view entirely — the banner reports where the **Mutation Log**
+  is stuck, not which rows are in view. A `pending` head prints no banner,
+  since that is the ordinary state between syncs.
 - **`tk show`** groups every **Mutation** targeting the **Item** into two
   sections: one for a `pending`, `failed`, or `applying` **Mutation**, and one
   for a `skipped`, `cancelled`, or `abandoned` **Mutation**; an `applied`
@@ -684,6 +692,11 @@ _Avoid_: ticket, tickets
 - **`tk search`** matches title text only. Exact **Display ID** / **Alias** lookup is **`tk show`**; title-or-body content search is **`tk grep`**.
 - **`tk search`** renders matches reusing **`tk list`** row rendering and chrome, laid out flat without **List Tree** nesting.
 - **`tk search`** takes a single required positional query and has no flags in v1; result limiting, **Origin** / **Ticket Kind** / **Priority** / status filtering, and sorting are deferred.
+- **`tk search`** shares **`tk list`**'s row markers and legend but not its
+  stuck-queue banner, so a `~` or `⚑` marker there carries no way to reach
+  the "queued behind someone else's problem" reading the banner provides.
+  The reader cannot tell an unsent edit of their own from someone else's
+  failure blocking the queue; **`tk list`** or **`tk sync log`** answers that.
 - **`tk grep`** finds **Tickets** and **Epics** whose title or body text matches a regular expression, rendering each match as a **`tk show`**-style block with the body collapsed to the matching lines plus surrounding context.
 - **`tk grep`** covers the whole **Repository Store** and every **Item Status**; like **`tk search`** it ignores **Scope** and is never narrowed by `TK_SCOPE`, because a lookup must not be silently narrowed.
 - **`tk grep`** matches title and body text; it is content search, distinct from **`tk search`** (title-only item lookup) and **`tk show`** (exact identifier lookup).
