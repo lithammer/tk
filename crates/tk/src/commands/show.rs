@@ -192,12 +192,11 @@ fn render<W: Write + ?Sized>(
         has_section = true;
     }
 
-    // Exhaustive over MutationState rather than a predicate like
-    // is_terminal(): applied is terminal too, so a predicate would only be
-    // correct because the renderer (not the store, see ItemMutation's doc
-    // comment) happens to drop it elsewhere. Writing out all seven variants
-    // means a state added later fails to compile here instead of silently
-    // landing in whichever bucket a predicate picked.
+    // Exhaustive over MutationState rather than a terminality predicate:
+    // applied is terminal too, so such a predicate would only be correct
+    // because rendering happens to drop applied elsewhere. Writing out all
+    // seven variants means a state added later fails to compile here instead
+    // of silently landing in whichever bucket the predicate picked.
     let mut unresolved = Vec::new();
     let mut withdrawn = Vec::new();
     for mutation in &detail.mutations {

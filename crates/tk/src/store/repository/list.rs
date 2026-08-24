@@ -271,6 +271,7 @@ pub(super) fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<ListRow>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::mutation_state::MutationState;
     use crate::store::migrations;
     use crate::store::testing::{
         FixtureItem, FixtureMutation, insert_dependency, insert_external_blocker,
@@ -841,44 +842,45 @@ mod tests {
     }
 
     #[test]
-    fn mutation_state_and_type_drive_pending_and_failed_flags() {
-        // `applying` and `abandoned` are omitted: migration 010's CHECK
-        // confines both to `promote_ticket` / `promote_epic`, so they can
-        // only ever land on the excluded Mutation type. Asserting they clear
-        // the flags would test that CHECK, not this query.
+    fn every_mutation_state_drives_the_pending_and_failed_flags() {
+        // Driven off `MutationState::ALL` so a state added later fails here
+        // rather than going silently untested. `applying` and `abandoned` are
+        // seeded on `promote_ticket` because migration 010's CHECK confines
+        // them there — for those two the assertion exercises the Promotion
+        // exclusion rather than the state arm, which is the other half of the
+        // same predicate. A bare state check would pass with
+        // `mutation_type not in (...)` dropped entirely; these rows are what
+        // catch that.
         let store = open_seeded();
-        let cases: &[(&str, &str, &str, bool, bool)] = &[
-            // (item_id, state, mutation_type, expect_pending, expect_failed)
-            ("pending-edit", "pending", "update_ticket", true, false),
-            ("failed-edit", "failed", "update_ticket", false, true),
-            ("applied-edit", "applied", "update_ticket", false, false),
-            ("skipped-edit", "skipped", "update_ticket", false, false),
-            ("cancelled-edit", "cancelled", "update_ticket", false, false),
-            // The type exclusion, not just the state: a bare state check
-            // would pass even if `mutation_type not in (...)` were dropped.
-            (
-                "pending-promotion",
-                "pending",
-                "promote_ticket",
-                false,
-                false,
-            ),
-        ];
-        for (i, (item_id, state, mutation_type, ..)) in cases.iter().enumerate() {
+        let mut expected = Vec::new();
+        for (i, state) in MutationState::ALL.into_iter().enumerate() {
             let seq = i64::try_from(i).unwrap() + 1;
+            let (mutation_type, expect_pending, expect_failed) = match state {
+                MutationState::Pending => ("update_ticket", true, false),
+                MutationState::Failed => ("update_ticket", false, true),
+                MutationState::Applied | MutationState::Skipped | MutationState::Cancelled => {
+                    ("update_ticket", false, false)
+                }
+                MutationState::Applying | MutationState::Abandoned => {
+                    ("promote_ticket", false, false)
+                }
+            };
+            let item_id = state.text();
             seed_ticket(&store, item_id, &format!("tk-{seq}"), "open", seq);
-            seed_mutation(&store, seq, item_id, "ticket", mutation_type, state);
+            seed_mutation(&store, seq, item_id, "ticket", mutation_type, state.text());
+            expected.push((state, mutation_type, expect_pending, expect_failed));
         }
+
         let rows = list_rows(&store, ListOptions::default()).unwrap();
-        for (item_id, state, mutation_type, expect_pending, expect_failed) in cases {
-            let row = rows.iter().find(|r| r.id == *item_id).unwrap();
+        for (state, mutation_type, expect_pending, expect_failed) in expected {
+            let row = rows.iter().find(|r| r.id == state.text()).unwrap();
             assert_eq!(
-                row.has_pending_mutation, *expect_pending,
-                "{item_id}: state={state} type={mutation_type}"
+                row.has_pending_mutation, expect_pending,
+                "state={state} type={mutation_type}"
             );
             assert_eq!(
-                row.has_failed_mutation, *expect_failed,
-                "{item_id}: state={state} type={mutation_type}"
+                row.has_failed_mutation, expect_failed,
+                "state={state} type={mutation_type}"
             );
         }
     }

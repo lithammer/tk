@@ -90,19 +90,6 @@ impl MutationState {
             Self::Applied => "applied",
         }
     }
-
-    /// Whether the transition table above has any edge leaving this state.
-    ///
-    /// Per the table: `skipped`, `cancelled`, `abandoned`, and `applied` are
-    /// terminal. Written as an exhaustive match so a state added later has to
-    /// answer here instead of silently reading as non-terminal.
-    #[must_use]
-    pub fn is_terminal(self) -> bool {
-        match self {
-            Self::Skipped | Self::Cancelled | Self::Abandoned | Self::Applied => true,
-            Self::Pending | Self::Failed | Self::Applying => false,
-        }
-    }
 }
 
 impl fmt::Display for MutationState {
@@ -143,21 +130,5 @@ mod tests {
         texts.sort_unstable();
         texts.dedup();
         assert_eq!(texts.len(), MutationState::ALL.len());
-    }
-
-    #[test]
-    fn is_terminal_matches_the_transition_table() {
-        // The transition table above names skipped, cancelled, abandoned, and
-        // applied as terminal; a mismatch here means is_terminal disagrees
-        // with the table it claims to summarize.
-        let terminal: Vec<&str> = MutationState::ALL
-            .into_iter()
-            .filter(|s| s.is_terminal())
-            .map(MutationState::text)
-            .collect();
-        assert_eq!(
-            terminal,
-            vec!["skipped", "cancelled", "abandoned", "applied"]
-        );
     }
 }
