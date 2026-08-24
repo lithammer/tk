@@ -410,6 +410,41 @@ mod tests {
     }
 
     #[test]
+    fn ready_view_still_surfaces_a_done_epic_parent_pending_tk_163() {
+        // Characterizes what LIST_ROWS_SQL does today, not what it should
+        // do: the epic-parent-inclusion branch above carries no status
+        // predicate on the parent, so a `done` Epic with a ready child still
+        // surfaces here (tk-163). If this test starts failing, tk-163 added
+        // that predicate on purpose — invert the assertion, don't chase a
+        // regression.
+        let store = open_seeded();
+        seed_epic(&store, "epic", "tk-1", "done", 1);
+        insert_fixture_item(
+            &store.conn,
+            FixtureItem {
+                id: "child",
+                display: "tk-2",
+                title: "Child",
+                container_id: Some("epic"),
+                container_class: Some("epic"),
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        let rows = list_rows(
+            &store,
+            ListOptions {
+                view: ListView::Ready,
+                ..ListOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(display_ids(&rows).contains(&"tk-1"));
+        assert!(display_ids(&rows).contains(&"tk-2"));
+    }
+
+    #[test]
     fn origin_local_filter_excludes_backend_rows() {
         let store = open_seeded();
         seed_ticket(&store, "local", "tk-1", "open", 1);

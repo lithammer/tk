@@ -63,3 +63,25 @@ second verb.
   rendered as **`tk show`** with `grep -C`-style body context, carrying its own
   pattern/regex semantics and exit-code contract. Until it lands, body/content
   search is intentionally absent, not an oversight.
+
+## Amendment (tk-163): the byte-safety premise was wrong; the decision stands
+
+Two claims in Consequences are false. **`tk search`** is not "the first
+caller to feed `done` rows to that renderer" on "an input **`tk list`** never
+produces (every list view is open/active-only)": `LIST_ROWS_SQL`'s
+epic-parent-inclusion branch carries no status predicate on the parent, so
+**`tk list`** already fed this renderer a `done` row — a `done` Epic acting as
+a container for a matching child — before **`tk search`** existed. "This is
+byte-safe for **`tk list`**, which never renders `done`" is wrong for the same
+reason.
+
+The decision the false premise was justifying — a `done` row never renders
+the blocked treatment — is unaffected: a `done` item can still carry an
+unresolved blocker regardless of which command surfaces it first, and
+dimming a closed item with `⊘` would still misrepresent it as pending. Only
+the "why this is safe" reasoning was wrong; the "what `render_row` does"
+decision stands.
+
+Whether a `done` Epic should surface as a container in a filtered
+**`tk list`** view at all — a question this ADR never considered — is
+tk-163's to decide.

@@ -654,10 +654,12 @@ _Avoid_: ticket, tickets
   code owns **Scope** resolution from argument or environment.
 - **`tk next`** takes only the optional **Scope** argument; it has no other
   flags in v1.
-- Done-item browsing through **`tk next`** / **`tk list`** is deferred; those
-  views do not surface `done` items. **`tk search`** is the sanctioned path for
-  finding a specific `done` **Ticket** or **Epic** by title, since it matches
-  every **Item Status**.
+- Done-item browsing through **`tk next`** is deferred; **`tk next`** selects
+  ready **Tickets** only and never surfaces a `done` item. **`tk list --ready`**
+  (and `--blocked`, `--active`, `--triage`, `--parked`) can surface a `done`
+  **Epic** as a container when it has a matching child **Ticket**.
+  **`tk search`** is the sanctioned path for finding a specific `done`
+  **Ticket** or **Epic** by title, since it matches every **Item Status**.
 - **`tk list`** takes an optional positional `<epic-id>` argument; absent it, **`tk list`** reads `TK_SCOPE`, then renders the whole **Repository Store**.
 - When a **Scope** is active, **`tk list`** renders only that **Epic** and its child **Tickets**, and prints a hint that the view is filtered.
 - **List Tree** renders **Epics** as top-level rows, child **Tickets** nested under their **Epic**, and unparented **Tickets** as top-level rows.
@@ -909,3 +911,9 @@ _Avoid_: ticket, tickets
   not police; the external CLI's own failure is the diagnostic. Silently keeping
   such a relationship local was rejected, since nothing would then tell the user
   their request was dropped.
+- Whether a `done` **Epic** should surface as a container in the filtered
+  **`tk list`** views was never considered when Epic-parent inclusion was
+  designed — open (tk-163): it does today, because the inclusion rule tests
+  only that the **Epic** has a matching child. ADR-0025's amendment records
+  that its byte-safety premise was wrong; the rendering decision that premise
+  was justifying stands.

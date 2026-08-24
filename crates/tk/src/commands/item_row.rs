@@ -37,9 +37,12 @@ fn selection_badge(selection_state: Option<SelectionState>) -> Option<&'static s
 /// A `done` row never renders the blocked treatment (ADR-0025): closing an
 /// item resolves none of its blockers, so a finished item can still carry an
 /// unresolved blocker, but dimming it and printing `⊘` would read as nonsense.
-/// `tk list` never feeds a `done` row here (every list view is open/active
-/// only), so this gate changes only `tk search` output and keeps `tk list`
-/// byte-identical.
+/// `tk list` can feed a `done` row here too: `LIST_ROWS_SQL`'s
+/// epic-parent-inclusion branch carries no status predicate on the parent, so
+/// a `done` Epic with a matching child already reaches this gate through
+/// `--ready` / `--blocked` / `--active` / `--triage` / `--parked`. Whether
+/// that Epic should surface at all is tk-163's to decide; this gate's
+/// behaviour once it does is unaffected either way.
 pub(crate) fn render_row<W: Write + ?Sized>(
     stdout: &mut W,
     row: &ListRow,
