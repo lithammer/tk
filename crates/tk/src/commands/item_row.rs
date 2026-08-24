@@ -31,6 +31,28 @@ fn selection_badge(selection_state: Option<SelectionState>) -> Option<&'static s
     }
 }
 
+/// Which Mutation marker glyphs [`render_row`] actually put on a row.
+///
+/// Accumulated across the rendered rows and handed to [`render_chrome`], so
+/// the legend explains the glyphs that reached the screen rather than the
+/// flags they were derived from. Those two can part company: `render_row`
+/// already suppresses `⊘` on a `done` row despite the flag being set.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct MarkersShown {
+    failed: bool,
+    pending: bool,
+}
+
+impl MarkersShown {
+    /// Union, for accumulating across rows.
+    pub(crate) fn merge(self, other: Self) -> Self {
+        Self {
+            failed: self.failed || other.failed,
+            pending: self.pending || other.pending,
+        }
+    }
+}
+
 /// Render one row, prefixed by `tree_prefix` (empty for a flat layout, a
 /// tree glyph for a nested List Tree child).
 ///
@@ -48,7 +70,7 @@ pub(crate) fn render_row<W: Write + ?Sized>(
     row: &ListRow,
     tree_prefix: &str,
     styler: SubStyler,
-) -> std::io::Result<()> {
+) -> std::io::Result<MarkersShown> {
     stdout.write_all(tree_prefix.as_bytes())?;
 
     let show_blocked = row.has_unresolved_blocker && row.status != ItemStatus::Done;
@@ -101,15 +123,18 @@ pub(crate) fn render_row<W: Write + ?Sized>(
     // comes first — and both render on a `done` row (ADR-0040): a `done`
     // Backend Item with a queued Mutation is exactly the case where the
     // Backend does not yet agree the Item is done.
+    let mut markers = MarkersShown::default();
     if row.has_failed_mutation {
         write!(
             stdout,
             " {}",
             styler.wrap(palette::MUTATION_FAILED, "\u{2691}")
         )?;
+        markers.failed = true;
     }
     if row.has_pending_mutation {
         write!(stdout, " {}", styler.wrap(palette::MUTATION_PENDING, "~"))?;
+        markers.pending = true;
     }
     stdout.write_all(b" ")?;
     sanitize::write_sanitized_line(stdout, row.title.as_bytes())?;
@@ -117,7 +142,8 @@ pub(crate) fn render_row<W: Write + ?Sized>(
     if show_blocked {
         write!(stdout, "{}", styler.close(palette::BLOCKED_ROW))?;
     }
-    stdout.write_all(b"\n")
+    stdout.write_all(b"\n")?;
+    Ok(markers)
 }
 
 /// Render the summary chrome printed below a non-empty row set: a separator
@@ -130,10 +156,12 @@ pub(crate) fn render_row<W: Write + ?Sized>(
 /// blocked` prints on a store with nothing blocked). An always-on legend for
 /// a condition most stores never hit would be noise, and the omission is why
 /// every pre-existing scenario snapshot — none of which carries a marked
-/// row — stays byte-identical.
+/// row — stays byte-identical. `markers` is what the rows actually rendered;
+/// see [`MarkersShown`].
 pub(crate) fn render_chrome<W: Write + ?Sized>(
     stdout: &mut W,
     rows: &[ListRow],
+    markers: MarkersShown,
     styler: SubStyler,
 ) -> std::io::Result<()> {
     let counts = StatusCounts::tally(rows);
@@ -172,52 +200,37 @@ pub(crate) fn render_chrome<W: Write + ?Sized>(
         styler.wrap(palette::BLOCKED, "\u{2298}")
     )?;
 
-    render_mutation_legend(stdout, rows, styler)
+    render_mutation_legend(stdout, markers, styler)
 }
 
-/// The `Mutations:` legend, or nothing when no row in `rows` carries a
-/// pending or failed Mutation.
+/// The `Mutations:` legend, or nothing when no marker was rendered.
 ///
-/// Folding the two flags directly over `rows` is correct only under an
-/// invariant the callers hold, not one this function can check: every row
-/// in `rows` is rendered exactly once. `render` emits roots and
-/// `render_children` emits the rest, and a row whose parent is absent from
-/// `rows` (a `done` Epic excluded from the default view, for instance)
-/// falls through and renders at top level rather than being skipped. If a
-/// future change starts suppressing a marker at render time — the way
-/// `render_row`'s `show_blocked` gates `⊘` on a `done` row — this fold
-/// would name a glyph that never actually appeared on screen, and would
-/// have to move to reporting what `render_row` actually emitted instead of
-/// folding the raw flags.
+/// Takes what [`render_row`] emitted rather than re-reading the rows, so the
+/// legend cannot name a glyph that never reached the screen — a row's flags
+/// and the marker drawn from them can diverge, the way `show_blocked` already
+/// suppresses `⊘` on a `done` row.
 fn render_mutation_legend<W: Write + ?Sized>(
     stdout: &mut W,
-    rows: &[ListRow],
+    markers: MarkersShown,
     styler: SubStyler,
 ) -> std::io::Result<()> {
-    let failed = rows.iter().any(|row| row.has_failed_mutation);
-    let pending = rows.iter().any(|row| row.has_pending_mutation);
-    if !failed && !pending {
-        return Ok(());
-    }
-    write!(stdout, "Mutations: ")?;
-    if failed {
-        write!(
-            stdout,
+    let mut entries = Vec::new();
+    if markers.failed {
+        entries.push(format!(
             "{} failed",
             styler.wrap(palette::MUTATION_FAILED, "\u{2691}")
-        )?;
+        ));
     }
-    if failed && pending {
-        write!(stdout, "  ")?;
-    }
-    if pending {
-        write!(
-            stdout,
+    if markers.pending {
+        entries.push(format!(
             "{} pending",
             styler.wrap(palette::MUTATION_PENDING, "~")
-        )?;
+        ));
     }
-    writeln!(stdout)
+    if entries.is_empty() {
+        return Ok(());
+    }
+    writeln!(stdout, "Mutations: {}", entries.join("  "))
 }
 
 fn render_total<W: Write + ?Sized>(

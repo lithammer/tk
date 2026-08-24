@@ -11,7 +11,7 @@ use std::io::Write;
 use clap::Args as ClapArgs;
 
 use crate::cli::{self, CommandError, Deps, Exit};
-use crate::commands::item_row::{render_chrome, render_row};
+use crate::commands::item_row::{MarkersShown, render_chrome, render_row};
 use crate::commands::resolver;
 use crate::render::styler::SubStyler;
 use crate::store::repository::list::ListRow;
@@ -63,10 +63,11 @@ fn render<W: Write + ?Sized>(
         return writeln!(stdout, "No items match \"{query}\".");
     }
 
+    let mut markers = MarkersShown::default();
     for row in rows {
-        render_row(stdout, row, "", styler)?;
+        markers = markers.merge(render_row(stdout, row, "", styler)?);
     }
-    render_chrome(stdout, rows, styler)
+    render_chrome(stdout, rows, markers, styler)
 }
 
 #[cfg(test)]

@@ -57,22 +57,21 @@ pub const KIND_EPIC: Style = fg(AnsiColor::Magenta);
 pub const SELECTION_BADGE: Style = fg(AnsiColor::BrightBlack);
 
 /// A Mutation the Backend failed to apply, rendered as `⚑` beside a list
-/// row's title. Bright red rather than the red proper `KIND_BUG` / `PRIORITY_P0`
-/// already use: `MATCH`'s entry records the rule that a token sharing their
-/// SGR reads as one of those badges, and `⚑`, `[bug]`, and `● P0` can all
-/// appear on the same row. A foreground colour, not `dimmed()`: it can
-/// render inside the dimmed `BLOCKED_ROW` span on a blocked row, so its
-/// close (`39`) must not reset the outer dim (ADR-0014 nesting) —
-/// `SELECTION_BADGE`'s comment records the same trap.
+/// row's title. Bright red, not the red `KIND_BUG` / `PRIORITY_P0` already
+/// use — sharing their SGR would let the glyph read as one of those badges,
+/// and `⚑`, `[bug]`, and `● P0` can all appear on the same row. A foreground
+/// colour, not `dimmed()`: it renders inside the dimmed `BLOCKED_ROW` span on
+/// a blocked row, so its close (`39`) must not reset the outer dim (ADR-0014
+/// nesting).
 pub const MUTATION_FAILED: Style = fg(AnsiColor::BrightRed);
 
 /// A Mutation still queued for the Backend, rendered as `~` beside a list
-/// row's title. Bright-black, the same muted class `SELECTION_BADGE`
-/// occupies — a deliberate SGR reuse, consistent with how this palette pairs
-/// one semantic class to one SGR (Red across `KIND_BUG` / `PRIORITY_P0`,
-/// Yellow across `PRIORITY_P1` / `STATUS_ACTIVE`) — kept as its own constant
-/// so a recolour is one edit. A foreground colour for the same nesting
-/// reason as `MUTATION_FAILED`.
+/// row's title. Bright black, the same SGR `SELECTION_BADGE` uses — one
+/// muted class, one SGR, as this palette already pairs Red across
+/// `KIND_BUG` / `PRIORITY_P0` and Yellow across `PRIORITY_P1` /
+/// `STATUS_ACTIVE` — kept as its own constant so a recolour is one edit. A
+/// foreground colour, not `dimmed()`, so its close (`39`) cannot reset the
+/// dimmed `BLOCKED_ROW` span it renders inside (ADR-0014 nesting).
 pub const MUTATION_PENDING: Style = fg(AnsiColor::BrightBlack);
 
 /// Open Item status (placeholder — uncoloured).

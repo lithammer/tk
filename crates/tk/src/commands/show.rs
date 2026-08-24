@@ -287,11 +287,16 @@ fn render_sub_row<W: Write + ?Sized>(
     stdout.write_all(b"\n")
 }
 
+/// Sub-row bullet for the sections that list plain values rather than
+/// related Items, written as bytes so the escape stays out of the two call
+/// sites: `"  • "`.
+const BULLET: &[u8] = b"  \xe2\x80\xa2 ";
+
 fn render_external_blocker<W: Write + ?Sized>(
     stdout: &mut W,
     eb: &ExternalBlockerSummary,
 ) -> std::io::Result<()> {
-    stdout.write_all(b"  \xe2\x80\xa2 ")?; // "  • "
+    stdout.write_all(BULLET)?;
     sanitize::write_sanitized_line(stdout, eb.reason.as_bytes())?;
     stdout.write_all(b"\n")
 }
@@ -300,7 +305,7 @@ fn render_item_mutation<W: Write + ?Sized>(
     stdout: &mut W,
     mutation: &ItemMutation,
 ) -> std::io::Result<()> {
-    stdout.write_all(b"  \xe2\x80\xa2 ")?; // "  • "
+    stdout.write_all(BULLET)?;
     writeln!(
         stdout,
         "{} {} {}",

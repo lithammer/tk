@@ -15,7 +15,7 @@ use std::io::Write;
 use clap::Args as ClapArgs;
 
 use crate::cli::{self, CommandError, Deps, Exit};
-use crate::commands::item_row::{render_chrome, render_row};
+use crate::commands::item_row::{MarkersShown, render_chrome, render_row};
 use crate::commands::{resolver, scope};
 use crate::domain::mutation_state::MutationState;
 use crate::render::palette;
@@ -124,8 +124,7 @@ fn render_scope_hint<W: Write + ?Sized>(
 
 /// One-line banner naming the Mutation Log's queue head: its Mutation
 /// Sequence, state, and target Display ID, pointing at `tk sync log
-/// <sequence>` for detail. No-op when there is no queue head, or when it is
-/// not one of the two states below.
+/// <sequence>` for detail.
 ///
 /// Fires only for a `Failed` or `Applying` head — the two states that need a
 /// human. A `Pending` head is the ordinary state between syncs for a
@@ -160,11 +159,10 @@ fn render_scope_hint<W: Write + ?Sized>(
 /// Promotion as such is tk-160; until it lands, `tk sync log <sequence>` is
 /// the only place that case is legible.
 ///
-/// The converse coherence — a failed row marker always comes with a banner
-/// naming that same Item — is emergent, not enforced: sync stops at the
-/// first rejection, so nothing pending can sit below a failed Mutation and a
-/// failed row is always the queue head. A second write path to `failed`
-/// outside that ordered loop would separate the two surfaces silently.
+/// In the other direction the two surfaces do agree: a failed row marker
+/// always has a matching banner, because sync stops at the first rejection
+/// so a failed Mutation is always the head. That coupling comes from the
+/// write path, not from this function.
 fn render_queue_head_banner<W: Write + ?Sized>(
     stdout: &mut W,
     head: Option<&MutationSummary>,
@@ -239,15 +237,16 @@ fn render<W: Write + ?Sized>(
 
     // Walk roots first; embed children inline so the renderer can lay
     // out a tree without a second pass over the row vector.
+    let mut markers = MarkersShown::default();
     for row in rows {
         if parent_is_in_rows(rows, row) {
             continue;
         }
-        render_row(stdout, row, "", styler)?;
-        render_children(stdout, rows, row, styler)?;
+        markers = markers.merge(render_row(stdout, row, "", styler)?);
+        markers = markers.merge(render_children(stdout, rows, row, styler)?);
     }
 
-    render_chrome(stdout, rows, styler)
+    render_chrome(stdout, rows, markers, styler)
 }
 
 fn render_children<W: Write + ?Sized>(
@@ -255,9 +254,10 @@ fn render_children<W: Write + ?Sized>(
     rows: &[ListRow],
     parent: &ListRow,
     styler: SubStyler,
-) -> std::io::Result<()> {
+) -> std::io::Result<MarkersShown> {
     let child_count = count_rendered_children(rows, &parent.id);
     let mut child_index = 0usize;
+    let mut markers = MarkersShown::default();
     for child in rows {
         let Some(container_id) = child.container_id.as_deref() else {
             continue;
@@ -271,9 +271,9 @@ fn render_children<W: Write + ?Sized>(
         } else {
             "\u{251c}\u{2500}\u{2500} "
         };
-        render_row(stdout, child, prefix, styler)?;
+        markers = markers.merge(render_row(stdout, child, prefix, styler)?);
     }
-    Ok(())
+    Ok(markers)
 }
 
 fn parent_is_in_rows(rows: &[ListRow], row: &ListRow) -> bool {
@@ -365,10 +365,6 @@ mod tests {
                 cwd,
             }
         }
-        fn deps(&mut self) -> Deps<'_> {
-            self.deps_with(Styler::plain())
-        }
-
         fn deps_with(&mut self, styler: Styler) -> Deps<'_> {
             Deps {
                 stdout: &mut self.stdout,
@@ -381,6 +377,32 @@ mod tests {
                 styler,
             }
         }
+    }
+
+    /// Seed one Mutation against `item_id`, deriving the `failure_json` the
+    /// `failed` state's CHECK requires. Mirrors the helper in
+    /// `store/repository/list.rs`'s tests.
+    fn seed_mutation(
+        conn: &Connection,
+        sequence: i64,
+        item_id: &str,
+        item_class: &str,
+        mutation_type: &str,
+        state: &str,
+    ) {
+        insert_fixture_mutation(
+            conn,
+            FixtureMutation {
+                sequence,
+                mutation_type,
+                item_id,
+                item_class,
+                state,
+                failure_json: (state == "failed").then_some(r#"{"detail":"prior"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
     }
 
     fn expect_git(h: &Harness<'_>, store: &TmpStore) {
@@ -397,15 +419,7 @@ mod tests {
     /// Drive `run` and frame any returned error as the dispatch seam does
     /// (ADR-0032: `tk list: <body>`), so a test asserts the framed bytes.
     fn run_rendered(h: &mut Harness<'_>, args: Args) -> Exit {
-        let mut deps = h.deps();
-        match run(&mut deps, args) {
-            Ok(exit) => exit,
-            Err(err) => {
-                let exit = err.exit();
-                err.render(deps.stderr, "list");
-                exit
-            }
-        }
+        run_rendered_with(h, Styler::plain(), args)
     }
 
     /// [`run_rendered`] with an explicit `Styler` so the colour-output test
@@ -885,114 +899,6 @@ mod tests {
     }
 
     #[test]
-    fn pending_and_failed_mutations_render_their_markers() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        for (id, display, seq) in [
-            ("pending", "tk-1", 1),
-            ("failed", "tk-2", 2),
-            ("both", "tk-3", 3),
-        ] {
-            insert_fixture_item(
-                &conn,
-                FixtureItem {
-                    id,
-                    display,
-                    title: "Row",
-                    created_seq: seq,
-                    ..FixtureItem::default()
-                },
-            )
-            .unwrap();
-        }
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 1,
-                mutation_type: "update_ticket",
-                item_id: "pending",
-                state: "pending",
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 2,
-                mutation_type: "update_ticket",
-                item_id: "failed",
-                state: "failed",
-                failure_json: Some(r#"{"detail":"boom"}"#),
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 3,
-                mutation_type: "update_ticket",
-                item_id: "both",
-                state: "pending",
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 4,
-                mutation_type: "set_item_status",
-                item_id: "both",
-                state: "failed",
-                failure_json: Some(r#"{"detail":"boom"}"#),
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
-        drop(conn);
-
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
-        let code = run_rendered(&mut h, default_args());
-        assert_eq!(code, Exit::Ok);
-        let stdout = String::from_utf8(h.stdout).unwrap();
-        let line_of = |id: &str| {
-            stdout
-                .lines()
-                .find(|l| l.contains(id))
-                .unwrap_or_else(|| panic!("no row for {id} in {stdout:?}"))
-                .to_owned()
-        };
-        assert!(
-            line_of("tk-1").contains(" ~ Row"),
-            "pending-only row should show ~: {stdout:?}"
-        );
-        assert!(
-            !line_of("tk-1").contains('\u{2691}'),
-            "pending-only row should not show ⚑: {stdout:?}"
-        );
-        assert!(
-            line_of("tk-2").contains(" \u{2691} Row"),
-            "failed-only row should show ⚑: {stdout:?}"
-        );
-        assert!(
-            !line_of("tk-2").contains('~'),
-            "failed-only row should not show ~: {stdout:?}"
-        );
-        assert!(
-            line_of("tk-3").contains(" \u{2691} ~ Row"),
-            "row with both should show ⚑ ~, failed first: {stdout:?}"
-        );
-        assert!(
-            stdout.contains("Mutations: \u{2691} failed  ~ pending\n"),
-            "legend should name both glyphs once any row carries them: {stdout:?}"
-        );
-    }
-
-    #[test]
     fn mutation_markers_pin_exact_byte_placement_and_spare_clean_rows() {
         // A substring check proves a marker glyph appears somewhere in the
         // line, not that it sits in the right place in a renderer shared
@@ -1046,52 +952,10 @@ mod tests {
         // Pending at sequence 1 keeps the queue head pending, so `run` prints
         // no `Sync:` banner and this snapshot stays a pure row/chrome contract
         // (a failed queue head would prepend a banner line here instead).
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 1,
-                mutation_type: "update_ticket",
-                item_id: "pending",
-                state: "pending",
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 2,
-                mutation_type: "update_ticket",
-                item_id: "failed",
-                state: "failed",
-                failure_json: Some(r#"{"detail":"boom"}"#),
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 3,
-                mutation_type: "update_ticket",
-                item_id: "both",
-                state: "pending",
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 4,
-                mutation_type: "set_item_status",
-                item_id: "both",
-                state: "failed",
-                failure_json: Some(r#"{"detail":"boom"}"#),
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
+        seed_mutation(&conn, 1, "pending", "ticket", "update_ticket", "pending");
+        seed_mutation(&conn, 2, "failed", "ticket", "update_ticket", "failed");
+        seed_mutation(&conn, 3, "both", "ticket", "update_ticket", "pending");
+        seed_mutation(&conn, 4, "both", "ticket", "set_item_status", "failed");
         drop(conn);
 
         let cwd_path = cwd();
@@ -1167,17 +1031,7 @@ mod tests {
             },
         )
         .unwrap();
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 1,
-                mutation_type: "update_ticket",
-                item_id: "t1",
-                state: "pending",
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
+        seed_mutation(&conn, 1, "t1", "ticket", "update_ticket", "pending");
         drop(conn);
 
         let cwd_path = cwd();
@@ -1214,19 +1068,7 @@ mod tests {
             },
         )
         .unwrap();
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 1,
-                mutation_type: "update_epic",
-                item_id: "epic",
-                item_class: "epic",
-                state: "failed",
-                failure_json: Some(r#"{"detail":"boom"}"#),
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
+        seed_mutation(&conn, 1, "epic", "epic", "update_epic", "failed");
         drop(conn);
 
         let cwd_path = cwd();
@@ -1272,17 +1114,7 @@ mod tests {
         )
         .unwrap();
         insert_dependency(&conn, "blocker", "blocked").unwrap();
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 1,
-                mutation_type: "update_ticket",
-                item_id: "blocked",
-                state: "pending",
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
+        seed_mutation(&conn, 1, "blocked", "ticket", "update_ticket", "pending");
         drop(conn);
 
         let cwd_path = cwd();
@@ -1344,17 +1176,7 @@ mod tests {
         // the fixture edit below must sequence after both.
         commit_promotion(&mut conn, "promoted");
         commit_promotion(&mut conn, "promotion_only");
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 3,
-                mutation_type: "update_ticket",
-                item_id: "promoted",
-                state: "pending",
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
+        seed_mutation(&conn, 3, "promoted", "ticket", "update_ticket", "pending");
         drop(conn);
 
         let cwd_path = cwd();
@@ -1422,17 +1244,7 @@ mod tests {
             },
         )
         .unwrap();
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 1,
-                mutation_type: "update_ticket",
-                item_id: "child",
-                state: "pending",
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
+        seed_mutation(&conn, 1, "child", "ticket", "update_ticket", "pending");
         drop(conn);
 
         let cwd_path = cwd();
@@ -1469,18 +1281,7 @@ mod tests {
             },
         )
         .unwrap();
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 1,
-                mutation_type: "update_ticket",
-                item_id: "t1",
-                state: "failed",
-                failure_json: Some(r#"{"detail":"boom"}"#),
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
+        seed_mutation(&conn, 1, "t1", "ticket", "update_ticket", "failed");
         drop(conn);
 
         let cwd_path = cwd();
@@ -1512,17 +1313,7 @@ mod tests {
         .unwrap();
         // `applying` is confined to promote_ticket/promote_epic with a
         // matching item_class (migration 010's CHECK constraint).
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 1,
-                mutation_type: "promote_ticket",
-                item_id: "t1",
-                state: "applying",
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
+        seed_mutation(&conn, 1, "t1", "ticket", "promote_ticket", "applying");
         drop(conn);
 
         let cwd_path = cwd();
@@ -1554,17 +1345,7 @@ mod tests {
             },
         )
         .unwrap();
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 1,
-                mutation_type: "update_ticket",
-                item_id: "t1",
-                state: "pending",
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
+        seed_mutation(&conn, 1, "t1", "ticket", "update_ticket", "pending");
         drop(conn);
 
         let cwd_path = cwd();
@@ -1622,18 +1403,7 @@ mod tests {
             },
         )
         .unwrap();
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 1,
-                mutation_type: "update_ticket",
-                item_id: "d1",
-                state: "failed",
-                failure_json: Some(r#"{"detail":"boom"}"#),
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
+        seed_mutation(&conn, 1, "d1", "ticket", "update_ticket", "failed");
         drop(conn);
 
         let cwd_path = cwd();
@@ -1692,18 +1462,7 @@ mod tests {
             },
         )
         .unwrap();
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 1,
-                mutation_type: "update_ticket",
-                item_id: "loose",
-                state: "failed",
-                failure_json: Some(r#"{"detail":"boom"}"#),
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
+        seed_mutation(&conn, 1, "loose", "ticket", "update_ticket", "failed");
         drop(conn);
 
         let cwd_path = cwd();

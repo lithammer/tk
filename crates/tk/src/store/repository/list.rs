@@ -272,6 +272,7 @@ pub(super) fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<ListRow>
 mod tests {
     use super::*;
     use crate::domain::mutation_state::MutationState;
+    use crate::domain::mutation_type::MutationType;
     use crate::store::migrations;
     use crate::store::testing::{
         FixtureItem, FixtureMutation, insert_dependency, insert_external_blocker,
@@ -881,6 +882,49 @@ mod tests {
             assert_eq!(
                 row.has_failed_mutation, expect_failed,
                 "state={state} type={mutation_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_promotion_mutation_type_is_excluded_from_the_flags() {
+        // The queries spell the excluded types as a literal; this drives the
+        // same set off `MutationType::is_promotion`, so a third Promotion kind
+        // added later fails here rather than silently lighting a marker on an
+        // Item that is not on the Backend at all.
+        let store = open_seeded();
+        seed_ticket(&store, "t", "tk-1", "open", 1);
+        seed_epic(&store, "e", "tk-2", "open", 2);
+
+        let promotions: Vec<MutationType> = MutationType::ALL
+            .into_iter()
+            .filter(|t| t.is_promotion())
+            .collect();
+        assert!(!promotions.is_empty(), "no Promotion types to check");
+
+        for (i, mutation_type) in promotions.into_iter().enumerate() {
+            let seq = i64::try_from(i).unwrap() + 1;
+            // The composite foreign key pins item_class to the target's class.
+            let (item_id, item_class) = match mutation_type {
+                MutationType::PromoteEpic => ("e", "epic"),
+                _ => ("t", "ticket"),
+            };
+            seed_mutation(
+                &store,
+                seq,
+                item_id,
+                item_class,
+                mutation_type.text(),
+                "pending",
+            );
+        }
+
+        let rows = list_rows(&store, ListOptions::default()).unwrap();
+        for row in &rows {
+            assert!(
+                !row.has_pending_mutation,
+                "{} lit a marker from a Promotion alone",
+                row.display_id
             );
         }
     }

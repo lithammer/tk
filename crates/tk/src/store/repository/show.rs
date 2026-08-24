@@ -74,12 +74,12 @@ pub struct ItemDetail {
     /// Unlike the other sub-reads this one filters by nothing: no Origin
     /// restriction, no Mutation Type restriction, `applied` rows included.
     /// The store answers truthfully and rendering decides what to show, so
-    /// filtering `applied` here would both invert that split and leave the
-    /// renderer's `Applied` arm unreachable. And where the list-row markers
-    /// exclude Promotions to keep one glyph from carrying two meanings,
-    /// `tk show` is a deliberate single-Item read: a Pending Promotion's own
-    /// Promotion Mutation is what the reader came for, and `state` plus
-    /// `mutation_type` tell it apart from an ordinary Mutation.
+    /// filtering `applied` here would make the renderer's `Applied` arm dead
+    /// code. And where the list-row markers exclude Promotions to keep one
+    /// glyph from carrying two meanings, `tk show` is a deliberate
+    /// single-Item read: a Pending Promotion's own Promotion Mutation is what
+    /// the reader came for, and `state` plus `mutation_type` tell it apart
+    /// from an ordinary Mutation.
     pub mutations: Vec<ItemMutation>,
 }
 
