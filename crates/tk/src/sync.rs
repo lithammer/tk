@@ -131,7 +131,8 @@ impl RunSyncError {
                 LoadApplicableError::PayloadJson(_)
                 | LoadApplicableError::OperationShapeMismatch { .. }
                 | LoadApplicableError::MissingBackendIdentity { .. }
-                | LoadApplicableError::CounterpartClassMismatch { .. },
+                | LoadApplicableError::CounterpartClassMismatch { .. }
+                | LoadApplicableError::MissingTicketKind { .. },
             )
             | Self::Outcome(
                 PersistMutationOutcomeError::PayloadJson(_)

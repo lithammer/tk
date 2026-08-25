@@ -42,6 +42,7 @@ use crate::domain::mutation_type::{AddressedCounterpart, MutationType};
 use crate::domain::origin::Origin;
 use crate::domain::promotion_graph::{GraphDependency, GraphItem, PromotionGraph};
 use crate::domain::promotion_plan::PromotionPlan;
+use crate::domain::ticket_kind::TicketKind;
 use crate::store::mutations;
 use crate::store::repository::RemoteWorkflowGuard;
 use crate::store::repository::create::generate_internal_id;
@@ -350,12 +351,14 @@ pub struct RecoveryPromotion {
     pub promotion: Promotion,
     /// Typed Backend kind decoded from the retained Promotion payload.
     pub backend_kind: BackendKind,
+    /// Current Ticket Kind from the Repository Store; `None` for Epics.
+    pub ticket_kind: Option<TicketKind>,
     /// Mutation state as of this read.
     state: MutationState,
     /// Stable internal Item ID, unaffected by receipt Display ID replacement.
     item_id: String,
     /// Item Class as of this read.
-    item_class: ItemClass,
+    pub item_class: ItemClass,
     /// Promotion Operation grouping as of this read.
     operation_id: String,
 }
@@ -463,6 +466,7 @@ struct RecoveryPromotionRow {
     payload_json: String,
     operation_id: Option<String>,
     display: String,
+    ticket_kind: Option<TicketKind>,
 }
 
 /// Load the unique nonterminal Promotion targeting `item_id` by stable
@@ -474,7 +478,7 @@ pub fn recoverable_promotion(
 ) -> Result<RecoveryPromotion, RecoveryPromotionError> {
     let mut stmt = conn.prepare(
         "select m.sequence, m.state, m.mutation_type, m.item_class, m.payload_json, \
-                m.promotion_operation_id, i.display_value \
+                m.promotion_operation_id, i.display_value, i.ticket_kind \
            from mutations m join items i on i.id = m.item_id \
           where m.item_id = ?1 and m.mutation_type in ('promote_ticket', 'promote_epic') \
             and m.state in ('pending', 'failed', 'applying') \
@@ -490,6 +494,7 @@ pub fn recoverable_promotion(
                 payload_json: r.get(4)?,
                 operation_id: r.get(5)?,
                 display: r.get(6)?,
+                ticket_kind: r.get(7)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -554,6 +559,7 @@ pub fn recoverable_promotion(
         item_class: row.item_class,
         promotion,
         backend_kind,
+        ticket_kind: row.ticket_kind,
         operation_id,
     })
 }

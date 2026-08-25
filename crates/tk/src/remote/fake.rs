@@ -13,7 +13,7 @@ use crate::domain::backend_operation::{
     BackendItemRefresh,
 };
 use crate::domain::backend_outcome::{BackendCreateOutcome, BackendEditOutcome};
-use crate::domain::promotion_capability::PromotionCapabilities;
+use crate::domain::promotion_capability::{PromotionCapabilities, PromotionRequirements};
 use crate::proc::ProcError;
 
 use super::adapter::{Adapter, AdapterReadError, ApplyError};
@@ -41,7 +41,7 @@ pub enum RefreshResponse {
 /// Scripted response for one [`Adapter::inspect_item`] call.
 #[derive(Debug)]
 pub enum InspectionResponse {
-    /// Success — the fake returns canonical identity and Backend content.
+    /// Success — the fake returns canonical identity, content, and Ticket Kind.
     Item(BackendItemInspection),
     /// Adapter-level rejection with this detail.
     RecordedFailure(String),
@@ -95,11 +95,12 @@ pub struct FakeAdapter {
     pub captured_refresh_keys: Vec<String>,
     /// Backend keys passed to `inspect_item`, in call order.
     pub captured_inspection_keys: Vec<String>,
-    /// This fake's [`Adapter::promotion_capabilities`] return value. Static
-    /// data, not a script entry, so tests set it once via
+    /// This fake's resolved capability value. Static data, not a script entry,
+    /// so tests set it once via
     /// [`FakeAdapter::with_capabilities`] instead of queuing a response per
     /// call.
     capabilities: PromotionCapabilities,
+    capability_error: Option<AdapterReadError>,
 }
 
 impl FakeAdapter {
@@ -117,6 +118,7 @@ impl FakeAdapter {
             captured_refresh_keys: Vec::new(),
             captured_inspection_keys: Vec::new(),
             capabilities: PromotionCapabilities::none(),
+            capability_error: None,
         }
     }
 
@@ -150,12 +152,19 @@ impl FakeAdapter {
         self
     }
 
-    /// Script this fake's [`Adapter::promotion_capabilities`] declaration.
+    /// Configure this fake's resolved [`PromotionCapabilities`] value.
     /// Defaults to [`PromotionCapabilities::none`] so each test opts into the
     /// exact Promotion facets it exercises.
     #[must_use]
     pub fn with_capabilities(mut self, capabilities: PromotionCapabilities) -> Self {
         self.capabilities = capabilities;
+        self
+    }
+
+    /// Make the next capability resolution fail with this Adapter read error.
+    #[must_use]
+    pub fn with_capability_error(mut self, error: AdapterReadError) -> Self {
+        self.capability_error = Some(error);
         self
     }
 }
@@ -244,8 +253,14 @@ impl Adapter for FakeAdapter {
         }
     }
 
-    fn promotion_capabilities(&self) -> PromotionCapabilities {
-        self.capabilities
+    fn resolve_promotion_capabilities(
+        &mut self,
+        _requirements: PromotionRequirements,
+    ) -> Result<PromotionCapabilities, AdapterReadError> {
+        if let Some(error) = self.capability_error.take() {
+            return Err(error);
+        }
+        Ok(self.capabilities)
     }
 }
 
@@ -286,6 +301,7 @@ mod tests {
             },
             title: title.into(),
             body: "Body".into(),
+            ticket_kind: TicketKind::Task,
         }
     }
 
@@ -307,6 +323,7 @@ mod tests {
                 title: "T".into(),
                 body: "B".into(),
             },
+            ticket_kind: TicketKind::Task,
         }
     }
 
@@ -464,14 +481,38 @@ mod tests {
 
     #[test]
     fn defaults_to_no_promotion_capabilities() {
-        let fake = FakeAdapter::new();
-        assert_eq!(fake.promotion_capabilities(), PromotionCapabilities::none());
+        let mut fake = FakeAdapter::new();
+        assert_eq!(
+            fake.resolve_promotion_capabilities(PromotionRequirements::none())
+                .unwrap(),
+            PromotionCapabilities::none()
+        );
     }
 
     #[test]
-    fn with_capabilities_overrides_the_declaration() {
+    fn with_capabilities_sets_the_resolved_value() {
         let caps = PromotionCapabilities::none().with_item_class(ItemClass::Epic);
-        let fake = FakeAdapter::new().with_capabilities(caps);
-        assert_eq!(fake.promotion_capabilities(), caps);
+        let mut fake = FakeAdapter::new().with_capabilities(caps);
+        assert_eq!(
+            fake.resolve_promotion_capabilities(PromotionRequirements::none())
+                .unwrap(),
+            caps
+        );
+    }
+
+    #[test]
+    fn capability_error_fails_the_next_resolution() {
+        let mut fake = FakeAdapter::new()
+            .with_capability_error(AdapterReadError::Failed("taxonomy read failed".into()));
+
+        assert!(matches!(
+            fake.resolve_promotion_capabilities(PromotionRequirements::none()),
+            Err(AdapterReadError::Failed(detail)) if detail == "taxonomy read failed"
+        ));
+        assert_eq!(
+            fake.resolve_promotion_capabilities(PromotionRequirements::none())
+                .unwrap(),
+            PromotionCapabilities::none()
+        );
     }
 }

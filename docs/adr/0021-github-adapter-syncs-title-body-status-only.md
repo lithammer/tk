@@ -1,18 +1,110 @@
 # The v1 GitHub Backend Adapter syncs fields and pushes relationships
 
 The v1 GitHub Backend Adapter (tk-34) maps item *fields* between tk and a
-GitHub repository through the `gh issue` subcommands:
+GitHub repository, chiefly through the `gh issue` subcommands:
 
 - title and body — bidirectional for Backend Tickets and Backend Epics (`gh
   issue edit`, from `update_ticket` / `update_epic`; read back on Pull),
 - Item Status as a two-state axis — `done` ↔ CLOSED (`gh issue close`),
   `open`/`active` ↔ OPEN (`gh issue reopen`) — bidirectional,
-- Ticket Kind — Pull-only: the `issueType` `--json` field maps to
-  `TicketKind` (`"Bug"` → `Bug`; every other value — incl. `"Task"`,
-  `"Feature"`, org-custom types, and a typeless issue — → `Task`, matching the
-  closed two-variant `TicketKind`). No Mutation changes a Ticket's Kind, so
-  there is nothing to push; `--type` is never written in v1,
+- Ticket Kind — Promotion sets the initial Bug representation described below,
+  and Pull maps the current Backend representation to `TicketKind`. No later
+  Mutation pushes Kind, so Pull remains authoritative after creation,
 - the issue refresh (`gh issue view <n>` → `BackendItemRefresh`).
+
+GitHub Bug Promotion prefers a usable native `Bug` Issue Type for any
+repository. When that capability is unavailable, a personal repository falls
+back to an existing `bug` Label; an organization repository rejects preflight.
+A native Issue Type or Label counts as the reserved representation only when
+its name equals `Bug` case-insensitively. Renamed, localized, prefixed, or
+otherwise heuristic aliases are not inferred. A missing representation rejects
+preflight rather than causing tk to create repository taxonomy.
+
+The personal-repository `bug` Label is private Backend Adapter encoding for
+Ticket Kind, not general Label support in tk. It adds no Label field, command,
+or Mutation Type to the Repository Store; tk-21 retains ownership of those
+domain and interface decisions.
+
+Backend Pull remains authoritative for Ticket Kind after Promotion. A
+personal repository treats a present native Issue Type as authoritative: `Bug`
+maps to Bug, while every other native type maps to Task. The reserved `bug`
+Label maps to Bug only when the issue is typeless, so a later GitHub rollout
+does not invalidate older labeled Bugs. Removing the only representation, or
+changing a native Issue Type away from `Bug`, refreshes the local Ticket as
+`Task`; tk does not restore the previous Backend representation.
+
+The installed `gh` 2.98.0 source exposes `issueType` and `labels`, but not
+repository ownership, through `gh issue view --json`; `gh repo view --json`
+separately exposes `isInOrganization`. Adopt, Pull, and Promotion
+Reconciliation retain the existing issue-read and identity-validation path.
+Only a typeless issue carrying the reserved Label needs the additional
+repository-ownership read, whose result the Adapter caches by repository for
+that invocation. Native types and ordinary typeless Tasks require no ownership
+call.
+
+Promotion Reconciliation also maps the candidate's Ticket Kind through that
+repository-specific representation. The mapped Kind must equal the retained
+Promotion's Kind, for both Task and Bug, and a mismatch is refused even with
+`--force`; the user must correct it on GitHub before reconciling.
+
+A 2026-08-24 live probe against the user-owned
+`lithammer/tk-gh-playground` repository with `gh` 2.98.0 showed why capability
+must match the creation path. The REST repository Issue Types endpoint listed
+enabled Task, Bug, and Feature types, but `gh issue edit --type Bug` resolved
+no available types and wrote nothing. Repository ownership selects whether
+the Label fallback is allowed; the REST listing alone does not prove native
+Issue Type capability. A REST create with an unavailable `type` then created
+issue #24 successfully but silently left it typeless; the probe issue was
+closed after inspection. In contrast, a direct `createIssue` GraphQL mutation
+with an invalid Issue Type ID returned no issue, and a title search confirmed
+that it created nothing. The REST result is observed behavior, not a claim
+from `gh` source; the GraphQL input contract is the API primitive that can
+couple representation and creation in one mutation.
+
+Bug Promotion therefore uses one direct GraphQL `createIssue` path with an
+exclusive representation proved during preflight: either the native Issue Type
+or the fallback Label, never both. Apply resolves that representation's current
+ID. Task and Epic Promotion retain their shipped `gh issue create` path. A
+future move to `gh issue create --type Bug` requires both usable
+personal-repository Issue Types and an upstream single-create contract that
+cannot strand a typeless issue before returning its receipt; personal
+availability alone is insufficient. The revisit is tracked by gh-49.
+
+Every Promotion calls the requirements-aware capability resolver established
+by ADR-0036. The GitHub Adapter satisfies static facets without I/O; when Bug
+is requested, it performs a fallible, repository-aware read to resolve
+repository ownership and currently usable Bug representations. It returns a
+plain `PromotionCapabilities` value to the pure Promotion planner. A
+successful inspection with no usable representation produces the ordinary
+unsupported-Bug preflight finding. Authentication, transport, and
+malformed-response failures remain Adapter read errors rather than being
+reported as unsupported capability. Repository-specific GitHub knowledge does
+not enter the command or planner.
+
+Native Issue Type absence requires an exhaustive direct GraphQL read. The
+Adapter reads each `issueTypes` page, including `isEnabled` and
+`pageInfo`, until `hasNextPage` is false; only then may it report that no
+enabled case-insensitive `Bug` exists. It must not use `gh` 2.98.0's
+`RepoIssueTypes` helper as this proof because that helper requests only the
+first 50 nodes and no page information. A failed page is an Adapter read error,
+not evidence that Bug is unsupported. Apply uses the same exhaustive resolver
+before creation.
+
+The Issue Type or Label ID is not durable Promotion intent and is not
+persisted. Preflight proves that the repository can currently represent Bug;
+Apply resolves the current ID again immediately before the atomic mutation. If
+that read finds the representation missing, Apply rejects without creating an
+issue and ordinary sync can retry after the repository taxonomy is repaired.
+Once `createIssue` starts, the ADR-0036 receipt contract still applies: a
+canonical URL proves creation, while a result without one is indeterminate
+unless the Adapter can prove that creation did not run.
+
+Ticket Kind is also not duplicated in the Promotion payload. It is immutable
+current state on the targeted Repository Store Item, so Apply and Promotion
+Reconciliation read it there when constructing or validating the Backend
+operation. Title and body remain retained in the Promotion payload because
+later local edits can change them while the original creation snapshot stays
+fixed.
 
 Dependencies and Epic membership are push-only. `add_dependency` and
 `remove_dependency` edit the blocked issue's dependency edge.

@@ -1,12 +1,12 @@
-//! Preflight for one `tk promote` invocation: a pure function from a
-//! Repository Store snapshot to either the ordered Mutations the operation
-//! commits or every problem it would hit (ADR-0035, ADR-0036).
+//! Pure preflight analysis for one `tk promote` invocation. It derives the
+//! required Backend capabilities from a Repository Store snapshot, then builds
+//! either the ordered Mutations the operation commits or every problem it
+//! would hit (ADR-0035, ADR-0036).
 //!
-//! Nothing here touches SQLite, Git, or a Backend — the planner reasons over
-//! [`PromotionGraph`] alone, so the whole operation is judged before a byte is
-//! written and a refused Promotion leaves the outbox empty. Findings
-//! accumulate rather than short-circuit: one run reports everything the user
-//! has to fix.
+//! Nothing here touches SQLite, Git, or a Backend. Every input is pure domain
+//! data, so the whole operation is judged before a byte is written and a
+//! refused Promotion leaves the outbox empty. Findings accumulate rather than
+//! short-circuit: one run reports everything the user has to fix.
 
 use std::collections::{HashMap, HashSet};
 
@@ -18,7 +18,7 @@ use crate::domain::mutation_payload::{
     DependencyRef, EpicRef, MutationPayload, Promotion, StatusChange,
 };
 use crate::domain::mutation_type::MutationType;
-use crate::domain::promotion_capability::PromotionCapabilities;
+use crate::domain::promotion_capability::{PromotionCapabilities, PromotionRequirements};
 use crate::domain::promotion_graph::{GraphItem, PromotionGraph};
 use crate::domain::promotion_plan::{MutationDraft, PromotionPlan};
 use crate::domain::selection_state::SelectionState;
@@ -31,6 +31,73 @@ use crate::domain::ticket_kind::TicketKind;
 pub struct ItemRef {
     pub id: String,
     pub display_id: String,
+}
+
+/// Derive the Backend capability facets needed by a Promotion graph.
+///
+/// This pass lets the Adapter read the Backend only for requested
+/// repository-specific facets while the planner stays independent of the
+/// Adapter.
+#[must_use]
+pub fn promotion_requirements(
+    graph: &PromotionGraph,
+    backend: BackendKind,
+) -> PromotionRequirements {
+    let by_id: HashMap<&str, &GraphItem> = graph.items.iter().map(|i| (i.id.as_str(), i)).collect();
+    let promoted: HashSet<&str> = graph
+        .items
+        .iter()
+        .filter(|item| is_promoted(graph, item))
+        .map(|item| item.id.as_str())
+        .collect();
+    let mut requirements = PromotionRequirements::none();
+
+    for item in graph
+        .items
+        .iter()
+        .filter(|item| promoted.contains(item.id.as_str()))
+    {
+        requirements = requirements.with_item_class(item.item_class);
+        if let Some(kind) = item.ticket_kind {
+            requirements = requirements.with_ticket_kind(kind);
+        }
+    }
+
+    for edge in &graph.dependencies {
+        if !promoted.contains(edge.blocked_id.as_str())
+            && !promoted.contains(edge.blocking_id.as_str())
+        {
+            continue;
+        }
+        let blocked = *by_id.get(edge.blocked_id.as_str()).expect(GRAPH_IS_CLOSED);
+        let blocking = *by_id.get(edge.blocking_id.as_str()).expect(GRAPH_IS_CLOSED);
+        if dependency_rule::classify(
+            &binding_after(blocked, &promoted, backend),
+            &binding_after(blocking, &promoted, backend),
+        ) == DependencyClassification::BecomesBackendIntent
+        {
+            requirements = requirements.with_dependencies();
+        }
+    }
+
+    for ticket in &graph.items {
+        let Some(epic_id) = ticket.container_id.as_deref() else {
+            continue;
+        };
+        if !promoted.contains(ticket.id.as_str()) && !promoted.contains(epic_id) {
+            continue;
+        }
+        let Some(epic) = by_id.get(epic_id).copied() else {
+            continue;
+        };
+        if binding_after(ticket, &promoted, backend).backend_kind() == Some(backend.text())
+            && binding_after(epic, &promoted, backend).backend_kind() == Some(backend.text())
+        {
+            requirements = requirements.with_epic_membership();
+        }
+    }
+
+    requirements
 }
 
 impl ItemRef {
@@ -51,14 +118,12 @@ pub enum PromotionFinding {
     /// A `triage` Ticket: captured-but-unaccepted work is not pushed to a
     /// Backend, and must be Accepted first.
     TriageTicket { item: ItemRef },
-    /// The Backend Adapter declares it cannot create this Item Class under
-    /// Promotion.
+    /// The Backend Adapter cannot create this Item Class under Promotion.
     ItemClassNotRepresentable {
         item: ItemRef,
         item_class: ItemClass,
     },
-    /// The Backend Adapter declares it cannot create this Ticket Kind under
-    /// Promotion.
+    /// The Backend Adapter cannot create this Ticket Kind under Promotion.
     TicketKindNotRepresentable {
         item: ItemRef,
         ticket_kind: TicketKind,
@@ -71,12 +136,12 @@ pub enum PromotionFinding {
         reason: DependencyRejection,
     },
     /// A Dependency the operation would make backend intent, on a Backend
-    /// that declares it cannot represent Dependencies. Keeping it local
-    /// instead would leave the backend-backed Blocked Item exposing an
-    /// incomplete blocking relationship (ADR-0035).
+    /// that cannot represent Dependencies. Keeping it local instead would
+    /// leave the backend-backed Blocked Item exposing an incomplete blocking
+    /// relationship (ADR-0035).
     DependencyNotRepresentable { blocked: ItemRef, blocking: ItemRef },
     /// Epic membership the operation would make backend intent, on a Backend
-    /// that declares it cannot represent membership.
+    /// that cannot represent membership.
     EpicMembershipNotRepresentable { ticket: ItemRef, epic: ItemRef },
 }
 
@@ -91,6 +156,22 @@ type EndpointOrder = (i64, i64);
 /// endpoint can be one the read never saw. A missing one is a
 /// `read_graph` fault, not user input.
 const GRAPH_IS_CLOSED: &str = "PromotionGraph carries both endpoints of every edge it names";
+
+/// The Backend binding an Item has after every Promotion in the operation
+/// lands. ADR-0035 judges relationships against this future graph.
+fn binding_after(
+    item: &GraphItem,
+    promoted: &HashSet<&str>,
+    backend: BackendKind,
+) -> BackendBinding {
+    if promoted.contains(item.id.as_str()) {
+        BackendBinding::PendingPromotion {
+            backend_kind: backend.text().to_owned(),
+        }
+    } else {
+        item.backend_binding.clone()
+    }
+}
 
 /// Preflight a `tk promote` of `graph.target_id` against `backend`, the
 /// Backend the configured Remote names.
@@ -122,18 +203,6 @@ pub fn plan_promotion(
     }
 
     let promoted: HashSet<&str> = operation.iter().map(|i| i.id.as_str()).collect();
-    // Every rule below reads the Origins the whole operation *will* produce,
-    // not the ones it starts from (ADR-0035).
-    let binding_after = |item: &GraphItem| -> BackendBinding {
-        if promoted.contains(item.id.as_str()) {
-            BackendBinding::PendingPromotion {
-                backend_kind: backend.text().to_owned(),
-            }
-        } else {
-            item.backend_binding.clone()
-        }
-    };
-
     let mut findings = Vec::new();
     let mut promotions = Vec::new();
     let mut statuses = Vec::new();
@@ -154,7 +223,10 @@ pub fn plan_promotion(
         let blocking = *by_id.get(edge.blocking_id.as_str()).expect(GRAPH_IS_CLOSED);
         let order = (blocked.created_seq, blocking.created_seq);
 
-        match dependency_rule::classify(&binding_after(blocked), &binding_after(blocking)) {
+        match dependency_rule::classify(
+            &binding_after(blocked, &promoted, backend),
+            &binding_after(blocking, &promoted, backend),
+        ) {
             DependencyClassification::Rejected(reason) => {
                 relationship_findings.push((
                     order,
@@ -216,8 +288,8 @@ pub fn plan_promotion(
         // Membership becomes backend intent only when Ticket and Epic are
         // backed by the same Backend after the operation. Mixed-Origin
         // membership stays local and is not a problem.
-        if binding_after(ticket).backend_kind() != Some(backend.text())
-            || binding_after(epic).backend_kind() != Some(backend.text())
+        if binding_after(ticket, &promoted, backend).backend_kind() != Some(backend.text())
+            || binding_after(epic, &promoted, backend).backend_kind() != Some(backend.text())
         {
             continue;
         }
@@ -280,9 +352,9 @@ fn collect_item_findings(
     }
     // Findings accumulate rather than short-circuit (ADR-0036), but the Ticket
     // Kind question only arises for a Backend that can create the Item Class at
-    // all: reporting both against a Backend declaring neither says one thing
-    // twice. A Backend that takes Tickets but not one Kind — GitHub and `bug`,
-    // once tk-137 lands — still reports the Kind on its own.
+    // all. Reporting both when the Backend supports neither says one thing
+    // twice; a Backend that supports Tickets but not one Kind still reports the
+    // Kind on its own.
     if capabilities.can_create_item_class(item.item_class) {
         if let Some(ticket_kind) = item.ticket_kind
             && !capabilities.can_create_ticket_kind(ticket_kind)
@@ -446,6 +518,47 @@ mod tests {
         capabilities: PromotionCapabilities,
     ) -> Vec<PromotionFinding> {
         plan_promotion(graph, capabilities, BackendKind::Github).expect_err("findings")
+    }
+
+    fn ticket_with_kind(id: &str, created_seq: i64, kind: TicketKind) -> GraphItem {
+        GraphItem {
+            ticket_kind: Some(kind),
+            ..ticket(id, created_seq)
+        }
+    }
+
+    #[test]
+    fn requirements_include_the_promoted_ticket_class_and_kind() {
+        let requirements = promotion_requirements(
+            &graph("t1", vec![ticket_with_kind("t1", 1, TicketKind::Bug)]),
+            BackendKind::Github,
+        );
+
+        assert!(requirements.requires_item_class(ItemClass::Ticket));
+        assert!(!requirements.requires_item_class(ItemClass::Epic));
+        assert!(requirements.requires_ticket_kind(TicketKind::Bug));
+        assert!(!requirements.requires_ticket_kind(TicketKind::Task));
+        assert!(!requirements.requires_dependencies());
+        assert!(!requirements.requires_epic_membership());
+    }
+
+    #[test]
+    fn requirements_include_relationships_the_operation_makes_backend_intent() {
+        let graph = with_edges(
+            with_children(graph(
+                "e1",
+                vec![epic("e1", 1), contained_in("e1", ticket("t1", 2))],
+            )),
+            vec![edge("t1", "e1")],
+        );
+
+        let requirements = promotion_requirements(&graph, BackendKind::Github);
+
+        assert!(requirements.requires_item_class(ItemClass::Ticket));
+        assert!(requirements.requires_item_class(ItemClass::Epic));
+        assert!(requirements.requires_ticket_kind(TicketKind::Task));
+        assert!(requirements.requires_dependencies());
+        assert!(requirements.requires_epic_membership());
     }
 
     /// `(mutation_type, item_id)` pairs, the shape order assertions read best
