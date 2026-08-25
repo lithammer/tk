@@ -132,6 +132,20 @@ Probed on 2026-08-24 against the user-owned
 - A direct `createIssue` GraphQL mutation with an invalid Issue Type ID returned
   no issue. A title search confirmed that it created nothing.
 
+Additional evidence collected on 2026-08-25 separates the schema contract from
+one repository observation:
+
+- **Primary schema evidence:** Live GitHub schema introspection reports
+  `Repository.issueTypes` as nullable (`OBJECT IssueTypeConnection`, not
+  `NON_NULL`), with the description “A list of the repository's issue types”.
+- **Repository observation:** Querying user-owned `lithammer/tk` returned
+  `{"data":{"repository":{"issueTypes":null}}}` with no errors. `gh repo
+  view` reported `isInOrganization:false`.
+- **Adapter policy and risk:** An initial null is treated as terminal native
+  Issue Type absence so the supported personal-repository `bug` Label fallback
+  remains reachable. The observation does not prove why GitHub returned null;
+  the API exposes no discriminator, so an undocumented reason remains a risk.
+
 Source at the installed `gh` 2.98.0 tag establishes the available read
 surfaces. `api/query_builder.go` exposes `issueType` and `labels` to
 `gh issue view --json`, and `isInOrganization` to `gh repo view --json`.
