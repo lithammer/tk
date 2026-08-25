@@ -14,9 +14,15 @@ barrier and deferred its operator recovery workflow.
 
 `tk promote reconcile <id> <backend-key>` inspects a candidate Backend object
 through a narrow Adapter read. The Adapter returns canonical identity, title,
-and body only; reconciliation does not classify Ticket Kind or lifecycle
-state. Exact title and body equality with the retained Promotion snapshot is
-the default proof that the candidate is the created object.
+body, and any non-convergeable facet needed to prove that the candidate can
+retain the Promotion's domain classification; reconciliation does not inspect
+lifecycle state. Exact title and body equality with the retained Promotion
+snapshot is the default proof that the candidate is the created object. A
+GitHub Ticket candidate's repository-owner-specific representation is mapped
+to Ticket Kind under ADR-0021, and that Kind must equal the retained
+Promotion's Kind. This applies symmetrically to Task and Bug. A mismatch is
+refused with or without `--force`; the user must correct it on GitHub before
+reconciling.
 
 A candidate identity that another Item already holds is refused outright, with
 or without `--force`: attaching it would break Backend Item and Display ID
@@ -27,8 +33,10 @@ A mismatch writes nothing unless `--force` is supplied. Forced reconciliation
 attaches the confirmed identity and appends current local title and body as a
 normal update Mutation in the same Promotion Operation. Receipt application,
 the forced update, the `applied` transition, and Sync Cursor advancement commit
-atomically. Backend lifecycle remains authoritative after attachment, so the
-nested sync may immediately import a closed Backend object as `done`.
+atomically. Force applies only to convergent title and body content; it cannot
+override a non-convergeable classification mismatch. Backend lifecycle remains
+authoritative after attachment, so the nested sync may immediately import a
+closed Backend object as `done`.
 
 `tk promote retry <id>` is the explicit-risk alternative. It moves an
 `applying` Promotion back to `pending`, then delegates to the normal ordered
@@ -82,6 +90,8 @@ to discover.
   reconciliation and explicit-risk retry.
 - `--force` is not a relaxed comparison alone; it durably converges the
   Backend object to current local content.
+- A non-convergeable classification mismatch must be corrected on the Backend
+  before reconciliation, even with `--force`.
 - Recovery cannot jump past unrelated nonterminal intent.
 - The Sync Cursor remains monotonic even when reconciliation resolves a
   Mutation behind already-applied terminal history.

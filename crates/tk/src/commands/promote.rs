@@ -33,7 +33,7 @@ use crate::domain::item_class::ItemClass;
 use crate::domain::mutation_state::MutationState;
 use crate::domain::promotion_graph::{GraphItem, PromotionGraph};
 use crate::domain::promotion_plan::PromotionPlan;
-use crate::promotion::plan::{PromotionFinding, plan_promotion};
+use crate::promotion::plan::{PromotionFinding, plan_promotion, promotion_requirements};
 use crate::remote::adapter::{Adapter, AdapterReadError};
 use crate::remote::factory::{self, OpenError as FactoryOpenError};
 use crate::store::mutations::AppendError;
@@ -256,6 +256,19 @@ fn reconcile(
     let inspection = adapter
         .inspect_item(&args.backend_key)
         .map_err(|err| inspection_error(&args.backend_key, err))?;
+    if recovery.item_class == ItemClass::Ticket
+        && recovery.ticket_kind != Some(inspection.ticket_kind)
+    {
+        return Err(CommandError::failure(format!(
+            "Backend item {} has Ticket Kind {}, but the retained Promotion targets {}. Correct the Backend item before reconciling; '--force' cannot override a classification mismatch.",
+            inspection.identity.display_id,
+            inspection.ticket_kind.label(),
+            recovery
+                .ticket_kind
+                .expect("Ticket recovery has a Ticket Kind")
+                .label(),
+        )));
+    }
     let title_matches = inspection.title == recovery.promotion.title;
     let body_matches = inspection.body == recovery.promotion.body;
     let exact = title_matches && body_matches;
@@ -326,6 +339,12 @@ fn ensure_recovery_backend(
 fn inspection_error(backend_key: &str, err: AdapterReadError) -> CommandError {
     CommandError::failure(format!(
         "could not inspect Backend item '{backend_key}': {err}"
+    ))
+}
+
+fn capability_error(err: AdapterReadError) -> CommandError {
+    CommandError::failure(format!(
+        "could not inspect Backend Promotion capabilities: {err}"
     ))
 }
 
@@ -565,7 +584,11 @@ fn promote(
     let backend = adapter.backend_kind();
     let graph = store_promotion::read_graph(store.conn(), &target.id, children)
         .map_err(read_graph_error)?;
-    let plan = plan_promotion(&graph, adapter.promotion_capabilities(), backend)
+    let requirements = promotion_requirements(&graph, backend);
+    let capabilities = adapter
+        .resolve_promotion_capabilities(requirements)
+        .map_err(capability_error)?;
+    let plan = plan_promotion(&graph, capabilities, backend)
         .map_err(|findings| refusal(&target.display_id, &findings, backend))?;
 
     let captured = capture_promotion_mappings(&graph, &plan);
@@ -1353,6 +1376,16 @@ mod tests {
     }
 
     fn inspection(display_id: &str, key: &str, title: &str, body: &str) -> InspectionResponse {
+        inspection_with_kind(display_id, key, title, body, TicketKind::Task)
+    }
+
+    fn inspection_with_kind(
+        display_id: &str,
+        key: &str,
+        title: &str,
+        body: &str,
+        ticket_kind: TicketKind,
+    ) -> InspectionResponse {
         InspectionResponse::Item(BackendItemInspection {
             identity: BackendItemIdentity {
                 backend_key: key.into(),
@@ -1360,6 +1393,7 @@ mod tests {
             },
             title: title.into(),
             body: body.into(),
+            ticket_kind,
         })
     }
 
@@ -1709,7 +1743,7 @@ mod tests {
                     "view",
                     key,
                     "--json",
-                    "number,title,body,state,issueType,url",
+                    "number,title,body,state,issueType,labels,url",
                 ],
                 RunOutput {
                     exit_code: 0,
@@ -1909,6 +1943,70 @@ mod tests {
             })
             .unwrap();
         assert_eq!(state, "applying");
+    }
+
+    #[test]
+    fn reconcile_refuses_a_bug_promotion_when_backend_is_a_task_even_with_force() {
+        let fixture = TmpStore::new("repo");
+        let mut conn = seed_store(&fixture);
+        local_ticket(&conn, "t1", "tk-1", 1);
+        conn.execute("update items set ticket_kind = 'bug' where id = 't1'", [])
+            .unwrap();
+        commit_promotion(&mut conn, "t1");
+        conn.execute("update mutations set state = 'applying'", [])
+            .unwrap();
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        let mut store = open_store(&h, &fixture, &cwd_path);
+        let mut fake = FakeAdapter::new().with_inspections(vec![inspection_with_kind(
+            "gh-42",
+            "42",
+            "Local work",
+            "",
+            TicketKind::Task,
+        )]);
+
+        let code = reconcile_rendered(&mut h, &mut store, &mut fake, "tk-1", "42", true);
+
+        assert_eq!(code, Exit::Failure);
+        assert_eq!(h.out(), "");
+        assert_eq!(
+            h.err(),
+            "tk promote: Backend item gh-42 has Ticket Kind Task, but the retained Promotion targets Bug. Correct the Backend item before reconciling; '--force' cannot override a classification mismatch.\n"
+        );
+        assert_eq!(item_state(&conn, "t1"), ("tk-1".into(), "local".into()));
+        assert_eq!(fake.captured_inspection_keys, vec!["42"]);
+    }
+
+    #[test]
+    fn reconcile_refuses_a_task_promotion_when_backend_is_a_bug() {
+        let fixture = TmpStore::new("repo");
+        let mut conn = seed_store(&fixture);
+        local_ticket(&conn, "t1", "tk-1", 1);
+        commit_promotion(&mut conn, "t1");
+        conn.execute("update mutations set state = 'applying'", [])
+            .unwrap();
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        let mut store = open_store(&h, &fixture, &cwd_path);
+        let mut fake = FakeAdapter::new().with_inspections(vec![inspection_with_kind(
+            "gh-42",
+            "42",
+            "Local work",
+            "",
+            TicketKind::Bug,
+        )]);
+
+        let code = reconcile_rendered(&mut h, &mut store, &mut fake, "tk-1", "42", false);
+
+        assert_eq!(code, Exit::Failure);
+        assert_eq!(h.out(), "");
+        assert_eq!(
+            h.err(),
+            "tk promote: Backend item gh-42 has Ticket Kind Bug, but the retained Promotion targets Task. Correct the Backend item before reconciling; '--force' cannot override a classification mismatch.\n"
+        );
+        assert_eq!(item_state(&conn, "t1"), ("tk-1".into(), "local".into()));
+        assert_eq!(fake.captured_inspection_keys, vec!["42"]);
     }
 
     #[test]

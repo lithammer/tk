@@ -7,15 +7,15 @@
 //! has a stronger result-certainty contract.
 //!
 //! Operational calls take `&mut self` so an Adapter may consume per-call
-//! state. Backend-kind and capability declarations are immutable properties
-//! and take `&self`.
+//! state. Capability resolution also takes `&mut self` because a requested
+//! repository-specific facet may require a Backend read.
 
 use crate::domain::backend_kind::BackendKind;
 use crate::domain::backend_operation::{
     AdoptedItem, BackendCreate, BackendEdit, BackendItemInspection, BackendItemRefresh,
 };
 use crate::domain::backend_outcome::{BackendCreateOutcome, BackendEditOutcome};
-use crate::domain::promotion_capability::PromotionCapabilities;
+use crate::domain::promotion_capability::{PromotionCapabilities, PromotionRequirements};
 use crate::proc::ProcError;
 use thiserror::Error;
 
@@ -62,8 +62,8 @@ pub trait Adapter {
 
     /// Inspect one Backend object for Promotion recovery.
     ///
-    /// This narrow read returns only canonical identity and content. It does
-    /// not classify the item as a Ticket Kind or map Backend lifecycle state.
+    /// This narrow read returns canonical identity, content, and Ticket Kind.
+    /// It does not map Backend lifecycle state.
     fn inspect_item(&mut self, key: &str) -> Result<BackendItemInspection, AdapterReadError>;
 
     /// Apply one non-Promotion Mutation to an existing Backend object.
@@ -79,13 +79,14 @@ pub trait Adapter {
     /// runner error proves the process never started.
     fn create_item(&mut self, create: &BackendCreate) -> BackendCreateOutcome;
 
-    /// The Backend's static Promotion capability declaration (ADR-0036
-    /// "Backend capability is declared per facet and staged"). Preflight
-    /// reads this before any backend call to reject a Promotion the Adapter
-    /// cannot represent.
+    /// Resolve the Backend capabilities required by one Promotion graph
+    /// (ADR-0036, ADR-0021).
     ///
-    /// Declared data, not a backend call: the signature takes `&self` and
-    /// returns the value directly rather than a `Result`, so nothing here
-    /// can fail or spawn a subprocess.
-    fn promotion_capabilities(&self) -> PromotionCapabilities;
+    /// Repository-invariant facets may resolve from static data. A requested
+    /// repository-specific facet may read the Backend and return an
+    /// [`AdapterReadError`].
+    fn resolve_promotion_capabilities(
+        &mut self,
+        requirements: PromotionRequirements,
+    ) -> Result<PromotionCapabilities, AdapterReadError>;
 }

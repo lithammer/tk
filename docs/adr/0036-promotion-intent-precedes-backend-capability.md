@@ -6,6 +6,11 @@
 > intent from applying until the earlier Mutation resolves. The barrier still
 > stops Backend Pull, Mutation Apply, Adopt, and Remote clear. ADR-0037 also
 > supplies the operator recovery workflow this decision deferred.
+>
+> **Amended by ADR-0021.** Capability resolution is still one typed preflight
+> seam, but a requested repository-specific facet may require a Backend read
+> before Promotion intent commits. Repository-invariant facets resolve without
+> I/O.
 
 tk-136 builds the whole local half of Promotion — preflight, the ordered
 outbox, and receipt application — before a Backend in the same build may act
@@ -37,17 +42,24 @@ transactions recheck the configured Remote after their Backend/preflight work.
 Clearing and restoring the same kind remains valid because repository
 resolution belongs to the Adapter.
 
-### Backend capability is declared per facet and staged
+### Backend capability is resolved per facet and staged
 
-A Backend Adapter declares, as static typed data, whether it can represent each
-Item class, Ticket Kind, Dependency, and Epic membership under Promotion.
-Preflight reads that declaration and rejects before any backend call, and the
-rejection aggregates with every other finding rather than short-circuiting.
+Pure graph analysis first describes the Item-class, Ticket-Kind, Dependency,
+and Epic-membership capabilities a Promotion requires. Every Promotion passes
+that typed requirement to one Adapter capability resolver, which returns a
+plain `PromotionCapabilities` value to the pure planner. The Adapter satisfies
+repository-invariant facets from static knowledge and performs Backend reads
+only for requested dynamic facets. The planner therefore remains independent
+of the Adapter and aggregates an unsupported capability with every other
+finding rather than short-circuiting.
 
-The GitHub Adapter declares Ticket and Epic creation, Task Ticket Kind,
-Dependencies, and Epic membership. It creates both Item Classes as typeless
-GitHub issues; later relationship Mutations supply their structure. Bug stays
-off because a typeless issue cannot reliably represent that closed Ticket Kind.
+The GitHub Adapter resolves Ticket and Epic creation, Task Ticket Kind,
+Dependencies, and Epic membership without a Backend call. It creates both Item
+Classes as typeless GitHub issues; later relationship Mutations supply their
+structure. A requested Bug facet triggers the repository-aware inspection in
+ADR-0021. A failed inspection aborts preflight as an Adapter read error; a
+successful inspection without a usable representation returns Bug as
+unsupported and leaves the outbox empty.
 
 Staging is a safety property, not sequencing preference. Sync stops at the
 first rejected Mutation, a Promotion Mutation is not a Sync Skip candidate, and

@@ -82,10 +82,13 @@ small boundary module after the second caller proves the shape.
   store's sync helpers. Single entry point `sync::run_sync`; the engine
   reaches the database only through `store/sync.rs` helpers, never via raw
   SQL.
-- `promotion/` owns the `tk promote` preflight planner. Single entry point
-  `promotion::plan::plan_promotion`, a pure function over the `domain/`
-  Promotion contract types that reaches no database, subprocess, or Backend
-  Adapter. `store/promotion.rs` produces the `PromotionGraph` it consumes and
+- `promotion/` owns pure analysis of the `tk promote` preflight graph: first it
+  derives the required Backend capability facets, then
+  `promotion::plan::plan_promotion` consumes the resolved capabilities. Neither
+  step reaches a database, subprocess, or Backend Adapter. The command always
+  asks the Adapter to resolve the typed requirements between those steps; the
+  Adapter may read the Backend only for a requested dynamic facet.
+  `store/promotion.rs` produces the `PromotionGraph` the analysis consumes and
   commits the `PromotionPlan` it returns; the dependency runs one way —
   `store/` does not import `promotion/`.
 - `commands/scope.rs` owns Scope resolution (ADR-0022): the `<epic-id>`

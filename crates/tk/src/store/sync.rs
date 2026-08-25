@@ -244,6 +244,11 @@ pub enum LoadApplicableError {
         expected: ItemClass,
         actual: ItemClass,
     },
+    #[error("mutation {mutation_type} requires Ticket Kind for Item {item_id}")]
+    MissingTicketKind {
+        mutation_type: MutationType,
+        item_id: String,
+    },
 }
 
 /// One applicable Mutation Log entry, decoded but not yet bound to a backend
@@ -405,8 +410,19 @@ pub fn resolve_backend_operation(
                 return Err(shape_error());
             }
             let Promotion { title, body, .. } = promotion;
+            let ticket_kind = conn
+                .query_row(
+                    "select ticket_kind from items where id = ?1",
+                    params![item_id],
+                    |row| row.get::<_, Option<TicketKind>>(0),
+                )?
+                .ok_or_else(|| LoadApplicableError::MissingTicketKind {
+                    mutation_type,
+                    item_id: item_id.clone(),
+                })?;
             BackendOperation::Create(BackendCreate::Ticket {
                 snapshot: TitleBody { title, body },
+                ticket_kind,
             })
         }
         (MutationType::PromoteEpic, MutationPayload::Promotion(promotion)) => {
@@ -2457,10 +2473,52 @@ mod tests {
         let BackendOperation::Create(create) = resolved.operation else {
             panic!("Promotion must resolve as creation")
         };
-        let BackendCreate::Ticket { snapshot } = create else {
+        let BackendCreate::Ticket {
+            snapshot,
+            ticket_kind,
+        } = create
+        else {
             panic!("expected Ticket creation")
         };
         assert_eq!(snapshot.title, "T");
+        assert_eq!(ticket_kind, TicketKind::Task);
+    }
+
+    #[test]
+    fn resolve_operation_reads_the_current_bug_kind_for_creation() {
+        let conn = open_seeded();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Local",
+                ticket_kind: Some("bug"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "promote_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"T","body":"B","backend_kind":"github"}"#,
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        let row = load_applicable_mutations(&conn).unwrap().remove(0);
+        let BackendOperation::Create(BackendCreate::Ticket { ticket_kind, .. }) =
+            resolve_backend_operation(&conn, row).unwrap().operation
+        else {
+            panic!("Promotion must resolve as Ticket creation")
+        };
+        assert_eq!(ticket_kind, TicketKind::Bug);
     }
 
     #[test]

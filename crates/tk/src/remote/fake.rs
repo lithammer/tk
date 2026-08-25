@@ -13,7 +13,7 @@ use crate::domain::backend_operation::{
     BackendItemRefresh,
 };
 use crate::domain::backend_outcome::{BackendCreateOutcome, BackendEditOutcome};
-use crate::domain::promotion_capability::PromotionCapabilities;
+use crate::domain::promotion_capability::{PromotionCapabilities, PromotionRequirements};
 use crate::proc::ProcError;
 
 use super::adapter::{Adapter, AdapterReadError, ApplyError};
@@ -41,7 +41,7 @@ pub enum RefreshResponse {
 /// Scripted response for one [`Adapter::inspect_item`] call.
 #[derive(Debug)]
 pub enum InspectionResponse {
-    /// Success — the fake returns canonical identity and Backend content.
+    /// Success — the fake returns canonical identity, content, and Ticket Kind.
     Item(BackendItemInspection),
     /// Adapter-level rejection with this detail.
     RecordedFailure(String),
@@ -95,8 +95,8 @@ pub struct FakeAdapter {
     pub captured_refresh_keys: Vec<String>,
     /// Backend keys passed to `inspect_item`, in call order.
     pub captured_inspection_keys: Vec<String>,
-    /// This fake's [`Adapter::promotion_capabilities`] return value. Static
-    /// data, not a script entry, so tests set it once via
+    /// This fake's resolved capability value. Static data, not a script entry,
+    /// so tests set it once via
     /// [`FakeAdapter::with_capabilities`] instead of queuing a response per
     /// call.
     capabilities: PromotionCapabilities,
@@ -150,7 +150,7 @@ impl FakeAdapter {
         self
     }
 
-    /// Script this fake's [`Adapter::promotion_capabilities`] declaration.
+    /// Configure this fake's resolved [`PromotionCapabilities`] value.
     /// Defaults to [`PromotionCapabilities::none`] so each test opts into the
     /// exact Promotion facets it exercises.
     #[must_use]
@@ -244,8 +244,11 @@ impl Adapter for FakeAdapter {
         }
     }
 
-    fn promotion_capabilities(&self) -> PromotionCapabilities {
-        self.capabilities
+    fn resolve_promotion_capabilities(
+        &mut self,
+        _requirements: PromotionRequirements,
+    ) -> Result<PromotionCapabilities, AdapterReadError> {
+        Ok(self.capabilities)
     }
 }
 
@@ -286,6 +289,7 @@ mod tests {
             },
             title: title.into(),
             body: "Body".into(),
+            ticket_kind: TicketKind::Task,
         }
     }
 
@@ -307,6 +311,7 @@ mod tests {
                 title: "T".into(),
                 body: "B".into(),
             },
+            ticket_kind: TicketKind::Task,
         }
     }
 
@@ -464,14 +469,22 @@ mod tests {
 
     #[test]
     fn defaults_to_no_promotion_capabilities() {
-        let fake = FakeAdapter::new();
-        assert_eq!(fake.promotion_capabilities(), PromotionCapabilities::none());
+        let mut fake = FakeAdapter::new();
+        assert_eq!(
+            fake.resolve_promotion_capabilities(PromotionRequirements::none())
+                .unwrap(),
+            PromotionCapabilities::none()
+        );
     }
 
     #[test]
     fn with_capabilities_overrides_the_declaration() {
         let caps = PromotionCapabilities::none().with_item_class(ItemClass::Epic);
-        let fake = FakeAdapter::new().with_capabilities(caps);
-        assert_eq!(fake.promotion_capabilities(), caps);
+        let mut fake = FakeAdapter::new().with_capabilities(caps);
+        assert_eq!(
+            fake.resolve_promotion_capabilities(PromotionRequirements::none())
+                .unwrap(),
+            caps
+        );
     }
 }

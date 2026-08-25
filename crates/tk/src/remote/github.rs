@@ -8,11 +8,15 @@
 //!
 //! Pull is refresh-by-key: the engine hands the Adopted working set's active
 //! keys to [`GithubAdapter::refresh_item`], which fetches each with one
-//! `gh issue view`. There is no listing and no discovery (ADR-0034).
+//! `gh issue view`. A typeless issue carrying the private `bug` label adds a
+//! cached repository-ownership read. There is no issue listing or discovery
+//! (ADR-0034).
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 
 use crate::domain::backend_kind::BackendKind;
 use crate::domain::backend_operation::{
@@ -22,7 +26,7 @@ use crate::domain::backend_operation::{
 use crate::domain::backend_outcome::{
     BackendCreateOutcome, BackendEditOutcome, Failure, FailureClass,
 };
-use crate::domain::promotion_capability::PromotionCapabilities;
+use crate::domain::promotion_capability::{PromotionCapabilities, PromotionRequirements};
 use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
 use crate::proc::{ProcRunner, RunOutput};
@@ -32,21 +36,30 @@ use super::adapter::{Adapter, AdapterReadError, ApplyError};
 /// The `--json` field set tk requests from `gh issue view`. `url` supplies the
 /// canonical Adopt identity, guards Pull identity, and rejects pull requests
 /// (see [`is_pull_request_url`]); `state` arrives UPPERCASE; `issueType` is an
-/// object-or-null.
-const ISSUE_JSON_FIELDS: &str = "number,title,body,state,issueType,url";
+/// object-or-null; `labels` supplies the personal-repository Bug fallback.
+const ISSUE_JSON_FIELDS: &str = "number,title,body,state,issueType,labels,url";
+const REPOSITORY_JSON_FIELDS: &str = "id,nameWithOwner,isInOrganization";
+const ISSUE_TYPES_QUERY: &str = "query RepositoryIssueTypes($owner: String!, $name: String!, $after: String) { repository(owner: $owner, name: $name) { issueTypes(first: 50, after: $after) { nodes { id name isEnabled } pageInfo { hasNextPage endCursor } } } }";
+const LABELS_QUERY: &str = "query RepositoryLabels($owner: String!, $name: String!, $after: String) { repository(owner: $owner, name: $name) { labels(first: 100, query: \"bug\", after: $after) { nodes { id name } pageInfo { hasNextPage endCursor } } } }";
+const CREATE_BUG_QUERY: &str = "mutation CreateBugIssue($repositoryId: ID!, $title: String!, $body: String!, $issueTypeId: ID, $labelIds: [ID!]) { createIssue(input: { repositoryId: $repositoryId, title: $title, body: $body, issueTypeId: $issueTypeId, labelIds: $labelIds }) { issue { url number } } }";
 
 /// GitHub Backend Adapter. Holds the injected runner and the command cwd from
-/// which `gh` resolves the repository (ADR-0033). Stateless beyond those
-/// borrows — `&mut self` is the trait's shape, not a need of this adapter.
+/// which `gh` resolves the repository (ADR-0033), plus per-invocation
+/// repository-ownership observations used by Pull classification.
 pub struct GithubAdapter<'a> {
     runner: &'a dyn ProcRunner,
     cwd: &'a Path,
+    repository_ownership: HashMap<String, bool>,
 }
 
 impl<'a> GithubAdapter<'a> {
     #[must_use]
     pub fn new(runner: &'a dyn ProcRunner, cwd: &'a Path) -> Self {
-        Self { runner, cwd }
+        Self {
+            runner,
+            cwd,
+            repository_ownership: HashMap::new(),
+        }
     }
 }
 
@@ -56,15 +69,21 @@ impl Adapter for GithubAdapter<'_> {
     }
 
     fn adopt_ticket(&mut self, input: &str) -> Result<AdoptedItem, AdapterReadError> {
-        self.view_issue(input)?.into_adopted_item()
+        let issue = self.view_issue(input)?;
+        let ticket_kind = self.ticket_kind(&issue)?;
+        issue.into_adopted_item(ticket_kind)
     }
 
     fn refresh_item(&mut self, key: &str) -> Result<BackendItemRefresh, AdapterReadError> {
-        self.view_matching_issue(key)?.into_refresh()
+        let issue = self.view_matching_issue(key)?;
+        let ticket_kind = self.ticket_kind(&issue)?;
+        issue.into_refresh(ticket_kind)
     }
 
     fn inspect_item(&mut self, key: &str) -> Result<BackendItemInspection, AdapterReadError> {
-        self.view_matching_issue(key)?.into_inspection()
+        let issue = self.view_matching_issue(key)?;
+        let ticket_kind = self.ticket_kind(&issue)?;
+        issue.into_inspection(ticket_kind)
     }
 
     fn apply_edit(&mut self, edit: &BackendEdit) -> Result<BackendEditOutcome, ApplyError> {
@@ -152,13 +171,33 @@ impl Adapter for GithubAdapter<'_> {
         self.create_issue(create)
     }
 
-    fn promotion_capabilities(&self) -> PromotionCapabilities {
-        PromotionCapabilities::none()
-            .with_item_class(crate::domain::item_class::ItemClass::Ticket)
-            .with_item_class(crate::domain::item_class::ItemClass::Epic)
-            .with_ticket_kind(TicketKind::Task)
-            .with_dependencies()
-            .with_epic_membership()
+    fn resolve_promotion_capabilities(
+        &mut self,
+        requirements: PromotionRequirements,
+    ) -> Result<PromotionCapabilities, AdapterReadError> {
+        use crate::domain::item_class::ItemClass;
+
+        let mut capabilities = PromotionCapabilities::none();
+        for class in [ItemClass::Ticket, ItemClass::Epic] {
+            if requirements.requires_item_class(class) {
+                capabilities = capabilities.with_item_class(class);
+            }
+        }
+        if requirements.requires_ticket_kind(TicketKind::Task) {
+            capabilities = capabilities.with_ticket_kind(TicketKind::Task);
+        }
+        if requirements.requires_ticket_kind(TicketKind::Bug)
+            && self.resolve_bug_representation()?.is_some()
+        {
+            capabilities = capabilities.with_ticket_kind(TicketKind::Bug);
+        }
+        if requirements.requires_dependencies() {
+            capabilities = capabilities.with_dependencies();
+        }
+        if requirements.requires_epic_membership() {
+            capabilities = capabilities.with_epic_membership();
+        }
+        Ok(capabilities)
     }
 }
 
@@ -179,12 +218,20 @@ impl GithubAdapter<'_> {
 
     /// Create the GitHub issue represented by either Promotion variant.
     ///
-    /// GitHub Tickets and Epics share one typeless issue surface; structure is
-    /// applied later through the relationship Mutations ordered behind their
-    /// Promotions. The receipt is authoritative even when `gh` exits non-zero.
+    /// Task Tickets and Epics share the typeless `gh issue create` surface.
+    /// Bugs use the direct GraphQL path below so classification and creation
+    /// are one effect (ADR-0021). A canonical receipt remains authoritative
+    /// even when `gh` exits non-zero.
     fn create_issue(&self, create: &BackendCreate) -> BackendCreateOutcome {
+        if let BackendCreate::Ticket {
+            snapshot,
+            ticket_kind: TicketKind::Bug,
+        } = create
+        {
+            return self.create_bug_issue(snapshot);
+        }
         let snapshot = match create {
-            BackendCreate::Ticket { snapshot } | BackendCreate::Epic { snapshot } => snapshot,
+            BackendCreate::Ticket { snapshot, .. } | BackendCreate::Epic { snapshot } => snapshot,
         };
         let output = match self.runner.run(
             &[
@@ -236,6 +283,110 @@ impl GithubAdapter<'_> {
         }
     }
 
+    /// Resolve the current Bug representation, then create the issue and its
+    /// classification in one GraphQL mutation (ADR-0021).
+    fn create_bug_issue(
+        &self,
+        snapshot: &crate::domain::mutation_payload::TitleBody,
+    ) -> BackendCreateOutcome {
+        let repository = match self.current_repository() {
+            Ok(repository) => repository,
+            Err(error) => return rejected_read(&error),
+        };
+        let representation = match self.resolve_bug_representation_in(&repository) {
+            Ok(Some(representation)) => representation,
+            Ok(None) => {
+                return BackendCreateOutcome::rejected(
+                    "the configured GitHub repository has no usable Bug representation",
+                );
+            }
+            Err(error) => return rejected_read(&error),
+        };
+        let repository_id = format!("repositoryId={}", repository.id);
+        let title = format!("title={}", snapshot.title);
+        let body = format!("body={}", snapshot.body);
+        let representation_arg = match representation {
+            BugRepresentation::NativeIssueType(id) => format!("issueTypeId={id}"),
+            BugRepresentation::Label(id) => format!("labelIds[]={id}"),
+        };
+        let argv = [
+            "gh".to_owned(),
+            "api".to_owned(),
+            "graphql".to_owned(),
+            "-f".to_owned(),
+            format!("query={CREATE_BUG_QUERY}"),
+            "-f".to_owned(),
+            repository_id,
+            "-f".to_owned(),
+            title,
+            "-f".to_owned(),
+            body,
+            "-f".to_owned(),
+            representation_arg,
+        ];
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let output = match self.runner.run(&argv, self.cwd) {
+            Ok(output) => output,
+            Err(
+                err @ (crate::proc::ProcError::ExecutableNotFound
+                | crate::proc::ProcError::SpawnFailed),
+            ) => {
+                return BackendCreateOutcome::Rejected(Failure {
+                    detail: format!("gh api graphql did not start: {err}"),
+                    class: FailureClass::Unknown,
+                    retry_after_s: None,
+                });
+            }
+            Err(err @ crate::proc::ProcError::OutcomeUnobserved) => {
+                return BackendCreateOutcome::Indeterminate(Failure {
+                    detail: format!("gh api graphql started, but its outcome is unknown: {err}"),
+                    class: FailureClass::Unknown,
+                    retry_after_s: None,
+                });
+            }
+        };
+        let stderr = stderr_string(&output);
+        let response: Result<GraphQlResponse<CreateIssueData>, _> =
+            serde_json::from_slice(&output.stdout);
+        if let Ok(response) = response {
+            if let Some(issue) = response
+                .data
+                .and_then(|data| data.create_issue)
+                .and_then(|payload| payload.issue)
+            {
+                if let Some(identity) = parse_issue_url(&issue.url) {
+                    return BackendCreateOutcome::Created(identity);
+                }
+            }
+            let detail = if !response.errors.is_empty() {
+                response
+                    .errors
+                    .into_iter()
+                    .map(|error| error.message)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else if stderr.is_empty() {
+                "gh api graphql returned no GitHub issue URL receipt".into()
+            } else {
+                stderr.clone()
+            };
+            return BackendCreateOutcome::Indeterminate(Failure {
+                class: classify(output.exit_code, &detail),
+                detail,
+                retry_after_s: None,
+            });
+        }
+        BackendCreateOutcome::Indeterminate(Failure {
+            class: classify(output.exit_code, &stderr),
+            detail: if stderr.is_empty() {
+                "gh api graphql returned an unrecognized response".into()
+            } else {
+                stderr
+            },
+            retry_after_s: None,
+        })
+    }
+
     /// Fetch and parse one GitHub issue view by the caller's Backend key.
     fn view_issue(&self, key: &str) -> Result<GhIssue, AdapterReadError> {
         let output = self.runner.run(
@@ -257,6 +408,233 @@ impl GithubAdapter<'_> {
         issue.validate_key(key)?;
         Ok(issue)
     }
+
+    /// Map GitHub classification to Ticket Kind. A native Issue Type wins;
+    /// only a typeless issue in a personal repository may use the `bug` Label
+    /// fallback (ADR-0021).
+    fn ticket_kind(&mut self, issue: &GhIssue) -> Result<TicketKind, AdapterReadError> {
+        if let Some(issue_type) = issue.issue_type.as_ref() {
+            return Ok(if issue_type.name.eq_ignore_ascii_case("Bug") {
+                TicketKind::Bug
+            } else {
+                TicketKind::Task
+            });
+        }
+        if !issue
+            .labels
+            .iter()
+            .any(|label| label.name.eq_ignore_ascii_case("bug"))
+        {
+            return Ok(TicketKind::Task);
+        }
+
+        issue.validated_identity()?;
+        let repository = issue
+            .url
+            .rsplit_once("/issues/")
+            .map(|(repository, _)| repository)
+            .ok_or_else(|| {
+                AdapterReadError::Failed(format!(
+                    "GitHub returned a non-canonical issue URL ({})",
+                    issue.url
+                ))
+            })?;
+        let is_organization = self.repository_is_organization(repository)?;
+        Ok(if is_organization {
+            TicketKind::Task
+        } else {
+            TicketKind::Bug
+        })
+    }
+
+    /// Read repository ownership once per canonical repository URL so Pull
+    /// does not repeat the extra lookup for each labeled Bug.
+    fn repository_is_organization(&mut self, repository: &str) -> Result<bool, AdapterReadError> {
+        if let Some(&is_organization) = self.repository_ownership.get(repository) {
+            return Ok(is_organization);
+        }
+        let output = self.runner.run(
+            &[
+                "gh",
+                "repo",
+                "view",
+                repository,
+                "--json",
+                "isInOrganization",
+            ],
+            self.cwd,
+        )?;
+        if !output.succeeded() {
+            return Err(AdapterReadError::Failed(stderr_string(&output)));
+        }
+        let ownership: RepositoryOwnership =
+            serde_json::from_slice(&output.stdout).map_err(|error| {
+                AdapterReadError::Failed(format!(
+                    "could not parse GitHub repository ownership: {error}"
+                ))
+            })?;
+        self.repository_ownership
+            .insert(repository.to_owned(), ownership.is_in_organization);
+        Ok(ownership.is_in_organization)
+    }
+
+    /// Read the repository that `gh` resolves from the Adapter command cwd.
+    fn current_repository(&self) -> Result<RepositoryContext, AdapterReadError> {
+        let output = self.runner.run(
+            &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
+            self.cwd,
+        )?;
+        if !output.succeeded() {
+            return Err(AdapterReadError::Failed(stderr_string(&output)));
+        }
+        serde_json::from_slice(&output.stdout).map_err(|error| {
+            AdapterReadError::Failed(format!(
+                "could not parse GitHub repository metadata: {error}"
+            ))
+        })
+    }
+
+    /// Resolve the current repository's usable Bug representation.
+    fn resolve_bug_representation(&self) -> Result<Option<BugRepresentation>, AdapterReadError> {
+        let repository = self.current_repository()?;
+        self.resolve_bug_representation_in(&repository)
+    }
+
+    /// Prefer a native Issue Type for any repository; use an existing Label
+    /// only for a personal repository (ADR-0021).
+    fn resolve_bug_representation_in(
+        &self,
+        repository: &RepositoryContext,
+    ) -> Result<Option<BugRepresentation>, AdapterReadError> {
+        let (owner, name) = repository.name_with_owner.split_once('/').ok_or_else(|| {
+            AdapterReadError::Failed(format!(
+                "GitHub returned an invalid repository name '{}'",
+                repository.name_with_owner
+            ))
+        })?;
+        if let Some(id) = self.find_native_bug_type(owner, name)? {
+            return Ok(Some(BugRepresentation::NativeIssueType(id)));
+        }
+        if repository.is_in_organization {
+            return Ok(None);
+        }
+        Ok(self
+            .find_bug_label(owner, name)?
+            .map(BugRepresentation::Label))
+    }
+
+    /// Read every Issue Type page before concluding that no enabled, exact
+    /// case-insensitive `Bug` exists (ADR-0021).
+    fn find_native_bug_type(
+        &self,
+        owner: &str,
+        name: &str,
+    ) -> Result<Option<String>, AdapterReadError> {
+        let mut after = None;
+        loop {
+            let page: IssueTypePageResponse =
+                self.graphql_page(ISSUE_TYPES_QUERY, owner, name, after.as_deref())?;
+            let repository = page.repository.ok_or_else(|| {
+                AdapterReadError::Failed(format!(
+                    "GitHub returned no repository for {owner}/{name}"
+                ))
+            })?;
+            for issue_type in repository.issue_types.nodes {
+                if issue_type.is_enabled && issue_type.name.eq_ignore_ascii_case("Bug") {
+                    return Ok(Some(issue_type.id));
+                }
+            }
+            if !repository.issue_types.page_info.has_next_page {
+                return Ok(None);
+            }
+            after = Some(repository.issue_types.page_info.end_cursor.ok_or_else(|| {
+                AdapterReadError::Failed(
+                    "GitHub issue type pagination omitted its next cursor".into(),
+                )
+            })?);
+        }
+    }
+
+    /// Read Label pages until the exact case-insensitive `bug` fallback is
+    /// found or the connection is exhausted.
+    fn find_bug_label(&self, owner: &str, name: &str) -> Result<Option<String>, AdapterReadError> {
+        let mut after = None;
+        loop {
+            let page: LabelPageResponse =
+                self.graphql_page(LABELS_QUERY, owner, name, after.as_deref())?;
+            let repository = page.repository.ok_or_else(|| {
+                AdapterReadError::Failed(format!(
+                    "GitHub returned no repository for {owner}/{name}"
+                ))
+            })?;
+            if let Some(label) = repository
+                .labels
+                .nodes
+                .into_iter()
+                .find(|label| label.name.eq_ignore_ascii_case("bug"))
+            {
+                return Ok(Some(label.id));
+            }
+            if !repository.labels.page_info.has_next_page {
+                return Ok(None);
+            }
+            after = Some(repository.labels.page_info.end_cursor.ok_or_else(|| {
+                AdapterReadError::Failed("GitHub label pagination omitted its next cursor".into())
+            })?);
+        }
+    }
+
+    /// Run one typed GraphQL page read. Transport, GraphQL, and malformed-data
+    /// failures stay Adapter read errors; they never prove unsupported Bug.
+    fn graphql_page<T: DeserializeOwned>(
+        &self,
+        query: &str,
+        owner: &str,
+        name: &str,
+        after: Option<&str>,
+    ) -> Result<T, AdapterReadError> {
+        let query_arg = format!("query={query}");
+        let owner_arg = format!("owner={owner}");
+        let name_arg = format!("name={name}");
+        let after_arg = format!("after={}", after.unwrap_or("null"));
+        let argv = [
+            "gh".to_owned(),
+            "api".to_owned(),
+            "graphql".to_owned(),
+            "-f".to_owned(),
+            query_arg,
+            "-f".to_owned(),
+            owner_arg,
+            "-f".to_owned(),
+            name_arg,
+            "-F".to_owned(),
+            after_arg,
+        ];
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let output = self.runner.run(&argv, self.cwd)?;
+        if !output.succeeded() {
+            return Err(AdapterReadError::Failed(stderr_string(&output)));
+        }
+        let response: GraphQlResponse<T> =
+            serde_json::from_slice(&output.stdout).map_err(|error| {
+                AdapterReadError::Failed(format!(
+                    "could not parse GitHub GraphQL response: {error}"
+                ))
+            })?;
+        if !response.errors.is_empty() {
+            return Err(AdapterReadError::Failed(
+                response
+                    .errors
+                    .into_iter()
+                    .map(|error| error.message)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ));
+        }
+        response.data.ok_or_else(|| {
+            AdapterReadError::Failed("GitHub GraphQL response contained no data".into())
+        })
+    }
 }
 
 /// Raw `gh issue view --json` shape. Only the fields tk maps are named; serde
@@ -271,12 +649,126 @@ struct GhIssue {
     state: String,
     #[serde(rename = "issueType")]
     issue_type: Option<GhIssueType>,
+    #[serde(default)]
+    labels: Vec<GhLabel>,
     /// Canonical issue/PR URL used for identity and the PR guard.
     url: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct GhLabel {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RepositoryOwnership {
+    #[serde(rename = "isInOrganization")]
+    is_in_organization: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RepositoryContext {
+    id: String,
+    #[serde(rename = "nameWithOwner")]
+    name_with_owner: String,
+    #[serde(rename = "isInOrganization")]
+    is_in_organization: bool,
+}
+
+#[derive(Debug)]
+enum BugRepresentation {
+    NativeIssueType(String),
+    Label(String),
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphQlResponse<T> {
+    data: Option<T>,
+    #[serde(default)]
+    errors: Vec<GraphQlError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphQlError {
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateIssueData {
+    #[serde(rename = "createIssue")]
+    create_issue: Option<CreateIssuePayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateIssuePayload {
+    issue: Option<CreateIssueReceipt>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateIssueReceipt {
+    url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueTypePageResponse {
+    repository: Option<IssueTypeRepository>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueTypeRepository {
+    #[serde(rename = "issueTypes")]
+    issue_types: IssueTypeConnection,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueTypeConnection {
+    nodes: Vec<NativeIssueType>,
+    #[serde(rename = "pageInfo")]
+    page_info: PageInfo,
+}
+
+#[derive(Debug, Deserialize)]
+struct NativeIssueType {
+    id: String,
+    name: String,
+    #[serde(rename = "isEnabled")]
+    is_enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct LabelPageResponse {
+    repository: Option<LabelRepository>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LabelRepository {
+    labels: LabelConnection,
+}
+
+#[derive(Debug, Deserialize)]
+struct LabelConnection {
+    nodes: Vec<GraphQlLabel>,
+    #[serde(rename = "pageInfo")]
+    page_info: PageInfo,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphQlLabel {
+    id: String,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PageInfo {
+    #[serde(rename = "hasNextPage")]
+    has_next_page: bool,
+    #[serde(rename = "endCursor")]
+    end_cursor: Option<String>,
+}
+
 /// The `issueType` object; `null` for an untyped issue or a repo without issue
-/// types. Only `name` is read (ADR-0021 issue-type → Ticket Kind mapping).
+/// types. Native type names take precedence over the private label fallback
+/// (ADR-0021).
 #[derive(Debug, Deserialize)]
 struct GhIssueType {
     name: String,
@@ -338,7 +830,7 @@ impl GhIssue {
         Ok(identity)
     }
 
-    fn into_fields(self) -> Result<IssueFields, AdapterReadError> {
+    fn into_fields(self, ticket_kind: TicketKind) -> Result<IssueFields, AdapterReadError> {
         let identity = self.validated_identity()?;
         let number = self.number;
 
@@ -350,13 +842,6 @@ impl GhIssue {
                     "#{number}: unexpected issue state '{other}'"
                 )));
             }
-        };
-        // "Bug" → Bug; every other value ("Task", "Feature", org-custom) and a
-        // typeless issue → Task, matching the closed two-variant TicketKind
-        // (ADR-0021). This read-only mapping never writes `--type`.
-        let ticket_kind = match self.issue_type.as_ref().map(|t| t.name.as_str()) {
-            Some("Bug") => TicketKind::Bug,
-            _ => TicketKind::Task,
         };
         Ok(IssueFields {
             number,
@@ -377,8 +862,8 @@ impl GhIssue {
         })
     }
 
-    fn into_adopted_item(self) -> Result<AdoptedItem, AdapterReadError> {
-        let issue = self.into_fields()?;
+    fn into_adopted_item(self, ticket_kind: TicketKind) -> Result<AdoptedItem, AdapterReadError> {
+        let issue = self.into_fields(ticket_kind)?;
         Ok(AdoptedItem {
             display_id: format!("gh-{}", issue.number),
             backend_key: issue.backend_key,
@@ -389,8 +874,8 @@ impl GhIssue {
         })
     }
 
-    fn into_refresh(self) -> Result<BackendItemRefresh, AdapterReadError> {
-        let issue = self.into_fields()?;
+    fn into_refresh(self, ticket_kind: TicketKind) -> Result<BackendItemRefresh, AdapterReadError> {
+        let issue = self.into_fields(ticket_kind)?;
         Ok(BackendItemRefresh {
             title: issue.title,
             body: issue.body,
@@ -399,12 +884,16 @@ impl GhIssue {
         })
     }
 
-    fn into_inspection(self) -> Result<BackendItemInspection, AdapterReadError> {
+    fn into_inspection(
+        self,
+        ticket_kind: TicketKind,
+    ) -> Result<BackendItemInspection, AdapterReadError> {
         let issue = self.into_content()?;
         Ok(BackendItemInspection {
             identity: issue.identity,
             title: issue.title,
             body: issue.body,
+            ticket_kind,
         })
     }
 }
@@ -539,6 +1028,10 @@ fn rejected_edit(output: &RunOutput) -> BackendEditOutcome {
     })
 }
 
+fn rejected_read(error: &AdapterReadError) -> BackendCreateOutcome {
+    BackendCreateOutcome::rejected(format!("could not resolve Bug representation: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,16 +1062,78 @@ mod tests {
         }
     }
 
+    fn expect_graphql_page(
+        runner: &FakeRunner,
+        query: &str,
+        owner: &str,
+        name: &str,
+        after: Option<&str>,
+        response: &str,
+    ) {
+        let argv = [
+            "gh".to_owned(),
+            "api".to_owned(),
+            "graphql".to_owned(),
+            "-f".to_owned(),
+            format!("query={query}"),
+            "-f".to_owned(),
+            format!("owner={owner}"),
+            "-f".to_owned(),
+            format!("name={name}"),
+            "-F".to_owned(),
+            format!("after={}", after.unwrap_or("null")),
+        ];
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        runner.expect_exact(&argv, ok(response));
+    }
+
+    fn expect_bug_create(
+        runner: &FakeRunner,
+        repository_id: &str,
+        title: &str,
+        body: &str,
+        representation: &str,
+        response: &str,
+    ) {
+        let argv = [
+            "gh".to_owned(),
+            "api".to_owned(),
+            "graphql".to_owned(),
+            "-f".to_owned(),
+            format!("query={CREATE_BUG_QUERY}"),
+            "-f".to_owned(),
+            format!("repositoryId={repository_id}"),
+            "-f".to_owned(),
+            format!("title={title}"),
+            "-f".to_owned(),
+            format!("body={body}"),
+            "-f".to_owned(),
+            representation.to_owned(),
+        ];
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        runner.expect_exact(&argv, ok(response));
+    }
+
     /// Build a `gh issue view --json` object. `issue_type` is either `"null"`
     /// or a type name; the extra object fields exercise serde's field-skipping.
     fn issue_json(number: i64, state: &str, issue_type: &str, url: &str) -> String {
+        issue_json_with_labels(number, state, issue_type, url, "[]")
+    }
+
+    fn issue_json_with_labels(
+        number: i64,
+        state: &str,
+        issue_type: &str,
+        url: &str,
+        labels: &str,
+    ) -> String {
         let it = if issue_type == "null" {
             "null".to_string()
         } else {
             format!(r#"{{"id":"IT_x","name":"{issue_type}","description":"d","color":"RED"}}"#)
         };
         format!(
-            r#"{{"number":{number},"title":"T{number}","body":"B","state":"{state}","issueType":{it},"updatedAt":"2026-06-20T00:00:00Z","url":"{url}"}}"#
+            r#"{{"number":{number},"title":"T{number}","body":"B","state":"{state}","issueType":{it},"labels":{labels},"updatedAt":"2026-06-20T00:00:00Z","url":"{url}"}}"#
         )
     }
 
@@ -650,7 +1205,10 @@ mod tests {
             body: body.into(),
         };
         match mt {
-            MutationType::PromoteTicket => BackendCreate::Ticket { snapshot },
+            MutationType::PromoteTicket => BackendCreate::Ticket {
+                snapshot,
+                ticket_kind: TicketKind::Task,
+            },
             MutationType::PromoteEpic => BackendCreate::Epic { snapshot },
             _ => panic!("not a Promotion Mutation Type"),
         }
@@ -918,6 +1476,97 @@ mod tests {
             );
             runner.assert_all_consumed();
         }
+    }
+
+    #[test]
+    fn refresh_maps_typeless_bug_label_to_bug_in_a_user_repository() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(
+            &["gh", "issue", "view", "1", "--json", ISSUE_JSON_FIELDS],
+            ok(&issue_json_with_labels(
+                1,
+                "OPEN",
+                "null",
+                "https://github.com/o/r/issues/1",
+                r#"[{"name":"BUG"}]"#,
+            )),
+        );
+        runner.expect_exact(
+            &[
+                "gh",
+                "repo",
+                "view",
+                "https://github.com/o/r",
+                "--json",
+                "isInOrganization",
+            ],
+            ok(r#"{"isInOrganization":false}"#),
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+
+        assert_eq!(
+            adapter.refresh_item("1").unwrap().ticket_kind,
+            Some(TicketKind::Bug)
+        );
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn refresh_maps_typeless_bug_label_to_task_in_an_organization_repository() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(
+            &["gh", "issue", "view", "1", "--json", ISSUE_JSON_FIELDS],
+            ok(&issue_json_with_labels(
+                1,
+                "OPEN",
+                "null",
+                "https://github.com/o/r/issues/1",
+                r#"[{"name":"bug"}]"#,
+            )),
+        );
+        runner.expect_exact(
+            &[
+                "gh",
+                "repo",
+                "view",
+                "https://github.com/o/r",
+                "--json",
+                "isInOrganization",
+            ],
+            ok(r#"{"isInOrganization":true}"#),
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+
+        assert_eq!(
+            adapter.refresh_item("1").unwrap().ticket_kind,
+            Some(TicketKind::Task)
+        );
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn refresh_native_issue_type_wins_over_a_bug_label() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(
+            &["gh", "issue", "view", "1", "--json", ISSUE_JSON_FIELDS],
+            ok(&issue_json_with_labels(
+                1,
+                "OPEN",
+                "Feature",
+                "https://github.com/o/r/issues/1",
+                r#"[{"name":"bug"}]"#,
+            )),
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+
+        assert_eq!(
+            adapter.refresh_item("1").unwrap().ticket_kind,
+            Some(TicketKind::Task)
+        );
+        runner.assert_all_consumed();
     }
 
     #[test]
@@ -1621,14 +2270,211 @@ mod tests {
     fn github_declares_the_shipped_promotion_facets() {
         let runner = FakeRunner::new();
         let cwd = cwd();
-        let adapter = GithubAdapter::new(&runner, &cwd);
-        let caps = adapter.promotion_capabilities();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let caps = adapter
+            .resolve_promotion_capabilities(
+                PromotionRequirements::none()
+                    .with_item_class(ItemClass::Ticket)
+                    .with_item_class(ItemClass::Epic)
+                    .with_ticket_kind(TicketKind::Task)
+                    .with_dependencies()
+                    .with_epic_membership(),
+            )
+            .unwrap();
         assert!(caps.can_create_item_class(ItemClass::Ticket));
         assert!(caps.can_create_item_class(ItemClass::Epic));
         assert!(caps.can_create_ticket_kind(TicketKind::Task));
         assert!(!caps.can_create_ticket_kind(TicketKind::Bug));
         assert!(caps.can_represent_dependencies());
         assert!(caps.can_represent_epic_membership());
+    }
+
+    #[test]
+    fn github_resolves_an_enabled_native_bug_type_for_bug_requirements() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(
+            &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
+            ok(r#"{"id":"R_1","nameWithOwner":"o/r","isInOrganization":true}"#),
+        );
+        runner.expect_prefix(
+            &["gh", "api", "graphql"],
+            ok(r#"{"data":{"repository":{"issueTypes":{"nodes":[{"id":"IT_1","name":"bug","isEnabled":true}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#),
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+
+        let capabilities = adapter
+            .resolve_promotion_capabilities(
+                PromotionRequirements::none().with_ticket_kind(TicketKind::Bug),
+            )
+            .unwrap();
+        assert!(capabilities.can_create_ticket_kind(TicketKind::Bug));
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn github_pages_issue_types_until_it_finds_an_enabled_bug() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(
+            &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
+            ok(r#"{"id":"R_1","nameWithOwner":"o/r","isInOrganization":true}"#),
+        );
+        expect_graphql_page(
+            &runner,
+            ISSUE_TYPES_QUERY,
+            "o",
+            "r",
+            None,
+            r#"{"data":{"repository":{"issueTypes":{"nodes":[{"id":"IT_1","name":"Task","isEnabled":true}],"pageInfo":{"hasNextPage":true,"endCursor":"CURSOR"}}}}}"#,
+        );
+        expect_graphql_page(
+            &runner,
+            ISSUE_TYPES_QUERY,
+            "o",
+            "r",
+            Some("CURSOR"),
+            r#"{"data":{"repository":{"issueTypes":{"nodes":[{"id":"IT_2","name":"Bug","isEnabled":true}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#,
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+
+        let capabilities = adapter
+            .resolve_promotion_capabilities(
+                PromotionRequirements::none().with_ticket_kind(TicketKind::Bug),
+            )
+            .unwrap();
+        assert!(capabilities.can_create_ticket_kind(TicketKind::Bug));
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn github_uses_the_final_issue_type_page_before_rejecting_bug_capability() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(
+            &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
+            ok(r#"{"id":"R_1","nameWithOwner":"o/r","isInOrganization":true}"#),
+        );
+        runner.expect_prefix(
+            &["gh", "api", "graphql"],
+            ok(r#"{"data":{"repository":{"issueTypes":{"nodes":[{"id":"IT_1","name":"Task","isEnabled":true}],"pageInfo":{"hasNextPage":true,"endCursor":"CURSOR"}}}}}"#),
+        );
+        runner.expect_prefix(
+            &["gh", "api", "graphql"],
+            ok(r#"{"data":{"repository":{"issueTypes":{"nodes":[{"id":"IT_2","name":"Bug","isEnabled":false}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#),
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+
+        let capabilities = adapter
+            .resolve_promotion_capabilities(
+                PromotionRequirements::none().with_ticket_kind(TicketKind::Bug),
+            )
+            .unwrap();
+        assert!(!capabilities.can_create_ticket_kind(TicketKind::Bug));
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn github_creates_bug_with_the_resolved_native_issue_type() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(
+            &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
+            ok(r#"{"id":"R_1","nameWithOwner":"o/r","isInOrganization":true}"#),
+        );
+        runner.expect_prefix(
+            &["gh", "api", "graphql"],
+            ok(r#"{"data":{"repository":{"issueTypes":{"nodes":[{"id":"IT_1","name":"Bug","isEnabled":true}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#),
+        );
+        expect_bug_create(
+            &runner,
+            "R_1",
+            "Bug title",
+            "Bug body",
+            "issueTypeId=IT_1",
+            r#"{"data":{"createIssue":{"issue":{"url":"https://github.com/o/r/issues/42","number":42}}}}"#,
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let outcome = adapter.create_item(&BackendCreate::Ticket {
+            snapshot: TitleBody {
+                title: "Bug title".into(),
+                body: "Bug body".into(),
+            },
+            ticket_kind: TicketKind::Bug,
+        });
+
+        assert_eq!(
+            outcome,
+            BackendCreateOutcome::Created(identity("https://github.com/o/r/issues/42"))
+        );
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn github_creates_a_personal_bug_with_the_resolved_label() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(
+            &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
+            ok(r#"{"id":"R_1","nameWithOwner":"p/r","isInOrganization":false}"#),
+        );
+        runner.expect_prefix(
+            &["gh", "api", "graphql"],
+            ok(r#"{"data":{"repository":{"issueTypes":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#),
+        );
+        runner.expect_prefix(
+            &["gh", "api", "graphql"],
+            ok(r#"{"data":{"repository":{"labels":{"nodes":[{"id":"L_1","name":"bug"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#),
+        );
+        expect_bug_create(
+            &runner,
+            "R_1",
+            "Bug title",
+            "Bug body",
+            "labelIds[]=L_1",
+            r#"{"data":{"createIssue":{"issue":{"url":"https://github.com/p/r/issues/42","number":42}}}}"#,
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let outcome = adapter.create_item(&BackendCreate::Ticket {
+            snapshot: TitleBody {
+                title: "Bug title".into(),
+                body: "Bug body".into(),
+            },
+            ticket_kind: TicketKind::Bug,
+        });
+
+        assert_eq!(
+            outcome,
+            BackendCreateOutcome::Created(identity("https://github.com/p/r/issues/42"))
+        );
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn github_resolves_an_existing_bug_label_for_a_user_repository() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(
+            &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
+            ok(r#"{"id":"R_1","nameWithOwner":"p/r","isInOrganization":false}"#),
+        );
+        runner.expect_prefix(
+            &["gh", "api", "graphql"],
+            ok(r#"{"data":{"repository":{"issueTypes":{"nodes":[{"id":"IT_1","name":"Task","isEnabled":true}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#),
+        );
+        runner.expect_prefix(
+            &["gh", "api", "graphql"],
+            ok(r#"{"data":{"repository":{"labels":{"nodes":[{"id":"L_1","name":"BUG"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#),
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+
+        let capabilities = adapter
+            .resolve_promotion_capabilities(
+                PromotionRequirements::none().with_ticket_kind(TicketKind::Bug),
+            )
+            .unwrap();
+        assert!(capabilities.can_create_ticket_kind(TicketKind::Bug));
+        runner.assert_all_consumed();
     }
 
     // ---- classify / PR guard -------------------------------------------

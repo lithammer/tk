@@ -473,7 +473,7 @@ mod tests {
                 "view",
                 "5",
                 "--json",
-                "number,title,body,state,issueType,url",
+                "number,title,body,state,issueType,labels,url",
             ],
             ok(&issue_json(
                 5,

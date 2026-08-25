@@ -38,6 +38,8 @@ pub struct BackendItemInspection {
     pub title: String,
     /// Current Backend body observed during inspection.
     pub body: String,
+    /// Ticket Kind mapped from the Backend representation.
+    pub ticket_kind: TicketKind,
 }
 
 /// Backend-native address of an object that already exists remotely.
@@ -83,8 +85,15 @@ pub enum BackendEdit {
 /// A Promotion Mutation that creates a new Backend object.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackendCreate {
-    Ticket { snapshot: TitleBody },
-    Epic { snapshot: TitleBody },
+    Ticket {
+        snapshot: TitleBody,
+        /// Current Ticket Kind from the Repository Store. This is transient
+        /// delivery data, not persisted Promotion intent.
+        ticket_kind: TicketKind,
+    },
+    Epic {
+        snapshot: TitleBody,
+    },
 }
 
 /// Typed delivery operation resolved immediately before an Adapter call.

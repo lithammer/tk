@@ -1,13 +1,9 @@
-//! Static declaration of what a Backend Adapter can represent under
-//! Promotion (ADR-0036 "Backend capability is declared per facet and
-//! staged").
+//! Typed data describing what a Backend Adapter can represent under Promotion
+//! (ADR-0036, ADR-0021).
 //!
-//! Pure domain data: no SQLite, subprocess, or rendering. Preflight reads a
-//! Backend Adapter's [`PromotionCapabilities`] and rejects before any backend
-//! call, so an Adapter never accepts Promotion intent it cannot later apply.
-//! Capability is staged facet by facet as an Adapter earns it: an Adapter
-//! starts at [`PromotionCapabilities::none`] and declares each facet only once
-//! it can apply the Mutations that facet admits to the outbox.
+//! Pure domain data: no SQLite, subprocess, or rendering. Pure graph analysis
+//! produces [`PromotionRequirements`]; an Adapter resolves those requirements
+//! into [`PromotionCapabilities`] before the planner commits Promotion intent.
 
 use super::item_class::ItemClass;
 use super::ticket_kind::TicketKind;
@@ -76,6 +72,90 @@ impl TicketKinds {
             TicketKind::Task => &mut self.task,
             TicketKind::Bug => &mut self.bug,
         }
+    }
+}
+
+/// The Backend capability facets one Promotion graph requires.
+///
+/// The command derives this value without contacting the Backend. The Adapter
+/// resolves these typed requirements before the pure Promotion planner runs;
+/// only repository-specific facets need a Backend read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromotionRequirements {
+    item_classes: ItemClasses,
+    ticket_kinds: TicketKinds,
+    dependencies: bool,
+    epic_membership: bool,
+}
+
+impl PromotionRequirements {
+    /// Start with no capability requirements.
+    #[must_use]
+    pub fn none() -> Self {
+        Self {
+            item_classes: ItemClasses::NONE,
+            ticket_kinds: TicketKinds::NONE,
+            dependencies: false,
+            epic_membership: false,
+        }
+    }
+
+    /// Add a required Item Class facet.
+    #[must_use]
+    pub fn with_item_class(mut self, class: ItemClass) -> Self {
+        *self.item_classes.slot(class) = true;
+        self
+    }
+
+    /// Add a required Ticket Kind facet.
+    #[must_use]
+    pub fn with_ticket_kind(mut self, kind: TicketKind) -> Self {
+        *self.ticket_kinds.slot(kind) = true;
+        self
+    }
+
+    /// Add the Dependency facet.
+    #[must_use]
+    pub fn with_dependencies(mut self) -> Self {
+        self.dependencies = true;
+        self
+    }
+
+    /// Add the Epic-membership facet.
+    #[must_use]
+    pub fn with_epic_membership(mut self) -> Self {
+        self.epic_membership = true;
+        self
+    }
+
+    /// Whether the Promotion requires the given Item Class facet.
+    #[must_use]
+    pub fn requires_item_class(self, class: ItemClass) -> bool {
+        self.item_classes.allows(class)
+    }
+
+    /// Whether the Promotion requires the given Ticket Kind facet.
+    #[must_use]
+    pub fn requires_ticket_kind(self, kind: TicketKind) -> bool {
+        self.ticket_kinds.allows(kind)
+    }
+
+    /// Whether the Promotion requires the Dependency facet.
+    #[must_use]
+    pub fn requires_dependencies(self) -> bool {
+        self.dependencies
+    }
+
+    /// Whether the Promotion requires the Epic-membership facet.
+    #[must_use]
+    pub fn requires_epic_membership(self) -> bool {
+        self.epic_membership
+    }
+}
+
+impl Default for PromotionRequirements {
+    fn default() -> Self {
+        Self::none()
     }
 }
 
