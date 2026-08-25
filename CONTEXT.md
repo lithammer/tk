@@ -435,8 +435,10 @@ _Avoid_: ticket, tickets
 - A Promotion creation returns exactly one certainty outcome: **Created** with
   a Backend identity, certified-no-effect **Rejected**, or **Indeterminate**.
 - The GitHub **Backend Adapter** promotes Task **Tickets** and **Epics** as
-  typeless GitHub issues. It represents **Dependencies** and Epic membership
-  through later relationship **Mutations**; Bug Promotion remains unsupported.
+  typeless GitHub issues. It promotes Bug **Tickets** with a usable native
+  `Bug` Issue Type, or in personal repositories with an existing `bug` Label.
+  It represents **Dependencies** and Epic membership through later relationship
+  **Mutations**.
 - A trustworthy GitHub issue URL receipt certifies **Created**, including when
   `gh` also exits nonzero. Pre-spawn runner failures and authentication
   rejection with the observed initial 401/bad-credentials frame certifies
