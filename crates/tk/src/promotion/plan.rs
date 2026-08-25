@@ -1,12 +1,12 @@
-//! Preflight for one `tk promote` invocation: a pure function from a
-//! Repository Store snapshot to either the ordered Mutations the operation
-//! commits or every problem it would hit (ADR-0035, ADR-0036).
+//! Pure preflight analysis for one `tk promote` invocation. It derives the
+//! required Backend capabilities from a Repository Store snapshot, then builds
+//! either the ordered Mutations the operation commits or every problem it
+//! would hit (ADR-0035, ADR-0036).
 //!
-//! Nothing here touches SQLite, Git, or a Backend — the planner reasons over
-//! [`PromotionGraph`] alone, so the whole operation is judged before a byte is
-//! written and a refused Promotion leaves the outbox empty. Findings
-//! accumulate rather than short-circuit: one run reports everything the user
-//! has to fix.
+//! Nothing here touches SQLite, Git, or a Backend. Every input is pure domain
+//! data, so the whole operation is judged before a byte is written and a
+//! refused Promotion leaves the outbox empty. Findings accumulate rather than
+//! short-circuit: one run reports everything the user has to fix.
 
 use std::collections::{HashMap, HashSet};
 
@@ -33,10 +33,11 @@ pub struct ItemRef {
     pub display_id: String,
 }
 
-/// Derive the dynamic Backend capability facets needed by a Promotion graph.
+/// Derive the Backend capability facets needed by a Promotion graph.
 ///
-/// This pure pass keeps repository inspection demand-driven while leaving the
-/// planner independent of the Adapter.
+/// This pass lets the Adapter read the Backend only for requested
+/// repository-specific facets while the planner stays independent of the
+/// Adapter.
 #[must_use]
 pub fn promotion_requirements(
     graph: &PromotionGraph,
@@ -117,14 +118,12 @@ pub enum PromotionFinding {
     /// A `triage` Ticket: captured-but-unaccepted work is not pushed to a
     /// Backend, and must be Accepted first.
     TriageTicket { item: ItemRef },
-    /// The Backend Adapter declares it cannot create this Item Class under
-    /// Promotion.
+    /// The Backend Adapter cannot create this Item Class under Promotion.
     ItemClassNotRepresentable {
         item: ItemRef,
         item_class: ItemClass,
     },
-    /// The Backend Adapter declares it cannot create this Ticket Kind under
-    /// Promotion.
+    /// The Backend Adapter cannot create this Ticket Kind under Promotion.
     TicketKindNotRepresentable {
         item: ItemRef,
         ticket_kind: TicketKind,
@@ -137,12 +136,12 @@ pub enum PromotionFinding {
         reason: DependencyRejection,
     },
     /// A Dependency the operation would make backend intent, on a Backend
-    /// that declares it cannot represent Dependencies. Keeping it local
-    /// instead would leave the backend-backed Blocked Item exposing an
-    /// incomplete blocking relationship (ADR-0035).
+    /// that cannot represent Dependencies. Keeping it local instead would
+    /// leave the backend-backed Blocked Item exposing an incomplete blocking
+    /// relationship (ADR-0035).
     DependencyNotRepresentable { blocked: ItemRef, blocking: ItemRef },
     /// Epic membership the operation would make backend intent, on a Backend
-    /// that declares it cannot represent membership.
+    /// that cannot represent membership.
     EpicMembershipNotRepresentable { ticket: ItemRef, epic: ItemRef },
 }
 
@@ -353,9 +352,9 @@ fn collect_item_findings(
     }
     // Findings accumulate rather than short-circuit (ADR-0036), but the Ticket
     // Kind question only arises for a Backend that can create the Item Class at
-    // all: reporting both against a Backend declaring neither says one thing
-    // twice. A Backend that takes Tickets but not one Kind — GitHub and `bug`,
-    // once tk-137 lands — still reports the Kind on its own.
+    // all. Reporting both when the Backend supports neither says one thing
+    // twice; a Backend that supports Tickets but not one Kind still reports the
+    // Kind on its own.
     if capabilities.can_create_item_class(item.item_class) {
         if let Some(ticket_kind) = item.ticket_kind
             && !capabilities.can_create_ticket_kind(ticket_kind)

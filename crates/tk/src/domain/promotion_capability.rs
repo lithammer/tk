@@ -75,9 +75,7 @@ impl TicketKinds {
     }
 }
 
-/// Shared storage for required and resolved Promotion facets. The public
-/// wrappers below keep those roles distinct while this value keeps the facet
-/// set exhaustive in one place.
+/// The exhaustive facet set shared by requirements and resolved capabilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PromotionFacets {
     item_classes: ItemClasses,
@@ -123,9 +121,9 @@ impl PromotionFacets {
 
 /// The Backend capability facets one Promotion graph requires.
 ///
-/// The command derives this value without contacting the Backend. The Adapter
-/// resolves these typed requirements before the pure Promotion planner runs;
-/// only repository-specific facets need a Backend read.
+/// Pure graph analysis derives this value without contacting the Backend. The
+/// Adapter resolves it before the Promotion planner runs; only
+/// repository-specific facets need a Backend read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PromotionRequirements {
     facets: PromotionFacets,
@@ -199,10 +197,9 @@ impl Default for PromotionRequirements {
     }
 }
 
-/// What a Backend Adapter can represent under Promotion, declared per facet:
-/// which Item Classes it can create, which Ticket Kinds it can create,
-/// whether it can represent a Dependency, and whether it can represent Epic
-/// membership.
+/// The Promotion facets a Backend Adapter has resolved: which Item Classes and
+/// Ticket Kinds it can create, whether it can represent a Dependency, and
+/// whether it can represent Epic membership.
 ///
 /// Facets are queried by typed value (`can_create_item_class`,
 /// `can_create_ticket_kind`) rather than as a collection callers index
@@ -214,8 +211,7 @@ pub struct PromotionCapabilities {
 }
 
 impl PromotionCapabilities {
-    /// The baseline every Backend Adapter starts from: no Item Class, Ticket
-    /// Kind, Dependency, or Epic membership representable under Promotion.
+    /// No resolved Promotion capability facets.
     #[must_use]
     pub fn none() -> Self {
         Self {
@@ -223,8 +219,7 @@ impl PromotionCapabilities {
         }
     }
 
-    /// Every facet on — the declaration a test uses when the Backend is not
-    /// what it is exercising.
+    /// Every Promotion capability facet.
     ///
     /// Built from the fields rather than by chaining `with_*`, so a facet added
     /// later is a compile error here instead of leaving "everything" quietly
@@ -236,30 +231,28 @@ impl PromotionCapabilities {
         }
     }
 
-    /// Declare that Promotion can create the given Item Class on this
-    /// Backend.
+    /// Mark the given Item Class as creatable on this Backend.
     #[must_use]
     pub fn with_item_class(mut self, class: ItemClass) -> Self {
         self.facets = self.facets.with_item_class(class);
         self
     }
 
-    /// Declare that Promotion can create the given Ticket Kind on this
-    /// Backend.
+    /// Mark the given Ticket Kind as creatable on this Backend.
     #[must_use]
     pub fn with_ticket_kind(mut self, kind: TicketKind) -> Self {
         self.facets = self.facets.with_ticket_kind(kind);
         self
     }
 
-    /// Declare that Promotion can represent a Dependency on this Backend.
+    /// Mark Dependencies as representable on this Backend.
     #[must_use]
     pub fn with_dependencies(mut self) -> Self {
         self.facets = self.facets.with_dependencies();
         self
     }
 
-    /// Declare that Promotion can represent Epic membership on this Backend.
+    /// Mark Epic membership as representable on this Backend.
     #[must_use]
     pub fn with_epic_membership(mut self) -> Self {
         self.facets = self.facets.with_epic_membership();
@@ -296,7 +289,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn none_declares_nothing() {
+    fn none_has_no_facets() {
         let caps = PromotionCapabilities::none();
         assert!(!caps.can_create_item_class(ItemClass::Ticket));
         assert!(!caps.can_create_item_class(ItemClass::Epic));
@@ -307,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn all_declares_every_facet() {
+    fn all_has_every_facet() {
         let caps = PromotionCapabilities::all();
         assert!(caps.can_create_item_class(ItemClass::Ticket));
         assert!(caps.can_create_item_class(ItemClass::Epic));
@@ -318,21 +311,21 @@ mod tests {
     }
 
     #[test]
-    fn with_item_class_declares_only_that_class() {
+    fn with_item_class_adds_only_that_class() {
         let caps = PromotionCapabilities::none().with_item_class(ItemClass::Epic);
         assert!(caps.can_create_item_class(ItemClass::Epic));
         assert!(!caps.can_create_item_class(ItemClass::Ticket));
     }
 
     #[test]
-    fn with_ticket_kind_declares_only_that_kind() {
+    fn with_ticket_kind_adds_only_that_kind() {
         let caps = PromotionCapabilities::none().with_ticket_kind(TicketKind::Task);
         assert!(caps.can_create_ticket_kind(TicketKind::Task));
         assert!(!caps.can_create_ticket_kind(TicketKind::Bug));
     }
 
     #[test]
-    fn with_dependencies_and_epic_membership_declare_independently() {
+    fn dependencies_and_epic_membership_are_independent() {
         let caps = PromotionCapabilities::none().with_dependencies();
         assert!(caps.can_represent_dependencies());
         assert!(!caps.can_represent_epic_membership());

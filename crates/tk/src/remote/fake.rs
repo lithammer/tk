@@ -100,6 +100,7 @@ pub struct FakeAdapter {
     /// [`FakeAdapter::with_capabilities`] instead of queuing a response per
     /// call.
     capabilities: PromotionCapabilities,
+    capability_error: Option<AdapterReadError>,
 }
 
 impl FakeAdapter {
@@ -117,6 +118,7 @@ impl FakeAdapter {
             captured_refresh_keys: Vec::new(),
             captured_inspection_keys: Vec::new(),
             capabilities: PromotionCapabilities::none(),
+            capability_error: None,
         }
     }
 
@@ -156,6 +158,13 @@ impl FakeAdapter {
     #[must_use]
     pub fn with_capabilities(mut self, capabilities: PromotionCapabilities) -> Self {
         self.capabilities = capabilities;
+        self
+    }
+
+    /// Make the next capability resolution fail with this Adapter read error.
+    #[must_use]
+    pub fn with_capability_error(mut self, error: AdapterReadError) -> Self {
+        self.capability_error = Some(error);
         self
     }
 }
@@ -248,6 +257,9 @@ impl Adapter for FakeAdapter {
         &mut self,
         _requirements: PromotionRequirements,
     ) -> Result<PromotionCapabilities, AdapterReadError> {
+        if let Some(error) = self.capability_error.take() {
+            return Err(error);
+        }
         Ok(self.capabilities)
     }
 }
@@ -478,13 +490,29 @@ mod tests {
     }
 
     #[test]
-    fn with_capabilities_overrides_the_declaration() {
+    fn with_capabilities_sets_the_resolved_value() {
         let caps = PromotionCapabilities::none().with_item_class(ItemClass::Epic);
         let mut fake = FakeAdapter::new().with_capabilities(caps);
         assert_eq!(
             fake.resolve_promotion_capabilities(PromotionRequirements::none())
                 .unwrap(),
             caps
+        );
+    }
+
+    #[test]
+    fn capability_error_fails_the_next_resolution() {
+        let mut fake = FakeAdapter::new()
+            .with_capability_error(AdapterReadError::Failed("taxonomy read failed".into()));
+
+        assert!(matches!(
+            fake.resolve_promotion_capabilities(PromotionRequirements::none()),
+            Err(AdapterReadError::Failed(detail)) if detail == "taxonomy read failed"
+        ));
+        assert_eq!(
+            fake.resolve_promotion_capabilities(PromotionRequirements::none())
+                .unwrap(),
+            PromotionCapabilities::none()
         );
     }
 }

@@ -189,10 +189,11 @@ impl Adapter for GithubAdapter<'_> {
         if requirements.requires_ticket_kind(TicketKind::Task) {
             capabilities = capabilities.with_ticket_kind(TicketKind::Task);
         }
-        if requirements.requires_ticket_kind(TicketKind::Bug)
-            && self.resolve_bug_representation()?.is_some()
-        {
-            capabilities = capabilities.with_ticket_kind(TicketKind::Bug);
+        if requirements.requires_ticket_kind(TicketKind::Bug) {
+            let repository = self.current_repository()?;
+            if self.find_bug_representation(&repository)?.is_some() {
+                capabilities = capabilities.with_ticket_kind(TicketKind::Bug);
+            }
         }
         if requirements.requires_dependencies() {
             capabilities = capabilities.with_dependencies();
@@ -306,16 +307,16 @@ impl GithubAdapter<'_> {
     ) -> BackendCreateOutcome {
         let repository = match self.current_repository() {
             Ok(repository) => repository,
-            Err(error) => return rejected_read(&error),
+            Err(error) => return bug_read_rejection(&error),
         };
-        let representation = match self.resolve_bug_representation_in(&repository) {
+        let representation = match self.find_bug_representation(&repository) {
             Ok(Some(representation)) => representation,
             Ok(None) => {
                 return BackendCreateOutcome::rejected(
                     "the configured GitHub repository has no usable Bug representation",
                 );
             }
-            Err(error) => return rejected_read(&error),
+            Err(error) => return bug_read_rejection(&error),
         };
         let repository_id = format!("repositoryId={}", repository.id);
         let title = format!("title={}", snapshot.title);
@@ -491,15 +492,9 @@ impl GithubAdapter<'_> {
         })
     }
 
-    /// Resolve the current repository's usable Bug representation.
-    fn resolve_bug_representation(&self) -> Result<Option<BugRepresentation>, AdapterReadError> {
-        let repository = self.current_repository()?;
-        self.resolve_bug_representation_in(&repository)
-    }
-
     /// Prefer a native Issue Type for any repository; use an existing Label
     /// only for a personal repository (ADR-0021).
-    fn resolve_bug_representation_in(
+    fn find_bug_representation(
         &self,
         repository: &RepositoryContext,
     ) -> Result<Option<BugRepresentation>, AdapterReadError> {
@@ -1021,7 +1016,7 @@ fn rejected_edit(output: &RunOutput) -> BackendEditOutcome {
     })
 }
 
-fn rejected_read(error: &AdapterReadError) -> BackendCreateOutcome {
+fn bug_read_rejection(error: &AdapterReadError) -> BackendCreateOutcome {
     BackendCreateOutcome::rejected(format!("could not resolve Bug representation: {error}"))
 }
 
@@ -2260,7 +2255,7 @@ mod tests {
     }
 
     #[test]
-    fn github_declares_the_shipped_promotion_facets() {
+    fn resolves_requested_static_facets_without_io() {
         let runner = FakeRunner::new();
         let cwd = cwd();
         let mut adapter = GithubAdapter::new(&runner, &cwd);
@@ -2283,7 +2278,7 @@ mod tests {
     }
 
     #[test]
-    fn github_resolves_an_enabled_native_bug_type_for_bug_requirements() {
+    fn resolves_an_enabled_native_bug_type_for_bug_requirements() {
         let runner = FakeRunner::new();
         runner.expect_exact(
             &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
@@ -2306,7 +2301,7 @@ mod tests {
     }
 
     #[test]
-    fn github_pages_issue_types_until_it_finds_an_enabled_bug() {
+    fn pages_issue_types_until_it_finds_an_enabled_bug() {
         let runner = FakeRunner::new();
         runner.expect_exact(
             &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
@@ -2341,7 +2336,7 @@ mod tests {
     }
 
     #[test]
-    fn github_uses_the_final_issue_type_page_before_rejecting_bug_capability() {
+    fn uses_the_final_issue_type_page_before_rejecting_bug_capability() {
         let runner = FakeRunner::new();
         runner.expect_exact(
             &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
@@ -2368,7 +2363,30 @@ mod tests {
     }
 
     #[test]
-    fn github_creates_bug_with_the_resolved_native_issue_type() {
+    fn bug_capability_read_failure_is_not_reported_as_unsupported() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(
+            &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
+            ok(r#"{"id":"R_1","nameWithOwner":"o/r","isInOrganization":true}"#),
+        );
+        runner.expect_prefix(
+            &["gh", "api", "graphql"],
+            fail(1, "GraphQL: taxonomy read failed"),
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+
+        assert!(matches!(
+            adapter.resolve_promotion_capabilities(
+                PromotionRequirements::none().with_ticket_kind(TicketKind::Bug)
+            ),
+            Err(AdapterReadError::Failed(detail)) if detail == "GraphQL: taxonomy read failed"
+        ));
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn creates_bug_with_the_resolved_native_issue_type() {
         let runner = FakeRunner::new();
         runner.expect_exact(
             &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
@@ -2404,7 +2422,7 @@ mod tests {
     }
 
     #[test]
-    fn github_creates_a_personal_bug_with_the_resolved_label() {
+    fn creates_a_personal_bug_with_the_resolved_label() {
         let runner = FakeRunner::new();
         runner.expect_exact(
             &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
@@ -2444,7 +2462,7 @@ mod tests {
     }
 
     #[test]
-    fn github_resolves_an_existing_bug_label_for_a_user_repository() {
+    fn resolves_an_existing_bug_label_for_a_user_repository() {
         let runner = FakeRunner::new();
         runner.expect_exact(
             &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],

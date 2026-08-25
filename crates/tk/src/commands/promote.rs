@@ -1619,6 +1619,27 @@ mod tests {
     }
 
     #[test]
+    fn capability_read_failure_leaves_the_outbox_empty() {
+        let fixture = TmpStore::new("repo");
+        let conn = seed_store(&fixture);
+        local_ticket(&conn, "t1", "tk-1", 1);
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        let mut store = open_store(&h, &fixture, &cwd_path);
+        let mut fake = FakeAdapter::new()
+            .with_capability_error(AdapterReadError::Failed("taxonomy read failed".into()));
+
+        let code = promote_rendered(&mut h, &mut store, &mut fake, "tk-1", false);
+
+        assert_eq!(code, Exit::Failure);
+        assert_eq!(
+            h.err(),
+            "tk promote: could not inspect Backend Promotion capabilities: taxonomy read failed\n"
+        );
+        assert_eq!(mutation_count(&conn).unwrap(), 0);
+    }
+
+    #[test]
     fn a_github_remote_promotes_a_task_through_the_real_adapter() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);

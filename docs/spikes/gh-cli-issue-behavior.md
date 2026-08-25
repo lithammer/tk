@@ -10,16 +10,18 @@ and — where one observation cannot settle what is *possible* — `gh`'s own
 source, which is open. Both beat inferring gh's behaviour from tk's
 expectations of it.
 
-- **gh version:** 2.94.0 (2026-06-10)
+- **Base probe gh version:** 2.94.0 (2026-06-10)
+- **Bug Promotion probe gh version:** 2.98.0 (2026-08-20)
 - **Sandbox:** private repo `lithammer/tk-gh-playground` — kept, not deleted
   (the auth token lacks `delete_repo` scope), so it persists as a re-probe
   sandbox for future `gh` versions / new failure modes.
-- **Date:** 2026-06-23
+- **Base probe date:** 2026-06-23
+- **Bug Promotion probe date:** 2026-08-24
 
 ## Read / Backend Pull — `gh issue view <n> --json …`
 
-Adapter field set: `number,title,body,state,issueType,updatedAt,url`. Verbatim
-(issue #1):
+Current Adapter field set: `number,title,body,state,issueType,labels,url`. The
+original issue #1 probe, before the Adapter requested `labels`, returned:
 
 ```
 {"body":"Body of an open issue","issueType":null,"number":1,"state":"OPEN","title":"Open task","updatedAt":"2026-06-23T08:43:33Z","url":"https://github.com/lithammer/tk-gh-playground/issues/1"}
@@ -29,11 +31,13 @@ Adapter field set: `number,title,body,state,issueType,updatedAt,url`. Verbatim
   adapter maps `OPEN → open`, `CLOSED → done`, and treats anything else as a
   typed error (never reached for issues; the PR url guard fires first).
 - `issueType` is `null` on an untyped issue. The object form
-  (`{"id","name",…}`) could **not** be observed: issue types are not
-  configurable on a personal private repo — `gh issue create --type Bug` →
-  `type "Bug" not found; available types: ` (exit 1), and it still creates the
-  issue typeless. So the `name == "Bug" → Bug` mapping stays **source-derived**;
-  re-probe on an org repo with issue types configured.
+  (`{"id","name",…}`) could **not** be observed in the base probe:
+  `gh issue create --type Bug` reported
+  `type "Bug" not found; available types: ` (exit 1), then created a typeless
+  issue. The later Bug Promotion probe found REST-listed types but still could
+  not apply one; see below. The `name == "Bug" → Bug` mapping remains
+  **source-derived** pending a probe on an organization repository with usable
+  Issue Types.
 - `url` is `…/issues/<n>` for an issue, `…/pull/<n>` for a PR.
 - A single `gh issue view <n>` writes one JSON object (not an array).
 
@@ -76,9 +80,10 @@ state never reaches the state parse — the url guard rejects the PR first.
 
 ## Promotion — `gh issue create`
 
-Re-probed on 2026-08-09 before enabling GitHub Promotion. Both Task Tickets
-and Epics use the typeless command `gh issue create --title <title> --body
-<body>`; Epic membership is a later `gh issue edit --parent` Mutation.
+Re-probed on 2026-08-09 before enabling GitHub Promotion. Task Tickets and
+Epics use the typeless command `gh issue create --title <title> --body <body>`;
+Epic membership is a later `gh issue edit --parent` Mutation. Bug Tickets use
+the direct GraphQL path described below.
 
 - A successful create prints one canonical issue URL on stdout. The trailing
   issue number is the backend key and yields Display ID `gh-<number>`.
@@ -107,10 +112,41 @@ Probed again 2026-08-18 (tk-142) for the shape of a validation rejection:
 - The same text appears from `updateIssue` when an edit carries the over-long
   title.
 
-The Adapter consequently never sends `--type`, parent, Dependency, Label, or
-Assignee flags during creation. Reconciliation and explicit-risk retry are
-separate recovery work; an indeterminate Promotion remains `applying` and is
-not replayed automatically.
+The typeless path never sends `--type`, parent, Dependency, Label, or Assignee
+flags during creation. Reconciliation and explicit-risk retry are separate
+recovery work; an indeterminate Promotion remains `applying` and is not
+replayed automatically.
+
+### Bug representation — Issue Type or personal-repository Label
+
+Probed on 2026-08-24 against the user-owned
+`lithammer/tk-gh-playground` repository with `gh` 2.98.0:
+
+- The REST repository Issue Types endpoint listed enabled Task, Bug, and
+  Feature types. Despite that list, `gh issue edit --type Bug` reported no
+  available types and changed nothing. The REST list alone therefore does not
+  prove that the repository can use a native Issue Type.
+- A REST create with an unavailable `type` created issue #24 but left it
+  typeless. The probe issue was closed after inspection. This is observed REST
+  behavior, not a claim about `gh issue create` from source.
+- A direct `createIssue` GraphQL mutation with an invalid Issue Type ID returned
+  no issue. A title search confirmed that it created nothing.
+
+Source at the installed `gh` 2.98.0 tag establishes the available read
+surfaces. `api/query_builder.go` exposes `issueType` and `labels` to
+`gh issue view --json`, and `isInOrganization` to `gh repo view --json`.
+`api/queries_issue.go` shows that `RepoIssueTypes` requests only the first 50
+Issue Types and no page information, so it cannot prove that an enabled `Bug`
+type is absent. The Adapter instead pages the `issueTypes` GraphQL connection
+to exhaustion.
+
+Bug Promotion uses one direct `createIssue` GraphQL mutation. Preflight and
+Apply prefer an enabled, case-insensitive `Bug` Issue Type. When none exists, a
+personal repository may use an existing case-insensitive `bug` Label; an
+organization repository has no fallback. The mutation sends exactly one of
+`issueTypeId` and `labelIds`, which creates the issue and its Ticket Kind
+representation as one effect. The Adapter never creates or renames repository
+taxonomy.
 
 ## Relationships — `--parent` / `--remove-parent` / `--remove-sub-issue`
 
@@ -119,9 +155,9 @@ argv (issues 7 and 8, `[tk-132-probe-2026-08-10-1901116e]`, closed after).
 Every call passed **canonical issue URLs** for both the subject and the flag
 value, matching the argv the Adapter builds from stored Backend keys.
 
-- Sub-issues **are** available on this personal private repo, unlike issue
-  types. All ten calls exited **0** with empty stderr and the edited issue's
-  URL on stdout.
+- Sub-issues **are** available on this personal private repo, unlike usable
+  Issue Types. All ten calls exited **0** with empty stderr and the edited
+  issue's URL on stdout.
 - `gh issue edit <child> --parent <parent>` attaches. `gh issue view <child>
   --json parent` reads back an object (`id`, `number`, `state`, `title`,
   `url`); `--json subIssues` on the parent reads back
