@@ -81,14 +81,17 @@ malformed-response failures remain Adapter read errors rather than being
 reported as unsupported capability. Repository-specific GitHub knowledge does
 not enter the command or planner.
 
-Native Issue Type absence requires an exhaustive direct GraphQL read. The
-Adapter reads each `issueTypes` page, including `isEnabled` and
-`pageInfo`, until `hasNextPage` is false; only then may it report that no
-enabled case-insensitive `Bug` exists. It must not use `gh` 2.98.0's
+Native Issue Type absence requires an exhaustive direct GraphQL read. GitHub's
+schema makes `Repository.issueTypes` nullable. An initial null is Adapter
+policy for no native Issue Type representation available to this caller, and
+is terminal native absence. A non-null connection still requires reading each
+`issueTypes` page, including `isEnabled` and `pageInfo`, until `hasNextPage` is
+false; only then may it report that no enabled case-insensitive `Bug` exists.
+Null after a promised next page, omitted or malformed fields, GraphQL errors,
+and failed pages are Adapter read errors. It must not use `gh` 2.98.0's
 `RepoIssueTypes` helper as this proof because that helper requests only the
-first 50 nodes and no page information. A failed page is an Adapter read error,
-not evidence that Bug is unsupported. Apply uses the same exhaustive resolver
-before creation.
+first 50 nodes and no page information. Apply uses the same exhaustive
+resolver before creation.
 
 The Issue Type or Label ID is not durable Promotion intent and is not
 persisted. Preflight proves that the repository can currently represent Bug;

@@ -531,15 +531,25 @@ impl GithubAdapter<'_> {
                     "GitHub returned no repository for {owner}/{name}"
                 ))
             })?;
-            for issue_type in repository.issue_types.nodes {
+            let issue_types = match repository.issue_types {
+                IssueTypesField::Connection(connection) => connection,
+                IssueTypesField::Null(()) if after.is_none() => return Ok(None),
+                IssueTypesField::Null(()) => {
+                    return Err(AdapterReadError::Failed(
+                        "GitHub issue type pagination returned null after a continuation cursor"
+                            .into(),
+                    ));
+                }
+            };
+            for issue_type in issue_types.nodes {
                 if issue_type.is_enabled && issue_type.name.eq_ignore_ascii_case("Bug") {
                     return Ok(Some(issue_type.id));
                 }
             }
-            if !repository.issue_types.page_info.has_next_page {
+            if !issue_types.page_info.has_next_page {
                 return Ok(None);
             }
-            after = Some(repository.issue_types.page_info.end_cursor.ok_or_else(|| {
+            after = Some(issue_types.page_info.end_cursor.ok_or_else(|| {
                 AdapterReadError::Failed(
                     "GitHub issue type pagination omitted its next cursor".into(),
                 )
@@ -709,7 +719,16 @@ struct IssueTypePageResponse {
 #[derive(Debug, Deserialize)]
 struct IssueTypeRepository {
     #[serde(rename = "issueTypes")]
-    issue_types: IssueTypeConnection,
+    issue_types: IssueTypesField,
+}
+
+/// Keeps ADR-0021's initial-null policy distinct from a missing
+/// `issueTypes` field.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum IssueTypesField {
+    Connection(IssueTypeConnection),
+    Null(()),
 }
 
 #[derive(Debug, Deserialize)]
@@ -1162,6 +1181,24 @@ mod tests {
     fn address(key: &str) -> BackendItemAddress {
         BackendItemAddress {
             backend_key: key.into(),
+        }
+    }
+
+    #[test]
+    fn issue_types_wire_field_requires_a_connection_or_explicit_null() {
+        let response: IssueTypePageResponse =
+            serde_json::from_str(r#"{"repository":{"issueTypes":null}}"#).unwrap();
+        assert!(matches!(
+            response.repository.unwrap().issue_types,
+            IssueTypesField::Null(())
+        ));
+
+        for response in [
+            r#"{"repository":{}}"#,
+            r#"{"repository":{"issueTypes":{"pageInfo":{"hasNextPage":false,"endCursor":null}}}}"#,
+            r#"{"repository":{"issueTypes":{"nodes":[],"pageInfo":null}}}"#,
+        ] {
+            assert!(serde_json::from_str::<IssueTypePageResponse>(response).is_err());
         }
     }
 
@@ -2422,6 +2459,77 @@ mod tests {
     }
 
     #[test]
+    fn resolves_a_personal_bug_label_after_an_initial_null_issue_type_connection() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(
+            &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
+            ok(r#"{"id":"R_1","nameWithOwner":"p/r","isInOrganization":false}"#),
+        );
+        expect_graphql_page(
+            &runner,
+            ISSUE_TYPES_QUERY,
+            "p",
+            "r",
+            None,
+            r#"{"data":{"repository":{"issueTypes":null}}}"#,
+        );
+        expect_graphql_page(
+            &runner,
+            LABELS_QUERY,
+            "p",
+            "r",
+            None,
+            r#"{"data":{"repository":{"labels":{"nodes":[{"id":"L_1","name":"bug"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#,
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+
+        let capabilities = adapter
+            .resolve_promotion_capabilities(
+                PromotionRequirements::none().with_ticket_kind(TicketKind::Bug),
+            )
+            .unwrap();
+        assert!(capabilities.can_create_ticket_kind(TicketKind::Bug));
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn rejects_null_issue_type_connection_after_pagination_started() {
+        let runner = FakeRunner::new();
+        runner.expect_exact(
+            &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
+            ok(r#"{"id":"R_1","nameWithOwner":"p/r","isInOrganization":false}"#),
+        );
+        expect_graphql_page(
+            &runner,
+            ISSUE_TYPES_QUERY,
+            "p",
+            "r",
+            None,
+            r#"{"data":{"repository":{"issueTypes":{"nodes":[],"pageInfo":{"hasNextPage":true,"endCursor":"CURSOR"}}}}}"#,
+        );
+        expect_graphql_page(
+            &runner,
+            ISSUE_TYPES_QUERY,
+            "p",
+            "r",
+            Some("CURSOR"),
+            r#"{"data":{"repository":{"issueTypes":null}}}"#,
+        );
+        let cwd = cwd();
+        let mut adapter = GithubAdapter::new(&runner, &cwd);
+
+        assert!(matches!(
+            adapter.resolve_promotion_capabilities(
+                PromotionRequirements::none().with_ticket_kind(TicketKind::Bug)
+            ),
+            Err(AdapterReadError::Failed(detail))
+                if detail == "GitHub issue type pagination returned null after a continuation cursor"
+        ));
+        runner.assert_all_consumed();
+    }
+
+    #[test]
     fn creates_a_personal_bug_with_the_resolved_label() {
         let runner = FakeRunner::new();
         runner.expect_exact(
@@ -2430,7 +2538,7 @@ mod tests {
         );
         runner.expect_prefix(
             &["gh", "api", "graphql"],
-            ok(r#"{"data":{"repository":{"issueTypes":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#),
+            ok(r#"{"data":{"repository":{"issueTypes":null}}}"#),
         );
         runner.expect_prefix(
             &["gh", "api", "graphql"],
