@@ -70,20 +70,23 @@ impl Adapter for GithubAdapter<'_> {
 
     fn adopt_ticket(&mut self, input: &str) -> Result<AdoptedItem, AdapterReadError> {
         let issue = self.view_issue(input)?;
-        let ticket_kind = self.ticket_kind(&issue)?;
-        issue.into_adopted_item(ticket_kind)
+        let identity = issue.validated_identity()?;
+        let ticket_kind = self.ticket_kind(&issue, &identity)?;
+        issue.into_adopted_item(identity, ticket_kind)
     }
 
     fn refresh_item(&mut self, key: &str) -> Result<BackendItemRefresh, AdapterReadError> {
         let issue = self.view_matching_issue(key)?;
-        let ticket_kind = self.ticket_kind(&issue)?;
-        issue.into_refresh(ticket_kind)
+        let identity = issue.validated_identity()?;
+        let ticket_kind = self.ticket_kind(&issue, &identity)?;
+        issue.into_refresh(identity, ticket_kind)
     }
 
     fn inspect_item(&mut self, key: &str) -> Result<BackendItemInspection, AdapterReadError> {
         let issue = self.view_matching_issue(key)?;
-        let ticket_kind = self.ticket_kind(&issue)?;
-        issue.into_inspection(ticket_kind)
+        let identity = issue.validated_identity()?;
+        let ticket_kind = self.ticket_kind(&issue, &identity)?;
+        Ok(issue.into_inspection(identity, ticket_kind))
     }
 
     fn apply_edit(&mut self, edit: &BackendEdit) -> Result<BackendEditOutcome, ApplyError> {
@@ -216,6 +219,34 @@ impl GithubAdapter<'_> {
         Ok(rejected_edit(&output))
     }
 
+    /// Run one non-idempotent creation command and preserve ADR-0036's effect
+    /// certainty boundary: a child that never starts is Rejected, while an
+    /// unobserved child is Indeterminate.
+    fn run_creation(
+        &self,
+        command: &str,
+        argv: &[&str],
+    ) -> Result<RunOutput, BackendCreateOutcome> {
+        match self.runner.run(argv, self.cwd) {
+            Ok(output) => Ok(output),
+            Err(
+                error @ (crate::proc::ProcError::ExecutableNotFound
+                | crate::proc::ProcError::SpawnFailed),
+            ) => Err(BackendCreateOutcome::Rejected(Failure {
+                detail: format!("{command} did not start: {error}"),
+                class: FailureClass::Unknown,
+                retry_after_s: None,
+            })),
+            Err(error @ crate::proc::ProcError::OutcomeUnobserved) => {
+                Err(BackendCreateOutcome::Indeterminate(Failure {
+                    detail: format!("{command} started, but its outcome is unknown: {error}"),
+                    class: FailureClass::Unknown,
+                    retry_after_s: None,
+                }))
+            }
+        }
+    }
+
     /// Create the GitHub issue represented by either Promotion variant.
     ///
     /// Task Tickets and Epics share the typeless `gh issue create` surface.
@@ -233,7 +264,8 @@ impl GithubAdapter<'_> {
         let snapshot = match create {
             BackendCreate::Ticket { snapshot, .. } | BackendCreate::Epic { snapshot } => snapshot,
         };
-        let output = match self.runner.run(
+        let output = match self.run_creation(
+            "gh issue create",
             &[
                 "gh",
                 "issue",
@@ -243,26 +275,9 @@ impl GithubAdapter<'_> {
                 "--body",
                 &snapshot.body,
             ],
-            self.cwd,
         ) {
             Ok(output) => output,
-            Err(
-                err @ (crate::proc::ProcError::ExecutableNotFound
-                | crate::proc::ProcError::SpawnFailed),
-            ) => {
-                return BackendCreateOutcome::Rejected(Failure {
-                    detail: format!("gh issue create did not start: {err}"),
-                    class: FailureClass::Unknown,
-                    retry_after_s: None,
-                });
-            }
-            Err(err @ crate::proc::ProcError::OutcomeUnobserved) => {
-                return BackendCreateOutcome::Indeterminate(Failure {
-                    detail: format!("gh issue create started, but its outcome is unknown: {err}"),
-                    class: FailureClass::Unknown,
-                    retry_after_s: None,
-                });
-            }
+            Err(outcome) => return outcome,
         };
 
         if let Some(identity) = parse_create_receipt(&output.stdout) {
@@ -325,25 +340,9 @@ impl GithubAdapter<'_> {
             representation_arg,
         ];
         let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
-        let output = match self.runner.run(&argv, self.cwd) {
+        let output = match self.run_creation("gh api graphql", &argv) {
             Ok(output) => output,
-            Err(
-                err @ (crate::proc::ProcError::ExecutableNotFound
-                | crate::proc::ProcError::SpawnFailed),
-            ) => {
-                return BackendCreateOutcome::Rejected(Failure {
-                    detail: format!("gh api graphql did not start: {err}"),
-                    class: FailureClass::Unknown,
-                    retry_after_s: None,
-                });
-            }
-            Err(err @ crate::proc::ProcError::OutcomeUnobserved) => {
-                return BackendCreateOutcome::Indeterminate(Failure {
-                    detail: format!("gh api graphql started, but its outcome is unknown: {err}"),
-                    class: FailureClass::Unknown,
-                    retry_after_s: None,
-                });
-            }
+            Err(outcome) => return outcome,
         };
         let stderr = stderr_string(&output);
         let response: Result<GraphQlResponse<CreateIssueData>, _> =
@@ -412,7 +411,11 @@ impl GithubAdapter<'_> {
     /// Map GitHub classification to Ticket Kind. A native Issue Type wins;
     /// only a typeless issue in a personal repository may use the `bug` Label
     /// fallback (ADR-0021).
-    fn ticket_kind(&mut self, issue: &GhIssue) -> Result<TicketKind, AdapterReadError> {
+    fn ticket_kind(
+        &mut self,
+        issue: &GhIssue,
+        identity: &BackendItemIdentity,
+    ) -> Result<TicketKind, AdapterReadError> {
         if let Some(issue_type) = issue.issue_type.as_ref() {
             return Ok(if issue_type.name.eq_ignore_ascii_case("Bug") {
                 TicketKind::Bug
@@ -428,17 +431,11 @@ impl GithubAdapter<'_> {
             return Ok(TicketKind::Task);
         }
 
-        issue.validated_identity()?;
-        let repository = issue
-            .url
+        let repository = identity
+            .backend_key
             .rsplit_once("/issues/")
             .map(|(repository, _)| repository)
-            .ok_or_else(|| {
-                AdapterReadError::Failed(format!(
-                    "GitHub returned a non-canonical issue URL ({})",
-                    issue.url
-                ))
-            })?;
+            .expect("validated GitHub issue identity contains its repository URL");
         let is_organization = self.repository_is_organization(repository)?;
         Ok(if is_organization {
             TicketKind::Task
@@ -783,12 +780,6 @@ struct IssueFields {
     status: ItemStatus,
 }
 
-struct IssueContent {
-    identity: BackendItemIdentity,
-    title: String,
-    body: String,
-}
-
 impl GhIssue {
     fn validate_key(&self, key: &str) -> Result<(), AdapterReadError> {
         if key == self.number.to_string() || key == self.url {
@@ -830,8 +821,11 @@ impl GhIssue {
         Ok(identity)
     }
 
-    fn into_fields(self, ticket_kind: TicketKind) -> Result<IssueFields, AdapterReadError> {
-        let identity = self.validated_identity()?;
+    fn into_fields(
+        self,
+        identity: BackendItemIdentity,
+        ticket_kind: TicketKind,
+    ) -> Result<IssueFields, AdapterReadError> {
         let number = self.number;
 
         let status = match self.state.as_str() {
@@ -853,17 +847,12 @@ impl GhIssue {
         })
     }
 
-    fn into_content(self) -> Result<IssueContent, AdapterReadError> {
-        let identity = self.validated_identity()?;
-        Ok(IssueContent {
-            identity,
-            title: self.title,
-            body: self.body,
-        })
-    }
-
-    fn into_adopted_item(self, ticket_kind: TicketKind) -> Result<AdoptedItem, AdapterReadError> {
-        let issue = self.into_fields(ticket_kind)?;
+    fn into_adopted_item(
+        self,
+        identity: BackendItemIdentity,
+        ticket_kind: TicketKind,
+    ) -> Result<AdoptedItem, AdapterReadError> {
+        let issue = self.into_fields(identity, ticket_kind)?;
         Ok(AdoptedItem {
             display_id: format!("gh-{}", issue.number),
             backend_key: issue.backend_key,
@@ -874,8 +863,12 @@ impl GhIssue {
         })
     }
 
-    fn into_refresh(self, ticket_kind: TicketKind) -> Result<BackendItemRefresh, AdapterReadError> {
-        let issue = self.into_fields(ticket_kind)?;
+    fn into_refresh(
+        self,
+        identity: BackendItemIdentity,
+        ticket_kind: TicketKind,
+    ) -> Result<BackendItemRefresh, AdapterReadError> {
+        let issue = self.into_fields(identity, ticket_kind)?;
         Ok(BackendItemRefresh {
             title: issue.title,
             body: issue.body,
@@ -886,15 +879,15 @@ impl GhIssue {
 
     fn into_inspection(
         self,
+        identity: BackendItemIdentity,
         ticket_kind: TicketKind,
-    ) -> Result<BackendItemInspection, AdapterReadError> {
-        let issue = self.into_content()?;
-        Ok(BackendItemInspection {
-            identity: issue.identity,
-            title: issue.title,
-            body: issue.body,
+    ) -> BackendItemInspection {
+        BackendItemInspection {
+            identity,
+            title: self.title,
+            body: self.body,
             ticket_kind,
-        })
+        }
     }
 }
 

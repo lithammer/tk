@@ -75,6 +75,52 @@ impl TicketKinds {
     }
 }
 
+/// Shared storage for required and resolved Promotion facets. The public
+/// wrappers below keep those roles distinct while this value keeps the facet
+/// set exhaustive in one place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PromotionFacets {
+    item_classes: ItemClasses,
+    ticket_kinds: TicketKinds,
+    dependencies: bool,
+    epic_membership: bool,
+}
+
+impl PromotionFacets {
+    const NONE: Self = Self {
+        item_classes: ItemClasses::NONE,
+        ticket_kinds: TicketKinds::NONE,
+        dependencies: false,
+        epic_membership: false,
+    };
+    const ALL: Self = Self {
+        item_classes: ItemClasses::ALL,
+        ticket_kinds: TicketKinds::ALL,
+        dependencies: true,
+        epic_membership: true,
+    };
+
+    fn with_item_class(mut self, class: ItemClass) -> Self {
+        *self.item_classes.slot(class) = true;
+        self
+    }
+
+    fn with_ticket_kind(mut self, kind: TicketKind) -> Self {
+        *self.ticket_kinds.slot(kind) = true;
+        self
+    }
+
+    fn with_dependencies(mut self) -> Self {
+        self.dependencies = true;
+        self
+    }
+
+    fn with_epic_membership(mut self) -> Self {
+        self.epic_membership = true;
+        self
+    }
+}
+
 /// The Backend capability facets one Promotion graph requires.
 ///
 /// The command derives this value without contacting the Backend. The Adapter
@@ -82,10 +128,7 @@ impl TicketKinds {
 /// only repository-specific facets need a Backend read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PromotionRequirements {
-    item_classes: ItemClasses,
-    ticket_kinds: TicketKinds,
-    dependencies: bool,
-    epic_membership: bool,
+    facets: PromotionFacets,
 }
 
 impl PromotionRequirements {
@@ -93,63 +136,60 @@ impl PromotionRequirements {
     #[must_use]
     pub fn none() -> Self {
         Self {
-            item_classes: ItemClasses::NONE,
-            ticket_kinds: TicketKinds::NONE,
-            dependencies: false,
-            epic_membership: false,
+            facets: PromotionFacets::NONE,
         }
     }
 
     /// Add a required Item Class facet.
     #[must_use]
     pub fn with_item_class(mut self, class: ItemClass) -> Self {
-        *self.item_classes.slot(class) = true;
+        self.facets = self.facets.with_item_class(class);
         self
     }
 
     /// Add a required Ticket Kind facet.
     #[must_use]
     pub fn with_ticket_kind(mut self, kind: TicketKind) -> Self {
-        *self.ticket_kinds.slot(kind) = true;
+        self.facets = self.facets.with_ticket_kind(kind);
         self
     }
 
     /// Add the Dependency facet.
     #[must_use]
     pub fn with_dependencies(mut self) -> Self {
-        self.dependencies = true;
+        self.facets = self.facets.with_dependencies();
         self
     }
 
     /// Add the Epic-membership facet.
     #[must_use]
     pub fn with_epic_membership(mut self) -> Self {
-        self.epic_membership = true;
+        self.facets = self.facets.with_epic_membership();
         self
     }
 
     /// Whether the Promotion requires the given Item Class facet.
     #[must_use]
     pub fn requires_item_class(self, class: ItemClass) -> bool {
-        self.item_classes.allows(class)
+        self.facets.item_classes.allows(class)
     }
 
     /// Whether the Promotion requires the given Ticket Kind facet.
     #[must_use]
     pub fn requires_ticket_kind(self, kind: TicketKind) -> bool {
-        self.ticket_kinds.allows(kind)
+        self.facets.ticket_kinds.allows(kind)
     }
 
     /// Whether the Promotion requires the Dependency facet.
     #[must_use]
     pub fn requires_dependencies(self) -> bool {
-        self.dependencies
+        self.facets.dependencies
     }
 
     /// Whether the Promotion requires the Epic-membership facet.
     #[must_use]
     pub fn requires_epic_membership(self) -> bool {
-        self.epic_membership
+        self.facets.epic_membership
     }
 }
 
@@ -170,10 +210,7 @@ impl Default for PromotionRequirements {
 /// variant, not an integer, selects the answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PromotionCapabilities {
-    item_classes: ItemClasses,
-    ticket_kinds: TicketKinds,
-    dependencies: bool,
-    epic_membership: bool,
+    facets: PromotionFacets,
 }
 
 impl PromotionCapabilities {
@@ -182,10 +219,7 @@ impl PromotionCapabilities {
     #[must_use]
     pub fn none() -> Self {
         Self {
-            item_classes: ItemClasses::NONE,
-            ticket_kinds: TicketKinds::NONE,
-            dependencies: false,
-            epic_membership: false,
+            facets: PromotionFacets::NONE,
         }
     }
 
@@ -198,10 +232,7 @@ impl PromotionCapabilities {
     #[must_use]
     pub fn all() -> Self {
         Self {
-            item_classes: ItemClasses::ALL,
-            ticket_kinds: TicketKinds::ALL,
-            dependencies: true,
-            epic_membership: true,
+            facets: PromotionFacets::ALL,
         }
     }
 
@@ -209,7 +240,7 @@ impl PromotionCapabilities {
     /// Backend.
     #[must_use]
     pub fn with_item_class(mut self, class: ItemClass) -> Self {
-        *self.item_classes.slot(class) = true;
+        self.facets = self.facets.with_item_class(class);
         self
     }
 
@@ -217,46 +248,46 @@ impl PromotionCapabilities {
     /// Backend.
     #[must_use]
     pub fn with_ticket_kind(mut self, kind: TicketKind) -> Self {
-        *self.ticket_kinds.slot(kind) = true;
+        self.facets = self.facets.with_ticket_kind(kind);
         self
     }
 
     /// Declare that Promotion can represent a Dependency on this Backend.
     #[must_use]
     pub fn with_dependencies(mut self) -> Self {
-        self.dependencies = true;
+        self.facets = self.facets.with_dependencies();
         self
     }
 
     /// Declare that Promotion can represent Epic membership on this Backend.
     #[must_use]
     pub fn with_epic_membership(mut self) -> Self {
-        self.epic_membership = true;
+        self.facets = self.facets.with_epic_membership();
         self
     }
 
     /// Whether Promotion can create the given Item Class on this Backend.
     #[must_use]
     pub fn can_create_item_class(&self, class: ItemClass) -> bool {
-        self.item_classes.allows(class)
+        self.facets.item_classes.allows(class)
     }
 
     /// Whether Promotion can create the given Ticket Kind on this Backend.
     #[must_use]
     pub fn can_create_ticket_kind(&self, kind: TicketKind) -> bool {
-        self.ticket_kinds.allows(kind)
+        self.facets.ticket_kinds.allows(kind)
     }
 
     /// Whether Promotion can represent a Dependency on this Backend.
     #[must_use]
     pub fn can_represent_dependencies(&self) -> bool {
-        self.dependencies
+        self.facets.dependencies
     }
 
     /// Whether Promotion can represent Epic membership on this Backend.
     #[must_use]
     pub fn can_represent_epic_membership(&self) -> bool {
-        self.epic_membership
+        self.facets.epic_membership
     }
 }
 

@@ -256,18 +256,18 @@ fn reconcile(
     let inspection = adapter
         .inspect_item(&args.backend_key)
         .map_err(|err| inspection_error(&args.backend_key, err))?;
-    if recovery.item_class == ItemClass::Ticket
-        && recovery.ticket_kind != Some(inspection.ticket_kind)
-    {
-        return Err(CommandError::failure(format!(
-            "Backend item {} has Ticket Kind {}, but the retained Promotion targets {}. Correct the Backend item before reconciling; '--force' cannot override a classification mismatch.",
-            inspection.identity.display_id,
-            inspection.ticket_kind.label(),
-            recovery
-                .ticket_kind
-                .expect("Ticket recovery has a Ticket Kind")
-                .label(),
-        )));
+    if recovery.item_class == ItemClass::Ticket {
+        let retained_kind = recovery
+            .ticket_kind
+            .expect("Ticket recovery has a Ticket Kind");
+        if retained_kind != inspection.ticket_kind {
+            return Err(CommandError::failure(format!(
+                "Backend item {} has Ticket Kind {}, but the retained Promotion targets {}. Correct the Backend item before reconciling; '--force' cannot override a classification mismatch.",
+                inspection.identity.display_id,
+                inspection.ticket_kind.label(),
+                retained_kind.label(),
+            )));
+        }
     }
     let title_matches = inspection.title == recovery.promotion.title;
     let body_matches = inspection.body == recovery.promotion.body;
