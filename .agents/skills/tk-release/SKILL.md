@@ -103,8 +103,8 @@ If the tag exists, stop — a release for that version was already started.
 
 Read and follow `.agents/skills/tk-changelog/SKILL.md` to produce user-facing
 notes for the commits since the previous tag (or since `zig-final` for the
-inaugural release). It returns the reviewed plain-text `NEW`/`IMPROVED`/`FIXED`
-block.
+inaugural release). It returns the reviewed plain-text
+`BREAKING`/`NEW`/`IMPROVED`/`FIXED` block, with empty sections omitted.
 
 ### 5. Tag and Push
 
@@ -117,6 +117,10 @@ extract the body cleanly.
 {
   printf 'tk v%s\n\n' "$NEXT"
   cat <<'NOTES'
+BREAKING
+
+- ...
+
 NEW
 
 - ...
