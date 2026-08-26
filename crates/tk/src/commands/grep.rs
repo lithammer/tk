@@ -108,7 +108,7 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     // Stream Items in creation order, rendering each match straight to stdout
     // (one Item in memory). `matched` drives the grep-style 0/1 exit overload;
     // `count` accumulates the matching-item total for `-c`.
-    let out = deps.styler.for_stdout();
+    let styler = deps.styler.for_stdout();
     let stdout = &mut *deps.stdout;
     let mut matched = false;
     let mut count: usize = 0;
@@ -131,7 +131,9 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
             }
             return Ok(ControlFlow::Continue(()));
         }
-        render_match(stdout, &item, &re, &mut matched, before, after, out)?;
+        if render_match(stdout, &item, &re, matched, before, after, styler)? {
+            matched = true;
+        }
         Ok(ControlFlow::Continue(()))
     });
     match scan {
@@ -159,12 +161,22 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
 /// `git diff -U3`, ADR-0026), used when neither `-C` nor `-A`/`-B` is given.
 const DEFAULT_CONTEXT: usize = 3;
 
-/// Whether the pattern hits an Item at all — the title or any (non-empty) body
-/// line. Mirrors [`render_match`]'s "title or body line" rule but yields only a
-/// predicate, so `-q` can answer yes/no without materialising any hunk.
+/// Body lines the pattern is matched against, in document order. An empty body
+/// is not one empty line: `"".split('\n')` yields a single "" that a pattern
+/// like `^$` would match, so an empty-bodied Item contributes no lines at all —
+/// which is what keeps `-q` / `-c` agreeing with what `render_match` prints.
+fn body_lines(body: &str) -> impl Iterator<Item = &str> {
+    (!body.is_empty())
+        .then(|| body.split('\n'))
+        .into_iter()
+        .flatten()
+}
+
+/// Whether the pattern hits an Item at all — the title or any body line —
+/// yielding only a predicate, so `-q` / `-c` can answer yes/no without
+/// materialising any hunk.
 fn item_matches(item: &GrepItem, re: &Regex) -> bool {
-    re.is_match(&item.title)
-        || (!item.body.is_empty() && item.body.split('\n').any(|line| re.is_match(line)))
+    re.is_match(&item.title) || body_lines(&item.body).any(|line| re.is_match(line))
 }
 
 /// Render one Item's matches as a `tk show`-style block, or nothing when the
@@ -173,25 +185,21 @@ fn item_matches(item: &GrepItem, re: &Regex) -> bool {
 /// The title is matched and rendered on the label line; body matches drive the
 /// `DESCRIPTION` hunks. A title-only hit therefore renders just the label (no
 /// body hunk), and the body context windows never absorb the title line.
+///
+/// Returns whether a block was written.
 fn render_match<W: Write + ?Sized>(
     stdout: &mut W,
     item: &GrepItem,
     re: &Regex,
-    matched: &mut bool,
+    after_previous_block: bool,
     before: usize,
     after: usize,
     styler: SubStyler,
-) -> std::io::Result<()> {
+) -> std::io::Result<bool> {
     let title_hit = re.is_match(&item.title);
 
-    // An empty body is not one empty line: `"".split('\n')` would yield a
-    // single "" the pattern could never usefully match.
-    let body_lines: Vec<&str> = if item.body.is_empty() {
-        Vec::new()
-    } else {
-        item.body.split('\n').collect()
-    };
-    let body_hits: Vec<usize> = body_lines
+    let lines: Vec<&str> = body_lines(&item.body).collect();
+    let body_hits: Vec<usize> = lines
         .iter()
         .enumerate()
         .filter(|(_, line)| re.is_match(line))
@@ -199,14 +207,12 @@ fn render_match<W: Write + ?Sized>(
         .collect();
 
     if !title_hit && body_hits.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
     // A blank line separates consecutive item blocks (not before the first).
-    // `*matched` is already true once an earlier block has been written.
-    if *matched {
+    if after_previous_block {
         stdout.write_all(b"\n")?;
     }
-    *matched = true;
 
     // Label line + facet bar, shared verbatim with `tk show` (ADR-0026). No
     // `DESCRIPTION` header: the hunks below are a collapsed view, not the body.
@@ -226,22 +232,22 @@ fn render_match<W: Write + ?Sized>(
         styler,
     )?;
 
-    for (idx, hunk) in context_hunks(&body_hits, body_lines.len(), before, after)
+    for (idx, hunk) in context_hunks(&body_hits, lines.len(), before, after)
         .into_iter()
         .enumerate()
     {
-        // A cyan `--` between non-contiguous hunks, like grep -C (the separator
+        // A blue `--` between non-contiguous hunks, like grep -C (the separator
         // colour is policy-gated, so a pipe still sees a bare `--`).
         if idx > 0 {
             writeln!(stdout, "{}", styler.wrap(palette::HUNK_SEPARATOR, "--"))?;
         }
-        for line in &body_lines[hunk] {
+        for line in &lines[hunk] {
             stdout.write_all(b"  ")?;
             highlight::write_highlighted_line(stdout, line, re, styler)?;
             stdout.write_all(b"\n")?;
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Expand each body-line hit to a `[hit - before, hit + after]` window (clamped
@@ -275,78 +281,12 @@ fn context_hunks(
 mod tests {
     use super::*;
     use crate::clock::FakeClock;
+    use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
     use crate::proc::{FakeRunner, RunOutput};
     use crate::render::Styler;
-    use crate::store::migrations;
     use crate::store::testing::{FixtureItem, TmpStore, insert_dependency, insert_fixture_item};
     use rand::SeedableRng;
     use rand::rngs::StdRng;
-    use rusqlite::Connection;
-    use std::path::Path;
-
-    fn cwd() -> std::path::PathBuf {
-        std::env::current_dir().unwrap()
-    }
-
-    fn seed_store(store: &TmpStore) -> Connection {
-        std::fs::create_dir_all(store.tk_dir()).unwrap();
-        let mut conn = Connection::open(store.db_path()).unwrap();
-        conn.execute_batch("pragma foreign_keys = on").unwrap();
-        migrations::apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        conn.execute(
-            "insert into store_config(key, value) values ('display_prefix', 'tk')",
-            [],
-        )
-        .unwrap();
-        conn
-    }
-
-    struct Harness<'a> {
-        stdout: Vec<u8>,
-        stderr: Vec<u8>,
-        stdin: std::io::Cursor<Vec<u8>>,
-        runner: FakeRunner,
-        clock: FakeClock,
-        rng: StdRng,
-        cwd: &'a Path,
-    }
-
-    impl<'a> Harness<'a> {
-        fn new(cwd: &'a Path) -> Self {
-            Self {
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-                stdin: std::io::Cursor::new(Vec::new()),
-                runner: FakeRunner::new(),
-                clock: FakeClock::new(1_778_284_800_000),
-                rng: StdRng::seed_from_u64(0),
-                cwd,
-            }
-        }
-        fn deps_with(&mut self, styler: Styler) -> Deps<'_> {
-            Deps {
-                stdout: &mut self.stdout,
-                stderr: &mut self.stderr,
-                stdin: &mut self.stdin,
-                runner: &self.runner,
-                clock: &self.clock,
-                rng: &mut self.rng,
-                cwd: self.cwd,
-                styler,
-            }
-        }
-    }
-
-    fn expect_git(h: &Harness<'_>, store: &TmpStore) {
-        h.runner.expect(
-            &["git", "rev-parse"],
-            RunOutput {
-                exit_code: 0,
-                stdout: store.git_rev_parse_stdout(),
-                stderr: Vec::new(),
-            },
-        );
-    }
 
     /// Drive `run` and frame any returned error as the dispatch seam does
     /// (ADR-0032: `tk grep: <body>`). A success — including the `Exit::NoMatch`
@@ -946,8 +886,8 @@ mod tests {
     #[test]
     fn hunk_separator_is_blue_under_color() {
         // ADR-0026: the `--` between non-contiguous hunks is blue (secondary to
-        // the cyan Display ID and red matches), gated by the Styler so piped
-        // output stays a bare `--`.
+        // the cyan Display ID and the bright-yellow matches), gated by the
+        // Styler so piped output stays a bare `--`.
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         let body = "NEEDLE one\na\nb\nc\nd\ne\nf\ng\nNEEDLE two";
@@ -1256,10 +1196,10 @@ mod tests {
 
     #[test]
     fn match_at_line_start_leaves_the_indent_outside_the_highlight() {
-        // The underline must never cover a hunk line's leading indent: the
-        // indent is written plain *before* the highlight opens, so even a match
-        // at column 0 of the body renders as `··\x1b[4m…`. This is what keeps
-        // underline from looking ragged on indented multi-line output.
+        // ADR-0026: the MATCH span must never cover a hunk line's leading
+        // indent. The two-space indent is written plain *before* the span
+        // opens, so even a match at column 0 of the body renders as
+        // `··\x1b[93m…` and the colour never tints the indent.
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_item(
@@ -1319,12 +1259,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn broken_pipe_mid_stream_is_a_match_not_a_no_match_or_failure() {
-        // `tk grep PATTERN | head` closes stdout after a block; the next write
-        // fails BrokenPipe. A write only happens after a block has started, so
-        // matches WERE found — exit must be Ok (match), never 1 (which a script
-        // would read as "no match" since stderr is empty) and never a Failure.
+    /// Drive `tk grep PIPEWORD` against one matching Ticket with a stdout that
+    /// fails every write with `kind`, returning the framed exit and whatever
+    /// reached stderr. That pair is what separates a match piped away from a
+    /// real write failure.
+    fn grep_with_failing_stdout(kind: std::io::ErrorKind) -> (Exit, String) {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_item(
@@ -1353,7 +1292,7 @@ mod tests {
         );
         let clock = FakeClock::new(1_778_284_800_000);
         let mut rng = StdRng::seed_from_u64(0);
-        let mut stdout = FailingWriter(std::io::ErrorKind::BrokenPipe);
+        let mut stdout = FailingWriter(kind);
         let mut stderr: Vec<u8> = Vec::new();
         let mut stdin = std::io::Cursor::new(Vec::new());
         let mut deps = Deps {
@@ -1366,7 +1305,7 @@ mod tests {
             cwd: &cwd_path,
             styler: Styler::plain(),
         };
-        let code = match run(
+        let exit = match run(
             &mut deps,
             Args {
                 pattern: "PIPEWORD".to_owned(),
@@ -1380,6 +1319,16 @@ mod tests {
                 exit
             }
         };
+        (exit, String::from_utf8(stderr).unwrap())
+    }
+
+    #[test]
+    fn broken_pipe_mid_stream_is_a_match_not_a_no_match_or_failure() {
+        // `tk grep PATTERN | head` closes stdout after a block; the next write
+        // fails BrokenPipe. A write only happens after a block has started, so
+        // matches WERE found — exit must be Ok (match), never 1 (which a script
+        // would read as "no match" since stderr is empty) and never a Failure.
+        let (code, stderr) = grep_with_failing_stdout(std::io::ErrorKind::BrokenPipe);
         assert_eq!(
             code,
             Exit::Ok,
@@ -1397,63 +1346,8 @@ mod tests {
         // `tk grep X > file`) must NOT collapse to the empty-stderr exit 1 of
         // NoMatch: it writes a diagnostic (so stderr is non-empty, distinct from
         // a no-match) and returns Failure, honouring Exit::Failure's contract.
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "t1",
-                display: "tk-1",
-                title: "Subject",
-                body: "the PIPEWORD appears here",
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        drop(conn);
-
-        let cwd_path = cwd();
-        let runner = FakeRunner::new();
-        runner.expect(
-            &["git", "rev-parse"],
-            RunOutput {
-                exit_code: 0,
-                stdout: store.git_rev_parse_stdout(),
-                stderr: Vec::new(),
-            },
-        );
-        let clock = FakeClock::new(1_778_284_800_000);
-        let mut rng = StdRng::seed_from_u64(0);
-        let mut stdout = FailingWriter(std::io::ErrorKind::StorageFull);
-        let mut stderr: Vec<u8> = Vec::new();
-        let mut stdin = std::io::Cursor::new(Vec::new());
-        let mut deps = Deps {
-            stdout: &mut stdout,
-            stderr: &mut stderr,
-            stdin: &mut stdin,
-            runner: &runner,
-            clock: &clock,
-            rng: &mut rng,
-            cwd: &cwd_path,
-            styler: Styler::plain(),
-        };
-        let code = match run(
-            &mut deps,
-            Args {
-                pattern: "PIPEWORD".to_owned(),
-                ..Args::default()
-            },
-        ) {
-            Ok(exit) => exit,
-            Err(err) => {
-                let exit = err.exit();
-                err.render(deps.stderr, "grep");
-                exit
-            }
-        };
+        let (code, stderr) = grep_with_failing_stdout(std::io::ErrorKind::StorageFull);
         assert_eq!(code, Exit::Failure);
-        let stderr = String::from_utf8(stderr).unwrap();
         assert!(
             stderr.contains("tk grep: failed to write output"),
             "a non-broken-pipe write error must write a diagnostic: {stderr:?}"

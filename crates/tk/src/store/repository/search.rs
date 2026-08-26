@@ -22,7 +22,7 @@ use super::list::{ListRow, row_from_sql};
 /// renderer the same derived flags.
 const SEARCH_ROWS_SQL: &str = "\
 select i.id, i.display_value, i.item_class, i.ticket_kind, i.priority, i.title, \
-       i.status, i.origin, i.container_id, i.selection_state, i.created_seq, \
+       i.status, i.container_id, i.selection_state, \
        ( \
            exists ( \
                select 1 \

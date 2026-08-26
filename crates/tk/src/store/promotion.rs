@@ -21,6 +21,14 @@
 //! close the loop: after the sync that follows the commit, they are how the
 //! command tells a Promotion queued behind an older Mutation from one whose
 //! own Mutations did not land.
+//!
+//! Promotion recovery also lives here (ADR-0037, ADR-0038, ADR-0039):
+//! [`recoverable_promotion`] and [`capture_recovery_mappings`] locate what a
+//! recovery acts on, [`reconcile_promotion`] and [`retry_promotion`] each
+//! resolve one nonterminal Promotion in a single transaction,
+//! [`cancel_promotion`] withdraws a whole Promotion Operation, and
+//! [`abandoned_promotions`] warns when an earlier withdrawal left a Backend
+//! object tk cannot address.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
@@ -225,10 +233,10 @@ pub fn commit_plan<R: Rng + ?Sized>(
     rng: &mut R,
     now: &str,
 ) -> Result<Option<String>, CommitPlanError> {
-    let tx = crate::store::write_transaction(conn)?;
     if plan.is_empty() {
         return Ok(None);
     }
+    let tx = crate::store::write_transaction(conn)?;
 
     let operation_id = generate_internal_id(rng);
     let actual = crate::store::sync::configured_remote_kind(&tx)?;
@@ -599,6 +607,21 @@ pub fn capture_recovery_mappings(
 }
 
 /// Reconcile a confirmed Backend identity into the Repository Store atomically.
+///
+/// Re-reads the Promotion under its own write transaction and refuses unless it
+/// is still the nonterminal Promotion `target` named, its Item is still Local,
+/// the Remote and the retained Backend cohort still match, no earlier Mutation
+/// is nonterminal, and no other Item holds `identity`. Success converts the
+/// Local Item into a Backend Item, marks the Promotion applied, and advances the
+/// Sync Cursor in that one transaction, so a refusal changes nothing
+/// (ADR-0037).
+///
+/// `force_convergence` additionally appends an update Mutation carrying the
+/// Item's current title and body into the same Promotion Operation, so the
+/// Backend object durably converges on current local content (ADR-0037). The
+/// caller sets it when the candidate's content no longer matched the retained
+/// Promotion snapshot and the operator supplied `--force`; it relaxes none of
+/// the refusals above.
 pub fn reconcile_promotion(
     conn: &mut Connection,
     _workflow: &RemoteWorkflowGuard,
@@ -634,11 +657,6 @@ pub fn reconcile_promotion(
     crate::store::sync::ensure_backend_cohort(&tx, current.backend_kind)?;
     ensure_no_earlier_nonterminal(&tx, current.sequence)?;
     ensure_identity_unclaimed(&tx, &target.item_id, current.backend_kind, identity)?;
-    let (title, body): (String, String) = tx.query_row(
-        "select title, body from items where id = ?1",
-        params![&target.item_id],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
     apply_receipt(
         &tx,
         &target.item_id,
@@ -647,10 +665,15 @@ pub fn reconcile_promotion(
         now,
     )?;
     if force_convergence {
-        let mutation_type = match current.item_class {
-            ItemClass::Ticket => MutationType::UpdateTicket,
-            ItemClass::Epic => MutationType::UpdateEpic,
-        };
+        // Convergence intent is current local title and body (CONTEXT.md
+        // Promotion Reconciliation), and Promotion leaves both untouched, so
+        // the read is the same either side of the receipt.
+        let (title, body): (String, String) = tx.query_row(
+            "select title, body from items where id = ?1",
+            params![&target.item_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let mutation_type = current.item_class.update_mutation_type();
         mutations::append(
             &tx,
             mutations::AppendRequest {

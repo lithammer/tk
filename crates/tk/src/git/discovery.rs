@@ -10,7 +10,6 @@
 //! own user-visible phrasing via `#[error]` (ADR-0017 stable strings), so the
 //! caller renders one line without a central message catalogue.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -30,8 +29,8 @@ pub struct DiscoveredPaths {
 /// Why [`discover_paths`] could not locate the Repository Store.
 ///
 /// Each variant's `#[error]` string is the stable user-visible phrasing
-/// (ADR-0017); [`render_failure`] prints it verbatim behind the `tk <command>:`
-/// prefix.
+/// (ADR-0017); the ADR-0032 dispatch seam prints it verbatim behind the
+/// `tk <command>:` prefix.
 #[derive(Debug, Error)]
 pub enum DiscoveryError {
     /// `git` is not on PATH (runner returned `ExecutableNotFound`).
@@ -118,17 +117,6 @@ fn normalize_native_sep(s: String) -> String {
     } else {
         s
     }
-}
-
-/// Render a [`DiscoveryError`] to `stderr` behind a `tk <command>: ` prefix.
-///
-/// The error's `Display` is the stable message (ADR-0017), so this is a single
-/// formatted line shared by every command that opens a Repository Store.
-///
-/// `command` is the bare subcommand name (`"init"`, `"add"`), without the
-/// `tk ` or the trailing colon — those are formatted in.
-pub fn render_failure<W: Write + ?Sized>(stderr: &mut W, command: &str, err: &DiscoveryError) {
-    let _ = writeln!(stderr, "tk {command}: {err}");
 }
 
 // ---- Tests --------------------------------------------------------------
@@ -275,51 +263,31 @@ mod tests {
     }
 
     #[test]
-    fn render_failure_formats_each_arm() {
-        let mut buf = Vec::new();
-        render_failure(&mut buf, "init", &DiscoveryError::GitMissing);
+    fn discovery_error_bodies_match_adr_0017() {
         assert_eq!(
-            std::str::from_utf8(&buf).unwrap(),
-            "tk init: git not found on PATH\n"
-        );
-
-        let mut buf = Vec::new();
-        render_failure(&mut buf, "add", &DiscoveryError::SpawnFailed);
-        assert_eq!(
-            std::str::from_utf8(&buf).unwrap(),
-            "tk add: failed to invoke git\n"
-        );
-
-        let mut buf = Vec::new();
-        render_failure(&mut buf, "show", &DiscoveryError::OutcomeUnobserved);
-        assert_eq!(
-            std::str::from_utf8(&buf).unwrap(),
-            "tk show: git started but its outcome could not be observed\n"
-        );
-
-        let mut buf = Vec::new();
-        render_failure(&mut buf, "init", &DiscoveryError::GitOutputUnparseable);
-        assert_eq!(
-            std::str::from_utf8(&buf).unwrap(),
-            "tk init: git produced unexpected rev-parse output\n"
-        );
-
-        let mut buf = Vec::new();
-        render_failure(&mut buf, "init", &DiscoveryError::GitRejected(None));
-        assert_eq!(
-            std::str::from_utf8(&buf).unwrap(),
-            "tk init: not in a git repository\n"
-        );
-
-        let mut buf = Vec::new();
-        render_failure(
-            &mut buf,
-            "add",
-            &DiscoveryError::GitRejected(Some("fatal: not a git repository".to_string())),
+            DiscoveryError::GitMissing.to_string(),
+            "git not found on PATH"
         );
         assert_eq!(
-            std::str::from_utf8(&buf).unwrap(),
-            "tk add: fatal: not a git repository\n"
+            DiscoveryError::SpawnFailed.to_string(),
+            "failed to invoke git"
+        );
+        assert_eq!(
+            DiscoveryError::OutcomeUnobserved.to_string(),
+            "git started but its outcome could not be observed"
+        );
+        assert_eq!(
+            DiscoveryError::GitOutputUnparseable.to_string(),
+            "git produced unexpected rev-parse output"
+        );
+        assert_eq!(
+            DiscoveryError::GitRejected(None).to_string(),
+            "not in a git repository"
+        );
+        assert_eq!(
+            DiscoveryError::GitRejected(Some("fatal: not a git repository".to_string()))
+                .to_string(),
+            "fatal: not a git repository"
         );
     }
 }

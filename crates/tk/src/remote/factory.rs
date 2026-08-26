@@ -1,7 +1,7 @@
 //! Backend Adapter factory.
 //!
-//! [`open_configured`] reads the singleton Remote row via
-//! [`crate::store::sync::get_remote`] and returns the concrete Adapter for it:
+//! [`open_configured`] reads the singleton Remote's kind via
+//! `configured_remote_kind` and returns the concrete Adapter for it:
 //! [`GithubAdapter`](super::github::GithubAdapter) for `github`,
 //! [`OpenError::NotImplemented`] for `jira` (tk-35). The repository is resolved
 //! by `gh` from the command cwd (ADR-0033), so the adapter is built from the
@@ -18,7 +18,7 @@ use super::adapter::Adapter;
 use super::github::GithubAdapter;
 use crate::domain::backend_kind::BackendKind;
 use crate::proc::ProcRunner;
-use crate::store::sync::get_remote;
+use crate::store::sync::configured_remote_kind;
 
 /// Error returned by [`open_configured`].
 #[derive(Debug, Error)]
@@ -40,14 +40,13 @@ pub fn open_configured<'a>(
     runner: &'a dyn ProcRunner,
     cwd: &'a Path,
 ) -> Result<Option<Box<dyn Adapter + 'a>>, OpenError> {
-    let Some(remote) = get_remote(conn)? else {
+    let Some(kind) = configured_remote_kind(conn)? else {
         return Ok(None);
     };
-    match remote.backend_kind.parse::<BackendKind>() {
-        Ok(BackendKind::Github) => Ok(Some(Box::new(GithubAdapter::new(runner, cwd)))),
-        // Jira has no adapter yet (tk-35); an unparseable kind cannot occur
-        // under the `remotes.backend_kind` CHECK and maps here defensively.
-        Ok(BackendKind::Jira) | Err(_) => Err(OpenError::NotImplemented),
+    match kind {
+        BackendKind::Github => Ok(Some(Box::new(GithubAdapter::new(runner, cwd)))),
+        // Jira has no adapter yet (tk-35).
+        BackendKind::Jira => Err(OpenError::NotImplemented),
     }
 }
 

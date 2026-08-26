@@ -11,6 +11,9 @@
 //! DESCRIPTION
 //! <body...>
 //!
+//! CLOSING REASON
+//! <reason...>                                                    (done items)
+//!
 //! PARENT / TICKETS / BLOCKED BY / BLOCKING / EXTERNAL BLOCKERS
 //!   <glyph> <status-glyph> <display-id>: [(Epic) ]<title>[ ● <priority>]
 //!
@@ -317,33 +320,14 @@ fn render_item_mutation<W: Write + ?Sized>(
 mod tests {
     use super::*;
     use crate::clock::FakeClock;
+    use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
     use crate::proc::{FakeRunner, RunOutput};
     use crate::render::Styler;
-    use crate::store::migrations;
     use crate::store::testing::{
         FixtureItem, FixtureMutation, TmpStore, insert_fixture_item, insert_fixture_mutation,
     };
     use rand::SeedableRng;
     use rand::rngs::StdRng;
-    use rusqlite::Connection;
-    use std::path::Path;
-
-    fn cwd() -> std::path::PathBuf {
-        std::env::current_dir().unwrap()
-    }
-
-    fn seed_store(store: &TmpStore) -> Connection {
-        std::fs::create_dir_all(store.tk_dir()).unwrap();
-        let mut conn = Connection::open(store.db_path()).unwrap();
-        conn.execute_batch("pragma foreign_keys = on").unwrap();
-        migrations::apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        conn.execute(
-            "insert into store_config(key, value) values ('display_prefix', 'tk')",
-            [],
-        )
-        .unwrap();
-        conn
-    }
 
     /// `ItemDetail` with every relationship empty and `mutations` supplied by
     /// the caller, for tests that vary only the Mutation section. Adding a
@@ -352,7 +336,6 @@ mod tests {
     /// exhaustive on purpose — not this one too.
     fn minimal_item_detail(mutations: Vec<ItemMutation>) -> ItemDetail {
         ItemDetail {
-            id: "t1".into(),
             display_id: "tk-1".into(),
             item_class: ItemClass::Ticket,
             ticket_kind: Some(crate::domain::ticket_kind::TicketKind::Task),
@@ -371,53 +354,6 @@ mod tests {
             external_blockers: Vec::new(),
             mutations,
         }
-    }
-
-    struct Harness<'a> {
-        stdout: Vec<u8>,
-        stderr: Vec<u8>,
-        stdin: std::io::Cursor<Vec<u8>>,
-        runner: FakeRunner,
-        clock: FakeClock,
-        rng: StdRng,
-        cwd: &'a Path,
-    }
-
-    impl<'a> Harness<'a> {
-        fn new(cwd: &'a Path) -> Self {
-            Self {
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-                stdin: std::io::Cursor::new(Vec::new()),
-                runner: FakeRunner::new(),
-                clock: FakeClock::new(1_778_284_800_000),
-                rng: StdRng::seed_from_u64(0),
-                cwd,
-            }
-        }
-        fn deps(&mut self) -> Deps<'_> {
-            Deps {
-                stdout: &mut self.stdout,
-                stderr: &mut self.stderr,
-                stdin: &mut self.stdin,
-                runner: &self.runner,
-                clock: &self.clock,
-                rng: &mut self.rng,
-                cwd: self.cwd,
-                styler: Styler::plain(),
-            }
-        }
-    }
-
-    fn expect_git(harness: &Harness<'_>, store: &TmpStore) {
-        harness.runner.expect(
-            &["git", "rev-parse"],
-            RunOutput {
-                exit_code: 0,
-                stdout: store.git_rev_parse_stdout(),
-                stderr: Vec::new(),
-            },
-        );
     }
 
     /// A stdout that fails every write with `BrokenPipe`, modelling a closed
@@ -671,7 +607,6 @@ mod tests {
                 display: "tk-2",
                 title: "Child ticket",
                 container_id: Some("epic"),
-                container_class: Some("epic"),
                 created_seq: 2,
                 ..FixtureItem::default()
             },
@@ -822,7 +757,6 @@ mod tests {
             priority,
         };
         let detail = ItemDetail {
-            id: "t1".into(),
             display_id: "tk-1".into(),
             item_class: ItemClass::Ticket,
             ticket_kind: Some(crate::domain::ticket_kind::TicketKind::Task),

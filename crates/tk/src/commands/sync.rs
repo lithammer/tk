@@ -2,8 +2,9 @@
 //!
 //! `tk sync` opens the configured Backend Adapter via
 //! [`crate::remote::factory::open_configured`] and drives the backend-blind
-//! engine ([`crate::sync::run_sync`]). The GitHub Adapter refreshes the adopted
-//! working set before the engine applies queued Mutations; unsupported Backend
+//! engine ([`crate::sync::run_sync`]). The engine derives the Adopted working
+//! set's active Backend keys and refreshes each through the Adapter before it
+//! applies queued Mutations (ADR-0034); unsupported Backend
 //! kinds fail while opening the Adapter.
 //!
 //! `tk sync --skip <id>` curates a failed Mutation under the repository's
@@ -186,15 +187,8 @@ fn run_log(deps: Deps<'_>, args: LogArgs) -> Exit {
                 let _ = writeln!(stderr, "tk sync log: Mutation {seq} not found");
                 Exit::Failure
             }
-            Err(LogError::Storage(err)) => {
-                resolver::storage_error(&err).render(stderr, LOG_COMMAND);
-                Exit::Failure
-            }
-            Err(LogError::FailureJson(err)) => {
-                let _ = writeln!(
-                    stderr,
-                    "tk sync log: failed to read Repository Store\n{err}"
-                );
+            Err(err) => {
+                render_log_error(stderr, &err);
                 Exit::Failure
             }
         };
@@ -216,15 +210,8 @@ fn run_log(deps: Deps<'_>, args: LogArgs) -> Exit {
 
     let rows = match store_sync::list_mutation_log(store.conn(), filter) {
         Ok(rows) => rows,
-        Err(LogError::Storage(err)) => {
-            resolver::storage_error(&err).render(stderr, LOG_COMMAND);
-            return Exit::Failure;
-        }
         Err(err) => {
-            let _ = writeln!(
-                stderr,
-                "tk sync log: failed to read Repository Store\n{err}"
-            );
+            render_log_error(stderr, &err);
             return Exit::Failure;
         }
     };
@@ -238,15 +225,8 @@ fn run_log(deps: Deps<'_>, args: LogArgs) -> Exit {
             LogListFilter::Default => match store_sync::mutation_log_is_empty(store.conn()) {
                 Ok(true) => "No Mutations recorded.",
                 Ok(false) => "All Mutations applied.",
-                Err(LogError::Storage(err)) => {
-                    resolver::storage_error(&err).render(stderr, LOG_COMMAND);
-                    return Exit::Failure;
-                }
                 Err(err) => {
-                    let _ = writeln!(
-                        stderr,
-                        "tk sync log: failed to read Repository Store\n{err}"
-                    );
+                    render_log_error(stderr, &err);
                     return Exit::Failure;
                 }
             },
@@ -306,6 +286,20 @@ fn render_skip_error<W: Write + ?Sized>(stderr: &mut W, err: &MarkSkippedError) 
             );
         }
         MarkSkippedError::Storage(err) => resolver::storage_error(err).render(stderr, COMMAND),
+    }
+}
+
+/// Render a [`LogError`] from any `tk sync log` read. Only the SQLite arm is an
+/// ordinary storage fault; the rest fall through to the generic frame.
+fn render_log_error<W: Write + ?Sized>(stderr: &mut W, err: &LogError) {
+    match err {
+        LogError::Storage(err) => resolver::storage_error(err).render(stderr, LOG_COMMAND),
+        LogError::MutationNotFound(_) | LogError::FailureJson(_) => {
+            let _ = writeln!(
+                stderr,
+                "tk sync log: failed to read Repository Store\n{err}"
+            );
+        }
     }
 }
 
@@ -419,14 +413,13 @@ fn render_log_detail<W: Write + ?Sized>(stdout: &mut W, detail: &LogDetailRow) {
 mod tests {
     use super::*;
     use crate::clock::FakeClock;
+    use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
     use crate::domain::backend_kind::BackendKind;
     use crate::domain::backend_operation::BackendItemIdentity;
     use crate::domain::mutation_payload::Promotion;
     use crate::domain::mutation_type::MutationType;
     use crate::proc::{FakeRunner, ProcError, RunOutput};
     use crate::remote::adapter::AdapterReadError;
-    use crate::render::Styler;
-    use crate::store::migrations;
     use crate::store::sync::{
         BackendCohortError, LoadApplicableError, PersistMutationOutcomeError, RefreshStoreError,
     };
@@ -434,74 +427,7 @@ mod tests {
         FixtureItem, FixtureMutation, FixtureRemote, TmpStore, insert_fixture_item,
         insert_fixture_mutation, insert_fixture_remote,
     };
-    use rand::SeedableRng;
-    use rand::rngs::StdRng;
     use rusqlite::Connection;
-    use std::path::Path;
-
-    fn cwd() -> std::path::PathBuf {
-        std::env::current_dir().unwrap()
-    }
-
-    fn seed_store(store: &TmpStore) -> Connection {
-        std::fs::create_dir_all(store.tk_dir()).unwrap();
-        let mut conn = Connection::open(store.db_path()).unwrap();
-        conn.execute_batch("pragma foreign_keys = on").unwrap();
-        migrations::apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        conn.execute(
-            "insert into store_config(key, value) values ('display_prefix', 'tk')",
-            [],
-        )
-        .unwrap();
-        conn
-    }
-
-    struct Harness<'a> {
-        stdout: Vec<u8>,
-        stderr: Vec<u8>,
-        stdin: std::io::Cursor<Vec<u8>>,
-        runner: FakeRunner,
-        clock: FakeClock,
-        rng: StdRng,
-        cwd: &'a Path,
-    }
-
-    impl<'a> Harness<'a> {
-        fn new(cwd: &'a Path) -> Self {
-            Self {
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-                stdin: std::io::Cursor::new(Vec::new()),
-                runner: FakeRunner::new(),
-                clock: FakeClock::new(1_778_284_800_000),
-                rng: StdRng::seed_from_u64(0),
-                cwd,
-            }
-        }
-        fn deps(&mut self) -> Deps<'_> {
-            Deps {
-                stdout: &mut self.stdout,
-                stderr: &mut self.stderr,
-                stdin: &mut self.stdin,
-                runner: &self.runner,
-                clock: &self.clock,
-                rng: &mut self.rng,
-                cwd: self.cwd,
-                styler: Styler::plain(),
-            }
-        }
-    }
-
-    fn expect_git(h: &Harness<'_>, store: &TmpStore) {
-        h.runner.expect(
-            &["git", "rev-parse"],
-            RunOutput {
-                exit_code: 0,
-                stdout: store.git_rev_parse_stdout(),
-                stderr: Vec::new(),
-            },
-        );
-    }
 
     fn backend_ticket(conn: &Connection, id: &str, display: &str, key: &str, created_seq: i64) {
         insert_fixture_item(
@@ -518,6 +444,20 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    fn log_args(id: Option<i64>) -> Args {
+        Args {
+            subcommand: Some(Sub::Log(LogArgs {
+                pending: false,
+                failed: false,
+                skipped: false,
+                cancelled: false,
+                abandoned: false,
+                id,
+            })),
+            skip: None,
+        }
     }
 
     // ---- tk sync (adapter-reachable paths) ------------------------------
@@ -929,20 +869,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
 
-        let code = run(
-            h.deps(),
-            Args {
-                subcommand: Some(Sub::Log(LogArgs {
-                    pending: false,
-                    failed: false,
-                    skipped: false,
-                    cancelled: false,
-                    abandoned: false,
-                    id: None,
-                })),
-                skip: None,
-            },
-        );
+        let code = run(h.deps(), log_args(None));
         assert_eq!(code, Exit::Ok);
         assert!(
             String::from_utf8(h.stdout)
@@ -974,20 +901,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
 
-        let code = run(
-            h.deps(),
-            Args {
-                subcommand: Some(Sub::Log(LogArgs {
-                    pending: false,
-                    failed: false,
-                    skipped: false,
-                    cancelled: false,
-                    abandoned: false,
-                    id: None,
-                })),
-                skip: None,
-            },
-        );
+        let code = run(h.deps(), log_args(None));
 
         assert_eq!(code, Exit::Ok);
         assert_eq!(
@@ -1032,20 +946,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
-            Args {
-                subcommand: Some(Sub::Log(LogArgs {
-                    pending: false,
-                    failed: false,
-                    skipped: false,
-                    cancelled: false,
-                    abandoned: false,
-                    id: None,
-                })),
-                skip: None,
-            },
-        );
+        let code = run(h.deps(), log_args(None));
         assert_eq!(code, Exit::Ok);
         let out = String::from_utf8(h.stdout).unwrap();
         assert!(out.contains("1 pending update_ticket tk-1"));
@@ -1076,20 +977,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
-            Args {
-                subcommand: Some(Sub::Log(LogArgs {
-                    pending: false,
-                    failed: false,
-                    skipped: false,
-                    cancelled: false,
-                    abandoned: false,
-                    id: Some(7),
-                })),
-                skip: None,
-            },
-        );
+        let code = run(h.deps(), log_args(Some(7)));
         assert_eq!(code, Exit::Ok);
         let out = String::from_utf8(h.stdout).unwrap();
         assert!(out.contains("Mutation 7  [failed]"));
@@ -1122,20 +1010,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
-            Args {
-                subcommand: Some(Sub::Log(LogArgs {
-                    pending: false,
-                    failed: false,
-                    skipped: false,
-                    cancelled: false,
-                    abandoned: false,
-                    id: None,
-                })),
-                skip: None,
-            },
-        );
+        let code = run(h.deps(), log_args(None));
         assert_eq!(code, Exit::Ok);
         let out = String::from_utf8(h.stdout).unwrap();
         assert!(
@@ -1169,20 +1044,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
-            Args {
-                subcommand: Some(Sub::Log(LogArgs {
-                    pending: false,
-                    failed: false,
-                    skipped: false,
-                    cancelled: false,
-                    abandoned: false,
-                    id: Some(3),
-                })),
-                skip: None,
-            },
-        );
+        let code = run(h.deps(), log_args(Some(3)));
         assert_eq!(code, Exit::Ok);
         let out = String::from_utf8(h.stdout).unwrap();
         assert!(out.contains("Class:      validation"), "{out}");
@@ -1199,20 +1061,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
-            Args {
-                subcommand: Some(Sub::Log(LogArgs {
-                    pending: false,
-                    failed: false,
-                    skipped: false,
-                    cancelled: false,
-                    abandoned: false,
-                    id: Some(99),
-                })),
-                skip: None,
-            },
-        );
+        let code = run(h.deps(), log_args(Some(99)));
         assert_eq!(code, Exit::Failure);
         assert!(
             String::from_utf8(h.stderr)

@@ -116,7 +116,6 @@ pub fn set_item_status<C: Clock + ?Sized>(
     };
 
     if current_status == ItemStatus::Done && req.status != ItemStatus::Done {
-        tx.commit()?;
         return Err(SetStatusError::LockedDone(item_class));
     }
 
@@ -136,7 +135,6 @@ pub fn set_item_status<C: Clock + ?Sized>(
         // item is not an amend path. Re-closing without a reason stays the
         // idempotent no-op `tk done`/`tk start`/`tk stop` rely on.
         if req.status == ItemStatus::Done && req.closing_reason.is_some() {
-            tx.commit()?;
             return Err(SetStatusError::AlreadyClosed(item_class));
         }
         tx.commit()?;
@@ -351,8 +349,8 @@ mod tests {
         let mut store = open_seeded();
         seed_backend_ticket(&store, "t1", "tk-1", 1);
 
-        // Active → already at status `open` (default fixture). Asking for
-        // open is a no-op.
+        // The fixture is already at status `open`, so asking for `open` is a
+        // no-op.
         set_item_status(
             &mut store,
             &clock(),

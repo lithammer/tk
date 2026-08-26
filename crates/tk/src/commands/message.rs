@@ -11,6 +11,8 @@ use std::path::Path;
 
 use thiserror::Error;
 
+use crate::cli::CommandError;
+
 /// Parsed Ticket message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedMessage {
@@ -61,7 +63,7 @@ pub fn parse(raw: &str) -> Result<ParsedMessage, ParseError> {
         body_start += 1;
     }
     let body = if body_start <= last {
-        join_body_lines(&lines[body_start..=last])
+        lines[body_start..=last].join("\n")
     } else {
         String::new()
     };
@@ -95,17 +97,6 @@ fn last_non_blank(lines: &[&str]) -> Option<usize> {
     lines.iter().rposition(|l| !is_blank(l))
 }
 
-fn join_body_lines(lines: &[&str]) -> String {
-    let mut out = String::new();
-    for (i, line) in lines.iter().enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-        out.push_str(line);
-    }
-    out
-}
-
 /// Source of the message body — repeated `-m` flags, a file path, or
 /// stdin (path `"-"`).
 #[derive(Debug)]
@@ -126,6 +117,28 @@ pub enum ReadError {
     },
     #[error("failed to read message from stdin: {0}")]
     Stdin(std::io::Error),
+}
+
+/// Build the [`CommandError`] for a failed message read (ADR-0032). The body
+/// is the stable user-facing line minus the `tk <command>:` frame the dispatch
+/// seam supplies.
+///
+/// Deliberately not `ReadError`'s own `Display`: the `File` arm's rendered body
+/// is shorter than its `#[error]` attribute, which stays the internal form.
+#[must_use]
+pub fn read_error(err: &ReadError) -> CommandError {
+    match err {
+        ReadError::Parse(ParseError::Empty) => CommandError::failure("message is empty"),
+        ReadError::Parse(ParseError::NulByte) => {
+            CommandError::failure("message contains a NUL byte")
+        }
+        ReadError::File { path, source } => {
+            CommandError::failure(format!("failed to read '{path}': {source}"))
+        }
+        ReadError::Stdin(source) => {
+            CommandError::failure(format!("failed to read message from stdin: {source}"))
+        }
+    }
 }
 
 /// Load and parse a command's message input.
@@ -199,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn body_only_is_an_error_when_title_blank() {
+    fn leading_blank_lines_are_skipped_and_first_paragraph_becomes_title() {
         // Title paragraph must contain non-blank content; leading blank
         // lines are skipped to find the first paragraph, so a non-blank
         // body becomes the title here.

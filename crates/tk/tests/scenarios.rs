@@ -16,8 +16,9 @@
 //! a developer's shell cannot tint the output. The binary reads no determinism
 //! env knobs (tk-105), so nothing else needs pinning: the random `items.id`
 //! never appears in output and OS entropy keeps it distinct across a scenario's
-//! `tk add` calls; no current scenario surfaces a timestamp; and a value that
-//! does vary (git's refusal stderr) is handled with an insta redaction filter.
+//! `tk add` calls; and the two values that do vary — the `Created:` date in
+//! `tk grep` output and git's refusal stderr — are pinned with insta
+//! redaction filters (the `tk show` scenarios assert substrings instead).
 //! `GIT_CEILING_DIRECTORIES` pins git discovery to the scratch tree so a
 //! `$TESTROOT` under an ambient repo cannot make a refusal scenario pass
 //! spuriously.
@@ -41,7 +42,7 @@ impl Repo {
     /// directory name becomes the Display ID prefix, so `name` controls the
     /// `<prefix>-N` IDs a scenario produces.
     fn new(name: &str) -> Self {
-        let repo = Self::bare(name);
+        let repo = Self::without_git(name);
         Command::new("git")
             .args(["init", "-q"])
             .current_dir(&repo.cwd)
@@ -51,7 +52,7 @@ impl Repo {
     }
 
     /// A scratch directory with no git repo — for refusal scenarios.
-    fn bare(name: &str) -> Self {
+    fn without_git(name: &str) -> Self {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().canonicalize().expect("canonicalize tempdir");
         let cwd = root.join(name);
@@ -78,9 +79,12 @@ impl Repo {
             .current_dir(&self.cwd)
             .env("GIT_CEILING_DIRECTORIES", &self.root)
             // Scrub the colour-policy env (per-child, never the test process's
-            // global state) so a developer's shell cannot tint the output. The
-            // binary reads no determinism env knobs (tk-105), so there is
-            // nothing else to scrub.
+            // global state) so a developer's shell cannot tint the output, and
+            // the ambient `TK_SCOPE` so an inherited Scope (ADR-0022) cannot
+            // narrow or reject a scenario's `tk list` / `tk next`; the `env`
+            // argument re-adds it for the scenario that exercises that
+            // channel. The binary reads no determinism env knobs (tk-105), so
+            // nothing else needs scrubbing.
             .env_remove("NO_COLOR")
             .env_remove("CLICOLOR_FORCE")
             .env_remove("TK_SCOPE");
@@ -121,6 +125,12 @@ fn repo_root() -> PathBuf {
 macro_rules! tk {
     ($repo:expr, $cmd:expr, @$snapshot:literal) => {
         insta::assert_snapshot!($repo.run($cmd), @$snapshot)
+    };
+    // `dated:` redacts the facet bar's creation date, which varies by day.
+    (dated: $repo:expr, $cmd:expr, @$snapshot:literal) => {
+        insta::with_settings!({filters => vec![(r"Created: \d{4}-\d{2}-\d{2}", "Created: [DATE]")]}, {
+            insta::assert_snapshot!($repo.run($cmd), @$snapshot)
+        })
     };
 }
 
@@ -485,7 +495,7 @@ fn lifecycle_guards_respect_selection_state() {
 
 #[test]
 fn init_refuses_outside_git_repository() {
-    let p = Repo::bare("scratch");
+    let p = Repo::without_git("scratch");
     let out = p.run("init");
     // Guard the trigger: an ambient repo would let init succeed; fail loud
     // rather than snapshot a non-refusal.
@@ -549,7 +559,7 @@ fn prime_is_silent_without_initialized_store() {
 
 #[test]
 fn prime_is_silent_outside_git_repository() {
-    let p = Repo::bare("scratch");
+    let p = Repo::without_git("scratch");
     assert_eq!(p.run("prime"), "");
 }
 
@@ -669,16 +679,14 @@ fn grep_renders_show_style_match_context() {
 
     // The facet bar surfaces the creation date; redact it so the snapshot is
     // stable across days.
-    insta::with_settings!({filters => vec![(r"Created: \d{4}-\d{2}-\d{2}", "Created: [DATE]")]}, {
-        tk!(p, "grep auth", @"
-        ○ project-2 · Add middleware
-          P2 · Task · Created: [DATE]
-          the handler validates the auth token
+    tk!(dated: p, "grep auth", @"
+    ○ project-2 · Add middleware
+      P2 · Task · Created: [DATE]
+      the handler validates the auth token
 
-        ○ project-3 · Refactor auth layer
-          P2 · Task · Created: [DATE]
-        ");
-    });
+    ○ project-3 · Refactor auth layer
+      P2 · Task · Created: [DATE]
+    ");
 }
 
 /// `-i` flips grep's case-sensitive default (ADR-0026) for one invocation, so
@@ -690,12 +698,10 @@ fn grep_ignore_case_matches_across_case() {
     p.run("add --epic -m 'Auth rework'"); // project-1 (capital A)
     p.run("add -m 'Unrelated chore'"); // project-2 (no match)
 
-    insta::with_settings!({filters => vec![(r"Created: \d{4}-\d{2}-\d{2}", "Created: [DATE]")]}, {
-        tk!(p, "grep auth -i", @"
-        ○ project-1 · Auth rework
-          Epic · Created: [DATE]
-        ");
-    });
+    tk!(dated: p, "grep auth -i", @"
+    ○ project-1 · Auth rework
+      Epic · Created: [DATE]
+    ");
 }
 
 /// `-F` matches the pattern as a literal (ADR-0026, tk-120): `a(b` is an invalid
@@ -707,13 +713,11 @@ fn grep_fixed_strings_matches_a_literal() {
     p.run("init");
     p.run("add -m 'Fix parser' -m 'the token a(b breaks the lexer'"); // project-1
 
-    insta::with_settings!({filters => vec![(r"Created: \d{4}-\d{2}-\d{2}", "Created: [DATE]")]}, {
-        tk!(p, "grep 'a(b' -F", @"
-        ○ project-1 · Fix parser
-          P2 · Task · Created: [DATE]
-          the token a(b breaks the lexer
-        ");
-    });
+    tk!(dated: p, "grep 'a(b' -F", @"
+    ○ project-1 · Fix parser
+      P2 · Task · Created: [DATE]
+      the token a(b breaks the lexer
+    ");
 }
 
 /// `-C 0` collapses each hunk to the matching line, overriding the default-3
@@ -726,13 +730,11 @@ fn grep_context_zero_shows_only_the_matching_line() {
     // Two body paragraphs (blank-line separated); the needle is in the second.
     p.run("add -m 'Subject' -m 'first paragraph here' -m 'second needle paragraph'"); // project-1
 
-    insta::with_settings!({filters => vec![(r"Created: \d{4}-\d{2}-\d{2}", "Created: [DATE]")]}, {
-        tk!(p, "grep needle -C 0", @"
-        ○ project-1 · Subject
-          P2 · Task · Created: [DATE]
-          second needle paragraph
-        ");
-    });
+    tk!(dated: p, "grep needle -C 0", @"
+    ○ project-1 · Subject
+      P2 · Task · Created: [DATE]
+      second needle paragraph
+    ");
 }
 
 /// `-q` suppresses all output and carries the answer in the exit code alone
@@ -834,13 +836,11 @@ fn grep_whitespace_pattern_matches_a_double_space() {
     p.run("add -m 'Format output' -m 'aligns the  columns by padding'"); // project-1 (double space)
     p.run("add -m 'Unrelated chore'"); // project-2 (no double space)
 
-    insta::with_settings!({filters => vec![(r"Created: \d{4}-\d{2}-\d{2}", "Created: [DATE]")]}, {
-        tk!(p, "grep '  ' -F", @"
-        ○ project-1 · Format output
-          P2 · Task · Created: [DATE]
-          aligns the  columns by padding
-        ");
-    });
+    tk!(dated: p, "grep '  ' -F", @"
+    ○ project-1 · Format output
+      P2 · Task · Created: [DATE]
+      aligns the  columns by padding
+    ");
 }
 
 // `tk promote` scenarios cover paths that cannot open a capable Adapter:

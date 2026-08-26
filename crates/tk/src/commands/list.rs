@@ -256,18 +256,13 @@ fn render_children<W: Write + ?Sized>(
     parent: &ListRow,
     styler: SubStyler,
 ) -> std::io::Result<MutationMarkers> {
-    let child_count = count_rendered_children(rows, &parent.id);
-    let mut child_index = 0usize;
+    let mut children = rows
+        .iter()
+        .filter(|child| child.container_id.as_deref() == Some(parent.id.as_str()))
+        .peekable();
     let mut markers = MutationMarkers::default();
-    for child in rows {
-        let Some(container_id) = child.container_id.as_deref() else {
-            continue;
-        };
-        if container_id != parent.id {
-            continue;
-        }
-        child_index += 1;
-        let prefix = if child_index == child_count {
+    while let Some(child) = children.next() {
+        let prefix = if children.peek().is_none() {
             "\u{2514}\u{2500}\u{2500} "
         } else {
             "\u{251c}\u{2500}\u{2500} "
@@ -282,12 +277,6 @@ fn parent_is_in_rows(rows: &[ListRow], row: &ListRow) -> bool {
         return false;
     };
     rows.iter().any(|r| r.id == container_id)
-}
-
-fn count_rendered_children(rows: &[ListRow], parent_id: &str) -> usize {
-    rows.iter()
-        .filter(|r| r.container_id.as_deref() == Some(parent_id))
-        .count()
 }
 
 fn empty_message(options: ListOptions<'_>) -> &'static str {
@@ -314,71 +303,13 @@ fn empty_message(options: ListOptions<'_>) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::FakeClock;
-    use crate::proc::{FakeRunner, RunOutput};
+    use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
     use crate::render::Styler;
-    use crate::store::migrations;
     use crate::store::testing::{
         FixtureItem, FixtureMutation, TmpStore, commit_promotion, insert_dependency,
         insert_fixture_item, insert_fixture_mutation,
     };
-    use rand::SeedableRng;
-    use rand::rngs::StdRng;
     use rusqlite::Connection;
-    use std::path::Path;
-
-    fn cwd() -> std::path::PathBuf {
-        std::env::current_dir().unwrap()
-    }
-
-    fn seed_store(store: &TmpStore) -> Connection {
-        std::fs::create_dir_all(store.tk_dir()).unwrap();
-        let mut conn = Connection::open(store.db_path()).unwrap();
-        conn.execute_batch("pragma foreign_keys = on").unwrap();
-        migrations::apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        conn.execute(
-            "insert into store_config(key, value) values ('display_prefix', 'tk')",
-            [],
-        )
-        .unwrap();
-        conn
-    }
-
-    struct Harness<'a> {
-        stdout: Vec<u8>,
-        stderr: Vec<u8>,
-        stdin: std::io::Cursor<Vec<u8>>,
-        runner: FakeRunner,
-        clock: FakeClock,
-        rng: StdRng,
-        cwd: &'a Path,
-    }
-
-    impl<'a> Harness<'a> {
-        fn new(cwd: &'a Path) -> Self {
-            Self {
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-                stdin: std::io::Cursor::new(Vec::new()),
-                runner: FakeRunner::new(),
-                clock: FakeClock::new(1_778_284_800_000),
-                rng: StdRng::seed_from_u64(0),
-                cwd,
-            }
-        }
-        fn deps_with(&mut self, styler: Styler) -> Deps<'_> {
-            Deps {
-                stdout: &mut self.stdout,
-                stderr: &mut self.stderr,
-                stdin: &mut self.stdin,
-                runner: &self.runner,
-                clock: &self.clock,
-                rng: &mut self.rng,
-                cwd: self.cwd,
-                styler,
-            }
-        }
-    }
 
     /// Seed one Mutation against `item_id`, deriving the `failure_json` the
     /// `failed` state's CHECK requires. Mirrors the helper in
@@ -404,17 +335,6 @@ mod tests {
             },
         )
         .unwrap();
-    }
-
-    fn expect_git(h: &Harness<'_>, store: &TmpStore) {
-        h.runner.expect(
-            &["git", "rev-parse"],
-            RunOutput {
-                exit_code: 0,
-                stdout: store.git_rev_parse_stdout(),
-                stderr: Vec::new(),
-            },
-        );
     }
 
     /// Drive `run` and frame any returned error as the dispatch seam does
@@ -780,7 +700,6 @@ mod tests {
                 display: "tk-2",
                 title: "Child",
                 container_id: Some("epic"),
-                container_class: Some("epic"),
                 created_seq: 2,
                 ..FixtureItem::default()
             },
@@ -880,7 +799,6 @@ mod tests {
                 display: "tk-2",
                 title: "Child",
                 container_id: Some("epic"),
-                container_class: Some("epic"),
                 created_seq: 2,
                 ..FixtureItem::default()
             },
@@ -930,7 +848,6 @@ mod tests {
                 display: "tk-2",
                 title: "Open child",
                 container_id: Some("e1"),
-                container_class: Some("epic"),
                 created_seq: 2,
                 ..FixtureItem::default()
             },
@@ -1307,7 +1224,6 @@ mod tests {
                 display: "tk-2",
                 title: "Open child of a done Epic",
                 container_id: Some("epic"),
-                container_class: Some("epic"),
                 created_seq: 2,
                 ..FixtureItem::default()
             },
@@ -1557,7 +1473,6 @@ mod tests {
                 display: "tk-2",
                 title: "Child",
                 container_id: Some("epic"),
-                container_class: Some("epic"),
                 created_seq: 2,
                 ..FixtureItem::default()
             },

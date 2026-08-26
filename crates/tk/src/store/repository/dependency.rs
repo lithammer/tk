@@ -111,17 +111,14 @@ pub fn add_dependency<C: Clock + ?Sized>(
     };
 
     if info.blocked_status == ItemStatus::Done {
-        tx.commit()?;
         return Err(AddDependencyError::BlockedDone);
     }
     if info.blocking_status == ItemStatus::Done {
-        tx.commit()?;
         return Err(AddDependencyError::BlockingDone);
     }
 
     let classification = classify_edge(&tx, edge)?;
     if let DependencyClassification::Rejected(rejection) = classification {
-        tx.commit()?;
         return Err(rejection.into());
     }
 
@@ -140,19 +137,16 @@ pub fn add_dependency<C: Clock + ?Sized>(
         )
         .optional()?;
     if cycles_into_existing.is_some() {
-        tx.commit()?;
         return Err(AddDependencyError::Cycle);
     }
 
-    let had_edge = edge_exists(&tx, edge)?;
-
-    tx.execute(
+    let inserted = tx.execute(
         "insert or ignore into dependencies(blocking_id, blocked_id, created_at) \
          values (?1, ?2, ?3)",
         params![edge.blocking_id, edge.blocked_id, now_iso],
-    )?;
+    )? == 1;
 
-    if !had_edge && classification == DependencyClassification::BecomesBackendIntent {
+    if inserted && classification == DependencyClassification::BecomesBackendIntent {
         mutations::append(
             &tx,
             mutations::AppendRequest {
@@ -189,14 +183,12 @@ pub fn remove_dependency<C: Clock + ?Sized>(
     // the Mutation Log the way it entered: a pairing the rule rejects never
     // carried a Mutation, and dropping its edge is current-state cleanup.
     let classification = classify_edge(&tx, edge)?;
-    let had_edge = edge_exists(&tx, edge)?;
-
-    tx.execute(
+    let removed = tx.execute(
         "delete from dependencies where blocking_id = ?1 and blocked_id = ?2",
         params![edge.blocking_id, edge.blocked_id],
-    )?;
+    )? > 0;
 
-    if had_edge && classification == DependencyClassification::BecomesBackendIntent {
+    if removed && classification == DependencyClassification::BecomesBackendIntent {
         mutations::append(
             &tx,
             mutations::AppendRequest {
@@ -253,17 +245,6 @@ fn classify_edge(
     let blocked = mutations::resolve_backend_binding(conn, edge.blocked_id)?;
     let blocking = mutations::resolve_backend_binding(conn, edge.blocking_id)?;
     Ok(dependency_rule::classify(&blocked, &blocking))
-}
-
-fn edge_exists(conn: &Connection, edge: DependencyEdge<'_>) -> Result<bool, rusqlite::Error> {
-    let present: Option<i64> = conn
-        .query_row(
-            "select 1 from dependencies where blocking_id = ?1 and blocked_id = ?2",
-            params![edge.blocking_id, edge.blocked_id],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(present.is_some())
 }
 
 #[cfg(test)]

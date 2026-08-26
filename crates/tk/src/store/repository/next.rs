@@ -16,6 +16,8 @@
 
 use rusqlite::params;
 
+use crate::domain::priority::Priority;
+
 use super::Store;
 
 /// One ready Ticket selected by [`next_ready_ticket`].
@@ -33,7 +35,7 @@ pub struct NextTicket {
 /// scripting stays uncluttered on stdout.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rationale {
-    pub effective_priority: String,
+    pub effective_priority: Priority,
     pub blocked_display_id: String,
 }
 
@@ -74,8 +76,8 @@ pub enum NextError {
     Storage(#[from] rusqlite::Error),
 }
 
-/// SQL ordering already guarantees `eff.ep <= ann.priority`, so a byte
-/// difference between the two priority text columns means Effective
+/// SQL ordering already guarantees `eff.ep <= ann.priority`, so a
+/// difference between the two Priority columns means Effective
 /// Priority came from a Blocked Item and a rationale is owed. The
 /// contributor sub-SELECT picks the lowest-`created_seq` Ticket carrying
 /// that Priority to ensure a deterministic rationale row.
@@ -189,8 +191,8 @@ pub fn next_ready_ticket(
         params![scope_mode, scope_id],
         |row| {
             let display_id: String = row.get(0)?;
-            let own_priority: String = row.get(1)?;
-            let effective_priority: String = row.get(2)?;
+            let own_priority: Priority = row.get(1)?;
+            let effective_priority: Priority = row.get(2)?;
             let contributor: Option<String> = row.get(3)?;
             let title: String = row.get(4)?;
             Ok((
@@ -204,7 +206,7 @@ pub fn next_ready_ticket(
     );
     match row {
         Ok((display_id, own_priority, effective_priority, contributor, title)) => {
-            let rationale = build_rationale(&own_priority, effective_priority, contributor);
+            let rationale = build_rationale(own_priority, effective_priority, contributor);
             Ok(Some(NextTicket {
                 display_id,
                 title,
@@ -217,8 +219,8 @@ pub fn next_ready_ticket(
 }
 
 fn build_rationale(
-    own_priority: &str,
-    effective_priority: String,
+    own_priority: Priority,
+    effective_priority: Priority,
     contributor: Option<String>,
 ) -> Option<Rationale> {
     if own_priority == effective_priority {
@@ -353,7 +355,7 @@ mod tests {
         // so it sorts ahead of `ready` (P1, own = effective).
         assert_eq!(ticket.display_id, "tk-1");
         let rationale = ticket.rationale.expect("rationale required");
-        assert_eq!(rationale.effective_priority, "P0");
+        assert_eq!(rationale.effective_priority, Priority::P0);
         assert_eq!(rationale.blocked_display_id, "tk-2");
     }
 
@@ -390,7 +392,6 @@ mod tests {
                 title: id,
                 priority: Some(priority),
                 container_id: Some(epic),
-                container_class: Some("epic"),
                 created_seq,
                 ..FixtureItem::default()
             },
@@ -461,7 +462,7 @@ mod tests {
             .expect("a ready ticket");
         assert_eq!(ticket.display_id, "tk-1");
         let rationale = ticket.rationale.expect("multi-hop rationale required");
-        assert_eq!(rationale.effective_priority, "P0");
+        assert_eq!(rationale.effective_priority, Priority::P0);
         assert_eq!(rationale.blocked_display_id, "tk-3");
     }
 
@@ -567,7 +568,7 @@ mod tests {
             .expect("a ready ticket");
         assert_eq!(ticket.display_id, "tk-1");
         let rationale = ticket.rationale.expect("inherited-priority rationale");
-        assert_eq!(rationale.effective_priority, "P0");
+        assert_eq!(rationale.effective_priority, Priority::P0);
         assert_eq!(rationale.blocked_display_id, "tk-3");
     }
 
@@ -593,7 +594,7 @@ mod tests {
         // `other-ready`.
         assert_eq!(ticket.display_id, "tk-1");
         let rationale = ticket.rationale.expect("inherited-priority rationale");
-        assert_eq!(rationale.effective_priority, "P0");
+        assert_eq!(rationale.effective_priority, Priority::P0);
         assert_eq!(rationale.blocked_display_id, "tk-3");
     }
 
@@ -618,7 +619,7 @@ mod tests {
         // `other-ready`; the parked `mid`'s own P1 never enters the min.
         assert_eq!(ticket.display_id, "tk-1");
         let rationale = ticket.rationale.expect("inherited-priority rationale");
-        assert_eq!(rationale.effective_priority, "P0");
+        assert_eq!(rationale.effective_priority, Priority::P0);
         assert_eq!(rationale.blocked_display_id, "tk-3");
     }
 }

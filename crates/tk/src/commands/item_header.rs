@@ -89,7 +89,7 @@ pub(crate) fn render_header<W: Write + ?Sized>(
                     "{}",
                     styler.wrap(palette::priority_style(priority), priority.text())
                 )?;
-                stdout.write_all(b" \xc2\xb7 ")?; // " · "
+                stdout.write_all(" \u{b7} ".as_bytes())?;
             }
             let kind = header
                 .ticket_kind
@@ -102,21 +102,21 @@ pub(crate) fn render_header<W: Write + ?Sized>(
             }
         }
     }
-    let created_date = first_chars(header.created_at, 10);
+    let created_date = date_prefix(header.created_at);
     write!(stdout, " \u{b7} Created: {created_date}")?;
     if header.updated_at != header.created_at {
-        let updated_date = first_chars(header.updated_at, 10);
+        let updated_date = date_prefix(header.updated_at);
         write!(stdout, " \u{b7} Updated: {updated_date}")?;
     }
     stdout.write_all(b"\n")
 }
 
-/// Truncate by char count (created_at / updated_at are ASCII ISO-8601 in
-/// practice, so this takes the `YYYY-MM-DD` date prefix), surviving a future
-/// multi-byte stamp.
-fn first_chars(s: &str, n: usize) -> &str {
-    match s.char_indices().nth(n) {
-        Some((idx, _)) => &s[..idx],
-        None => s,
+/// The `YYYY-MM-DD` date prefix of an ISO-8601 timestamp. Truncates by char
+/// count (created_at / updated_at are ASCII in practice), so a future
+/// multi-byte stamp cannot split a char boundary.
+fn date_prefix(timestamp: &str) -> &str {
+    match timestamp.char_indices().nth(10) {
+        Some((idx, _)) => &timestamp[..idx],
+        None => timestamp,
     }
 }

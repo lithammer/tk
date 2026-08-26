@@ -36,10 +36,10 @@ use crate::domain::ticket_kind::TicketKind;
 use crate::store::mutations;
 use crate::store::repository::RemoteWorkflowGuard;
 use crate::store::repository::create::generate_internal_id;
-use crate::store::sequences::{self, SequenceError};
+use crate::store::sequences::{self, Counter, SequenceError};
 
 // ──────────────────────────────────────────────────────────────────────────
-// Directional Backend reads
+// Canonical Adopt insertion and Backend cohort errors
 // ──────────────────────────────────────────────────────────────────────────
 
 /// Error returned while validating the retained Backend-kind cohort.
@@ -135,7 +135,7 @@ pub fn adopt_backend_ticket(
         return Ok(AdoptOutcome::AlreadyExists(row));
     }
     let id = generate_internal_id(rng);
-    let created_seq = sequences::next(&tx, "item_created_seq")?;
+    let created_seq = sequences::next(&tx, Counter::ItemCreated)?;
     // Adopt inserts Backend Tickets as accepted; Epics stay outside Selection
     // State (ADR-0027). This is its own intake decision, not an inheritance of
     // the `tk add` default, so it names `Accepted` explicitly. Selection State
@@ -879,36 +879,8 @@ pub fn mark_mutation_skipped(
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// Remote read + pending/failed count
+// Pending/failed count
 // ──────────────────────────────────────────────────────────────────────────
-
-/// Loaded copy of the singleton Remote configuration plus its Sync Cursor.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RemoteRow {
-    pub backend_kind: String,
-    pub config_json: String,
-    pub last_applied_sequence: i64,
-}
-
-/// Read the v1 singleton Remote configuration plus its Sync Cursor. Returns
-/// `None` when no Remote is configured.
-pub fn get_remote(conn: &Connection) -> rusqlite::Result<Option<RemoteRow>> {
-    conn.query_row(
-        "select r.backend_kind, r.config_json, c.last_applied_sequence \
-           from remotes r \
-           join sync_cursors c on c.remote_name = r.name \
-          where r.name = 'primary'",
-        [],
-        |row| {
-            Ok(RemoteRow {
-                backend_kind: row.get(0)?,
-                config_json: row.get(1)?,
-                last_applied_sequence: row.get(2)?,
-            })
-        },
-    )
-    .optional()
-}
 
 /// The rendered fields of one Backend item, addressed by its backend identity.
 /// `tk adopt` renders its outcome from this stored row, keeping the displayed
@@ -1074,10 +1046,9 @@ pub fn merge_backend_refreshes(
     Ok(())
 }
 
-/// Return an invariant error when retained backend-bound state spans kinds.
-fn ensure_single_backend_kind(
-    conn: &Connection,
-) -> Result<Option<BackendKind>, BackendCohortError> {
+/// The single Backend kind retained backend-bound state belongs to, or `None`
+/// when no such state exists. Errors when that state spans more than one kind.
+fn retained_backend_kind(conn: &Connection) -> Result<Option<BackendKind>, BackendCohortError> {
     let kinds = retained_backend_kinds(conn)?;
     if kinds.len() > 1 {
         return Err(BackendCohortError::MultipleBackendKinds);
@@ -1090,7 +1061,7 @@ pub(crate) fn ensure_backend_cohort(
     conn: &Connection,
     expected: BackendKind,
 ) -> Result<(), BackendCohortError> {
-    if let Some(retained) = ensure_single_backend_kind(conn)?
+    if let Some(retained) = retained_backend_kind(conn)?
         && retained != expected
     {
         return Err(BackendCohortError::BackendKindMismatch { expected, retained });
@@ -1121,6 +1092,10 @@ fn retained_backend_kinds(conn: &Connection) -> Result<Vec<BackendKind>, Backend
     Ok(kinds)
 }
 
+/// The kind of the v1 singleton Remote, or `None` when none is configured.
+/// The only Remote read in the store: `remotes.config_json` carries nothing a
+/// reader needs under ADR-0033 (the repository is resolved by `gh` from the
+/// command cwd), and the Sync Cursor belongs to the Mutation Log views.
 pub(crate) fn configured_remote_kind(conn: &Connection) -> rusqlite::Result<Option<BackendKind>> {
     let actual = conn
         .query_row(
@@ -1205,7 +1180,7 @@ pub fn set_remote(
 ) -> Result<SetRemoteOutcome, SetRemoteError> {
     let tx = crate::store::write_transaction(conn)?;
 
-    if let Some(retained) = ensure_single_backend_kind(&tx)? {
+    if let Some(retained) = retained_backend_kind(&tx)? {
         if retained != kind {
             return Err(SetRemoteError::BackendKindConflict {
                 requested: kind,
@@ -1451,10 +1426,9 @@ pub fn list_mutation_log(
 
 /// Look up one Mutation Log entry by sequence and return its full detail.
 pub fn show_mutation_log(conn: &Connection, sequence: i64) -> Result<LogDetailRow, LogError> {
-    // The closure stashes the raw `failure_json` in `failure_detail`; it is
-    // decoded into the typed Failure after the query, because a rusqlite row
-    // closure can only surface `rusqlite::Error`, not `LogError`.
-    let mut detail = conn
+    // Decoding happens after the query: a rusqlite row closure can only
+    // surface `rusqlite::Error`, not `LogError`.
+    let (mut detail, raw_failure) = conn
         .query_row(
             "select m.sequence, m.state, m.mutation_type, i.display_value, \
                     m.item_class, m.payload_json, m.failure_json, \
@@ -1464,24 +1438,28 @@ pub fn show_mutation_log(conn: &Connection, sequence: i64) -> Result<LogDetailRo
               where m.sequence = ?1",
             params![sequence],
             |r| {
-                Ok(LogDetailRow {
-                    sequence: r.get(0)?,
-                    state: r.get(1)?,
-                    mutation_type: r.get(2)?,
-                    target_display_id: r.get(3)?,
-                    item_class: r.get(4)?,
-                    payload_json: r.get(5)?,
-                    failure_detail: r.get(6)?,
-                    failure_class: None,
-                    created_at: r.get(7)?,
-                    state_changed_at: r.get(8)?,
-                })
+                let raw_failure: Option<String> = r.get(6)?;
+                Ok((
+                    LogDetailRow {
+                        sequence: r.get(0)?,
+                        state: r.get(1)?,
+                        mutation_type: r.get(2)?,
+                        target_display_id: r.get(3)?,
+                        item_class: r.get(4)?,
+                        payload_json: r.get(5)?,
+                        failure_detail: None,
+                        failure_class: None,
+                        created_at: r.get(7)?,
+                        state_changed_at: r.get(8)?,
+                    },
+                    raw_failure,
+                ))
             },
         )
         .optional()?
         .ok_or(LogError::MutationNotFound(sequence))?;
 
-    if let Some(raw) = detail.failure_detail.take() {
+    if let Some(raw) = raw_failure {
         let failure = decode_failure(&raw)?;
         detail.failure_detail = Some(failure.detail);
         detail.failure_class = Some(failure.class);
@@ -1497,303 +1475,6 @@ fn decode_failure(raw: &str) -> Result<Failure, LogError> {
 }
 
 #[cfg(test)]
-mod directional_tests {
-    use super::*;
-    use crate::store::migrations;
-    use rand::SeedableRng;
-    use std::sync::{Arc, Barrier};
-    use std::time::Duration;
-
-    const NOW: &str = "2026-08-09T00:00:00Z";
-
-    fn open() -> Connection {
-        let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("pragma foreign_keys = on").unwrap();
-        migrations::apply_all(&mut conn, NOW).unwrap();
-        set_remote(&mut conn, BackendKind::Github, "{}", NOW).unwrap();
-        conn
-    }
-
-    fn adopted(key: &str, display_id: &str) -> AdoptedItem {
-        AdoptedItem {
-            backend_key: key.into(),
-            display_id: display_id.into(),
-            ticket_kind: TicketKind::Task,
-            title: "Original".into(),
-            body: "Original body".into(),
-            status: ItemStatus::Open,
-        }
-    }
-
-    #[test]
-    fn canonical_adopt_is_idempotent_without_overwriting_stored_fields() {
-        let mut conn = open();
-        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
-        let first = adopt_backend_ticket(
-            &mut conn,
-            BackendKind::Github,
-            &mut rng,
-            &adopted("42", "gh-42"),
-            NOW,
-        )
-        .unwrap();
-        assert!(matches!(first, AdoptOutcome::Inserted(_)));
-
-        let mut canonical = adopted("42", "gh-42");
-        canonical.title = "Changed remotely".into();
-        let second =
-            adopt_backend_ticket(&mut conn, BackendKind::Github, &mut rng, &canonical, NOW)
-                .unwrap();
-        assert!(matches!(second, AdoptOutcome::AlreadyExists(_)));
-        assert_eq!(
-            find_adopted_ticket(&conn, BackendKind::Github, "42")
-                .unwrap()
-                .unwrap()
-                .title,
-            "Original"
-        );
-    }
-
-    #[test]
-    fn adopt_does_not_alias_same_numbered_issues_across_repositories() {
-        let mut conn = open();
-        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
-        adopt_backend_ticket(
-            &mut conn,
-            BackendKind::Github,
-            &mut rng,
-            &adopted("https://github.com/one/repo/issues/42", "gh-42"),
-            NOW,
-        )
-        .unwrap();
-
-        assert!(
-            find_adopted_ticket(
-                &conn,
-                BackendKind::Github,
-                "https://github.com/other/repo/issues/42",
-            )
-            .unwrap()
-            .is_none()
-        );
-        assert!(matches!(
-            adopt_backend_ticket(
-                &mut conn,
-                BackendKind::Github,
-                &mut rng,
-                &adopted("https://github.com/other/repo/issues/42", "gh-42"),
-                NOW,
-            ),
-            Err(AdoptStoreError::DisplayIdCollision(id)) if id == "gh-42"
-        ));
-    }
-
-    #[test]
-    fn concurrent_canonical_adopt_inserts_once_without_consuming_a_second_sequence() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("tk.db");
-        {
-            let mut conn = Connection::open(&path).unwrap();
-            conn.execute_batch("pragma foreign_keys = on").unwrap();
-            migrations::apply_all(&mut conn, NOW).unwrap();
-            set_remote(&mut conn, BackendKind::Github, "{}", NOW).unwrap();
-        }
-
-        let barrier = Arc::new(Barrier::new(2));
-        let mut handles = Vec::new();
-        for seed in [7, 11] {
-            let path = path.clone();
-            let barrier = Arc::clone(&barrier);
-            handles.push(std::thread::spawn(move || {
-                let mut conn = Connection::open(path).unwrap();
-                conn.busy_timeout(Duration::from_secs(5)).unwrap();
-                conn.execute_batch("pragma foreign_keys = on").unwrap();
-                let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-                barrier.wait();
-                adopt_backend_ticket(
-                    &mut conn,
-                    BackendKind::Github,
-                    &mut rng,
-                    &adopted("42", "gh-42"),
-                    NOW,
-                )
-                .map(|outcome| matches!(outcome, AdoptOutcome::Inserted(_)))
-                .map_err(|error| error.to_string())
-            }));
-        }
-
-        let mut inserted = handles
-            .into_iter()
-            .map(|handle| handle.join().unwrap().unwrap())
-            .collect::<Vec<_>>();
-        inserted.sort_unstable();
-        assert_eq!(inserted, [false, true]);
-
-        let conn = Connection::open(path).unwrap();
-        let item_count: i64 = conn
-            .query_row("select count(*) from items", [], |row| row.get(0))
-            .unwrap();
-        let resolver_count: i64 = conn
-            .query_row("select count(*) from item_ids", [], |row| row.get(0))
-            .unwrap();
-        let created_sequence: i64 = conn
-            .query_row(
-                "select value from sequences where name = 'item_created_seq'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!((item_count, resolver_count, created_sequence), (1, 1, 1));
-    }
-
-    #[test]
-    fn canonical_adopt_refuses_when_the_remote_was_cleared_after_the_read() {
-        let mut conn = open();
-        clear_remote(&mut conn).unwrap();
-        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
-
-        let error = adopt_backend_ticket(
-            &mut conn,
-            BackendKind::Github,
-            &mut rng,
-            &adopted("42", "gh-42"),
-            NOW,
-        )
-        .unwrap_err();
-
-        assert!(matches!(
-            error,
-            AdoptStoreError::RemoteChanged {
-                expected: BackendKind::Github,
-                actual: None,
-            }
-        ));
-        let item_count: i64 = conn
-            .query_row("select count(*) from items", [], |row| row.get(0))
-            .unwrap();
-        let created_sequence: i64 = conn
-            .query_row(
-                "select value from sequences where name = 'item_created_seq'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!((item_count, created_sequence), (0, 0));
-    }
-
-    #[test]
-    fn canonical_adopt_refuses_when_the_remote_kind_changed_after_the_read() {
-        let mut conn = open();
-        clear_remote(&mut conn).unwrap();
-        set_remote(&mut conn, BackendKind::Jira, "{}", NOW).unwrap();
-        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
-
-        let error = adopt_backend_ticket(
-            &mut conn,
-            BackendKind::Github,
-            &mut rng,
-            &adopted("42", "gh-42"),
-            NOW,
-        )
-        .unwrap_err();
-
-        assert!(matches!(
-            error,
-            AdoptStoreError::RemoteChanged {
-                expected: BackendKind::Github,
-                actual: Some(BackendKind::Jira),
-            }
-        ));
-        let item_count: i64 = conn
-            .query_row("select count(*) from items", [], |row| row.get(0))
-            .unwrap();
-        let created_sequence: i64 = conn
-            .query_row(
-                "select value from sequences where name = 'item_created_seq'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!((item_count, created_sequence), (0, 0));
-    }
-
-    #[test]
-    fn canonical_adopt_refuses_a_remote_kind_incompatible_with_retained_items() {
-        let mut conn = open();
-        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
-        adopt_backend_ticket(
-            &mut conn,
-            BackendKind::Github,
-            &mut rng,
-            &adopted("1", "gh-1"),
-            NOW,
-        )
-        .unwrap();
-        conn.execute(
-            "update remotes set backend_kind = 'jira' where name = 'primary'",
-            [],
-        )
-        .unwrap();
-
-        let error = adopt_backend_ticket(
-            &mut conn,
-            BackendKind::Jira,
-            &mut rng,
-            &adopted("2", "jira-2"),
-            NOW,
-        )
-        .unwrap_err();
-
-        assert!(matches!(
-            error,
-            AdoptStoreError::BackendCohort(BackendCohortError::BackendKindMismatch {
-                expected: BackendKind::Jira,
-                retained: BackendKind::Github,
-            })
-        ));
-        let item_count: i64 = conn
-            .query_row("select count(*) from items", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(item_count, 1);
-    }
-
-    #[test]
-    fn refresh_preserves_ticket_identity_and_only_updates_owned_fields() {
-        let mut conn = open();
-        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
-        adopt_backend_ticket(
-            &mut conn,
-            BackendKind::Github,
-            &mut rng,
-            &adopted("42", "gh-42"),
-            NOW,
-        )
-        .unwrap();
-        merge_backend_refreshes(
-            &mut conn,
-            BackendKind::Github,
-            &[(
-                "42".into(),
-                BackendItemRefresh {
-                    title: "Fresh".into(),
-                    body: "Fresh body".into(),
-                    status: ItemStatus::Active,
-                    ticket_kind: Some(TicketKind::Bug),
-                },
-            )],
-            NOW,
-        )
-        .unwrap();
-        let row = find_adopted_ticket(&conn, BackendKind::Github, "42")
-            .unwrap()
-            .unwrap();
-        assert_eq!(row.display_id, "gh-42");
-        assert_eq!(row.title, "Fresh");
-        assert_eq!(row.ticket_kind, Some(TicketKind::Bug));
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::backend_operation::BackendItemIdentity;
@@ -1806,6 +1487,10 @@ mod tests {
     };
     use rand::SeedableRng;
     use rand::rngs::StdRng;
+    use std::sync::{Arc, Barrier};
+    use std::time::Duration;
+
+    const NOW: &str = "2026-08-09T00:00:00Z";
 
     fn open_seeded() -> Connection {
         let mut conn = Connection::open_in_memory().unwrap();
@@ -2439,7 +2124,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_operation_leaves_identity_none_for_a_pending_promotion_item() {
+    fn resolve_operation_turns_a_pending_promotion_into_a_backend_creation() {
         // A Promotion Mutation targets a Local Item (ADR-0036), so there is no
         // backend identity to bind until its own receipt lands.
         let conn = open_seeded();
@@ -3545,33 +3230,7 @@ mod tests {
         }
     }
 
-    // ---- get_remote / count ---------------------------------------------
-
-    #[test]
-    fn get_remote_returns_none_when_unconfigured() {
-        let conn = open_seeded();
-        assert_eq!(get_remote(&conn).unwrap(), None);
-    }
-
-    #[test]
-    fn get_remote_returns_configured_row_with_cursor() {
-        let conn = open_seeded();
-        insert_fixture_remote(
-            &conn,
-            FixtureRemote {
-                backend_kind: "github",
-                config_json: r#"{"repo":"o/r"}"#,
-                last_applied_sequence: 9,
-                ..FixtureRemote::default()
-            },
-        )
-        .unwrap();
-
-        let row = get_remote(&conn).unwrap().unwrap();
-        assert_eq!(row.backend_kind, "github");
-        assert_eq!(row.config_json, r#"{"repo":"o/r"}"#);
-        assert_eq!(row.last_applied_sequence, 9);
-    }
+    // ---- pending/failed count -------------------------------------------
 
     #[test]
     fn pending_or_failed_count_counts_only_in_flight() {
@@ -3613,10 +3272,28 @@ mod tests {
             set_remote(&mut conn, BackendKind::Github, "{}", "2026-06-17T00:00:00Z").unwrap();
         assert_eq!(outcome, SetRemoteOutcome::Created);
 
-        let row = get_remote(&conn).unwrap().unwrap();
-        assert_eq!(row.backend_kind, "github");
-        assert_eq!(row.config_json, "{}");
-        assert_eq!(row.last_applied_sequence, 0);
+        assert_eq!(
+            configured_remote_kind(&conn).unwrap(),
+            Some(BackendKind::Github)
+        );
+        let config_json: String = conn
+            .query_row(
+                "select config_json from remotes where name = 'primary'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(config_json, "{}");
+        // `set_remote` seeds the Sync Cursor at 0 (ADR-0033); losing this
+        // would let a new Remote start mid-log and skip Mutations.
+        let last_applied: i64 = conn
+            .query_row(
+                "select last_applied_sequence from sync_cursors where remote_name = 'primary'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(last_applied, 0);
 
         // A second set is an idempotent no-op (ADR-0033): no replace, one row.
         let again =
@@ -3639,7 +3316,10 @@ mod tests {
             set_remote(&mut conn, BackendKind::Github, "{}", "2026-06-18T00:00:00Z").unwrap();
 
         assert_eq!(outcome, SetRemoteOutcome::Created);
-        assert_eq!(get_remote(&conn).unwrap().unwrap().backend_kind, "github");
+        assert_eq!(
+            configured_remote_kind(&conn).unwrap(),
+            Some(BackendKind::Github)
+        );
     }
 
     #[test]
@@ -3656,7 +3336,7 @@ mod tests {
             } => {}
             other => panic!("expected BackendKindConflict, got {other:?}"),
         }
-        assert_eq!(get_remote(&conn).unwrap(), None);
+        assert_eq!(configured_remote_kind(&conn).unwrap(), None);
     }
 
     #[test]
@@ -3692,7 +3372,7 @@ mod tests {
             SetRemoteError::BackendCohort(BackendCohortError::MultipleBackendKinds) => {}
             other => panic!("expected mixed Backend cohort, got {other:?}"),
         }
-        assert_eq!(get_remote(&conn).unwrap(), None);
+        assert_eq!(configured_remote_kind(&conn).unwrap(), None);
     }
 
     #[test]
@@ -3729,7 +3409,7 @@ mod tests {
             }
             other => panic!("expected unknown Backend kind, got {other:?}"),
         }
-        assert_eq!(get_remote(&conn).unwrap(), None);
+        assert_eq!(configured_remote_kind(&conn).unwrap(), None);
     }
 
     #[test]
@@ -3744,7 +3424,10 @@ mod tests {
             } => {}
             other => panic!("expected RemoteKindConflict, got {other:?}"),
         }
-        assert_eq!(get_remote(&conn).unwrap().unwrap().backend_kind, "github");
+        assert_eq!(
+            configured_remote_kind(&conn).unwrap(),
+            Some(BackendKind::Github)
+        );
     }
 
     #[test]
@@ -3754,7 +3437,7 @@ mod tests {
 
         clear_remote(&mut conn).unwrap();
 
-        assert_eq!(get_remote(&conn).unwrap(), None);
+        assert_eq!(configured_remote_kind(&conn).unwrap(), None);
         let cursors: i64 = conn
             .query_row("select count(*) from sync_cursors", [], |r| r.get(0))
             .unwrap();
@@ -3797,7 +3480,7 @@ mod tests {
             other => panic!("expected WouldOrphan(1), got {other:?}"),
         }
         // The Remote survives a refused clear.
-        assert!(get_remote(&conn).unwrap().is_some());
+        assert!(configured_remote_kind(&conn).unwrap().is_some());
     }
 
     #[test]
@@ -3833,7 +3516,7 @@ mod tests {
             clear_remote(&mut conn),
             Err(ClearRemoteError::ApplyingMutation(3))
         ));
-        assert!(get_remote(&conn).unwrap().is_some());
+        assert!(configured_remote_kind(&conn).unwrap().is_some());
     }
 
     // ---- log read -------------------------------------------------------
@@ -4067,5 +3750,285 @@ mod tests {
                 ref item_id,
             }) if item_id == "t1"
         ));
+    }
+
+    // ---- adopt ----------------------------------------------------------
+
+    #[test]
+    fn canonical_adopt_is_idempotent_without_overwriting_stored_fields() {
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        let first = adopt_backend_ticket(
+            &mut conn,
+            BackendKind::Github,
+            &mut rng,
+            &adopted("42", "gh-42", "Original", ItemStatus::Open),
+            NOW,
+        )
+        .unwrap();
+        assert!(matches!(first, AdoptOutcome::Inserted(_)));
+
+        let mut canonical = adopted("42", "gh-42", "Original", ItemStatus::Open);
+        canonical.title = "Changed remotely".into();
+        let second =
+            adopt_backend_ticket(&mut conn, BackendKind::Github, &mut rng, &canonical, NOW)
+                .unwrap();
+        assert!(matches!(second, AdoptOutcome::AlreadyExists(_)));
+        assert_eq!(
+            find_adopted_ticket(&conn, BackendKind::Github, "42")
+                .unwrap()
+                .unwrap()
+                .title,
+            "Original"
+        );
+    }
+
+    #[test]
+    fn adopt_does_not_alias_same_numbered_issues_across_repositories() {
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        adopt_backend_ticket(
+            &mut conn,
+            BackendKind::Github,
+            &mut rng,
+            &adopted(
+                "https://github.com/one/repo/issues/42",
+                "gh-42",
+                "Original",
+                ItemStatus::Open,
+            ),
+            NOW,
+        )
+        .unwrap();
+
+        assert!(
+            find_adopted_ticket(
+                &conn,
+                BackendKind::Github,
+                "https://github.com/other/repo/issues/42",
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(matches!(
+            adopt_backend_ticket(
+                &mut conn,
+                BackendKind::Github,
+                &mut rng,
+                &adopted("https://github.com/other/repo/issues/42", "gh-42", "Original", ItemStatus::Open),
+                NOW,
+            ),
+            Err(AdoptStoreError::DisplayIdCollision(id)) if id == "gh-42"
+        ));
+    }
+
+    #[test]
+    fn concurrent_canonical_adopt_inserts_once_without_consuming_a_second_sequence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tk.db");
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            conn.execute_batch("pragma foreign_keys = on").unwrap();
+            migrations::apply_all(&mut conn, NOW).unwrap();
+            set_remote(&mut conn, BackendKind::Github, "{}", NOW).unwrap();
+        }
+
+        let barrier = Arc::new(Barrier::new(2));
+        let mut handles = Vec::new();
+        for seed in [7, 11] {
+            let path = path.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                let mut conn = Connection::open(path).unwrap();
+                conn.busy_timeout(Duration::from_secs(5)).unwrap();
+                conn.execute_batch("pragma foreign_keys = on").unwrap();
+                let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+                barrier.wait();
+                adopt_backend_ticket(
+                    &mut conn,
+                    BackendKind::Github,
+                    &mut rng,
+                    &adopted("42", "gh-42", "Original", ItemStatus::Open),
+                    NOW,
+                )
+                .map(|outcome| matches!(outcome, AdoptOutcome::Inserted(_)))
+                .map_err(|error| error.to_string())
+            }));
+        }
+
+        let mut inserted = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap().unwrap())
+            .collect::<Vec<_>>();
+        inserted.sort_unstable();
+        assert_eq!(inserted, [false, true]);
+
+        let conn = Connection::open(path).unwrap();
+        let item_count: i64 = conn
+            .query_row("select count(*) from items", [], |row| row.get(0))
+            .unwrap();
+        let resolver_count: i64 = conn
+            .query_row("select count(*) from item_ids", [], |row| row.get(0))
+            .unwrap();
+        let created_sequence: i64 = conn
+            .query_row(
+                "select value from sequences where name = 'item_created_seq'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!((item_count, resolver_count, created_sequence), (1, 1, 1));
+    }
+
+    #[test]
+    fn canonical_adopt_refuses_when_the_remote_was_cleared_after_the_read() {
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        clear_remote(&mut conn).unwrap();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+
+        let error = adopt_backend_ticket(
+            &mut conn,
+            BackendKind::Github,
+            &mut rng,
+            &adopted("42", "gh-42", "Original", ItemStatus::Open),
+            NOW,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            AdoptStoreError::RemoteChanged {
+                expected: BackendKind::Github,
+                actual: None,
+            }
+        ));
+        let item_count: i64 = conn
+            .query_row("select count(*) from items", [], |row| row.get(0))
+            .unwrap();
+        let created_sequence: i64 = conn
+            .query_row(
+                "select value from sequences where name = 'item_created_seq'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!((item_count, created_sequence), (0, 0));
+    }
+
+    #[test]
+    fn canonical_adopt_refuses_when_the_remote_kind_changed_after_the_read() {
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        clear_remote(&mut conn).unwrap();
+        set_remote(&mut conn, BackendKind::Jira, "{}", NOW).unwrap();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+
+        let error = adopt_backend_ticket(
+            &mut conn,
+            BackendKind::Github,
+            &mut rng,
+            &adopted("42", "gh-42", "Original", ItemStatus::Open),
+            NOW,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            AdoptStoreError::RemoteChanged {
+                expected: BackendKind::Github,
+                actual: Some(BackendKind::Jira),
+            }
+        ));
+        let item_count: i64 = conn
+            .query_row("select count(*) from items", [], |row| row.get(0))
+            .unwrap();
+        let created_sequence: i64 = conn
+            .query_row(
+                "select value from sequences where name = 'item_created_seq'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!((item_count, created_sequence), (0, 0));
+    }
+
+    #[test]
+    fn canonical_adopt_refuses_a_remote_kind_incompatible_with_retained_items() {
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        adopt_backend_ticket(
+            &mut conn,
+            BackendKind::Github,
+            &mut rng,
+            &adopted("1", "gh-1", "Original", ItemStatus::Open),
+            NOW,
+        )
+        .unwrap();
+        conn.execute(
+            "update remotes set backend_kind = 'jira' where name = 'primary'",
+            [],
+        )
+        .unwrap();
+
+        let error = adopt_backend_ticket(
+            &mut conn,
+            BackendKind::Jira,
+            &mut rng,
+            &adopted("2", "jira-2", "Original", ItemStatus::Open),
+            NOW,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            AdoptStoreError::BackendCohort(BackendCohortError::BackendKindMismatch {
+                expected: BackendKind::Jira,
+                retained: BackendKind::Github,
+            })
+        ));
+        let item_count: i64 = conn
+            .query_row("select count(*) from items", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(item_count, 1);
+    }
+
+    #[test]
+    fn refresh_preserves_ticket_identity_and_only_updates_owned_fields() {
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        adopt_backend_ticket(
+            &mut conn,
+            BackendKind::Github,
+            &mut rng,
+            &adopted("42", "gh-42", "Original", ItemStatus::Open),
+            NOW,
+        )
+        .unwrap();
+        merge_backend_refreshes(
+            &mut conn,
+            BackendKind::Github,
+            &[(
+                "42".into(),
+                BackendItemRefresh {
+                    title: "Fresh".into(),
+                    body: "Fresh body".into(),
+                    status: ItemStatus::Active,
+                    ticket_kind: Some(TicketKind::Bug),
+                },
+            )],
+            NOW,
+        )
+        .unwrap();
+        let row = find_adopted_ticket(&conn, BackendKind::Github, "42")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.display_id, "gh-42");
+        assert_eq!(row.title, "Fresh");
+        assert_eq!(row.ticket_kind, Some(TicketKind::Bug));
     }
 }

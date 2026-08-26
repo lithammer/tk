@@ -55,14 +55,14 @@ pub struct Args {
 pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     let input = select_input(&args).map_err(CommandError::usage)?;
 
-    let parsed =
-        message::read_input(input, deps.cwd, deps.stdin).map_err(|err| message_error(&err))?;
+    let parsed = message::read_input(input, deps.cwd, deps.stdin)
+        .map_err(|err| message::read_error(&err))?;
 
     let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
         .map_err(|err| resolver::open_error(&err))?;
 
     let parent_ref = if let Some(arg) = args.parent.as_deref() {
-        match resolver::resolve_epic_with_display(&store, arg) {
+        match resolver::resolve_epic(&store, arg) {
             Ok(r) => Some(r),
             Err(resolver::ResolveEpicError::NotFound) => {
                 return Err(CommandError::failure(format!(
@@ -164,23 +164,6 @@ fn select_input(args: &Args) -> Result<MessageInput<'_>, &'static str> {
     Err("a message is required (use -m or -F)")
 }
 
-fn message_error(err: &message::ReadError) -> CommandError {
-    match err {
-        message::ReadError::Parse(message::ParseError::Empty) => {
-            CommandError::failure("message is empty")
-        }
-        message::ReadError::Parse(message::ParseError::NulByte) => {
-            CommandError::failure("message contains a NUL byte")
-        }
-        message::ReadError::File { path, source } => {
-            CommandError::failure(format!("failed to read '{path}': {source}"))
-        }
-        message::ReadError::Stdin(source) => {
-            CommandError::failure(format!("failed to read message from stdin: {source}"))
-        }
-    }
-}
-
 fn create_error(err: &CreateError) -> CommandError {
     match err {
         CreateError::Sqlite(err) => resolver::storage_error(err),
@@ -196,81 +179,8 @@ fn create_error(err: &CreateError) -> CommandError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::FakeClock;
-    use crate::proc::{FakeRunner, RunOutput};
-    use crate::render::Styler;
-    use crate::store::migrations;
+    use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
     use crate::store::testing::TmpStore;
-    use rand::SeedableRng;
-    use rand::rngs::StdRng;
-    use rusqlite::Connection;
-    use std::path::Path;
-
-    fn cwd() -> std::path::PathBuf {
-        std::env::current_dir().unwrap()
-    }
-
-    fn seed_store(store: &TmpStore) {
-        std::fs::create_dir_all(store.tk_dir()).unwrap();
-        let mut conn = Connection::open(store.db_path()).unwrap();
-        conn.execute_batch("pragma foreign_keys = on").unwrap();
-        migrations::apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        conn.execute(
-            "insert into store_config(key, value) values ('display_prefix', 'tk')",
-            [],
-        )
-        .unwrap();
-    }
-
-    struct Harness<'a> {
-        stdout: Vec<u8>,
-        stderr: Vec<u8>,
-        stdin: std::io::Cursor<Vec<u8>>,
-        runner: FakeRunner,
-        clock: FakeClock,
-        rng: StdRng,
-        cwd: &'a Path,
-    }
-
-    impl<'a> Harness<'a> {
-        fn new(cwd: &'a Path) -> Self {
-            Self::with_seed(cwd, 7)
-        }
-        fn with_seed(cwd: &'a Path, seed: u64) -> Self {
-            Self {
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-                stdin: std::io::Cursor::new(Vec::new()),
-                runner: FakeRunner::new(),
-                clock: FakeClock::new(1_778_284_800_000),
-                rng: StdRng::seed_from_u64(seed),
-                cwd,
-            }
-        }
-        fn deps(&mut self) -> Deps<'_> {
-            Deps {
-                stdout: &mut self.stdout,
-                stderr: &mut self.stderr,
-                stdin: &mut self.stdin,
-                runner: &self.runner,
-                clock: &self.clock,
-                rng: &mut self.rng,
-                cwd: self.cwd,
-                styler: Styler::plain(),
-            }
-        }
-    }
-
-    fn expect_git(h: &Harness<'_>, store: &TmpStore) {
-        h.runner.expect(
-            &["git", "rev-parse"],
-            RunOutput {
-                exit_code: 0,
-                stdout: store.git_rev_parse_stdout(),
-                stderr: Vec::new(),
-            },
-        );
-    }
 
     /// Drive `run` and frame any returned error as the dispatch seam does
     /// (ADR-0032: `tk add: <body>`), so a test asserts the framed bytes.
@@ -303,7 +213,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         expect_git(&h, &store);
         let code = run_rendered(&mut h, args_with(vec!["Ship it".into()]));
         assert_eq!(code, Exit::Ok);
@@ -319,7 +229,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         expect_git(&h, &store);
         let mut a = args_with(vec!["Crash on click".into()]);
         a.bug = true;
@@ -334,7 +244,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         expect_git(&h, &store);
         let mut a = args_with(vec!["Investigate flaky test".into()]);
         a.triage = true;
@@ -353,7 +263,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         expect_git(&h, &store);
         let mut a = args_with(vec!["Big work".into()]);
         a.epic = true;
@@ -373,7 +283,7 @@ mod tests {
 
         // First create an epic.
         {
-            let mut h = Harness::new(&cwd_path);
+            let mut h = Harness::with_seed(&cwd_path, 7);
             expect_git(&h, &store);
             let mut a = args_with(vec!["Epic".into()]);
             a.epic = true;
@@ -399,7 +309,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         expect_git(&h, &store);
         let mut a = args_with(vec!["Title".into()]);
         a.parent = Some("nope".into());
@@ -417,7 +327,7 @@ mod tests {
 
         // Create a ticket first.
         {
-            let mut h = Harness::new(&cwd_path);
+            let mut h = Harness::with_seed(&cwd_path, 7);
             expect_git(&h, &store);
             assert_eq!(
                 run_rendered(&mut h, args_with(vec!["Standalone".into()])),
@@ -441,7 +351,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         expect_git(&h, &store);
         let code = run_rendered(&mut h, args_with(vec!["   ".into()]));
         assert_eq!(code, Exit::Failure);
@@ -454,7 +364,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         let code = run_rendered(&mut h, args_with(vec![]));
         assert_eq!(code, Exit::Usage);
         let stderr = String::from_utf8(h.stderr).unwrap();
@@ -466,7 +376,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         h.stdin = std::io::Cursor::new(b"From stdin\n\nBody p".to_vec());
         expect_git(&h, &store);
         let mut a = args_with(vec![]);

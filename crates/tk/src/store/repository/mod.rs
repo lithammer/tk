@@ -1,5 +1,5 @@
-//! Repository Store facade: open / resolve / list / next / show / create /
-//! update / status / dependency operations.
+//! Repository Store facade: open, Display ID / Alias resolution, and the
+//! per-operation submodules declared below.
 //!
 //! Each command surface lives in its own submodule and operates against the
 //! shared [`Store`] handle. The split mirrors the operation taxonomy used
@@ -96,8 +96,9 @@ pub enum RemoteWorkflowLockError {
 impl Store {
     /// Borrow the underlying SQLite connection.
     ///
-    /// Exposed for tests and tightly-scoped helper modules (e.g. fixture
-    /// inserts under `#[cfg(test)]`). Production command handlers should
+    /// Commands borrow it to reach the `store::sync`, `store::promotion`, and
+    /// `remote::factory` functions that take a `&Connection`; `#[cfg(test)]`
+    /// fixture inserts use it too. Production command handlers should
     /// reach for the typed operation functions in this module's children
     /// rather than running ad-hoc SQL against the connection.
     #[must_use]
@@ -171,7 +172,7 @@ pub enum OpenError {
     /// A SQLite file exists at the Repository Store path but its
     /// `application_id` is not tk's; refuse to touch a foreign database.
     #[error("Repository Store is not a tk Repository Store")]
-    NotTicketStore,
+    NotRepositoryStore,
     /// The store records a higher schema version than this binary knows.
     #[error("Repository Store was created by a newer tk version")]
     FromFutureVersion,
@@ -209,7 +210,6 @@ pub fn open_existing<R: ProcRunner + ?Sized>(
     cwd: &Path,
     clock: &dyn Clock,
 ) -> Result<Store, OpenError> {
-    // `?` converts a DiscoveryError into OpenError::DiscoveryFailed via #[from].
     let paths = discovery::discover_paths(runner, cwd)?;
     let db_path = paths.git_common_dir.join("tk").join("tk.db");
 
@@ -229,7 +229,7 @@ pub fn open_existing<R: ProcRunner + ?Sized>(
         .optional()?
         .unwrap_or(0);
     if app_id != i64::from(migrations::APPLICATION_ID) {
-        return Err(OpenError::NotTicketStore);
+        return Err(OpenError::NotRepositoryStore);
     }
 
     let version = migrations::current_version(&conn)?;
@@ -263,23 +263,20 @@ impl From<migrations::ApplyError> for OpenError {
 }
 
 /// A Display ID or Alias resolved to a stable internal item ID and class.
+///
+/// `display_id` is the Item's *current* Display ID, not the resolver value the
+/// command was invoked with — a command echoing an Alias back must show the
+/// canonical Display ID. It rides on the `items` row the resolve already
+/// joins, so carrying it costs no extra query.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedItemRef {
-    pub id: String,
-    pub item_class: ItemClass,
-}
-
-/// A resolved item plus its current Display ID, used when a command must
-/// echo the current Display ID rather than the user-supplied resolver value.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedItemRefWithDisplay {
     pub id: String,
     pub display_id: String,
     pub item_class: ItemClass,
 }
 
 /// Why resolving a Display ID or Alias that must be an Epic failed. Shared by
-/// [`resolve_as_epic`] and [`resolve_as_epic_with_display`] and re-exported as
+/// [`resolve_as_epic`] and re-exported as
 /// `resolver::ResolveEpicError`; the command picks the exit-1 phrasing per
 /// variant. With only Ticket and Epic in v1, "not an Epic" means "is a
 /// Ticket", so `NotAnEpic` carries no payload.
@@ -302,34 +299,13 @@ pub fn resolve_item_ref(
     display_arg: &str,
 ) -> Result<Option<ResolvedItemRef>, rusqlite::Error> {
     conn.query_row(
-        "select i.id, i.item_class \
-           from item_ids ids \
-           join items i on i.id = ids.item_id \
-          where ids.value = ?1",
-        params![display_arg],
-        |row| {
-            Ok(ResolvedItemRef {
-                id: row.get(0)?,
-                item_class: row.get(1)?,
-            })
-        },
-    )
-    .optional()
-}
-
-/// Resolve a Display ID or Alias to its internal ID plus the current Display ID.
-pub fn resolve_item_ref_with_display(
-    conn: &Connection,
-    display_arg: &str,
-) -> Result<Option<ResolvedItemRefWithDisplay>, rusqlite::Error> {
-    conn.query_row(
         "select i.id, i.display_value, i.item_class \
            from item_ids ids \
            join items i on i.id = ids.item_id \
           where ids.value = ?1",
         params![display_arg],
         |row| {
-            Ok(ResolvedItemRefWithDisplay {
+            Ok(ResolvedItemRef {
                 id: row.get(0)?,
                 display_id: row.get(1)?,
                 item_class: row.get(2)?,
@@ -349,23 +325,7 @@ pub fn resolve_as_epic(
     conn: &Connection,
     display_arg: &str,
 ) -> Result<ResolvedItemRef, ResolveEpicError> {
-    // `?` converts a SQLite fault into ResolveEpicError::Storage via #[from].
     let Some(resolved) = resolve_item_ref(conn, display_arg)? else {
-        return Err(ResolveEpicError::NotFound);
-    };
-    if resolved.item_class == ItemClass::Epic {
-        Ok(resolved)
-    } else {
-        Err(ResolveEpicError::NotAnEpic)
-    }
-}
-
-/// Like [`resolve_as_epic`] but with the current Display ID attached.
-pub fn resolve_as_epic_with_display(
-    conn: &Connection,
-    display_arg: &str,
-) -> Result<ResolvedItemRefWithDisplay, ResolveEpicError> {
-    let Some(resolved) = resolve_item_ref_with_display(conn, display_arg)? else {
         return Err(ResolveEpicError::NotFound);
     };
     if resolved.item_class == ItemClass::Epic {
@@ -451,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_item_ref_with_display_returns_canonical_display() {
+    fn resolve_item_ref_returns_canonical_display() {
         let conn = open_seeded();
         insert_fixture_item(
             &conn,
@@ -465,9 +425,7 @@ mod tests {
         )
         .unwrap();
         insert_alias(&conn, "alias", "t1").unwrap();
-        let r = resolve_item_ref_with_display(&conn, "alias")
-            .unwrap()
-            .unwrap();
+        let r = resolve_item_ref(&conn, "alias").unwrap().unwrap();
         assert_eq!(r.display_id, "tk-42");
     }
 
@@ -573,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn open_existing_reports_not_ticket_store_when_application_id_mismatches() {
+    fn open_existing_reports_not_repository_store_when_application_id_mismatches() {
         let store = TmpStore::new("repo");
         std::fs::create_dir_all(store.tk_dir()).unwrap();
         // Plant a foreign SQLite file with no application_id at the
@@ -587,7 +545,7 @@ mod tests {
         let runner = fake_runner_for(&store);
         assert!(matches!(
             open_existing(&runner, &cwd(), &fixed_clock()),
-            Err(OpenError::NotTicketStore)
+            Err(OpenError::NotRepositoryStore)
         ));
     }
 

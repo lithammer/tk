@@ -6,6 +6,8 @@
 
 use std::fmt;
 
+use crate::domain::mutation_type::MutationType;
+
 /// The top-level item class stored in the Repository Store. The default is
 /// [`ItemClass::Ticket`] — Tickets outnumber Epics in every real repository
 /// and the discriminator drives mutation-type selection across the store
@@ -24,6 +26,15 @@ impl ItemClass {
         match self {
             Self::Ticket => "ticket",
             Self::Epic => "epic",
+        }
+    }
+
+    /// The Mutation kind a title/body edit of this Item Class appends.
+    #[must_use]
+    pub fn update_mutation_type(self) -> MutationType {
+        match self {
+            Self::Ticket => MutationType::UpdateTicket,
+            Self::Epic => MutationType::UpdateEpic,
         }
     }
 

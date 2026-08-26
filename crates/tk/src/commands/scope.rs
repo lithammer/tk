@@ -11,7 +11,7 @@
 
 use crate::cli::CommandError;
 use crate::commands::resolver::{self, ResolveEpicError};
-use crate::store::repository::{ResolvedItemRefWithDisplay, Store};
+use crate::store::repository::{ResolvedItemRef, Store};
 
 /// Environment variable carrying a session Scope for orchestrated / AFK runs.
 /// A parent process exports it so every `tk` subprocess inherits the same
@@ -23,14 +23,11 @@ const SCOPE_ENV: &str = "TK_SCOPE";
 /// Reads the `<epic-id>` `arg` if present, else `TK_SCOPE`, else `None`, then
 /// resolves Epic-only: a miss or a non-Epic becomes a [`CommandError`] for the
 /// dispatch seam to frame. `Ok(None)` means no Scope was supplied.
-pub fn resolve(
-    store: &Store,
-    arg: Option<&str>,
-) -> Result<Option<ResolvedItemRefWithDisplay>, CommandError> {
+pub fn resolve(store: &Store, arg: Option<&str>) -> Result<Option<ResolvedItemRef>, CommandError> {
     let Some(value) = effective_value(arg, env_value().as_deref()) else {
         return Ok(None);
     };
-    match resolver::resolve_epic_with_display(store, &value) {
+    match resolver::resolve_epic(store, &value) {
         Ok(epic) => Ok(Some(epic)),
         Err(ResolveEpicError::NotFound) => Err(CommandError::failure(format!(
             "scope '{value}' is not a known Display ID or Alias"

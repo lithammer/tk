@@ -13,7 +13,7 @@
 
 #![allow(dead_code)]
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use rand::SeedableRng;
 use rusqlite::{Connection, params};
@@ -72,11 +72,6 @@ impl TmpStore {
         )
         .into_bytes()
     }
-
-    #[must_use]
-    pub fn toplevel(&self) -> &Path {
-        &self.toplevel
-    }
 }
 
 /// Raw Repository Store item fixture used by read-side tests.
@@ -98,7 +93,6 @@ pub struct FixtureItem<'a> {
     pub backend_kind: Option<&'a str>,
     pub backend_key: Option<&'a str>,
     pub container_id: Option<&'a str>,
-    pub container_class: Option<&'a str>,
     /// Selection State override for Ticket fixtures (ADR-0027). `None` derives
     /// the default `accepted`; set `Some("triage")` (with `priority: None`) or
     /// `Some("parked")` to fixture those states. Ignored for Epics, which
@@ -127,7 +121,6 @@ impl Default for FixtureItem<'_> {
             backend_kind: None,
             backend_key: None,
             container_id: None,
-            container_class: None,
             selection_state: None,
             created_seq: 0,
             created_at: "2026-05-09T00:00:00.000Z",
@@ -144,9 +137,9 @@ impl Default for FixtureItem<'_> {
 // gain in a test-only builder.
 #[allow(clippy::large_types_passed_by_value)]
 pub fn insert_fixture_item(conn: &Connection, item: FixtureItem<'_>) -> rusqlite::Result<()> {
-    let container_class = item
-        .container_id
-        .map(|_| item.container_class.unwrap_or("epic"));
+    // `items` CHECK admits only ('epic') alongside a container_id, so the
+    // class is fully determined by whether the fixture has a parent.
+    let container_class = item.container_id.map(|_| "epic");
     // Selection State (ADR-0027) is Ticket-only: a Ticket takes the explicit
     // `selection_state` override or defaults to `accepted`; an Epic always
     // stores NULL. Deriving from item_class keeps every Epic call site correct
@@ -261,7 +254,7 @@ pub fn commit_promotion(conn: &mut Connection, id: &str) {
         BackendKind::Github,
     )
     .expect("a promotable fixture");
-    if crate::store::sync::get_remote(conn)
+    if crate::store::sync::configured_remote_kind(conn)
         .expect("read fixture Remote")
         .is_none()
     {

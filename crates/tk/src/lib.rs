@@ -10,7 +10,8 @@
 //! - [`git`]: git subprocess discovery façade.
 //! - [`store`]: Repository Store + migrations.
 //! - [`domain`]: pure domain helpers.
-//! - [`remote`]: Backend Adapter trait + test fake (real adapters in tk-40).
+//! - [`remote`]: Backend Adapter trait, factory, GitHub adapter, and test fake.
+//! - [`render`]: terminal-rendering subsystem (palette, styler, sanitize).
 //! - [`sync`]: backend-blind sync engine (Pull merge + Mutation outbox replay).
 //! - [`promotion`]: Promotion engine (`tk promote` preflight over a store
 //!   snapshot).

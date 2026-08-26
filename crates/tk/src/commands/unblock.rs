@@ -3,6 +3,7 @@
 use clap::Args as ClapArgs;
 
 use crate::cli::{CommandError, Deps, Exit};
+use crate::commands::dependency_edge;
 use crate::commands::resolver;
 use crate::store::repository::dependency::{self, DependencyEdge, RemoveDependencyError};
 
@@ -17,33 +18,13 @@ pub struct Args {
 }
 
 pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
-    let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
-        .map_err(|err| resolver::open_error(&err))?;
-
-    let blocked = match resolver::resolve(&store, &args.blocked) {
-        Ok(r) => r,
-        Err(resolver::ResolveError::NotFound) => {
-            return Err(CommandError::failure(format!(
-                "blocked '{}' is not a known Display ID or Alias",
-                args.blocked
-            )));
-        }
-        Err(resolver::ResolveError::Storage(err)) => return Err(resolver::storage_error(&err)),
-    };
-    let blocking = match resolver::resolve(&store, &args.blocking) {
-        Ok(r) => r,
-        Err(resolver::ResolveError::NotFound) => {
-            return Err(CommandError::failure(format!(
-                "blocking '{}' is not a known Display ID or Alias",
-                args.blocking
-            )));
-        }
-        Err(resolver::ResolveError::Storage(err)) => return Err(resolver::storage_error(&err)),
-    };
-
-    if blocked.id == blocking.id {
-        return Err(CommandError::failure("an item cannot block itself"));
-    }
+    let (mut store, blocked, blocking) = dependency_edge::resolve(
+        deps.runner,
+        deps.cwd,
+        deps.clock,
+        &args.blocked,
+        &args.blocking,
+    )?;
 
     match dependency::remove_dependency(
         &mut store,

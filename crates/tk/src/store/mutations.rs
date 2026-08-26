@@ -66,7 +66,7 @@ pub struct AppendRequest<'a> {
 /// row identifier downstream (e.g. surfacing a pending Mutation count) can
 /// avoid a follow-up `SELECT`.
 pub fn append(conn: &Connection, req: AppendRequest<'_>) -> Result<i64, AppendError> {
-    let sequence = sequences::next(conn, "mutation_seq")?;
+    let sequence = sequences::next(conn, sequences::Counter::Mutation)?;
     let payload_json = req.payload.to_json_string();
     conn.execute(
         "insert into mutations(\
