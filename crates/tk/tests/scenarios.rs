@@ -254,11 +254,12 @@ fn triage_capture_and_acceptance_flow() {
     );
 
     // tk next ignores triage; list --triage surfaces it.
-    let next_empty = p.run("next");
-    assert!(
-        !next_empty.contains("project-1"),
-        "triage is not selectable: {next_empty}"
-    );
+    tk!(p, "next", @"
+    exit 1
+    -- stdout --
+    -- stderr --
+    tk next: no ready Tickets
+    ");
     let triage_view = p.run("list --triage");
     assert!(
         triage_view.contains("project-1"),
@@ -277,7 +278,7 @@ fn triage_capture_and_acceptance_flow() {
     Accepted Ticket: project-1 - Investigate flaky test
     Priority: P1
     ");
-    assert_eq!(p.run("next").trim(), "project-1");
+    assert_eq!(p.run("next").trim(), "project-1: Investigate flaky test");
 
     // Re-accepting is an idempotent success.
     let again = p.run("accept project-1");
@@ -308,11 +309,16 @@ fn accepting_a_blocked_triage_ticket_preserves_the_blocker() {
     // the blocked view rather than as ready work.
     let blocked = p.run("list --blocked");
     assert!(blocked.contains("project-1"), "blocked={blocked}");
-    assert_ne!(
-        p.run("next").trim(),
-        "project-1",
-        "still blocked, not selectable"
-    );
+    // project-1 is still blocked, so project-2 is the pick; it inherits
+    // Effective Priority P1 from the blocked project-1, which is why the
+    // stderr rationale names project-1 as the contributor.
+    tk!(p, "next", @"
+    exit 0
+    -- stdout --
+    project-2: Prerequisite
+    -- stderr --
+    project-2: Effective Priority P1 (via project-1)
+    ");
 }
 
 #[test]
@@ -322,7 +328,7 @@ fn parking_and_unparking_flow() {
 
     // An accepted Ticket is selectable by default.
     p.run("add -m 'Build the thing'"); // project-1 (accepted, P2)
-    assert_eq!(p.run("next").trim(), "project-1");
+    assert_eq!(p.run("next").trim(), "project-1: Build the thing");
 
     // Park it: the Priority is preserved and echoed (the held work stays ranked).
     tk!(p, "park project-1", @r"
@@ -332,11 +338,12 @@ fn parking_and_unparking_flow() {
 
     // Parked work drops out of automatic selection but stays visible: the
     // focused view lists it and plain list marks it with a dim [parked] badge.
-    let next_after_park = p.run("next");
-    assert!(
-        !next_after_park.contains("project-1"),
-        "parked is not selectable: {next_after_park}"
-    );
+    tk!(p, "next", @"
+    exit 1
+    -- stdout --
+    -- stderr --
+    tk next: no ready Tickets
+    ");
     let parked_view = p.run("list --parked");
     assert!(
         parked_view.contains("project-1"),
@@ -368,7 +375,7 @@ fn parking_and_unparking_flow() {
     Unparked Ticket: project-1 - Build the thing
     Priority: P0
     ");
-    assert_eq!(p.run("next").trim(), "project-1");
+    assert_eq!(p.run("next").trim(), "project-1: Build the thing");
 
     // Re-unparking is an idempotent success.
     let reunpark = p.run("unpark project-1");
@@ -386,6 +393,17 @@ fn parking_and_unparking_flow() {
         ),
         "park_triage={park_triage}"
     );
+}
+
+#[test]
+fn next_shows_the_title_by_default_and_quiet_restores_the_bare_id() {
+    let p = Repo::new("project");
+    p.run("init");
+
+    p.run("add -m 'Ship the feature'"); // project-1 (accepted, P2)
+
+    tk!(p, "next", @"project-1: Ship the feature");
+    tk!(p, "next -q", @"project-1");
 }
 
 #[test]

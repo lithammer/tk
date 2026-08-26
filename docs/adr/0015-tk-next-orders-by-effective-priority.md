@@ -79,3 +79,40 @@ agents the reason.
   in the path, so the walk stays bounded by the number of distinct
   reachable nodes. A depth cap remains as defense in depth against a
   malformed schema.
+
+## Amendment (tk-171): the supported scripting form is now `tk next -q`
+
+The premise inside **Rationale on stdout** is no longer true. That
+entry reads "Rejected because `id="$(tk next)"` is a supported usage;
+a second stdout line would break it." As of tk-171 `tk next` prints
+`<display-id>: <title>`, so `id="$(tk next)"` captures the title along
+with the **Display ID**. The supported scripting form is
+`id="$(tk next -q)"`, which restores the bare **Display ID** line
+byte-for-byte.
+
+The decision that premise was protecting is untouched. tk-171 adds no
+second stdout line and does not move the rationale: it still renders
+on stderr in both modes, and `-q` does not silence it — `2>/dev/null`
+remains the way to quiet it. What changed is which invocation a script
+names, not where the rationale goes.
+
+`tk next -q` is unstyled by contract. The default line styles its
+**Display ID** through the palette as the other read commands do, so
+under `CLICOLOR_FORCE=1` the default prints a coloured **Display ID**
+and `-q` prints a plain one. The asymmetry is deliberate: `-q` exists
+to be captured, so its bytes must not vary with colour policy.
+
+`-q` collides with `tk grep -q`, which suppresses all output and lets
+the exit status carry the answer, while `tk next -q` still prints a
+line. Two spellings, two meanings, one CLI.
+
+`tk grep -q` is not the one that should move: it deliberately mimics
+grep(1), where `-q` has meant exactly that for decades, and a tool
+that offers `tk grep` has already promised that shape. `tk next` has
+no such external convention to honour — `-q` there is simply the
+spelling tk-171 chose, ratified with the collision on the table rather
+than discovered afterwards. `--id-only` and `--plain` were the
+alternatives; neither was ruled out on the merits.
+
+The cost lands on tk-173, which can no longer reuse `-q` as the shared
+name for the low-chrome mode across the read commands.

@@ -11,8 +11,8 @@
 //! The Repository Store owns readiness, scope interpretation, Effective
 //! Priority computation, and creation-order tie breaks. The command
 //! renderer owns the compact stdout row and the optional stderr
-//! rationale, so the typed [`NextTicket`] carries only the Display ID
-//! plus an optional [`Rationale`].
+//! rationale, so the typed [`NextTicket`] carries the Display ID, the
+//! title, and an optional [`Rationale`].
 
 use rusqlite::params;
 
@@ -22,6 +22,7 @@ use super::Store;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NextTicket {
     pub display_id: String,
+    pub title: String,
     /// Populated only when Effective Priority < own Priority — i.e. the
     /// urgency was inherited from a Blocked Item rather than the candidate
     /// itself.
@@ -82,7 +83,7 @@ const NEXT_READY_TICKET_SQL: &str = "\
 with recursive \
   annotated as ( \
       select i.id, i.display_value, i.item_class, i.priority, i.status, \
-             i.selection_state, i.container_id, i.created_seq, \
+             i.selection_state, i.container_id, i.created_seq, i.title, \
              exists ( \
                  select 1 \
                    from dependencies d \
@@ -157,7 +158,8 @@ select ann.display_value, ann.priority, eff.ep, \
               and r2.node_id <> ann.id \
             order by contributor.created_seq asc \
             limit 1 \
-       ) as contributor_display \
+       ) as contributor_display, \
+       ann.title \
   from annotated ann \
   join eff on eff.start_id = ann.id \
  where ann.item_class = 'ticket' \
@@ -190,14 +192,22 @@ pub fn next_ready_ticket(
             let own_priority: String = row.get(1)?;
             let effective_priority: String = row.get(2)?;
             let contributor: Option<String> = row.get(3)?;
-            Ok((display_id, own_priority, effective_priority, contributor))
+            let title: String = row.get(4)?;
+            Ok((
+                display_id,
+                own_priority,
+                effective_priority,
+                contributor,
+                title,
+            ))
         },
     );
     match row {
-        Ok((display_id, own_priority, effective_priority, contributor)) => {
+        Ok((display_id, own_priority, effective_priority, contributor, title)) => {
             let rationale = build_rationale(&own_priority, effective_priority, contributor);
             Ok(Some(NextTicket {
                 display_id,
+                title,
                 rationale,
             }))
         }
@@ -271,6 +281,30 @@ mod tests {
             .unwrap()
             .expect("a ready ticket");
         assert_eq!(ticket.display_id, "tk-2");
+    }
+
+    #[test]
+    fn selected_ticket_carries_its_title() {
+        let store = open_seeded();
+        insert_fixture_item(
+            &store.conn,
+            FixtureItem {
+                id: "ready",
+                display: "tk-1",
+                title: "Design comments schema, storage, and CLI boundaries",
+                priority: Some("P2"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        let ticket = next_ready_ticket(&store, NextOptions::default())
+            .unwrap()
+            .expect("a ready ticket");
+        assert_eq!(
+            ticket.title,
+            "Design comments schema, storage, and CLI boundaries"
+        );
     }
 
     #[test]

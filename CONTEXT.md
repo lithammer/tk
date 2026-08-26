@@ -654,8 +654,12 @@ _Avoid_: ticket, tickets
   typed error rather than narrowing to a single **Ticket**.
 - Store-facing **`tk next`** selection accepts a resolved **Scope**; command
   code owns **Scope** resolution from argument or environment.
-- **`tk next`** takes only the optional **Scope** argument; it has no other
-  flags in v1.
+- **`tk next`** takes the optional **Scope** argument and `-q`/`--quiet`; it
+  has no other flags in v1.
+- **`tk next`** writes one stdout line, `<display-id>: <title>`. `-q`/
+  `--quiet` writes the bare **Display ID** instead — the form to capture in
+  a script — and is unstyled whatever the colour policy. Neither mode
+  changes the **Effective Priority** rationale, which stays on stderr.
 - Done-item browsing through **`tk next`** is deferred; **`tk next`** selects
   ready **Tickets** only and never surfaces a `done` item. **`tk list --ready`**
   (and `--blocked`, `--active`, `--triage`, `--parked`) can surface a `done`
