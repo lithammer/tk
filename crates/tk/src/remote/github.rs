@@ -79,7 +79,7 @@ impl Adapter for GithubAdapter<'_> {
         let issue = self.view_matching_issue(key)?;
         let identity = issue.validated_identity()?;
         let ticket_kind = self.ticket_kind(&issue, &identity)?;
-        issue.into_refresh(identity, ticket_kind)
+        issue.into_refresh(ticket_kind)
     }
 
     fn inspect_item(&mut self, key: &str) -> Result<BackendItemInspection, AdapterReadError> {
@@ -609,6 +609,10 @@ impl GithubAdapter<'_> {
             owner_arg,
             "-f".to_owned(),
             name_arg,
+            // `after` must ride `-F`, not `-f`: only `gh`'s typed field
+            // converts the literal `null` into a JSON null for
+            // `$after: String`. Under `-f` the first page would ask GitHub for
+            // the cursor string "null".
             "-F".to_owned(),
             after_arg,
         ];
@@ -785,15 +789,6 @@ struct GhIssueType {
     name: String,
 }
 
-struct IssueFields {
-    number: i64,
-    backend_key: String,
-    ticket_kind: TicketKind,
-    title: String,
-    body: String,
-    status: ItemStatus,
-}
-
 impl GhIssue {
     fn validate_key(&self, key: &str) -> Result<(), AdapterReadError> {
         if key == self.number.to_string() || key == self.url {
@@ -835,24 +830,27 @@ impl GhIssue {
         Ok(identity)
     }
 
-    fn into_fields(
+    /// Map the backend-owned issue state onto Item Status; GitHub distinguishes
+    /// only open from closed.
+    fn item_status(&self) -> Result<ItemStatus, AdapterReadError> {
+        match self.state.as_str() {
+            "OPEN" => Ok(ItemStatus::Open),
+            "CLOSED" => Ok(ItemStatus::Done),
+            other => Err(AdapterReadError::Failed(format!(
+                "#{}: unexpected issue state '{other}'",
+                self.number
+            ))),
+        }
+    }
+
+    fn into_adopted_item(
         self,
         identity: BackendItemIdentity,
         ticket_kind: TicketKind,
-    ) -> Result<IssueFields, AdapterReadError> {
-        let number = self.number;
-
-        let status = match self.state.as_str() {
-            "OPEN" => ItemStatus::Open,
-            "CLOSED" => ItemStatus::Done,
-            other => {
-                return Err(AdapterReadError::Failed(format!(
-                    "#{number}: unexpected issue state '{other}'"
-                )));
-            }
-        };
-        Ok(IssueFields {
-            number,
+    ) -> Result<AdoptedItem, AdapterReadError> {
+        let status = self.item_status()?;
+        Ok(AdoptedItem {
+            display_id: identity.display_id,
             backend_key: identity.backend_key,
             ticket_kind,
             title: self.title,
@@ -861,33 +859,13 @@ impl GhIssue {
         })
     }
 
-    fn into_adopted_item(
-        self,
-        identity: BackendItemIdentity,
-        ticket_kind: TicketKind,
-    ) -> Result<AdoptedItem, AdapterReadError> {
-        let issue = self.into_fields(identity, ticket_kind)?;
-        Ok(AdoptedItem {
-            display_id: format!("gh-{}", issue.number),
-            backend_key: issue.backend_key,
-            ticket_kind: issue.ticket_kind,
-            title: issue.title,
-            body: issue.body,
-            status: issue.status,
-        })
-    }
-
-    fn into_refresh(
-        self,
-        identity: BackendItemIdentity,
-        ticket_kind: TicketKind,
-    ) -> Result<BackendItemRefresh, AdapterReadError> {
-        let issue = self.into_fields(identity, ticket_kind)?;
+    fn into_refresh(self, ticket_kind: TicketKind) -> Result<BackendItemRefresh, AdapterReadError> {
+        let status = self.item_status()?;
         Ok(BackendItemRefresh {
-            title: issue.title,
-            body: issue.body,
-            status: issue.status,
-            ticket_kind: Some(issue.ticket_kind),
+            title: self.title,
+            body: self.body,
+            status,
+            ticket_kind: Some(ticket_kind),
         })
     }
 
@@ -982,6 +960,16 @@ fn create_failure_detail(output: &RunOutput, stderr: &str) -> String {
     }
 }
 
+/// True only for the one `gh` stderr shape that certifies no issue was created.
+///
+/// ADR-0036 effect certainty: a completed non-zero `gh issue create` is
+/// Indeterminate by default, because `gh` may have created the issue and then
+/// failed a later step. Certifying Rejected therefore needs all three
+/// conditions at once — a non-zero exit with no stdout receipt at all, stderr
+/// *starting* with the `HTTP 401: Bad credentials (https://.../graphql)` line,
+/// and its `Try authenticating with:  gh auth login -h ` hint on a following
+/// line (all matched case-insensitively). [`classify`]'s broader Auth anchors
+/// classify a failure; they never certify absence of effect.
 fn certifies_auth_rejection(output: &RunOutput, stderr: &str) -> bool {
     if output.succeeded() || !output.stdout.is_empty() {
         return false;
@@ -1047,10 +1035,10 @@ mod tests {
     use crate::domain::mutation_payload::{EpicRef, MutationPayload, StatusChange, TitleBody};
     use crate::domain::mutation_type::MutationType;
     use crate::proc::{FakeRunner, ProcError, RunOutput};
-    use std::path::PathBuf;
 
-    fn cwd() -> PathBuf {
-        std::env::current_dir().unwrap()
+    /// Command cwd the Adapter passes to the runner; `FakeRunner::run` ignores it.
+    fn cwd() -> &'static Path {
+        Path::new(".")
     }
 
     fn ok(stdout: &str) -> RunOutput {
@@ -1144,8 +1132,8 @@ mod tests {
         )
     }
 
-    fn edit(mt: MutationType, payload: MutationPayload, key: Option<&str>) -> BackendEdit {
-        let target = address(key.expect("adapter tests provide a target identity"));
+    fn edit(mt: MutationType, payload: MutationPayload, key: &str) -> BackendEdit {
+        let target = address(key);
         match (mt, payload) {
             (MutationType::UpdateTicket, MutationPayload::UpdateTitleBody(snapshot)) => {
                 BackendEdit::UpdateTicket {
@@ -1253,8 +1241,7 @@ mod tests {
                 "https://github.com/o/r/issues/42",
             )),
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
         let s = adapter.adopt_ticket("42").unwrap();
         assert_eq!(s.backend_key, "https://github.com/o/r/issues/42");
         assert_eq!(s.display_id, "gh-42");
@@ -1276,8 +1263,7 @@ mod tests {
                 "https://github.com/o/r/issues/7",
             )),
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
         let s = adapter.refresh_item("7").unwrap();
         assert_eq!(s.status, ItemStatus::Done);
         assert_eq!(s.ticket_kind, Some(TicketKind::Bug));
@@ -1297,8 +1283,7 @@ mod tests {
                 "https://github.com/o/r/issues/42",
             )),
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
         let inspection = adapter.inspect_item(key).unwrap();
         assert_eq!(
             inspection.identity,
@@ -1324,8 +1309,7 @@ mod tests {
                 "https://github.com/o/r/issues/2",
             )),
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
 
         let AdapterReadError::Failed(detail) = adapter.inspect_item("1").unwrap_err() else {
             panic!("redirected identity must be a Backend read failure")
@@ -1347,8 +1331,7 @@ mod tests {
                 "https://github.com/o/r/issues/2",
             )),
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
 
         let AdapterReadError::Failed(detail) = adapter.inspect_item(key).unwrap_err() else {
             panic!("redirected identity must be a Backend read failure")
@@ -1370,8 +1353,7 @@ mod tests {
                 "https://github.com/o/r/issues/2",
             )),
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
 
         let AdapterReadError::Failed(detail) = adapter.inspect_item("1").unwrap_err() else {
             panic!("inconsistent identity must be a Backend read failure")
@@ -1392,8 +1374,7 @@ mod tests {
                 "http://github.com/o/r/issues/1",
             )),
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
 
         let AdapterReadError::Failed(detail) = adapter.inspect_item("1").unwrap_err() else {
             panic!("noncanonical identity must be a Backend read failure")
@@ -1414,8 +1395,7 @@ mod tests {
                 "https://github.com/o/r/issues/42",
             )),
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
 
         let inspection = adapter.inspect_item("42").unwrap();
 
@@ -1435,8 +1415,7 @@ mod tests {
                 "https://github.com/o/r/pull/99",
             )),
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
         match adapter.inspect_item("99").unwrap_err() {
             AdapterReadError::Failed(detail) => {
                 assert!(detail.contains("#99 is a pull request"), "{detail}");
@@ -1453,8 +1432,7 @@ mod tests {
             &["gh", "issue", "view", "42", "--json", ISSUE_JSON_FIELDS],
             fail(1, "GraphQL: issue not found"),
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
         assert!(matches!(
             adapter.inspect_item("42").unwrap_err(),
             AdapterReadError::Failed(detail) if detail == "GraphQL: issue not found"
@@ -1469,8 +1447,7 @@ mod tests {
             &["gh", "issue", "view", "42", "--json", ISSUE_JSON_FIELDS],
             ProcError::ExecutableNotFound,
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
         assert!(matches!(
             adapter.inspect_item("42").unwrap_err(),
             AdapterReadError::Env(ProcError::ExecutableNotFound)
@@ -1491,8 +1468,7 @@ mod tests {
                     "https://github.com/o/r/issues/1",
                 )),
             );
-            let cwd = cwd();
-            let mut adapter = GithubAdapter::new(&runner, &cwd);
+            let mut adapter = GithubAdapter::new(&runner, cwd());
             let s = adapter.refresh_item("1").unwrap();
             assert_eq!(
                 s.ticket_kind,
@@ -1527,8 +1503,7 @@ mod tests {
             ],
             ok(r#"{"isInOrganization":false}"#),
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
 
         assert_eq!(
             adapter.refresh_item("1").unwrap().ticket_kind,
@@ -1561,8 +1536,7 @@ mod tests {
             ],
             ok(r#"{"isInOrganization":true}"#),
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
 
         assert_eq!(
             adapter.refresh_item("1").unwrap().ticket_kind,
@@ -1584,8 +1558,7 @@ mod tests {
                 r#"[{"name":"bug"}]"#,
             )),
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
 
         assert_eq!(
             adapter.refresh_item("1").unwrap().ticket_kind,
@@ -1607,8 +1580,7 @@ mod tests {
                 "https://github.com/o/r/issues/2",
             )),
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
 
         let AdapterReadError::Failed(detail) = adapter.refresh_item(key).unwrap_err() else {
             panic!("redirected identity must be a Backend read failure")
@@ -1630,8 +1602,7 @@ mod tests {
                 "https://github.com/o/r/pull/99",
             )),
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
         match adapter.adopt_ticket("99").unwrap_err() {
             AdapterReadError::Failed(d) => assert!(d.contains("#99 is a pull request"), "{d}"),
             AdapterReadError::Env(e) => panic!("expected Failed, got Env({e:?})"),
@@ -1650,8 +1621,7 @@ mod tests {
             &["gh", "issue", "view", "5", "--json", ISSUE_JSON_FIELDS],
             fail(1, stderr),
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
         match adapter.refresh_item("5").unwrap_err() {
             AdapterReadError::Failed(d) => assert_eq!(d, stderr),
             AdapterReadError::Env(e) => panic!("expected Failed, got Env({e:?})"),
@@ -1666,8 +1636,7 @@ mod tests {
             &["gh", "issue", "view", "1", "--json", ISSUE_JSON_FIELDS],
             ProcError::ExecutableNotFound,
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
         assert!(matches!(
             adapter.refresh_item("1").unwrap_err(),
             AdapterReadError::Env(ProcError::ExecutableNotFound)
@@ -1696,8 +1665,7 @@ mod tests {
                 "https://github.com/o/r/issues/2",
             )),
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
         let first = adapter.refresh_item("1").unwrap();
         let second = adapter.refresh_item("2").unwrap();
         assert_eq!(first.status, ItemStatus::Open);
@@ -1712,8 +1680,7 @@ mod tests {
             &["gh", "issue", "view", "1", "--json", ISSUE_JSON_FIELDS],
             ok("not json"),
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
         assert!(matches!(
             adapter.refresh_item("1").unwrap_err(),
             AdapterReadError::Failed(_)
@@ -1732,15 +1699,14 @@ mod tests {
             ],
             ok(""),
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
         let v = edit(
             MutationType::UpdateTicket,
             MutationPayload::UpdateTitleBody(TitleBody {
                 title: "New".into(),
                 body: "Body".into(),
             }),
-            Some("42"),
+            "42",
         );
         assert!(matches!(
             adapter.apply_edit(&v).unwrap(),
@@ -1753,14 +1719,13 @@ mod tests {
     fn apply_set_status_done_closes() {
         let runner = FakeRunner::new();
         runner.expect_exact(&["gh", "issue", "close", "42"], ok(""));
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
         let v = edit(
             MutationType::SetItemStatus,
             MutationPayload::ItemStatus(StatusChange {
                 status: "done".into(),
             }),
-            Some("42"),
+            "42",
         );
         assert!(matches!(
             adapter.apply_edit(&v).unwrap(),
@@ -1774,14 +1739,13 @@ mod tests {
         for status in ["open", "active"] {
             let runner = FakeRunner::new();
             runner.expect_exact(&["gh", "issue", "reopen", "42"], ok(""));
-            let cwd = cwd();
-            let mut adapter = GithubAdapter::new(&runner, &cwd);
+            let mut adapter = GithubAdapter::new(&runner, cwd());
             let v = edit(
                 MutationType::SetItemStatus,
                 MutationPayload::ItemStatus(StatusChange {
                     status: status.into(),
                 }),
-                Some("42"),
+                "42",
             );
             assert!(
                 matches!(
@@ -1807,14 +1771,13 @@ mod tests {
                 stderr: b"! Issue o/r#42 (T) is already closed".to_vec(),
             },
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
         let v = edit(
             MutationType::SetItemStatus,
             MutationPayload::ItemStatus(StatusChange {
                 status: "done".into(),
             }),
-            Some("42"),
+            "42",
         );
         assert!(matches!(
             adapter.apply_edit(&v).unwrap(),
@@ -1830,15 +1793,14 @@ mod tests {
             &["gh", "issue", "edit", "42", "--title", "T", "--body", ""],
             fail(1, "HTTP 422: Validation Failed"),
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
         let v = edit(
             MutationType::UpdateTicket,
             MutationPayload::UpdateTitleBody(TitleBody {
                 title: "T".into(),
                 body: String::new(),
             }),
-            Some("42"),
+            "42",
         );
         match adapter.apply_edit(&v).unwrap() {
             BackendEditOutcome::Rejected(f) => {
@@ -1855,14 +1817,13 @@ mod tests {
     fn apply_spawn_failure_is_apply_error() {
         let runner = FakeRunner::new();
         runner.expect_exact_error(&["gh", "issue", "close", "42"], ProcError::SpawnFailed);
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
         let v = edit(
             MutationType::SetItemStatus,
             MutationPayload::ItemStatus(StatusChange {
                 status: "done".into(),
             }),
-            Some("42"),
+            "42",
         );
         assert!(matches!(
             adapter.apply_edit(&v),
@@ -1880,15 +1841,14 @@ mod tests {
             ],
             ok(""),
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
         let edit = edit(
             MutationType::UpdateEpic,
             MutationPayload::UpdateTitleBody(TitleBody {
                 title: "Epic".into(),
                 body: "Plan".into(),
             }),
-            Some("42"),
+            "42",
         );
         assert_eq!(
             adapter.apply_edit(&edit).unwrap(),
@@ -1901,14 +1861,13 @@ mod tests {
     fn apply_add_ticket_to_epic_sets_parent() {
         let runner = FakeRunner::new();
         runner.expect_exact(&["gh", "issue", "edit", "42", "--parent", "9"], ok(""));
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
         let edit = edit(
             MutationType::AddTicketToEpic,
             MutationPayload::EpicRef(EpicRef {
                 epic_id: "e".into(),
             }),
-            Some("42"),
+            "42",
         );
         assert_eq!(
             adapter.apply_edit(&edit).unwrap(),
@@ -1928,14 +1887,13 @@ mod tests {
                 stderr: b"! Issue #42 already has parent #9".to_vec(),
             },
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
         let edit = edit(
             MutationType::AddTicketToEpic,
             MutationPayload::EpicRef(EpicRef {
                 epic_id: "e".into(),
             }),
-            Some("42"),
+            "42",
         );
         assert_eq!(
             adapter.apply_edit(&edit).unwrap(),
@@ -1948,14 +1906,13 @@ mod tests {
     fn apply_remove_ticket_from_epic_removes_parent() {
         let runner = FakeRunner::new();
         runner.expect_exact(&["gh", "issue", "edit", "42", "--remove-parent"], ok(""));
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
         let edit = edit(
             MutationType::RemoveTicketFromEpic,
             MutationPayload::EpicRef(EpicRef {
                 epic_id: "e".into(),
             }),
-            Some("42"),
+            "42",
         );
         assert_eq!(
             adapter.apply_edit(&edit).unwrap(),
@@ -1971,14 +1928,13 @@ mod tests {
             &["gh", "issue", "edit", "42", "--parent", "9"],
             fail(1, "HTTP 422: parent must be an issue"),
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
         let edit = edit(
             MutationType::AddTicketToEpic,
             MutationPayload::EpicRef(EpicRef {
                 epic_id: "e".into(),
             }),
-            Some("42"),
+            "42",
         );
         match adapter.apply_edit(&edit).unwrap() {
             BackendEditOutcome::Rejected(failure) => {
@@ -1998,14 +1954,13 @@ mod tests {
             &["gh", "issue", "edit", "42", "--remove-parent"],
             ProcError::SpawnFailed,
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
         let edit = edit(
             MutationType::RemoveTicketFromEpic,
             MutationPayload::EpicRef(EpicRef {
                 epic_id: "e".into(),
             }),
-            Some("42"),
+            "42",
         );
         assert!(matches!(
             adapter.apply_edit(&edit),
@@ -2021,8 +1976,7 @@ mod tests {
             &["gh", "issue", "edit", "5", "--add-blocked-by", "9"],
             ok(""),
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
         let v = dep_edit(MutationType::AddDependency, "5", "9");
         assert!(matches!(
             adapter.apply_edit(&v).unwrap(),
@@ -2038,8 +1992,7 @@ mod tests {
             &["gh", "issue", "edit", "5", "--remove-blocked-by", "9"],
             ok(""),
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
         let v = dep_edit(MutationType::RemoveDependency, "5", "9");
         assert!(matches!(
             adapter.apply_edit(&v).unwrap(),
@@ -2061,8 +2014,7 @@ mod tests {
                 stderr: b"! Issue already blocked by #9".to_vec(),
             },
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
         let v = dep_edit(MutationType::AddDependency, "5", "9");
         assert!(matches!(
             adapter.apply_edit(&v).unwrap(),
@@ -2079,8 +2031,7 @@ mod tests {
             &["gh", "issue", "edit", "5", "--add-blocked-by", "9"],
             fail(1, "unknown flag: --add-blocked-by"),
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
         let v = dep_edit(MutationType::AddDependency, "5", "9");
         match adapter.apply_edit(&v).unwrap() {
             BackendEditOutcome::Rejected(f) => {
@@ -2102,8 +2053,7 @@ mod tests {
                 &["gh", "issue", "create", "--title", "T", "--body", "Body"],
                 ok("https://github.com/o/r/issues/42\n"),
             );
-            let cwd = cwd();
-            let mut adapter = GithubAdapter::new(&runner, &cwd);
+            let mut adapter = GithubAdapter::new(&runner, cwd());
             let outcome = adapter.create_item(&create(mt, "T", "Body"));
             let BackendCreateOutcome::Created(identity) = outcome else {
                 panic!("{mt}: expected a confirmed receipt, got {outcome:?}");
@@ -2125,8 +2075,7 @@ mod tests {
                 stderr: b"a later CLI step failed".to_vec(),
             },
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
 
         assert_eq!(
             adapter.create_item(&create(MutationType::PromoteTicket, "T", "B")),
@@ -2143,8 +2092,7 @@ mod tests {
                 &["gh", "issue", "create", "--title", "T", "--body", "B"],
                 ok(stdout),
             );
-            let cwd = cwd();
-            let mut adapter = GithubAdapter::new(&runner, &cwd);
+            let mut adapter = GithubAdapter::new(&runner, cwd());
 
             let BackendCreateOutcome::Indeterminate(failure) =
                 adapter.create_item(&create(MutationType::PromoteTicket, "T", "B"))
@@ -2169,8 +2117,7 @@ mod tests {
                 &["gh", "issue", "create", "--title", "T", "--body", "B"],
                 fail(1, stderr),
             );
-            let cwd = cwd();
-            let mut adapter = GithubAdapter::new(&runner, &cwd);
+            let mut adapter = GithubAdapter::new(&runner, cwd());
 
             let BackendCreateOutcome::Indeterminate(failure) =
                 adapter.create_item(&create(MutationType::PromoteTicket, "T", "B"))
@@ -2191,8 +2138,7 @@ mod tests {
             &["gh", "issue", "create", "--title", "T", "--body", "B"],
             fail(1, stderr),
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
 
         let BackendCreateOutcome::Rejected(failure) =
             adapter.create_item(&create(MutationType::PromoteTicket, "T", "B"))
@@ -2216,8 +2162,7 @@ mod tests {
                 &["gh", "issue", "create", "--title", "T", "--body", "B"],
                 fail(1, stderr),
             );
-            let cwd = cwd();
-            let mut adapter = GithubAdapter::new(&runner, &cwd);
+            let mut adapter = GithubAdapter::new(&runner, cwd());
 
             let BackendCreateOutcome::Indeterminate(failure) =
                 adapter.create_item(&create(MutationType::PromoteTicket, "T", "B"))
@@ -2237,8 +2182,7 @@ mod tests {
                 &["gh", "issue", "create", "--title", "T", "--body", "B"],
                 err,
             );
-            let cwd = cwd();
-            let mut adapter = GithubAdapter::new(&runner, &cwd);
+            let mut adapter = GithubAdapter::new(&runner, cwd());
 
             let BackendCreateOutcome::Rejected(failure) =
                 adapter.create_item(&create(MutationType::PromoteTicket, "T", "B"))
@@ -2258,8 +2202,7 @@ mod tests {
             &["gh", "issue", "create", "--title", "T", "--body", "B"],
             ProcError::OutcomeUnobserved,
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
 
         let BackendCreateOutcome::Indeterminate(failure) =
             adapter.create_item(&create(MutationType::PromoteTicket, "T", "B"))
@@ -2294,8 +2237,7 @@ mod tests {
     #[test]
     fn resolves_requested_static_facets_without_io() {
         let runner = FakeRunner::new();
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
         let caps = adapter
             .resolve_promotion_capabilities(
                 PromotionRequirements::none()
@@ -2321,12 +2263,11 @@ mod tests {
             &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
             ok(r#"{"id":"R_1","nameWithOwner":"o/r","isInOrganization":true}"#),
         );
-        runner.expect_prefix(
+        runner.expect(
             &["gh", "api", "graphql"],
             ok(r#"{"data":{"repository":{"issueTypes":{"nodes":[{"id":"IT_1","name":"bug","isEnabled":true}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#),
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
 
         let capabilities = adapter
             .resolve_promotion_capabilities(
@@ -2360,8 +2301,7 @@ mod tests {
             Some("CURSOR"),
             r#"{"data":{"repository":{"issueTypes":{"nodes":[{"id":"IT_2","name":"Bug","isEnabled":true}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#,
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
 
         let capabilities = adapter
             .resolve_promotion_capabilities(
@@ -2379,16 +2319,15 @@ mod tests {
             &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
             ok(r#"{"id":"R_1","nameWithOwner":"o/r","isInOrganization":true}"#),
         );
-        runner.expect_prefix(
+        runner.expect(
             &["gh", "api", "graphql"],
             ok(r#"{"data":{"repository":{"issueTypes":{"nodes":[{"id":"IT_1","name":"Task","isEnabled":true}],"pageInfo":{"hasNextPage":true,"endCursor":"CURSOR"}}}}}"#),
         );
-        runner.expect_prefix(
+        runner.expect(
             &["gh", "api", "graphql"],
             ok(r#"{"data":{"repository":{"issueTypes":{"nodes":[{"id":"IT_2","name":"Bug","isEnabled":false}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#),
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
 
         let capabilities = adapter
             .resolve_promotion_capabilities(
@@ -2406,12 +2345,11 @@ mod tests {
             &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
             ok(r#"{"id":"R_1","nameWithOwner":"o/r","isInOrganization":true}"#),
         );
-        runner.expect_prefix(
+        runner.expect(
             &["gh", "api", "graphql"],
             fail(1, "GraphQL: taxonomy read failed"),
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
 
         assert!(matches!(
             adapter.resolve_promotion_capabilities(
@@ -2429,7 +2367,7 @@ mod tests {
             &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
             ok(r#"{"id":"R_1","nameWithOwner":"o/r","isInOrganization":true}"#),
         );
-        runner.expect_prefix(
+        runner.expect(
             &["gh", "api", "graphql"],
             ok(r#"{"data":{"repository":{"issueTypes":{"nodes":[{"id":"IT_1","name":"Bug","isEnabled":true}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#),
         );
@@ -2441,8 +2379,7 @@ mod tests {
             "issueTypeId=IT_1",
             r#"{"data":{"createIssue":{"issue":{"url":"https://github.com/o/r/issues/42","number":42}}}}"#,
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
         let outcome = adapter.create_item(&BackendCreate::Ticket {
             snapshot: TitleBody {
                 title: "Bug title".into(),
@@ -2481,8 +2418,7 @@ mod tests {
             None,
             r#"{"data":{"repository":{"labels":{"nodes":[{"id":"L_1","name":"bug"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#,
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
 
         let capabilities = adapter
             .resolve_promotion_capabilities(
@@ -2516,8 +2452,7 @@ mod tests {
             Some("CURSOR"),
             r#"{"data":{"repository":{"issueTypes":null}}}"#,
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
 
         assert!(matches!(
             adapter.resolve_promotion_capabilities(
@@ -2536,11 +2471,11 @@ mod tests {
             &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
             ok(r#"{"id":"R_1","nameWithOwner":"p/r","isInOrganization":false}"#),
         );
-        runner.expect_prefix(
+        runner.expect(
             &["gh", "api", "graphql"],
             ok(r#"{"data":{"repository":{"issueTypes":null}}}"#),
         );
-        runner.expect_prefix(
+        runner.expect(
             &["gh", "api", "graphql"],
             ok(r#"{"data":{"repository":{"labels":{"nodes":[{"id":"L_1","name":"bug"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#),
         );
@@ -2552,8 +2487,7 @@ mod tests {
             "labelIds[]=L_1",
             r#"{"data":{"createIssue":{"issue":{"url":"https://github.com/p/r/issues/42","number":42}}}}"#,
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
         let outcome = adapter.create_item(&BackendCreate::Ticket {
             snapshot: TitleBody {
                 title: "Bug title".into(),
@@ -2576,16 +2510,15 @@ mod tests {
             &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
             ok(r#"{"id":"R_1","nameWithOwner":"p/r","isInOrganization":false}"#),
         );
-        runner.expect_prefix(
+        runner.expect(
             &["gh", "api", "graphql"],
             ok(r#"{"data":{"repository":{"issueTypes":{"nodes":[{"id":"IT_1","name":"Task","isEnabled":true}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#),
         );
-        runner.expect_prefix(
+        runner.expect(
             &["gh", "api", "graphql"],
             ok(r#"{"data":{"repository":{"labels":{"nodes":[{"id":"L_1","name":"BUG"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#),
         );
-        let cwd = cwd();
-        let mut adapter = GithubAdapter::new(&runner, &cwd);
+        let mut adapter = GithubAdapter::new(&runner, cwd());
 
         let capabilities = adapter
             .resolve_promotion_capabilities(

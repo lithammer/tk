@@ -120,11 +120,11 @@ fn run_clear(deps: &mut Deps<'_>) -> Result<Exit, CommandError> {
 fn run_show(deps: &mut Deps<'_>) -> Result<Exit, CommandError> {
     let store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
         .map_err(|err| resolver::open_error(&err))?;
-    match store_sync::get_remote(store.conn()) {
+    match store_sync::configured_remote_kind(store.conn()) {
         // Kind-only identity line (ADR-0033): the v1 config carries no repo, and
         // the Sync Cursor belongs to `tk sync log`, not this config view.
-        Ok(Some(remote)) => {
-            let _ = writeln!(deps.stdout, "Remote: {}", remote.backend_kind);
+        Ok(Some(kind)) => {
+            let _ = writeln!(deps.stdout, "Remote: {kind}");
             Ok(Exit::Ok)
         }
         // An absent Remote is a query result, not a failure.
@@ -139,81 +139,11 @@ fn run_show(deps: &mut Deps<'_>) -> Result<Exit, CommandError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::FakeClock;
-    use crate::proc::{FakeRunner, RunOutput};
-    use crate::render::Styler;
-    use crate::store::migrations;
+    use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
     use crate::store::testing::{
         FixtureItem, FixtureMutation, TmpStore, insert_fixture_item, insert_fixture_mutation,
     };
-    use rand::SeedableRng;
-    use rand::rngs::StdRng;
     use rusqlite::Connection;
-    use std::path::Path;
-
-    fn cwd() -> std::path::PathBuf {
-        std::env::current_dir().unwrap()
-    }
-
-    fn seed_store(store: &TmpStore) -> Connection {
-        std::fs::create_dir_all(store.tk_dir()).unwrap();
-        let mut conn = Connection::open(store.db_path()).unwrap();
-        conn.execute_batch("pragma foreign_keys = on").unwrap();
-        migrations::apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        conn.execute(
-            "insert into store_config(key, value) values ('display_prefix', 'tk')",
-            [],
-        )
-        .unwrap();
-        conn
-    }
-
-    struct Harness<'a> {
-        stdout: Vec<u8>,
-        stderr: Vec<u8>,
-        stdin: std::io::Cursor<Vec<u8>>,
-        runner: FakeRunner,
-        clock: FakeClock,
-        rng: StdRng,
-        cwd: &'a Path,
-    }
-
-    impl<'a> Harness<'a> {
-        fn new(cwd: &'a Path) -> Self {
-            Self {
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-                stdin: std::io::Cursor::new(Vec::new()),
-                runner: FakeRunner::new(),
-                clock: FakeClock::new(1_778_284_800_000),
-                rng: StdRng::seed_from_u64(0),
-                cwd,
-            }
-        }
-        fn deps(&mut self) -> Deps<'_> {
-            Deps {
-                stdout: &mut self.stdout,
-                stderr: &mut self.stderr,
-                stdin: &mut self.stdin,
-                runner: &self.runner,
-                clock: &self.clock,
-                rng: &mut self.rng,
-                cwd: self.cwd,
-                styler: Styler::plain(),
-            }
-        }
-    }
-
-    fn expect_git(h: &Harness<'_>, store: &TmpStore) {
-        h.runner.expect(
-            &["git", "rev-parse"],
-            RunOutput {
-                exit_code: 0,
-                stdout: store.git_rev_parse_stdout(),
-                stderr: Vec::new(),
-            },
-        );
-    }
 
     /// Drive `run` and frame any returned error exactly as the dispatch seam
     /// does (ADR-0032: `tk remote: <body>`), so a test asserts the framed bytes.

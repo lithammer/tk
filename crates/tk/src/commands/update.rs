@@ -46,26 +46,24 @@ pub struct Args {
 }
 
 pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
-    let has_message_input = !args.message.is_empty() || args.file.is_some();
+    let input = if args.message.is_empty() {
+        args.file.as_deref().map(MessageInput::File)
+    } else {
+        Some(MessageInput::Paragraphs(&args.message))
+    };
     let has_parent_op = args.parent.is_some() || args.no_parent;
 
-    if !has_message_input && args.priority.is_none() && !has_parent_op {
+    if input.is_none() && args.priority.is_none() && !has_parent_op {
         return Err(CommandError::usage(
             "no changes requested; supply at least one of \
              -m / -F / -p / -P / --no-parent",
         ));
     }
 
-    let parsed_msg = if has_message_input {
-        let input = if args.message.is_empty() {
-            MessageInput::File(args.file.as_deref().expect("has_message_input flag holds"))
-        } else {
-            MessageInput::Paragraphs(&args.message)
-        };
-        Some(message::read_input(input, deps.cwd, deps.stdin).map_err(|err| message_error(&err))?)
-    } else {
-        None
-    };
+    let parsed_msg = input
+        .map(|input| message::read_input(input, deps.cwd, &mut *deps.stdin))
+        .transpose()
+        .map_err(|err| message::read_error(&err))?;
 
     let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
         .map_err(|err| resolver::open_error(&err))?;
@@ -158,99 +156,12 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     }
 }
 
-fn message_error(err: &message::ReadError) -> CommandError {
-    match err {
-        message::ReadError::Parse(message::ParseError::Empty) => {
-            CommandError::failure("message is empty")
-        }
-        message::ReadError::Parse(message::ParseError::NulByte) => {
-            CommandError::failure("message contains a NUL byte")
-        }
-        message::ReadError::File { path, source } => {
-            CommandError::failure(format!("failed to read '{path}': {source}"))
-        }
-        message::ReadError::Stdin(source) => {
-            CommandError::failure(format!("failed to read message from stdin: {source}"))
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::FakeClock;
-    use crate::proc::{FakeRunner, RunOutput};
-    use crate::render::Styler;
-    use crate::store::migrations;
+    use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
     use crate::store::testing::{FixtureItem, TmpStore, insert_fixture_item};
-    use rand::SeedableRng;
-    use rand::rngs::StdRng;
     use rusqlite::Connection;
-    use std::path::Path;
-
-    fn cwd() -> std::path::PathBuf {
-        std::env::current_dir().unwrap()
-    }
-
-    fn seed_store(store: &TmpStore) -> Connection {
-        std::fs::create_dir_all(store.tk_dir()).unwrap();
-        let mut conn = Connection::open(store.db_path()).unwrap();
-        conn.execute_batch("pragma foreign_keys = on").unwrap();
-        migrations::apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        conn.execute(
-            "insert into store_config(key, value) values ('display_prefix', 'tk')",
-            [],
-        )
-        .unwrap();
-        conn
-    }
-
-    struct Harness<'a> {
-        stdout: Vec<u8>,
-        stderr: Vec<u8>,
-        stdin: std::io::Cursor<Vec<u8>>,
-        runner: FakeRunner,
-        clock: FakeClock,
-        rng: StdRng,
-        cwd: &'a Path,
-    }
-
-    impl<'a> Harness<'a> {
-        fn new(cwd: &'a Path) -> Self {
-            Self {
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-                stdin: std::io::Cursor::new(Vec::new()),
-                runner: FakeRunner::new(),
-                clock: FakeClock::new(1_778_284_800_000),
-                rng: StdRng::seed_from_u64(0),
-                cwd,
-            }
-        }
-        fn deps(&mut self) -> Deps<'_> {
-            Deps {
-                stdout: &mut self.stdout,
-                stderr: &mut self.stderr,
-                stdin: &mut self.stdin,
-                runner: &self.runner,
-                clock: &self.clock,
-                rng: &mut self.rng,
-                cwd: self.cwd,
-                styler: Styler::plain(),
-            }
-        }
-    }
-
-    fn expect_git(h: &Harness<'_>, store: &TmpStore) {
-        h.runner.expect(
-            &["git", "rev-parse"],
-            RunOutput {
-                exit_code: 0,
-                stdout: store.git_rev_parse_stdout(),
-                stderr: Vec::new(),
-            },
-        );
-    }
 
     /// Drive `run` and frame any returned error as the dispatch seam does
     /// (ADR-0032: `tk update: <body>`), so a test asserts the framed bytes.

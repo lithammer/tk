@@ -14,7 +14,9 @@
 //!
 //! Vowels are not stripped. Output is always lowercase ASCII.
 
-/// Maximum length of the stored local Display ID prefix.
+/// Maximum length of the derived prefix shape. The `tk-` guard for an
+/// empty or digit-leading result can push the stored Display ID prefix
+/// three characters past this.
 pub const MAX_PREFIX_LEN: usize = 12;
 
 const SEPARATORS: &[char] = &['-', '_', '.', '/', ':', '#', ' ', '\t'];

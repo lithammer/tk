@@ -14,10 +14,12 @@
 //!   per-call-site chaining (`owo-colors`-style); call sites take a
 //!   palette name and let the resolved [`styler::Styler`] gate emission.
 //! - [`styler`]: the policy-aware emitter. Holds per-stream
-//!   [`styler::ColorChoice`] values resolved once from `--color` /
-//!   `NO_COLOR` / `CLICOLOR_FORCE` / TTY detection and carried on `Deps`.
+//!   [`styler::ColorChoice`] values resolved once from `NO_COLOR` /
+//!   `CLICOLOR_FORCE` / TTY detection and carried on `Deps`.
 //! - [`sanitize`]: write user/Remote-controlled text with terminal
 //!   control bytes rendered inert.
+//! - [`highlight`]: write one sanitised line with each `tk grep` regex
+//!   match wrapped in [`palette::MATCH`] (ADR-0026).
 
 pub mod highlight;
 pub mod palette;

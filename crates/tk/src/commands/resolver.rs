@@ -16,14 +16,14 @@ use crate::cli::CommandError;
 use crate::clock::Clock;
 use crate::proc::ProcRunner;
 use crate::store::mutations;
-use crate::store::repository::{self, ResolvedItemRef, ResolvedItemRefWithDisplay, Store};
+use crate::store::repository::{self, ResolvedItemRef, Store};
 
 /// Errors re-exported from the store layer, where the operations that produce
 /// them live. [`OpenError`] is turned into a [`CommandError`] by [`open_error`];
 /// the resolve errors are matched and rendered by each command.
 pub use crate::store::repository::{OpenError, ResolveEpicError};
 
-/// Failure of [`resolve`] / [`resolve_with_display`].
+/// Failure of [`resolve`].
 #[derive(Debug, Error)]
 pub enum ResolveError {
     #[error("Display ID or Alias not found")]
@@ -54,29 +54,9 @@ pub fn resolve(store: &Store, arg: &str) -> Result<ResolvedItemRef, ResolveError
     }
 }
 
-/// Like [`resolve`] but with the current Display ID attached.
-pub fn resolve_with_display(
-    store: &Store,
-    arg: &str,
-) -> Result<ResolvedItemRefWithDisplay, ResolveError> {
-    match repository::resolve_item_ref_with_display(store.conn(), arg) {
-        Ok(Some(r)) => Ok(r),
-        Ok(None) => Err(ResolveError::NotFound),
-        Err(err) => Err(ResolveError::Storage(err)),
-    }
-}
-
 /// Resolve a Display ID or Alias that must refer to an Epic.
 pub fn resolve_epic(store: &Store, arg: &str) -> Result<ResolvedItemRef, ResolveEpicError> {
     repository::resolve_as_epic(store.conn(), arg)
-}
-
-/// Like [`resolve_epic`] but with the current Display ID attached.
-pub fn resolve_epic_with_display(
-    store: &Store,
-    arg: &str,
-) -> Result<ResolvedItemRefWithDisplay, ResolveEpicError> {
-    repository::resolve_as_epic_with_display(store.conn(), arg)
 }
 
 /// Build the [`CommandError`] for an [`OpenError`] (ADR-0032). The body is the

@@ -6,16 +6,18 @@
 //! surface — the binary exposes no clock override env var (ADR-0018, amended
 //! by tk-105).
 //!
-//! Formatting and parsing are delegated to `jiff` (`Timestamp::parse`,
-//! `from_millisecond`, `strftime`) — calendar arithmetic edge cases on
-//! pre-1970 dates and far-future stamps that the original hand-roll mishandled
-//! are jiff's problem now. tk doesn't use jiff's timezone or zoned-datetime
-//! machinery, so the dep is pinned with `default-features = false` to keep
-//! the tzdb bundle out of the static binary.
+//! Timekeeping and formatting are delegated to `jiff` (`Timestamp::now`,
+//! `Timestamp::from_millisecond`, `strftime`) — calendar arithmetic on
+//! pre-1970 and far-future stamps is not tk's to get right. tk doesn't use
+//! jiff's timezone or zoned-datetime machinery, so the dep is pinned with
+//! `default-features = false` to keep the tzdb bundle out of the static
+//! binary.
 
 use jiff::Timestamp;
 
-/// Common clock seam. `tk init` reads this to stamp `schema_migrations.applied_at`.
+/// Clock seam for every stored timestamp: Repository Store writes stamp
+/// `created_at` / `updated_at`, Mutation Log rows, and
+/// `schema_migrations.applied_at` through it.
 pub trait Clock {
     /// UTC milliseconds since the Unix epoch.
     fn now_ms(&self) -> i64;

@@ -76,20 +76,25 @@ fn failures(outputs: &[Output]) -> Vec<String> {
         .collect()
 }
 
-/// Seed one Ticket per writer sequentially and return their Display IDs,
-/// parsed from the `Created Ticket: <id> - <title>` line.
+/// The Display ID in a `tk add` result, parsed from the
+/// `Created Ticket: <id> - <title>` line.
+fn display_id(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .and_then(|l| l.strip_prefix("Created Ticket: "))
+        .and_then(|l| l.split(" - ").next())
+        .expect("Display ID in tk add output")
+        .to_string()
+}
+
+/// Seed one Ticket per writer sequentially and return their Display IDs.
 fn seed_tickets(dir: &TempDir, n: usize) -> Vec<String> {
     (0..n)
         .map(|i| {
             let out = tk(dir.path(), &["add", "-m", &format!("seed {i}")]);
             assert!(out.status.success(), "seed add {i} failed");
-            String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .next()
-                .and_then(|l| l.strip_prefix("Created Ticket: "))
-                .and_then(|l| l.split(" - ").next())
-                .expect("Display ID in tk add output")
-                .to_string()
+            display_id(&out)
         })
         .collect()
 }
@@ -107,18 +112,7 @@ fn parallel_adds_all_succeed_with_distinct_display_ids() {
 
     // Distinct Display IDs prove sequence allocation serialized: two writers
     // sharing a `display_seq` read would collide here.
-    let ids: HashSet<String> = outputs
-        .iter()
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .next()
-                .and_then(|l| l.strip_prefix("Created Ticket: "))
-                .and_then(|l| l.split(" - ").next())
-                .expect("Display ID in tk add output")
-                .to_string()
-        })
-        .collect();
+    let ids: HashSet<String> = outputs.iter().map(display_id).collect();
     assert_eq!(ids.len(), WRITERS);
 }
 

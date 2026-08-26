@@ -70,7 +70,6 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         .adopt_ticket(&args.key)
         .map_err(adapter_read_error)?;
 
-    debug_assert_eq!(adapter.backend_kind(), expected);
     let outcome = store_sync::adopt_backend_ticket(
         store.conn_mut(),
         expected,
@@ -154,84 +153,12 @@ fn adopt_store_error(err: AdoptStoreError) -> CommandError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::FakeClock;
-    use crate::proc::{FakeRunner, ProcError, RunOutput};
-    use crate::render::Styler;
-    use crate::store::migrations;
+    use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
+    use crate::proc::{ProcError, RunOutput};
     use crate::store::testing::{
         FixtureItem, FixtureMutation, FixtureRemote, TmpStore, insert_fixture_item,
         insert_fixture_mutation, insert_fixture_remote,
     };
-    use rand::SeedableRng;
-    use rand::rngs::StdRng;
-    use rusqlite::Connection;
-    use std::path::Path;
-
-    fn cwd() -> std::path::PathBuf {
-        std::env::current_dir().unwrap()
-    }
-
-    fn seed_store(store: &TmpStore) -> Connection {
-        std::fs::create_dir_all(store.tk_dir()).unwrap();
-        let mut conn = Connection::open(store.db_path()).unwrap();
-        conn.execute_batch("pragma foreign_keys = on").unwrap();
-        migrations::apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        conn.execute(
-            "insert into store_config(key, value) values ('display_prefix', 'tk')",
-            [],
-        )
-        .unwrap();
-        conn
-    }
-
-    struct Harness<'a> {
-        stdout: Vec<u8>,
-        stderr: Vec<u8>,
-        stdin: std::io::Cursor<Vec<u8>>,
-        runner: FakeRunner,
-        clock: FakeClock,
-        rng: StdRng,
-        cwd: &'a Path,
-    }
-
-    impl<'a> Harness<'a> {
-        fn new(cwd: &'a Path) -> Self {
-            Self {
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-                stdin: std::io::Cursor::new(Vec::new()),
-                runner: FakeRunner::new(),
-                clock: FakeClock::new(1_778_284_800_000),
-                rng: StdRng::seed_from_u64(7),
-                cwd,
-            }
-        }
-        fn deps(&mut self) -> Deps<'_> {
-            Deps {
-                stdout: &mut self.stdout,
-                stderr: &mut self.stderr,
-                stdin: &mut self.stdin,
-                runner: &self.runner,
-                clock: &self.clock,
-                rng: &mut self.rng,
-                cwd: self.cwd,
-                styler: Styler::plain(),
-            }
-        }
-    }
-
-    /// Queue the `git rev-parse` discovery call `open_for_command` makes. FIFO,
-    /// so this must precede any `gh` expectation.
-    fn expect_git(h: &Harness<'_>, store: &TmpStore) {
-        h.runner.expect(
-            &["git", "rev-parse"],
-            RunOutput {
-                exit_code: 0,
-                stdout: store.git_rev_parse_stdout(),
-                stderr: Vec::new(),
-            },
-        );
-    }
 
     fn ok(stdout: &str) -> RunOutput {
         RunOutput {
@@ -281,7 +208,7 @@ mod tests {
         let conn = seed_store(&store);
         insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         expect_git(&h, &store);
         h.runner.expect(
             &["gh", "issue", "view", "https://github.com/o/r/issues/42"],
@@ -352,7 +279,7 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         expect_git(&h, &store);
 
         let code = run_rendered(&mut h, "42");
@@ -371,7 +298,7 @@ mod tests {
         let conn = seed_store(&store);
         insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         expect_git(&h, &store);
         h.runner.expect(
             &["gh", "issue", "view", "7"],
@@ -415,7 +342,7 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         expect_git(&h, &store);
         let code = run_rendered(&mut h, "https://github.com/o/r/issues/42");
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -464,7 +391,7 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         expect_git(&h, &store);
         h.runner.expect_exact(
             &[
@@ -497,7 +424,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         expect_git(&h, &store);
 
         let code = run_rendered(&mut h, "42");
@@ -523,7 +450,7 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         expect_git(&h, &store);
 
         let code = run_rendered(&mut h, "42");
@@ -543,7 +470,7 @@ mod tests {
         let conn = seed_store(&store);
         insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         expect_git(&h, &store);
         h.runner.expect(
             &["gh", "issue", "view", "99"],
@@ -570,7 +497,7 @@ mod tests {
         let conn = seed_store(&store);
         insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         let stderr_line = "GraphQL: Could not resolve to an issue or pull request \
                            with the number of 5. (repository.issue)";
         expect_git(&h, &store);
@@ -605,7 +532,7 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         expect_git(&h, &store);
         h.runner.expect(
             &["gh", "issue", "view", "42"],

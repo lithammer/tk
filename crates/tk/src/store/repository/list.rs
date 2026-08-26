@@ -10,7 +10,6 @@
 use rusqlite::params;
 
 use crate::domain::item_class::ItemClass;
-use crate::domain::origin::Origin;
 use crate::domain::priority::Priority;
 use crate::domain::selection_state::SelectionState;
 use crate::domain::status::ItemStatus;
@@ -28,13 +27,11 @@ pub struct ListRow {
     pub priority: Option<Priority>,
     pub title: String,
     pub status: ItemStatus,
-    pub origin: Origin,
     /// Internal stable ID of the parent Epic, if any.
     pub container_id: Option<String>,
     /// Local-only Selection State; `None` for Epics (ADR-0027). Drives the dim
     /// `[parked]` list badge.
     pub selection_state: Option<SelectionState>,
-    pub created_seq: i64,
     pub has_unresolved_blocker: bool,
     /// True when the Item has a `pending` Mutation whose type is not a
     /// Promotion (`promote_ticket` / `promote_epic`). The Promotion
@@ -144,7 +141,7 @@ pub struct ListOptions<'a> {
 ///          direct child Tickets.
 ///
 /// The `case ?1 when '<tag>' then ...` arms cover every [`ListView`]
-/// variant; the test below catches a missing arm.
+/// variant; the per-view tests below cover the arms.
 const LIST_ROWS_SQL: &str = "\
 with annotated as ( \
     select i.id, i.display_value, i.item_class, i.ticket_kind, \
@@ -192,7 +189,7 @@ matching as ( \
       from annotated \
 ) \
 select id, display_value, item_class, ticket_kind, priority, title, \
-       status, origin, container_id, selection_state, created_seq, \
+       status, container_id, selection_state, \
        (has_unresolved_dependency or has_unresolved_external_blocker) as has_unresolved_blocker, \
        exists ( \
            select 1 \
@@ -255,13 +252,11 @@ pub(super) fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<ListRow>
         priority: row.get(4)?,
         title: row.get(5)?,
         status: row.get(6)?,
-        origin: row.get(7)?,
-        container_id: row.get(8)?,
-        selection_state: row.get(9)?,
-        created_seq: row.get(10)?,
-        has_unresolved_blocker: row.get(11)?,
-        has_pending_mutation: row.get(12)?,
-        has_failed_mutation: row.get(13)?,
+        container_id: row.get(7)?,
+        selection_state: row.get(8)?,
+        has_unresolved_blocker: row.get(9)?,
+        has_pending_mutation: row.get(10)?,
+        has_failed_mutation: row.get(11)?,
     })
 }
 
@@ -441,7 +436,6 @@ mod tests {
                 display: "tk-2",
                 title: "Child",
                 container_id: Some("epic"),
-                container_class: Some("epic"),
                 created_seq: 2,
                 ..FixtureItem::default()
             },
@@ -478,7 +472,6 @@ mod tests {
                 display: "tk-2",
                 title: "Child",
                 container_id: Some("epic"),
-                container_class: Some("epic"),
                 created_seq: 2,
                 ..FixtureItem::default()
             },
@@ -555,7 +548,6 @@ mod tests {
                 display: "tk-2",
                 title: "Child",
                 container_id: Some("epic"),
-                container_class: Some("epic"),
                 created_seq: 2,
                 ..FixtureItem::default()
             },
@@ -589,7 +581,6 @@ mod tests {
                 display: "tk-2",
                 title: "Local child",
                 container_id: Some("epic-local-child"),
-                container_class: Some("epic"),
                 created_seq: 2,
                 ..FixtureItem::default()
             },
@@ -606,7 +597,6 @@ mod tests {
                 backend_kind: Some("github"),
                 backend_key: Some("99"),
                 container_id: Some("epic-backend-child"),
-                container_class: Some("epic"),
                 created_seq: 4,
                 ..FixtureItem::default()
             },
@@ -637,7 +627,6 @@ mod tests {
                 display: "tk-2",
                 title: "Child",
                 container_id: Some("epic"),
-                container_class: Some("epic"),
                 created_seq: 2,
                 ..FixtureItem::default()
             },
@@ -817,8 +806,11 @@ mod tests {
 
     #[test]
     fn every_view_variant_has_a_case_arm_in_sql() {
-        // Drive each view through the query so a missing `when` arm in
-        // LIST_ROWS_SQL surfaces as a SQLite NULL → row-filter mismatch.
+        // Drive each view through the query so a malformed LIST_ROWS_SQL — bad
+        // syntax, wrong bind count — fails here. A missing `when` arm is not
+        // caught: it yields NULL for `self_matches`, and this store holds no
+        // items, so the result is empty either way. The arms themselves are
+        // covered by the per-view tests above.
         let store = open_seeded();
         for view in [
             ListView::Default,
@@ -974,7 +966,6 @@ mod tests {
                 display: "tk-2",
                 title: "Child",
                 container_id: Some("epic"),
-                container_class: Some("epic"),
                 created_seq: 2,
                 ..FixtureItem::default()
             },

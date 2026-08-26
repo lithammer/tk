@@ -39,12 +39,9 @@ pub enum StoreKind {
     Foreign,
 }
 
-/// Run `tk init` against the supplied `Deps`. Returns the process exit code.
-///
-/// Argument parsing and `--help` / `-h` rendering happen upstream in
-/// [`crate::cli`] via clap-derive; this entrypoint receives a parsed [`Args`]
-/// (currently empty) and proceeds directly to the discovery → classify →
-/// pragmas → migrations → seed pipeline.
+/// Run `tk init`. On failure returns the [`CommandError`] for the dispatch
+/// seam to frame as `tk init:` (ADR-0032); on success returns the process
+/// [`Exit`].
 pub fn run(deps: &mut Deps<'_>, _args: Args) -> Result<Exit, CommandError> {
     let paths = discovery::discover_paths(deps.runner, deps.cwd)
         // DiscoveryError's Display is the stable body (ADR-0017); the seam
@@ -88,7 +85,7 @@ pub fn run(deps: &mut Deps<'_>, _args: Args) -> Result<Exit, CommandError> {
         StoreKind::Fresh => false,
     };
 
-    if let Err(err) = configure_for_ticket_store(&conn) {
+    if let Err(err) = configure_repository_store(&conn) {
         return Err(CommandError::failure(format!(
             "failed to configure {}: {err}",
             db_path.display()
@@ -163,7 +160,7 @@ pub fn classify(conn: &Connection) -> Result<StoreKind, rusqlite::Error> {
 /// connection cannot use WAL and will be refused here — that's deliberate, so
 /// tests that need an in-memory store skip this helper and apply the matching
 /// pragmas directly (see `tests` modules in `store::migrations`).
-fn configure_for_ticket_store(conn: &Connection) -> Result<(), rusqlite::Error> {
+fn configure_repository_store(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.pragma_update(None, "journal_mode", "wal")?;
     let mode: String = conn.query_row("pragma journal_mode", [], |r| r.get(0))?;
     if !mode.eq_ignore_ascii_case("wal") {
@@ -183,9 +180,8 @@ fn configure_for_ticket_store(conn: &Connection) -> Result<(), rusqlite::Error> 
 /// store does not already carry an explicit prefix.
 ///
 /// `store_config.key` is the primary key, so `INSERT OR IGNORE` collapses the
-/// select-then-insert dance into a single atomic write and preserves
-/// idempotency without swallowing transient SQLite errors (the earlier
-/// `.ok()` on the select did the wrong thing on `SQLITE_BUSY` / I/O errors).
+/// select-then-insert dance into a single atomic write, preserving idempotency
+/// without swallowing transient SQLite errors.
 fn seed_display_prefix(conn: &Connection, paths: &DiscoveredPaths) -> Result<(), rusqlite::Error> {
     let basename = paths
         .toplevel
@@ -244,91 +240,10 @@ fn set_dir_mode_0700(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::FakeClock;
-    use crate::proc::{FakeRunner, RunOutput};
-    use crate::render::Styler;
-    use rand::SeedableRng;
-    use rand::rngs::StdRng;
+    use crate::commands::testing::Harness;
+    use crate::proc::RunOutput;
+    use crate::store::testing::TmpStore;
     use rusqlite::Connection;
-    use std::path::PathBuf;
-
-    /// Materialize a fake `.git` repository under a tempdir, suitable for
-    /// `tk init` to point at via a faked `git rev-parse` response.
-    struct TmpStore {
-        // Held to keep the tempdir alive across the test body; the path is
-        // accessed through `toplevel` / `common_dir`.
-        #[allow(dead_code)]
-        tmp: tempfile::TempDir,
-        toplevel: PathBuf,
-        common_dir: PathBuf,
-    }
-
-    impl TmpStore {
-        fn new(repo_name: &str) -> Self {
-            let tmp = tempfile::tempdir().unwrap();
-            let toplevel = tmp.path().join(repo_name);
-            let common = toplevel.join(".git");
-            std::fs::create_dir_all(&common).unwrap();
-            TmpStore {
-                tmp,
-                toplevel,
-                common_dir: common,
-            }
-        }
-
-        fn rev_parse_stdout(&self) -> Vec<u8> {
-            format!(
-                "{}\n{}\n",
-                self.common_dir.display(),
-                self.toplevel.display()
-            )
-            .into_bytes()
-        }
-
-        fn db_path(&self) -> PathBuf {
-            self.common_dir.join("tk").join("tk.db")
-        }
-    }
-
-    struct Harness<'a> {
-        stdout: Vec<u8>,
-        stderr: Vec<u8>,
-        stdin: std::io::Cursor<Vec<u8>>,
-        runner: FakeRunner,
-        clock: FakeClock,
-        rng: StdRng,
-        cwd: &'a Path,
-    }
-
-    impl<'a> Harness<'a> {
-        fn new(cwd: &'a Path) -> Self {
-            Self {
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-                stdin: std::io::Cursor::new(Vec::new()),
-                runner: FakeRunner::new(),
-                clock: FakeClock::new(1_778_457_600_000),
-                rng: StdRng::seed_from_u64(0),
-                cwd,
-            }
-        }
-
-        fn deps(&mut self) -> Deps<'_> {
-            Deps {
-                stdout: &mut self.stdout,
-                stderr: &mut self.stderr,
-                stdin: &mut self.stdin,
-                runner: &self.runner,
-                clock: &self.clock,
-                rng: &mut self.rng,
-                cwd: self.cwd,
-                // Scenario-test default per ADR-0014: both streams stay
-                // no-colour so byte-exact output assertions hold without
-                // TTY mocking.
-                styler: Styler::plain(),
-            }
-        }
-    }
 
     /// Drive `run` and frame any returned error as the dispatch seam does
     /// (ADR-0032: `tk init: <body>`), so a test asserts the framed bytes.
@@ -347,7 +262,7 @@ mod tests {
     #[test]
     fn returns_exit_1_with_diagnostic_when_not_in_a_git_repo() {
         let cwd = std::env::current_dir().unwrap();
-        let mut h = Harness::new(&cwd);
+        let mut h = Harness::new(&cwd).with_clock_ms(1_778_457_600_000);
         h.runner.expect(
             &["git", "rev-parse"],
             RunOutput {
@@ -368,7 +283,7 @@ mod tests {
     #[test]
     fn empty_stderr_git_failure_falls_back_to_default() {
         let cwd = std::env::current_dir().unwrap();
-        let mut h = Harness::new(&cwd);
+        let mut h = Harness::new(&cwd).with_clock_ms(1_778_457_600_000);
         h.runner.expect(
             &["git", "rev-parse"],
             RunOutput {
@@ -390,12 +305,12 @@ mod tests {
     fn success_creates_store_applies_migrations_seeds_prefix() {
         let store = TmpStore::new("my-test-repo");
         let cwd = std::env::current_dir().unwrap();
-        let mut h = Harness::new(&cwd);
+        let mut h = Harness::new(&cwd).with_clock_ms(1_778_457_600_000);
         h.runner.expect(
             &["git", "rev-parse"],
             RunOutput {
                 exit_code: 0,
-                stdout: store.rev_parse_stdout(),
+                stdout: store.git_rev_parse_stdout(),
                 stderr: Vec::new(),
             },
         );
@@ -431,12 +346,12 @@ mod tests {
 
         // First run.
         {
-            let mut h = Harness::new(&cwd);
+            let mut h = Harness::new(&cwd).with_clock_ms(1_778_457_600_000);
             h.runner.expect(
                 &["git", "rev-parse"],
                 RunOutput {
                     exit_code: 0,
-                    stdout: store.rev_parse_stdout(),
+                    stdout: store.git_rev_parse_stdout(),
                     stderr: Vec::new(),
                 },
             );
@@ -455,12 +370,12 @@ mod tests {
 
         // Second run.
         {
-            let mut h = Harness::new(&cwd);
+            let mut h = Harness::new(&cwd).with_clock_ms(1_778_457_600_000);
             h.runner.expect(
                 &["git", "rev-parse"],
                 RunOutput {
                     exit_code: 0,
-                    stdout: store.rev_parse_stdout(),
+                    stdout: store.git_rev_parse_stdout(),
                     stderr: Vec::new(),
                 },
             );
@@ -516,12 +431,12 @@ mod tests {
         }
 
         let cwd = std::env::current_dir().unwrap();
-        let mut h = Harness::new(&cwd);
+        let mut h = Harness::new(&cwd).with_clock_ms(1_778_457_600_000);
         h.runner.expect(
             &["git", "rev-parse"],
             RunOutput {
                 exit_code: 0,
-                stdout: store.rev_parse_stdout(),
+                stdout: store.git_rev_parse_stdout(),
                 stderr: Vec::new(),
             },
         );
@@ -548,12 +463,12 @@ mod tests {
         }
 
         let cwd = std::env::current_dir().unwrap();
-        let mut h = Harness::new(&cwd);
+        let mut h = Harness::new(&cwd).with_clock_ms(1_778_457_600_000);
         h.runner.expect(
             &["git", "rev-parse"],
             RunOutput {
                 exit_code: 0,
-                stdout: store.rev_parse_stdout(),
+                stdout: store.git_rev_parse_stdout(),
                 stderr: Vec::new(),
             },
         );
@@ -567,7 +482,7 @@ mod tests {
     #[test]
     fn surfaces_unparseable_rev_parse_output() {
         let cwd = std::env::current_dir().unwrap();
-        let mut h = Harness::new(&cwd);
+        let mut h = Harness::new(&cwd).with_clock_ms(1_778_457_600_000);
         h.runner.expect(
             &["git", "rev-parse"],
             RunOutput {

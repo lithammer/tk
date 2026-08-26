@@ -9,7 +9,7 @@
 //! [`ItemMutation`] so the renderer never deserializes text columns of its
 //! own.
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 
 use crate::domain::item_class::ItemClass;
 use crate::domain::mutation_state::MutationState;
@@ -51,7 +51,6 @@ pub struct ItemMutation {
 /// model is where one command joins them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemDetail {
-    pub id: String,
     pub display_id: String,
     pub item_class: ItemClass,
     pub ticket_kind: Option<TicketKind>,
@@ -93,31 +92,32 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
         return Ok(None);
     };
 
-    let row = store.conn.query_row(
-        "select id, display_value, item_class, ticket_kind, priority, selection_state, title, body, \
-                closing_reason, status, created_at, updated_at, container_id \
-           from items where id = ?1",
-        params![&reference.id],
-        |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, ItemClass>(2)?,
-                r.get::<_, Option<TicketKind>>(3)?,
-                r.get::<_, Option<Priority>>(4)?,
-                r.get::<_, Option<SelectionState>>(5)?,
-                r.get::<_, String>(6)?,
-                r.get::<_, String>(7)?,
-                r.get::<_, Option<String>>(8)?,
-                r.get::<_, ItemStatus>(9)?,
-                r.get::<_, String>(10)?,
-                r.get::<_, String>(11)?,
-                r.get::<_, Option<String>>(12)?,
-            ))
-        },
-    );
-    let Ok((
-        id,
+    let row = store
+        .conn
+        .query_row(
+            "select display_value, item_class, ticket_kind, priority, selection_state, title, \
+                    body, closing_reason, status, created_at, updated_at, container_id \
+               from items where id = ?1",
+            params![&reference.id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, ItemClass>(1)?,
+                    r.get::<_, Option<TicketKind>>(2)?,
+                    r.get::<_, Option<Priority>>(3)?,
+                    r.get::<_, Option<SelectionState>>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, String>(6)?,
+                    r.get::<_, Option<String>>(7)?,
+                    r.get::<_, ItemStatus>(8)?,
+                    r.get::<_, String>(9)?,
+                    r.get::<_, String>(10)?,
+                    r.get::<_, Option<String>>(11)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((
         display_id,
         item_class,
         ticket_kind,
@@ -132,11 +132,7 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
         container_id,
     )) = row
     else {
-        return match row {
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(other) => Err(other),
-            Ok(_) => unreachable!(),
-        };
+        return Ok(None);
     };
 
     let parent = container_id
@@ -146,17 +142,16 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
         .flatten();
 
     let children = if item_class == ItemClass::Epic {
-        read_children(&store.conn, &id)?
+        read_children(&store.conn, &reference.id)?
     } else {
         Vec::new()
     };
-    let blocked_by = read_blocked_by(&store.conn, &id)?;
-    let blocking = read_blocking(&store.conn, &id)?;
-    let external_blockers = read_external_blockers(&store.conn, &id)?;
-    let mutations = read_mutations(&store.conn, &id, item_class)?;
+    let blocked_by = read_blocked_by(&store.conn, &reference.id)?;
+    let blocking = read_blocking(&store.conn, &reference.id)?;
+    let external_blockers = read_external_blockers(&store.conn, &reference.id)?;
+    let mutations = read_mutations(&store.conn, &reference.id)?;
 
     Ok(Some(ItemDetail {
-        id,
         display_id,
         item_class,
         ticket_kind,
@@ -187,11 +182,7 @@ fn read_item_summary_by_id(
         params![id],
         item_summary_from_row,
     )
-    .map(Some)
-    .or_else(|err| match err {
-        rusqlite::Error::QueryReturnedNoRows => Ok(None),
-        other => Err(other),
-    })
+    .optional()
 }
 
 fn read_children(
@@ -262,16 +253,14 @@ fn read_external_blockers(
 fn read_mutations(
     conn: &rusqlite::Connection,
     item_id: &str,
-    item_class: ItemClass,
 ) -> Result<Vec<ItemMutation>, rusqlite::Error> {
     let mut stmt = conn.prepare(
         "select sequence, state, mutation_type \
            from mutations \
           where item_id = ?1 \
-            and item_class = ?2 \
           order by sequence asc",
     )?;
-    stmt.query_map(params![item_id, item_class.text()], |row| {
+    stmt.query_map(params![item_id], |row| {
         Ok(ItemMutation {
             sequence: row.get(0)?,
             state: row.get(1)?,
@@ -374,7 +363,6 @@ mod tests {
                 display: "tk-2",
                 title: "A",
                 container_id: Some("epic"),
-                container_class: Some("epic"),
                 created_seq: 2,
                 ..FixtureItem::default()
             },
@@ -387,7 +375,6 @@ mod tests {
                 display: "tk-3",
                 title: "B",
                 container_id: Some("epic"),
-                container_class: Some("epic"),
                 created_seq: 3,
                 ..FixtureItem::default()
             },
@@ -418,7 +405,6 @@ mod tests {
                 display: "tk-2",
                 title: "Child",
                 container_id: Some("epic"),
-                container_class: Some("epic"),
                 created_seq: 2,
                 ..FixtureItem::default()
             },

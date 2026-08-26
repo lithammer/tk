@@ -10,6 +10,28 @@
 use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 
+/// The three named counters `sequences` holds. The variant set mirrors the
+/// migration-001 `sequences.name` CHECK constraint; the `text()` spelling is
+/// the storage contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Counter {
+    ItemCreated,
+    Display,
+    Mutation,
+}
+
+impl Counter {
+    /// SQLite storage string for the `sequences.name` row.
+    #[must_use]
+    pub fn text(self) -> &'static str {
+        match self {
+            Self::ItemCreated => "item_created_seq",
+            Self::Display => "display_seq",
+            Self::Mutation => "mutation_seq",
+        }
+    }
+}
+
 /// Errors returned by [`next`].
 ///
 /// `Missing` flags Repository Store corruption (the counter row vanished
@@ -21,8 +43,8 @@ pub enum SequenceError {
     /// The named counter row is missing from the `sequences` table. The
     /// schema migration seeds all three counters at zero, so reaching this
     /// arm means the store has been tampered with or partially restored.
-    #[error("sequence counter `{0}` is missing from the store")]
-    Missing(&'static str),
+    #[error("sequence counter `{}` is missing from the store", .0.text())]
+    Missing(Counter),
     /// Underlying SQLite error from the `UPDATE … RETURNING` step.
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
@@ -37,19 +59,18 @@ pub enum SequenceError {
 /// (which derefs to [`Connection`]) is the idiomatic way to satisfy that
 /// contract.
 ///
-/// `name` is a `&'static str` so the [`SequenceError::Missing`] arm can
-/// carry the offending counter name without an allocation; the schema's
-/// CHECK constraint limits the universe to three values, all of which sit
-/// in this crate as string literals.
-pub fn next(conn: &Connection, name: &'static str) -> Result<i64, SequenceError> {
+/// `counter` is a typed [`Counter`]; its `text()` is the SQL spelling the
+/// `sequences.name` CHECK constraint pins, so a counter this table does not
+/// hold is unrepresentable rather than a runtime lookup miss.
+pub fn next(conn: &Connection, counter: Counter) -> Result<i64, SequenceError> {
     let value: Option<i64> = conn
         .query_row(
             "update sequences set value = value + 1 where name = ?1 returning value",
-            params![name],
+            params![counter.text()],
             |row| row.get(0),
         )
         .optional()?;
-    value.ok_or(SequenceError::Missing(name))
+    value.ok_or(SequenceError::Missing(counter))
 }
 
 #[cfg(test)]
@@ -69,7 +90,7 @@ mod tests {
     fn first_allocation_returns_one() {
         let conn = open_seeded_memory();
         let tx = conn.unchecked_transaction().unwrap();
-        assert_eq!(next(&tx, "item_created_seq").unwrap(), 1);
+        assert_eq!(next(&tx, Counter::ItemCreated).unwrap(), 1);
         tx.commit().unwrap();
     }
 
@@ -77,9 +98,9 @@ mod tests {
     fn allocations_increment_monotonically_within_a_transaction() {
         let conn = open_seeded_memory();
         let tx = conn.unchecked_transaction().unwrap();
-        let a = next(&tx, "display_seq").unwrap();
-        let b = next(&tx, "display_seq").unwrap();
-        let c = next(&tx, "display_seq").unwrap();
+        let a = next(&tx, Counter::Display).unwrap();
+        let b = next(&tx, Counter::Display).unwrap();
+        let c = next(&tx, Counter::Display).unwrap();
         tx.commit().unwrap();
         assert_eq!((a, b, c), (1, 2, 3));
     }
@@ -88,9 +109,9 @@ mod tests {
     fn counters_are_independent() {
         let conn = open_seeded_memory();
         let tx = conn.unchecked_transaction().unwrap();
-        assert_eq!(next(&tx, "item_created_seq").unwrap(), 1);
-        assert_eq!(next(&tx, "display_seq").unwrap(), 1);
-        assert_eq!(next(&tx, "mutation_seq").unwrap(), 1);
+        assert_eq!(next(&tx, Counter::ItemCreated).unwrap(), 1);
+        assert_eq!(next(&tx, Counter::Display).unwrap(), 1);
+        assert_eq!(next(&tx, Counter::Mutation).unwrap(), 1);
         tx.commit().unwrap();
     }
 
@@ -100,7 +121,7 @@ mod tests {
         conn.execute("delete from sequences where name = 'mutation_seq'", [])
             .unwrap();
         let tx = conn.unchecked_transaction().unwrap();
-        let err = next(&tx, "mutation_seq").unwrap_err();
-        assert!(matches!(err, SequenceError::Missing("mutation_seq")));
+        let err = next(&tx, Counter::Mutation).unwrap_err();
+        assert!(matches!(err, SequenceError::Missing(Counter::Mutation)));
     }
 }

@@ -231,7 +231,7 @@ fn apply_one(conn: &mut Connection, mig: &Migration, now_iso: &str) -> Result<()
         // window must be opened here, before BEGIN (ADR-0028).
         conn.execute_batch("pragma foreign_keys = off")?;
     }
-    let result = apply_one_txn(conn, mig, now_iso, fk_off);
+    let result = apply_one_txn(conn, mig, now_iso);
     if fk_off {
         // Restore enforcement on *every* path — a failed rebuild must never
         // leave the connection with foreign keys disabled for the rest of the
@@ -241,12 +241,8 @@ fn apply_one(conn: &mut Connection, mig: &Migration, now_iso: &str) -> Result<()
     result
 }
 
-fn apply_one_txn(
-    conn: &mut Connection,
-    mig: &Migration,
-    now_iso: &str,
-    fk_off: bool,
-) -> Result<(), ApplyError> {
+fn apply_one_txn(conn: &mut Connection, mig: &Migration, now_iso: &str) -> Result<(), ApplyError> {
+    let fk_off = mig.foreign_keys == ForeignKeys::Off;
     // The write lock is taken at transaction start, so a second migrator
     // (auto-migrate-on-open, tk-110) waits on `busy_timeout` rather than
     // racing. Re-read the version *inside* the lock: the recorded version
@@ -942,7 +938,6 @@ mod tests {
                 priority: Some("P1"),
                 title: "Child",
                 container_id: Some("e1"),
-                container_class: Some("epic"),
                 created_seq: 2,
                 ..FixtureItem::default()
             },
@@ -1429,7 +1424,7 @@ mod tests {
             "foreign keys must be re-enabled after a failed rebuild"
         );
 
-        // The failed migration rolled back: no probe table, store still at v6.
+        // The failed migration rolled back: no probe table, version unchanged.
         let probe: Option<i64> = conn
             .query_row(
                 "select 1 from sqlite_master where type='table' and name='fk_probe'",

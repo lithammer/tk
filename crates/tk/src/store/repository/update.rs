@@ -93,21 +93,13 @@ pub enum UpdateError {
     Mutation(#[from] mutations::AppendError),
 }
 
-impl ItemClass {
-    fn update_mutation_type(self) -> MutationType {
-        match self {
-            Self::Ticket => MutationType::UpdateTicket,
-            Self::Epic => MutationType::UpdateEpic,
-        }
-    }
-}
-
 struct Current {
     title: String,
     body: String,
-    priority: Option<String>,
+    priority: Option<Priority>,
     selection_state: Option<SelectionState>,
     container_id: Option<String>,
+    display_id: String,
 }
 
 /// The new column values for an item update, grouped so [`write_columns`]
@@ -123,9 +115,7 @@ struct ColumnWrites<'a> {
     parent: ParentWrite<'a>,
 }
 
-/// Whether an update rewrites the container columns, and to what. Replaces a
-/// `parent_changed: bool` + `new_epic_id: Option<_>` pair whose
-/// `false`/`Some` combination was unrepresentable nonsense.
+/// Whether an update rewrites the container columns, and to what.
 #[derive(Clone, Copy)]
 enum ParentWrite<'a> {
     /// Leave `container_id` / `container_class` as they are.
@@ -146,7 +136,7 @@ pub fn update_item<C: Clock + ?Sized>(
 
     let current = tx
         .query_row(
-            "select title, body, priority, selection_state, container_id \
+            "select title, body, priority, selection_state, container_id, display_value \
                from items where id = ?1",
             params![req.id],
             |r| {
@@ -156,6 +146,7 @@ pub fn update_item<C: Clock + ?Sized>(
                     priority: r.get(2)?,
                     selection_state: r.get(3)?,
                     container_id: r.get(4)?,
+                    display_id: r.get(5)?,
                 })
             },
         )
@@ -178,52 +169,35 @@ pub fn update_item<C: Clock + ?Sized>(
     let new_body: Option<&str> = req
         .body
         .filter(|requested| *requested != current.body.as_str());
-    let new_priority: Option<Priority> = req.priority.filter(|requested| {
-        current
-            .priority
-            .as_deref()
-            .is_none_or(|stored| stored != requested.text())
-    });
+    let new_priority: Option<Priority> = req
+        .priority
+        .filter(|requested| current.priority != Some(*requested));
 
-    // Parent delta: derive old_epic_id (for remove_ticket_from_epic) and
-    // new_epic_id (for add_ticket_to_epic).
-    let (old_epic_id, new_epic_id, parent_changed) = match req.parent {
-        ParentOp::Unchanged => (None, None, false),
-        ParentOp::Clear => {
-            if current.container_id.is_some() {
-                (current.container_id.as_deref(), None, true)
-            } else {
-                (None, None, false)
-            }
-        }
+    // Parent delta: `old_epic_id` addresses remove_ticket_from_epic; the
+    // `ParentWrite` carries the new container for both the column write and
+    // add_ticket_to_epic.
+    let (old_epic_id, parent) = match req.parent {
+        ParentOp::Unchanged => (None, ParentWrite::Unchanged),
+        ParentOp::Clear => match current.container_id.as_deref() {
+            Some(existing) => (Some(existing), ParentWrite::Changed(None)),
+            None => (None, ParentWrite::Unchanged),
+        },
         ParentOp::Set(target) => match current.container_id.as_deref() {
-            Some(existing) if existing == target => (None, None, false),
-            existing => (existing, Some(target), true),
+            Some(existing) if existing == target => (None, ParentWrite::Unchanged),
+            existing => (existing, ParentWrite::Changed(Some(target))),
         },
     };
 
     let title_or_body_changed = new_title.is_some() || new_body.is_some();
-    let any_change = title_or_body_changed || new_priority.is_some() || parent_changed;
+    let any_change = title_or_body_changed
+        || new_priority.is_some()
+        || matches!(parent, ParentWrite::Changed(_));
 
     if !any_change {
-        let snap = tx
-            .query_row(
-                "select display_value, title from items where id = ?1",
-                params![req.id],
-                |r| {
-                    let display: String = r.get(0)?;
-                    let title: String = r.get(1)?;
-                    Ok((display, title))
-                },
-            )
-            .optional()?;
-        let Some((display_id, title)) = snap else {
-            return Err(UpdateError::NotFound);
-        };
         tx.commit()?;
         return Ok(UpdatedItem {
-            display_id,
-            title,
+            display_id: current.display_id,
+            title: current.title,
             item_class: req.item_class,
         });
     }
@@ -231,11 +205,6 @@ pub fn update_item<C: Clock + ?Sized>(
     let effective_title: &str = new_title.unwrap_or(&current.title);
     let effective_body: &str = new_body.unwrap_or(&current.body);
 
-    let parent = if parent_changed {
-        ParentWrite::Changed(new_epic_id)
-    } else {
-        ParentWrite::Unchanged
-    };
     write_columns(
         &tx,
         req.id,
@@ -271,7 +240,7 @@ pub fn update_item<C: Clock + ?Sized>(
                 },
             )?;
         }
-        if let Some(new_id) = new_epic_id
+        if let ParentWrite::Changed(Some(new_id)) = parent
             && membership_is_backend_intent(&tx, &intent, new_id)?
         {
             mutations::append(
@@ -306,24 +275,10 @@ pub fn update_item<C: Clock + ?Sized>(
         }
     }
 
-    let snap = tx
-        .query_row(
-            "select display_value, title from items where id = ?1",
-            params![req.id],
-            |r| {
-                let display: String = r.get(0)?;
-                let title: String = r.get(1)?;
-                Ok((display, title))
-            },
-        )
-        .optional()?;
-    let Some((display_id, title)) = snap else {
-        return Err(UpdateError::NotFound);
-    };
     tx.commit()?;
     Ok(UpdatedItem {
-        display_id,
-        title,
+        display_id: current.display_id,
+        title: effective_title.to_owned(),
         item_class: req.item_class,
     })
 }
@@ -738,7 +693,6 @@ mod tests {
                 backend_kind: Some("github"),
                 backend_key: Some("99"),
                 container_id: Some("e-old"),
-                container_class: Some("epic"),
                 created_seq: 3,
                 ..FixtureItem::default()
             },
@@ -805,7 +759,6 @@ mod tests {
                 backend_kind: Some("github"),
                 backend_key: Some("99"),
                 container_id: Some("e1"),
-                container_class: Some("epic"),
                 created_seq: 2,
                 ..FixtureItem::default()
             },
@@ -897,7 +850,6 @@ mod tests {
                 backend_kind: Some("github"),
                 backend_key: Some("99"),
                 container_id: Some("e-old"),
-                container_class: Some("epic"),
                 created_seq: 3,
                 ..FixtureItem::default()
             },

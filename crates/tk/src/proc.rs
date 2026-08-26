@@ -3,9 +3,6 @@
 //! ADR-0018 models the subprocess seam as a Rust trait. Every
 //! subprocess in tk (git / gh / acli / curl) flows through this seam so tests
 //! can substitute a `FakeRunner` without per-call-site changes.
-//!
-//! `tk init` only spawns `git rev-parse`, but the trait must already be shaped
-//! correctly for downstream callers (see [`crate::git::discovery`]).
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -171,11 +168,6 @@ impl FakeRunner {
     /// accepted. Use [`Self::expect_exact`] when the command shape is part of
     /// the behavior under test.
     pub fn expect(&self, argv_prefix: &[&str], output: RunOutput) {
-        self.expect_prefix(argv_prefix, output);
-    }
-
-    /// Queue a scripted response matched against an argv prefix.
-    pub fn expect_prefix(&self, argv_prefix: &[&str], output: RunOutput) {
         self.queue(
             ArgvExpectation::Prefix(strings(argv_prefix)),
             Ok(output),
@@ -341,7 +333,7 @@ mod tests {
     #[test]
     fn prefix_expectation_accepts_trailing_arguments() {
         let runner = FakeRunner::new();
-        runner.expect_prefix(&["git", "status"], output("ok"));
+        runner.expect(&["git", "status"], output("ok"));
 
         let result = runner
             .run(&["git", "status", "--short"], Path::new("."))
@@ -354,7 +346,7 @@ mod tests {
     #[test]
     fn expectations_are_consumed_in_fifo_order() {
         let runner = FakeRunner::new();
-        runner.expect_prefix(&["git"], output("first"));
+        runner.expect(&["git"], output("first"));
         runner.expect_exact(&["git", "rev-parse"], output("second"));
 
         let first = runner.run(&["git", "status"], Path::new(".")).unwrap();

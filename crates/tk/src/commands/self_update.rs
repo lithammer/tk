@@ -17,10 +17,10 @@ use std::io::Write;
 use std::path::Path;
 
 use clap::Args as ClapArgs;
-use rand::Rng;
 use thiserror::Error;
 
 use crate::cli::{CommandError, Deps, Exit};
+use crate::commands::staging;
 use crate::platform;
 use crate::proc::ProcError;
 
@@ -43,6 +43,8 @@ const RELEASES_BASE_URL: &str = "https://github.com/lithammer/tk/releases";
 /// binary out of `ls` output; the hex suffix is 64 random bits via
 /// [`Deps::rng`] so concurrent self-updates against the same exe directory
 /// cannot collide.
+/// Staged binary filename shape: `.tk.tmp.<8-byte-hex>`, written beside the
+/// running exe, which is its collision domain.
 const STAGE_NAME_PREFIX: &str = ".tk.tmp.";
 
 /// Curl's `User-Agent` header is keyed to the running tk version so log
@@ -377,7 +379,7 @@ fn perform_update(
         ..
     } = deps;
 
-    let stage_name = render_stage_name(rng);
+    let stage_name = staging::staged_file_name(STAGE_NAME_PREFIX, rng);
     let target_path = target_dir.join(target_name);
     let stage_path = target_dir.join(&stage_name);
 
@@ -558,8 +560,8 @@ fn manpage_process_error(err: ProcError) -> String {
 
 /// Build a [`CommandError::Failure`] whose frame is `body` and whose forwarded
 /// tail is a subprocess's own stderr (`raw`), trimmed of surrounding
-/// whitespace. An empty trimmed tail forwards nothing, matching the pre-seam
-/// `if !trimmed.is_empty()` guard; a non-empty one carries its own trailing
+/// whitespace. An empty trimmed tail forwards nothing; a non-empty one
+/// carries its own trailing
 /// newline so the seam writes it verbatim after tk's frame.
 fn forwarding(body: String, raw: &[u8]) -> CommandError {
     let trimmed = trim_whitespace(raw);
@@ -585,13 +587,7 @@ fn create_exclusive(path: &Path) -> std::io::Result<fs::File> {
 /// when `-o` consumes the body to disk (asset download path; the body
 /// never reaches stdout).
 fn parse_status_only(stdout: &[u8]) -> Option<u16> {
-    let trimmed = trim_trailing_newline(stdout);
-    let last_nl = trimmed.iter().rposition(|b| *b == b'\n');
-    let code_bytes = match last_nl {
-        Some(i) => &trimmed[i + 1..],
-        None => trimmed,
-    };
-    std::str::from_utf8(code_bytes).ok()?.trim().parse().ok()
+    split_body_and_status(stdout).ok().map(|(_, status)| status)
 }
 
 fn trim_whitespace(bytes: &[u8]) -> &[u8] {
@@ -745,21 +741,6 @@ fn smoke_output_contains_token(text: &[u8], token: &str) -> bool {
         start = end;
     }
     false
-}
-
-/// Build the staged binary's filename: `.tk.tmp.<8-byte-hex>`. The hex
-/// suffix is 64 random bits so concurrent self-updates against the same
-/// exe directory cannot collide on a stage path.
-fn render_stage_name<R: Rng + ?Sized>(rng: &mut R) -> String {
-    let mut bytes = [0u8; 8];
-    rng.fill_bytes(&mut bytes);
-    let mut s = String::with_capacity(STAGE_NAME_PREFIX.len() + 16);
-    s.push_str(STAGE_NAME_PREFIX);
-    for b in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(s, "{b:02x}");
-    }
-    s
 }
 
 #[cfg(test)]
@@ -1250,7 +1231,7 @@ mod tests {
 
     fn predict_stage_name(seed: u64) -> String {
         let mut rng = StdRng::seed_from_u64(seed);
-        render_stage_name(&mut rng)
+        staging::staged_file_name(STAGE_NAME_PREFIX, &mut rng)
     }
 
     #[test]
@@ -1802,16 +1783,6 @@ mod tests {
         // No tk.exe.old.
 
         cleanup_stale_exe_at(&exe_path);
-    }
-
-    #[test]
-    fn render_stage_name_prefix_and_hex_suffix() {
-        let mut rng = StdRng::seed_from_u64(42);
-        let name = render_stage_name(&mut rng);
-        assert!(name.starts_with(STAGE_NAME_PREFIX));
-        let suffix = &name[STAGE_NAME_PREFIX.len()..];
-        assert_eq!(suffix.len(), 16);
-        assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]

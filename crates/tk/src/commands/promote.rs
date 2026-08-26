@@ -43,7 +43,7 @@ use crate::store::promotion::{
     RecoveryPromotionMapping, UnrepresentableDependency,
 };
 use crate::store::repository::RemoteWorkflowGuard;
-use crate::store::repository::{ResolvedItemRefWithDisplay, Store};
+use crate::store::repository::{ResolvedItemRef, Store};
 use crate::store::sync::BackendCohortError;
 use crate::sync::{self, CreatedIdentityNotStoredCause, RunSyncError, RunSyncErrorCategory};
 
@@ -120,15 +120,7 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         .lock_remote_workflow()
         .map_err(CommandError::failure)?;
 
-    let target = match resolver::resolve_with_display(&store, &id) {
-        Ok(r) => r,
-        Err(resolver::ResolveError::NotFound) => {
-            return Err(CommandError::failure(format!(
-                "'{id}' is not a known Display ID or Alias"
-            )));
-        }
-        Err(resolver::ResolveError::Storage(err)) => return Err(resolver::storage_error(&err)),
-    };
+    let target = resolve_target(&store, &id)?;
 
     // Only an Epic contains Promotion Children, so `--children` elsewhere is a
     // malformed invocation rather than an operation to refuse.
@@ -138,14 +130,7 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         )));
     }
 
-    let adapter_opt = match factory::open_configured(store.conn(), deps.runner, deps.cwd) {
-        Ok(adapter) => adapter,
-        Err(err @ FactoryOpenError::NotImplemented) => return Err(CommandError::failure(err)),
-        Err(FactoryOpenError::Storage(err)) => return Err(resolver::storage_error(&err)),
-    };
-    let Some(mut adapter) = adapter_opt else {
-        return Err(no_remote());
-    };
+    let mut adapter = open_adapter(deps.runner, deps.cwd, &store)?;
     promote(
         deps,
         &mut store,
@@ -164,10 +149,10 @@ fn run_reconcile(deps: &mut Deps<'_>, args: ReconcileArgs) -> Result<Exit, Comma
     let workflow = store
         .lock_remote_workflow()
         .map_err(CommandError::failure)?;
-    let target = resolve_recovery_target(&store, &args.id)?;
+    let target = resolve_target(&store, &args.id)?;
     let recovery = store_promotion::recoverable_promotion(store.conn(), &target.id)
         .map_err(|err| recovery_error(err, &target.display_id))?;
-    let mut adapter = open_recovery_adapter(deps.runner, deps.cwd, &store)?;
+    let mut adapter = open_adapter(deps.runner, deps.cwd, &store)?;
     reconcile(
         deps,
         &mut store,
@@ -186,10 +171,10 @@ fn run_retry(deps: &mut Deps<'_>, args: RetryArgs) -> Result<Exit, CommandError>
     let workflow = store
         .lock_remote_workflow()
         .map_err(CommandError::failure)?;
-    let target = resolve_recovery_target(&store, &args.id)?;
+    let target = resolve_target(&store, &args.id)?;
     let recovery = store_promotion::recoverable_promotion(store.conn(), &target.id)
         .map_err(|err| recovery_error(err, &target.display_id))?;
-    let mut adapter = open_recovery_adapter(deps.runner, deps.cwd, &store)?;
+    let mut adapter = open_adapter(deps.runner, deps.cwd, &store)?;
     retry(deps, &mut store, &mut *adapter, &workflow, &recovery, &now)
 }
 
@@ -205,18 +190,15 @@ fn run_cancel(deps: &mut Deps<'_>, args: CancelArgs) -> Result<Exit, CommandErro
     let workflow = store
         .lock_remote_workflow()
         .map_err(CommandError::failure)?;
-    let target = resolve_recovery_target(&store, &args.id)?;
+    let target = resolve_target(&store, &args.id)?;
     let report = store_promotion::cancel_promotion(store.conn_mut(), &workflow, &target.id, &now)
         .map_err(|err| cancel_error(err, &target.display_id))?;
     render_cancellation(deps.stdout, &report);
     Ok(Exit::Ok)
 }
 
-fn resolve_recovery_target(
-    store: &Store,
-    id: &str,
-) -> Result<ResolvedItemRefWithDisplay, CommandError> {
-    match resolver::resolve_with_display(store, id) {
+fn resolve_target(store: &Store, id: &str) -> Result<ResolvedItemRef, CommandError> {
+    match resolver::resolve(store, id) {
         Ok(target) => Ok(target),
         Err(resolver::ResolveError::NotFound) => Err(CommandError::failure(format!(
             "'{id}' is not a known Display ID or Alias"
@@ -225,7 +207,7 @@ fn resolve_recovery_target(
     }
 }
 
-fn open_recovery_adapter<'a>(
+fn open_adapter<'a>(
     runner: &'a dyn crate::proc::ProcRunner,
     cwd: &'a std::path::Path,
     store: &Store,
@@ -577,7 +559,7 @@ fn promote(
     store: &mut Store,
     adapter: &mut dyn Adapter,
     workflow: &RemoteWorkflowGuard,
-    target: &ResolvedItemRefWithDisplay,
+    target: &ResolvedItemRef,
     children: bool,
     now: &str,
 ) -> Result<Exit, CommandError> {
@@ -763,7 +745,7 @@ fn render_mappings<W: Write + ?Sized>(
 ) -> Result<(), CommandError> {
     let mut corruption = None;
     for item in captured {
-        let current = match resolver::resolve_with_display(store, &item.outgoing_display_id) {
+        let current = match resolver::resolve(store, &item.outgoing_display_id) {
             Ok(current) => current,
             Err(resolver::ResolveError::NotFound) => {
                 corruption.get_or_insert_with(|| {
@@ -960,7 +942,7 @@ fn render_finding(finding: &PromotionFinding, backend: BackendKind) -> String {
     }
 }
 
-/// The no-Remote diagnostic for both configuration lookup paths.
+/// The no-Remote diagnostic for the Remote configuration lookup.
 fn no_remote() -> CommandError {
     CommandError::failure("no Remote configured; run 'tk remote set <kind>' first")
 }
@@ -1021,14 +1003,14 @@ fn recovery_error(err: RecoveryPromotionError, display_id: &str) -> CommandError
                 "the Promotion for {display_id} is {state}, not an indeterminate creation; Mutation {sequence} is retried by 'tk sync'"
             ))
         }
-        // Named exhaustively rather than caught by `_`, so a variant added
-        // later has to be classified here instead of inheriting a corruption
-        // diagnosis it may not deserve.
         RecoveryPromotionError::MultipleNonterminalPromotions { first, second, .. } => {
             CommandError::failure(format!(
                 "Repository Store corruption: '{display_id}' has multiple nonterminal Promotion Mutations ({first} and {second})"
             ))
         }
+        // Named exhaustively rather than caught by `_`, so a variant added
+        // later has to be classified here instead of inheriting a corruption
+        // diagnosis it may not deserve.
         err @ (RecoveryPromotionError::MalformedPayload { .. }
         | RecoveryPromotionError::MalformedBackendKind { .. }
         | RecoveryPromotionError::MissingOperationId(_)
@@ -1149,7 +1131,7 @@ fn render_cancellation<W: Write + ?Sized>(stdout: &mut W, report: &CancellationR
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::FakeClock;
+    use crate::commands::testing::{self, Harness, cwd, expect_git};
     use crate::domain::backend_operation::{
         BackendEdit, BackendItemIdentity, BackendItemInspection, BackendItemRefresh,
     };
@@ -1157,94 +1139,26 @@ mod tests {
     use crate::domain::promotion_capability::PromotionCapabilities;
     use crate::domain::status::ItemStatus;
     use crate::domain::ticket_kind::TicketKind;
-    use crate::proc::{FakeRunner, RunOutput};
+    use crate::proc::RunOutput;
     use crate::promotion::plan::ItemRef;
     use crate::remote::fake::{
         CreateResponse, EditResponse, FakeAdapter, InspectionResponse, RefreshResponse,
     };
-    use crate::render::Styler;
-    use crate::store::migrations;
     use crate::store::sync::{LoadApplicableError, PersistMutationOutcomeError, RefreshStoreError};
     use crate::store::testing::{
         FixtureItem, FixtureMutation, FixtureRemote, TmpStore, commit_promotion, insert_alias,
         insert_dependency, insert_fixture_item, insert_fixture_mutation, insert_fixture_remote,
         mutation_count,
     };
-    use rand::SeedableRng;
-    use rand::rngs::StdRng;
     use rusqlite::Connection;
     use std::path::Path;
 
-    fn cwd() -> std::path::PathBuf {
-        std::env::current_dir().unwrap()
-    }
-
-    fn seed_store(store: &TmpStore) -> Connection {
-        std::fs::create_dir_all(store.tk_dir()).unwrap();
-        let mut conn = Connection::open(store.db_path()).unwrap();
-        conn.execute_batch("pragma foreign_keys = on").unwrap();
-        migrations::apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        conn.execute(
-            "insert into store_config(key, value) values ('display_prefix', 'tk')",
-            [],
-        )
-        .unwrap();
+    /// The shared seeded store plus the configured Remote every Promotion
+    /// test needs — `tk promote` refuses outright without one.
+    fn seed_store(fixture: &TmpStore) -> Connection {
+        let conn = testing::seed_store(fixture);
         insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
         conn
-    }
-
-    struct Harness<'a> {
-        stdout: Vec<u8>,
-        stderr: Vec<u8>,
-        stdin: std::io::Cursor<Vec<u8>>,
-        runner: FakeRunner,
-        clock: FakeClock,
-        rng: StdRng,
-        cwd: &'a Path,
-    }
-
-    impl<'a> Harness<'a> {
-        fn new(cwd: &'a Path) -> Self {
-            Self {
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-                stdin: std::io::Cursor::new(Vec::new()),
-                runner: FakeRunner::new(),
-                clock: FakeClock::new(1_778_284_800_000),
-                rng: StdRng::seed_from_u64(7),
-                cwd,
-            }
-        }
-        fn deps(&mut self) -> Deps<'_> {
-            Deps {
-                stdout: &mut self.stdout,
-                stderr: &mut self.stderr,
-                stdin: &mut self.stdin,
-                runner: &self.runner,
-                clock: &self.clock,
-                rng: &mut self.rng,
-                cwd: self.cwd,
-                styler: Styler::plain(),
-            }
-        }
-        fn out(&self) -> String {
-            String::from_utf8(self.stdout.clone()).unwrap()
-        }
-        fn err(&self) -> String {
-            String::from_utf8(self.stderr.clone()).unwrap()
-        }
-    }
-
-    /// Queue the `git rev-parse` discovery call `open_for_command` makes.
-    fn expect_git(h: &Harness<'_>, store: &TmpStore) {
-        h.runner.expect(
-            &["git", "rev-parse"],
-            RunOutput {
-                exit_code: 0,
-                stdout: store.git_rev_parse_stdout(),
-                stderr: Vec::new(),
-            },
-        );
     }
 
     fn local_ticket(conn: &Connection, id: &str, display: &str, created_seq: i64) {
@@ -1287,14 +1201,7 @@ mod tests {
 
     fn adapter_with_refresh(edits: Vec<EditResponse>, creates: Vec<CreateResponse>) -> FakeAdapter {
         FakeAdapter::new()
-            .with_refreshes(vec![RefreshResponse::Item(
-                crate::domain::backend_operation::BackendItemRefresh {
-                    title: "Adopted".into(),
-                    body: String::new(),
-                    status: crate::domain::status::ItemStatus::Open,
-                    ticket_kind: Some(TicketKind::Task),
-                },
-            )])
+            .with_refreshes(vec![refresh("Adopted", "", ItemStatus::Open)])
             .with_edits(edits)
             .with_creates(creates)
             .with_capabilities(PromotionCapabilities::all())
@@ -1338,8 +1245,8 @@ mod tests {
 
     /// Open the Repository Store the way `run` does, so a test can drive
     /// [`promote`] against a scripted Adapter.
-    fn open_store(h: &Harness<'_>, store: &TmpStore, cwd: &Path) -> Store {
-        expect_git(h, store);
+    fn open_store(h: &Harness<'_>, fixture: &TmpStore, cwd: &Path) -> Store {
+        expect_git(h, fixture);
         resolver::open_for_command(&h.runner, cwd, &h.clock).expect("open the Repository Store")
     }
 
@@ -1352,7 +1259,7 @@ mod tests {
         id: &str,
         children: bool,
     ) -> Exit {
-        let target = resolver::resolve_with_display(store, id).expect("the target resolves");
+        let target = resolver::resolve(store, id).expect("the target resolves");
         let workflow = store.lock_remote_workflow().unwrap();
         let mut deps = h.deps();
         let now = deps.clock.now_iso();
@@ -1414,7 +1321,7 @@ mod tests {
         backend_key: &str,
         force: bool,
     ) -> Exit {
-        let target = resolver::resolve_with_display(store, id).expect("the target resolves");
+        let target = resolver::resolve(store, id).expect("the target resolves");
         let recovery = store_promotion::recoverable_promotion(store.conn(), &target.id)
             .expect("the Promotion is recoverable");
         let workflow = store.lock_remote_workflow().unwrap();
@@ -1441,7 +1348,7 @@ mod tests {
         fake: &mut FakeAdapter,
         id: &str,
     ) -> Exit {
-        let target = resolver::resolve_with_display(store, id).expect("the target resolves");
+        let target = resolver::resolve(store, id).expect("the target resolves");
         let recovery = store_promotion::recoverable_promotion(store.conn(), &target.id)
             .expect("the Promotion is recoverable");
         let workflow = store.lock_remote_workflow().unwrap();
@@ -1476,11 +1383,11 @@ mod tests {
 
     #[test]
     fn an_unknown_id_names_what_the_user_typed() {
-        let store = TmpStore::new("repo");
-        seed_store(&store);
+        let fixture = TmpStore::new("repo");
+        seed_store(&fixture);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        let mut h = Harness::with_seed(&cwd_path, 7);
+        expect_git(&h, &fixture);
 
         let code = run_rendered(&mut h, "tk-9999", false);
 
@@ -1495,12 +1402,12 @@ mod tests {
 
     #[test]
     fn children_on_a_ticket_is_a_usage_error() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
+        let fixture = TmpStore::new("repo");
+        let conn = seed_store(&fixture);
         local_ticket(&conn, "t1", "tk-1", 1);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        let mut h = Harness::with_seed(&cwd_path, 7);
+        expect_git(&h, &fixture);
 
         let code = run_rendered(&mut h, "tk-1", true);
 
@@ -1521,14 +1428,14 @@ mod tests {
 
     #[test]
     fn no_remote_configured_is_a_failure_with_the_sync_guidance() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
+        let fixture = TmpStore::new("repo");
+        let conn = seed_store(&fixture);
         conn.execute("delete from sync_cursors", []).unwrap();
         conn.execute("delete from remotes", []).unwrap();
         local_ticket(&conn, "t1", "tk-1", 1);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        let mut h = Harness::with_seed(&cwd_path, 7);
+        expect_git(&h, &fixture);
 
         let code = run_rendered(&mut h, "tk-1", false);
 
@@ -1544,16 +1451,16 @@ mod tests {
 
     #[test]
     fn a_jira_remote_is_not_implemented() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
+        let fixture = TmpStore::new("repo");
+        let conn = seed_store(&fixture);
         conn.execute("update remotes set backend_kind = 'jira'", [])
             .unwrap();
         conn.execute("update sync_cursors set backend_kind = 'jira'", [])
             .unwrap();
         local_ticket(&conn, "t1", "tk-1", 1);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        let mut h = Harness::with_seed(&cwd_path, 7);
+        expect_git(&h, &fixture);
 
         let code = run_rendered(&mut h, "tk-1", false);
 
@@ -1569,8 +1476,8 @@ mod tests {
 
     #[test]
     fn github_capabilities_leave_only_real_aggregate_preflight_findings() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
+        let fixture = TmpStore::new("repo");
+        let conn = seed_store(&fixture);
         local_epic(&conn, "e1", "tk-1", 1);
         insert_fixture_item(
             &conn,
@@ -1601,8 +1508,8 @@ mod tests {
         local_ticket(&conn, "outside", "tk-4", 4);
         insert_dependency(&conn, "outside", "c1").unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        let mut h = Harness::with_seed(&cwd_path, 7);
+        expect_git(&h, &fixture);
 
         let code = run_rendered(&mut h, "tk-1", true);
 
@@ -1624,7 +1531,7 @@ mod tests {
         let conn = seed_store(&fixture);
         local_ticket(&conn, "t1", "tk-1", 1);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = FakeAdapter::new()
             .with_capability_error(AdapterReadError::Failed("taxonomy read failed".into()));
@@ -1641,12 +1548,12 @@ mod tests {
 
     #[test]
     fn a_github_remote_promotes_a_task_through_the_real_adapter() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
+        let fixture = TmpStore::new("repo");
+        let conn = seed_store(&fixture);
         local_ticket(&conn, "t1", "tk-1", 1);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        let mut h = Harness::with_seed(&cwd_path, 7);
+        expect_git(&h, &fixture);
         h.runner.expect_exact(
             &[
                 "gh",
@@ -1674,8 +1581,8 @@ mod tests {
 
     #[test]
     fn a_github_remote_promotes_an_epic_and_child_with_membership() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
+        let fixture = TmpStore::new("repo");
+        let conn = seed_store(&fixture);
         local_epic(&conn, "e1", "tk-1", 1);
         insert_fixture_item(
             &conn,
@@ -1690,8 +1597,8 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        let mut h = Harness::with_seed(&cwd_path, 7);
+        expect_git(&h, &fixture);
         h.runner.expect_exact(
             &[
                 "gh",
@@ -1753,7 +1660,7 @@ mod tests {
         conn.execute("update mutations set state = 'applying'", [])
             .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         expect_git(&h, &fixture);
         let issue = br#"{"number":42,"title":"Local work","body":"","state":"OPEN","issueType":null,"url":"https://github.com/o/r/issues/42"}"#;
         for key in ["42", "https://github.com/o/r/issues/42"] {
@@ -1798,7 +1705,7 @@ mod tests {
         conn.execute("update mutations set state = 'applying'", [])
             .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         expect_git(&h, &fixture);
         h.runner.expect_exact(
             &[
@@ -1830,7 +1737,7 @@ mod tests {
         let fixture = TmpStore::new("repo");
         let _conn = seed_store(&fixture);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         let blocking_store = open_store(&h, &fixture, &cwd_path);
         let _guard = blocking_store.lock_remote_workflow().unwrap();
         expect_git(&h, &fixture);
@@ -1857,7 +1764,7 @@ mod tests {
         let fixture = TmpStore::new("repo");
         let _conn = seed_store(&fixture);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         let blocking_store = open_store(&h, &fixture, &cwd_path);
         let _guard = blocking_store.lock_remote_workflow().unwrap();
         expect_git(&h, &fixture);
@@ -1878,7 +1785,7 @@ mod tests {
         let conn = seed_store(&fixture);
         local_ticket(&conn, "t1", "tk-1", 1);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         expect_git(&h, &fixture);
 
         let code = run_subcommand_rendered(&mut h, Sub::Retry(RetryArgs { id: "tk-1".into() }));
@@ -1900,7 +1807,7 @@ mod tests {
         conn.execute("update mutations set state = 'applying'", [])
             .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = FakeAdapter::new()
             .with_inspections(vec![inspection(
@@ -1939,7 +1846,7 @@ mod tests {
         conn.execute("update mutations set state = 'applying'", [])
             .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = FakeAdapter::new().with_inspections(vec![inspection(
             "gh-42",
@@ -1977,7 +1884,7 @@ mod tests {
         conn.execute("update mutations set state = 'applying'", [])
             .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = FakeAdapter::new().with_inspections(vec![inspection_with_kind(
             "gh-42",
@@ -2008,7 +1915,7 @@ mod tests {
         conn.execute("update mutations set state = 'applying'", [])
             .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = FakeAdapter::new().with_inspections(vec![inspection_with_kind(
             "gh-42",
@@ -2041,7 +1948,7 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = FakeAdapter::new()
             .with_inspections(vec![inspection(
@@ -2093,7 +2000,7 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = FakeAdapter::new()
             .with_inspections(vec![inspection("gh-1", "1", "Local work", "")])
@@ -2126,7 +2033,7 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = FakeAdapter::new()
             .with_inspections(vec![inspection("gh-1", "1", "Local work", "")])
@@ -2153,7 +2060,7 @@ mod tests {
         conn.execute("update mutations set state = 'applying'", [])
             .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = FakeAdapter::new().with_creates(vec![CreateResponse::Created {
             backend_key: "42".into(),
@@ -2176,7 +2083,7 @@ mod tests {
         conn.execute("update mutations set state = 'applying'", [])
             .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = FakeAdapter::new().with_creates(vec![CreateResponse::Indeterminate(
             "request outcome unknown".into(),
@@ -2205,7 +2112,7 @@ mod tests {
         commit_promotion(&mut conn, "t1");
         drop(conn);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         expect_git(&h, &fixture);
 
         let code = cancel_rendered(&mut h, "tk-1");
@@ -2231,7 +2138,7 @@ mod tests {
         conn.execute("delete from remotes", []).unwrap();
         drop(conn);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         expect_git(&h, &fixture);
 
         let code = cancel_rendered(&mut h, "tk-1");
@@ -2272,7 +2179,7 @@ mod tests {
         .unwrap();
         drop(conn);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         expect_git(&h, &fixture);
 
         let code = cancel_rendered(&mut h, "tk-1");
@@ -2295,7 +2202,7 @@ mod tests {
             .unwrap();
         drop(conn);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         expect_git(&h, &fixture);
 
         let code = cancel_rendered(&mut h, "tk-1");
@@ -2330,7 +2237,7 @@ mod tests {
         insert_dependency(&conn, "t1", "backend").unwrap();
         drop(conn);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         expect_git(&h, &fixture);
 
         let code = cancel_rendered(&mut h, "tk-1");
@@ -2348,12 +2255,12 @@ mod tests {
         drop(conn);
         let cwd_path = cwd();
         {
-            let mut h = Harness::new(&cwd_path);
+            let mut h = Harness::with_seed(&cwd_path, 7);
             expect_git(&h, &fixture);
             assert_eq!(cancel_rendered(&mut h, "tk-1"), Exit::Ok);
         }
 
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         expect_git(&h, &fixture);
         let code = cancel_rendered(&mut h, "tk-1");
 
@@ -2371,7 +2278,7 @@ mod tests {
         local_ticket(&conn, "t1", "tk-1", 1);
         drop(conn);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         expect_git(&h, &fixture);
 
         let code = cancel_rendered(&mut h, "tk-1");
@@ -2552,7 +2459,7 @@ mod tests {
         let fixture = TmpStore::new("repo");
         let _conn = seed_store(&fixture);
         let cwd_path = cwd();
-        let h = Harness::new(&cwd_path);
+        let h = Harness::with_seed(&cwd_path, 7);
         let store = open_store(&h, &fixture, &cwd_path);
         let captured = [PromotionMapping {
             item_id: "missing".into(),
@@ -2578,7 +2485,7 @@ mod tests {
         let conn = seed_store(&fixture);
         local_ticket(&conn, "other", "tk-2", 1);
         let cwd_path = cwd();
-        let h = Harness::new(&cwd_path);
+        let h = Harness::with_seed(&cwd_path, 7);
         let store = open_store(&h, &fixture, &cwd_path);
         let captured = [PromotionMapping {
             item_id: "expected".into(),
@@ -2618,7 +2525,7 @@ mod tests {
         .unwrap();
         insert_alias(&conn, "tk-2", "landed").unwrap();
         let cwd_path = cwd();
-        let h = Harness::new(&cwd_path);
+        let h = Harness::with_seed(&cwd_path, 7);
         let store = open_store(&h, &fixture, &cwd_path);
         let captured = [
             PromotionMapping {
@@ -2777,8 +2684,8 @@ mod tests {
 
     #[test]
     fn re_promoting_after_an_abandonment_warns_about_the_object_it_may_duplicate() {
-        let store = TmpStore::new("repo");
-        let mut conn = seed_store(&store);
+        let fixture = TmpStore::new("repo");
+        let mut conn = seed_store(&fixture);
         local_ticket(&conn, "t1", "tk-1", 1);
         commit_promotion(&mut conn, "t1");
         // tk never learned whether the first creation landed, so this
@@ -2786,8 +2693,8 @@ mod tests {
         conn.execute("update mutations set state = 'abandoned'", [])
             .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        let mut st = open_store(&h, &store, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = adapter(
             vec![],
             vec![CreateResponse::Created {
@@ -2796,7 +2703,7 @@ mod tests {
             }],
         );
 
-        let code = promote_rendered(&mut h, &mut st, &mut fake, "tk-1", false);
+        let code = promote_rendered(&mut h, &mut store, &mut fake, "tk-1", false);
 
         assert_eq!(code, Exit::Ok, "stderr={}", h.err());
         assert_eq!(
@@ -2807,12 +2714,12 @@ mod tests {
 
     #[test]
     fn a_local_ticket_promotes_and_reports_its_backend_display_id() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
+        let fixture = TmpStore::new("repo");
+        let conn = seed_store(&fixture);
         local_ticket(&conn, "t1", "tk-1", 1);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        let mut st = open_store(&h, &store, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = adapter(
             vec![],
             vec![CreateResponse::Created {
@@ -2821,7 +2728,7 @@ mod tests {
             }],
         );
 
-        let code = promote_rendered(&mut h, &mut st, &mut fake, "tk-1", false);
+        let code = promote_rendered(&mut h, &mut store, &mut fake, "tk-1", false);
 
         assert_eq!(code, Exit::Ok, "stderr={}", h.err());
         assert_eq!(h.out(), "Promoted Ticket: tk-1 -> gh-42\n");
@@ -2836,8 +2743,8 @@ mod tests {
 
     #[test]
     fn children_promotes_the_epic_and_its_local_children() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
+        let fixture = TmpStore::new("repo");
+        let conn = seed_store(&fixture);
         local_epic(&conn, "e1", "tk-1", 1);
         insert_fixture_item(
             &conn,
@@ -2852,8 +2759,8 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        let mut st = open_store(&h, &store, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         // Promotions first, then the membership the operation makes intent.
         let mut fake = adapter(
             vec![EditResponse::Success],
@@ -2869,7 +2776,7 @@ mod tests {
             ],
         );
 
-        let code = promote_rendered(&mut h, &mut st, &mut fake, "tk-1", true);
+        let code = promote_rendered(&mut h, &mut store, &mut fake, "tk-1", true);
 
         assert_eq!(code, Exit::Ok, "stderr={}", h.err());
         assert_eq!(
@@ -2884,8 +2791,8 @@ mod tests {
     fn a_dependency_reaches_the_backend_with_both_endpoints_resolved() {
         // ADR-0036 requires both Promotion receipts before relationship
         // delivery; otherwise the Dependency cannot be addressed.
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
+        let fixture = TmpStore::new("repo");
+        let conn = seed_store(&fixture);
         local_epic(&conn, "e1", "tk-1", 1);
         insert_fixture_item(
             &conn,
@@ -2913,8 +2820,8 @@ mod tests {
         .unwrap();
         insert_dependency(&conn, "c1", "c2").unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        let mut st = open_store(&h, &store, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         // Three Promotions, then the two memberships and the Dependency.
         let mut fake = adapter(
             vec![
@@ -2938,7 +2845,7 @@ mod tests {
             ],
         );
 
-        let code = promote_rendered(&mut h, &mut st, &mut fake, "tk-1", true);
+        let code = promote_rendered(&mut h, &mut store, &mut fake, "tk-1", true);
 
         assert_eq!(code, Exit::Ok, "stderr={}", h.err());
         let dependency = fake
@@ -2960,8 +2867,8 @@ mod tests {
 
     #[test]
     fn an_already_backend_target_appends_nothing_and_succeeds() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
+        let fixture = TmpStore::new("repo");
+        let conn = seed_store(&fixture);
         insert_fixture_item(
             &conn,
             FixtureItem {
@@ -2977,11 +2884,11 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        let mut st = open_store(&h, &store, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = adapter_with_refresh(vec![], vec![]);
 
-        let code = promote_rendered(&mut h, &mut st, &mut fake, "gh-7", false);
+        let code = promote_rendered(&mut h, &mut store, &mut fake, "gh-7", false);
 
         assert_eq!(code, Exit::Ok, "stderr={}", h.err());
         assert_eq!(h.out(), "Already promoted: gh-7\n");
@@ -2995,13 +2902,13 @@ mod tests {
         // The empty plan is the re-invocation case, so this run's whole job was
         // to drain the earlier Promotion. Exiting 0 with an empty stderr would
         // tell an agent the Promotion landed while it is still pending.
-        let store = TmpStore::new("repo");
-        let mut conn = seed_store(&store);
+        let fixture = TmpStore::new("repo");
+        let mut conn = seed_store(&fixture);
         local_ticket(&conn, "t1", "tk-1", 1);
         commit_promotion(&mut conn, "t1");
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        let mut st = open_store(&h, &store, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = adapter(
             vec![],
             vec![CreateResponse::Rejected(
@@ -3009,7 +2916,7 @@ mod tests {
             )],
         );
 
-        let code = promote_rendered(&mut h, &mut st, &mut fake, "tk-1", false);
+        let code = promote_rendered(&mut h, &mut store, &mut fake, "tk-1", false);
 
         assert_eq!(code, Exit::Failure);
         assert_eq!(h.out(), "Promotion already pending: tk-1\n");
@@ -3021,13 +2928,13 @@ mod tests {
 
     #[test]
     fn an_already_pending_target_appends_nothing_and_still_syncs() {
-        let store = TmpStore::new("repo");
-        let mut conn = seed_store(&store);
+        let fixture = TmpStore::new("repo");
+        let mut conn = seed_store(&fixture);
         local_ticket(&conn, "t1", "tk-1", 1);
         commit_promotion(&mut conn, "t1");
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        let mut st = open_store(&h, &store, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = adapter(
             vec![],
             vec![CreateResponse::Created {
@@ -3036,7 +2943,7 @@ mod tests {
             }],
         );
 
-        let code = promote_rendered(&mut h, &mut st, &mut fake, "tk-1", false);
+        let code = promote_rendered(&mut h, &mut store, &mut fake, "tk-1", false);
 
         assert_eq!(code, Exit::Ok, "stderr={}", h.err());
         assert_eq!(
@@ -3054,8 +2961,8 @@ mod tests {
 
     #[test]
     fn a_partial_batch_prints_what_landed_and_exits_failure() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
+        let fixture = TmpStore::new("repo");
+        let conn = seed_store(&fixture);
         local_epic(&conn, "e1", "tk-1", 1);
         insert_fixture_item(
             &conn,
@@ -3070,8 +2977,8 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        let mut st = open_store(&h, &store, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = adapter(
             vec![],
             vec![
@@ -3083,7 +2990,7 @@ mod tests {
             ],
         );
 
-        let code = promote_rendered(&mut h, &mut st, &mut fake, "tk-1", true);
+        let code = promote_rendered(&mut h, &mut store, &mut fake, "tk-1", true);
 
         assert_eq!(code, Exit::Failure);
         assert_eq!(
@@ -3100,12 +3007,12 @@ mod tests {
 
     #[test]
     fn an_indeterminate_creation_warns_not_to_retry_sync() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
+        let fixture = TmpStore::new("repo");
+        let conn = seed_store(&fixture);
         local_ticket(&conn, "t1", "tk-1", 1);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        let mut st = open_store(&h, &store, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = adapter(
             vec![],
             vec![CreateResponse::Indeterminate(
@@ -3113,7 +3020,7 @@ mod tests {
             )],
         );
 
-        let code = promote_rendered(&mut h, &mut st, &mut fake, "tk-1", false);
+        let code = promote_rendered(&mut h, &mut store, &mut fake, "tk-1", false);
 
         assert_eq!(code, Exit::Failure);
         assert_eq!(h.out(), "");
@@ -3130,8 +3037,8 @@ mod tests {
     /// clear an `applying` blocker, and recommending it would loop the operator.
     #[test]
     fn an_older_applying_mutation_points_at_promotion_recovery() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
+        let fixture = TmpStore::new("repo");
+        let conn = seed_store(&fixture);
         local_ticket(&conn, "t0", "tk-9", 1);
         local_ticket(&conn, "t1", "tk-1", 2);
         insert_fixture_mutation(
@@ -3154,11 +3061,11 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        let mut st = open_store(&h, &store, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = adapter_with_refresh(vec![], vec![]);
 
-        let code = promote_rendered(&mut h, &mut st, &mut fake, "tk-1", false);
+        let code = promote_rendered(&mut h, &mut store, &mut fake, "tk-1", false);
 
         assert_eq!(code, Exit::Failure);
         assert_eq!(
@@ -3204,7 +3111,7 @@ mod tests {
         conn.execute("update mutations set state = 'applying'", [])
             .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
         let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake =
             FakeAdapter::new().with_inspections(vec![inspection("gh-42", "42", "Local work", "")]);
@@ -3231,8 +3138,8 @@ mod tests {
 
     #[test]
     fn an_older_failed_mutation_leaves_the_promotion_pending_behind_it() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
+        let fixture = TmpStore::new("repo");
+        let conn = seed_store(&fixture);
         insert_fixture_item(
             &conn,
             FixtureItem {
@@ -3269,14 +3176,14 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        let mut st = open_store(&h, &store, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = adapter_with_refresh(
             vec![EditResponse::RecordedFailure("HTTP 403".into())],
             vec![],
         );
 
-        let code = promote_rendered(&mut h, &mut st, &mut fake, "tk-1", false);
+        let code = promote_rendered(&mut h, &mut store, &mut fake, "tk-1", false);
 
         assert_eq!(code, Exit::Failure);
         assert_eq!(h.out(), "", "no receipt landed, so no mapping is rendered");
@@ -3302,12 +3209,12 @@ mod tests {
 
     #[test]
     fn a_certified_creation_rejection_reports_where_the_promotion_stands() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
+        let fixture = TmpStore::new("repo");
+        let conn = seed_store(&fixture);
         local_ticket(&conn, "t1", "tk-1", 1);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        let mut st = open_store(&h, &store, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = adapter(
             vec![],
             vec![CreateResponse::Rejected(
@@ -3315,7 +3222,7 @@ mod tests {
             )],
         );
 
-        let code = promote_rendered(&mut h, &mut st, &mut fake, "tk-1", false);
+        let code = promote_rendered(&mut h, &mut store, &mut fake, "tk-1", false);
 
         assert_eq!(code, Exit::Failure);
         assert_eq!(
@@ -3331,8 +3238,8 @@ mod tests {
         // The planner judges the edge against the Origins the operation *will*
         // produce: the Promotion Child becomes backend-backed while the Item it
         // waits on stays local.
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
+        let fixture = TmpStore::new("repo");
+        let conn = seed_store(&fixture);
         local_epic(&conn, "e1", "tk-1", 1);
         insert_fixture_item(
             &conn,
@@ -3349,8 +3256,8 @@ mod tests {
         local_ticket(&conn, "outside", "tk-3", 3);
         insert_dependency(&conn, "outside", "c1").unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        let mut st = open_store(&h, &store, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         // Dependencies are the only facet this Backend cannot represent, so the
         // rejected edge is the finding, not a capability complaint.
         let mut fake = FakeAdapter::new().with_capabilities(
@@ -3361,7 +3268,7 @@ mod tests {
                 .with_epic_membership(),
         );
 
-        let code = promote_rendered(&mut h, &mut st, &mut fake, "tk-1", true);
+        let code = promote_rendered(&mut h, &mut store, &mut fake, "tk-1", true);
 
         assert_eq!(code, Exit::Failure);
         assert_eq!(

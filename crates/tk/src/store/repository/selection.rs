@@ -70,14 +70,17 @@ pub fn accept_ticket<C: Clock + ?Sized>(
 ) -> Result<AcceptOutcome, AcceptError> {
     let tx = crate::store::write_transaction(&mut store.conn)?;
 
-    let row: Option<(String, String, ItemClass, Option<SelectionState>)> = tx
-        .query_row(
-            "select display_value, title, item_class, selection_state from items where id = ?1",
-            params![id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )
-        .optional()?;
-    let Some((display_id, title, item_class, selection_state)) = row else {
+    let Some(SelectionRow {
+        display_id,
+        title,
+        item_class,
+        selection_state,
+        // Acceptance takes its Priority from the caller's `--priority`, not
+        // from the row, and is invariant-safe at any status, so neither
+        // `priority` nor `status` is consulted here.
+        ..
+    }) = read_selection_row(&tx, id)?
+    else {
         return Err(AcceptError::NotFound);
     };
 
@@ -116,9 +119,9 @@ pub fn accept_ticket<C: Clock + ?Sized>(
     }
 }
 
-/// Current-state columns the park/unpark transitions inspect before deciding
-/// whether a Selection State change is allowed. Both read the same row shape,
-/// so a single typed reader keeps the two transitions in lockstep.
+/// Current-state columns the Selection State transitions inspect before
+/// deciding whether a change is allowed. All three read the same row shape,
+/// so a single typed reader keeps the transitions in lockstep.
 struct SelectionRow {
     display_id: String,
     title: String,
@@ -126,8 +129,8 @@ struct SelectionRow {
     selection_state: Option<SelectionState>,
     priority: Option<Priority>,
     /// Item Status, read so `park_ticket` can refuse an `active` Ticket
-    /// (ADR-0029). `unpark_ticket` ignores it — unparking is always
-    /// invariant-safe.
+    /// (ADR-0029). `accept_ticket` and `unpark_ticket` ignore it — accepting
+    /// and unparking are invariant-safe at any status.
     status: ItemStatus,
 }
 
@@ -196,9 +199,10 @@ pub enum ParkError {
 /// Park a Ticket: move it from accepted to parked, preserving Priority, or
 /// confirm an already-parked Ticket as an idempotent no-op.
 ///
-/// Status-agnostic by design (ADR-0027): this touches `selection_state` only,
-/// never `status`. Rejecting `tk park` on an active Ticket is tk-76's lifecycle
-/// guard, not this transition's job. `id` is the resolved internal `items.id`.
+/// Writes `selection_state` only, never `status` (ADR-0027). It does read
+/// `status`: an `active` Ticket is refused so `active ⟹ accepted` holds, and
+/// this transition owns that diagnostic — the schema CHECK is the backstop
+/// (ADR-0029). `id` is the resolved internal `items.id`.
 pub fn park_ticket<C: Clock + ?Sized>(
     store: &mut Store,
     clock: &C,

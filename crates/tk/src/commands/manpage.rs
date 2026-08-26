@@ -11,9 +11,9 @@
 use std::path::Path;
 
 use clap::Args as ClapArgs;
-use rand::Rng;
 
 use crate::cli::{CommandError, Deps, Exit};
+use crate::commands::staging;
 use crate::platform;
 
 /// The hand-authored `man/tk.1` at the repository root, embedded per
@@ -22,6 +22,8 @@ use crate::platform;
 /// renders are the bytes this binary ships.
 const MANPAGE_BYTES: &[u8] = include_bytes!("../../../../man/tk.1");
 
+/// Staged manpage filename shape: `.tk.1.tmp.<8-byte-hex>`, written beside
+/// the installed man1 directory, which is its collision domain.
 const STAGE_NAME_PREFIX: &str = ".tk.1.tmp.";
 
 #[derive(Debug, ClapArgs)]
@@ -79,7 +81,7 @@ fn install(deps: &mut Deps<'_>) -> Result<Exit, CommandError> {
         return Err(install_failure(&target_path, &err.to_string()));
     }
 
-    let stage_name = render_stage_name(deps.rng);
+    let stage_name = staging::staged_file_name(STAGE_NAME_PREFIX, deps.rng);
     let stage_path = target_dir.join(&stage_name);
 
     if let Err(err) = std::fs::write(&stage_path, MANPAGE_BYTES) {
@@ -105,20 +107,6 @@ fn install_failure(path: &Path, reason: &str) -> CommandError {
         "install failed at {}: {reason}; existing file (if any) left unchanged",
         path.display()
     ))
-}
-
-/// Build the hex-suffixed staged filename. 64 random bits make concurrent
-/// installs collision-free without pid sniffing.
-fn render_stage_name<R: Rng + ?Sized>(rng: &mut R) -> String {
-    let mut bytes = [0u8; 8];
-    rng.fill_bytes(&mut bytes);
-    let mut s = String::with_capacity(STAGE_NAME_PREFIX.len() + 16);
-    s.push_str(STAGE_NAME_PREFIX);
-    for b in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(s, "{b:02x}");
-    }
-    s
 }
 
 #[cfg(test)]
@@ -153,15 +141,5 @@ mod tests {
         assert_eq!(code, Exit::Ok);
         assert_eq!(stdout.as_slice(), MANPAGE_BYTES);
         assert!(stderr.is_empty());
-    }
-
-    #[test]
-    fn stage_name_has_prefix_and_hex_suffix() {
-        let mut rng = StdRng::seed_from_u64(0);
-        let name = render_stage_name(&mut rng);
-        assert!(name.starts_with(STAGE_NAME_PREFIX));
-        let suffix = &name[STAGE_NAME_PREFIX.len()..];
-        assert_eq!(suffix.len(), 16);
-        assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }

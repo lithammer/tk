@@ -122,8 +122,8 @@ pub const MATCH: Style = fg(AnsiColor::BrightYellow);
 
 /// `tk grep` `--` separator between non-contiguous hunks (ADR-0026). Blue —
 /// structural chrome that should read as secondary to the cyan Display ID
-/// anchor and the red matches; cyan was reassigned to the Display ID because it
-/// pops more and the anchor needs it more than the separator does.
+/// anchor and the bright-yellow `MATCH` highlight; not cyan, which the Display
+/// ID anchor needs more than the separator does.
 pub const HUNK_SEPARATOR: Style = fg(AnsiColor::Blue);
 
 // Domain-enum → palette `Style` mappers. The single source of truth for these

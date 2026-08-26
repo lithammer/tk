@@ -108,7 +108,7 @@ where
 
     let id = generate_internal_id(rng);
     let display_id = next_display_id(&tx)?;
-    let created_seq = sequences::next(&tx, "item_created_seq")?;
+    let created_seq = sequences::next(&tx, sequences::Counter::ItemCreated)?;
 
     // Triage carries no Priority; accepted carries one (ADR-0027). The sum
     // type makes the pair consistent by construction; the combined schema
@@ -173,7 +173,7 @@ where
 
     let id = generate_internal_id(rng);
     let display_id = next_display_id(&tx)?;
-    let created_seq = sequences::next(&tx, "item_created_seq")?;
+    let created_seq = sequences::next(&tx, sequences::Counter::ItemCreated)?;
 
     tx.execute(
         "insert into items(\
@@ -235,7 +235,7 @@ fn insert_display_resolver(
 }
 
 fn next_display_id(conn: &rusqlite::Connection) -> Result<String, CreateError> {
-    let display_seq = sequences::next(conn, "display_seq")?;
+    let display_seq = sequences::next(conn, sequences::Counter::Display)?;
     let prefix: Option<String> = conn
         .query_row(
             "select value from store_config where key = 'display_prefix'",

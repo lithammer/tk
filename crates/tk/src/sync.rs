@@ -38,7 +38,9 @@ use crate::store::sync::{
 /// Summary of one sync run for the calling command to render.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncReport {
-    /// Number of Backend Items refreshed during Pull.
+    /// Number of Backend Items fetched during Pull. An Item still counts when
+    /// the merge leaves its row untouched because a pending or failed
+    /// Mutation targets it (ADR-0010).
     pub pulled_count: usize,
     /// Number of Mutations that transitioned to `applied` during this run.
     pub applied_count: usize,
@@ -197,6 +199,10 @@ impl RunSyncError {
 }
 
 /// Run one sync against a configured Adapter.
+///
+/// The workflow guard proves the caller holds the Remote workflow lock across
+/// Backend access and Repository Store persistence; the engine never acquires
+/// it, and a nested Promotion sync reuses its caller's guard.
 ///
 /// `now` is the injected timestamp written to every row this run touches.
 pub fn run_sync(

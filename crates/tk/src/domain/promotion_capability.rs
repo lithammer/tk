@@ -34,10 +34,10 @@ impl ItemClasses {
         }
     }
 
-    fn slot(&mut self, class: ItemClass) -> &mut bool {
+    fn allow(&mut self, class: ItemClass) {
         match class {
-            ItemClass::Ticket => &mut self.ticket,
-            ItemClass::Epic => &mut self.epic,
+            ItemClass::Ticket => self.ticket = true,
+            ItemClass::Epic => self.epic = true,
         }
     }
 }
@@ -67,10 +67,10 @@ impl TicketKinds {
         }
     }
 
-    fn slot(&mut self, kind: TicketKind) -> &mut bool {
+    fn allow(&mut self, kind: TicketKind) {
         match kind {
-            TicketKind::Task => &mut self.task,
-            TicketKind::Bug => &mut self.bug,
+            TicketKind::Task => self.task = true,
+            TicketKind::Bug => self.bug = true,
         }
     }
 }
@@ -99,12 +99,12 @@ impl PromotionFacets {
     };
 
     fn with_item_class(mut self, class: ItemClass) -> Self {
-        *self.item_classes.slot(class) = true;
+        self.item_classes.allow(class);
         self
     }
 
     fn with_ticket_kind(mut self, kind: TicketKind) -> Self {
-        *self.ticket_kinds.slot(kind) = true;
+        self.ticket_kinds.allow(kind);
         self
     }
 
@@ -188,12 +188,6 @@ impl PromotionRequirements {
     #[must_use]
     pub fn requires_epic_membership(self) -> bool {
         self.facets.epic_membership
-    }
-}
-
-impl Default for PromotionRequirements {
-    fn default() -> Self {
-        Self::none()
     }
 }
 

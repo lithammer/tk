@@ -15,8 +15,8 @@ use crate::store::repository::status::{self, SetStatusError, SetStatusRequest};
 
 /// Per-command success prefix tokens. `tk start` says "Started Ticket: …";
 /// `tk stop` says "Stopped Ticket: …"; `tk done` says "Done Ticket: …".
-/// The active-verb suffix is shared across both classes; only the verb
-/// differs across commands.
+/// Within one command the verb is shared across both classes; across
+/// commands only the verb differs.
 #[derive(Debug, Clone, Copy)]
 pub struct SuccessLabel {
     pub ticket: &'static str,
@@ -99,70 +99,9 @@ pub fn transition(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::FakeClock;
-    use crate::proc::{FakeRunner, RunOutput};
-    use crate::render::Styler;
-    use crate::store::migrations;
+    use crate::commands::testing::{Harness, cwd, expect_git, seed_store, seed_store_at_version};
     use crate::store::testing::{FixtureItem, TmpStore, insert_fixture_item};
-    use rand::SeedableRng;
-    use rand::rngs::StdRng;
     use rusqlite::Connection;
-    use std::path::Path;
-
-    fn cwd() -> std::path::PathBuf {
-        std::env::current_dir().unwrap()
-    }
-
-    fn seed_store(store: &TmpStore) -> Connection {
-        seed_store_at_version(store, migrations::MAX_KNOWN_VERSION)
-    }
-
-    struct Harness<'a> {
-        stdout: Vec<u8>,
-        stderr: Vec<u8>,
-        stdin: std::io::Cursor<Vec<u8>>,
-        runner: FakeRunner,
-        clock: FakeClock,
-        rng: StdRng,
-        cwd: &'a Path,
-    }
-
-    impl<'a> Harness<'a> {
-        fn new(cwd: &'a Path) -> Self {
-            Self {
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-                stdin: std::io::Cursor::new(Vec::new()),
-                runner: FakeRunner::new(),
-                clock: FakeClock::new(1_778_284_800_000),
-                rng: StdRng::seed_from_u64(0),
-                cwd,
-            }
-        }
-        fn deps(&mut self) -> Deps<'_> {
-            Deps {
-                stdout: &mut self.stdout,
-                stderr: &mut self.stderr,
-                stdin: &mut self.stdin,
-                runner: &self.runner,
-                clock: &self.clock,
-                rng: &mut self.rng,
-                cwd: self.cwd,
-                styler: Styler::plain(),
-            }
-        }
-    }
-
-    fn expect_git(h: &Harness<'_>, store: &TmpStore) {
-        h.runner.expect(
-            &["git", "rev-parse"],
-            RunOutput {
-                exit_code: 0,
-                stdout: store.git_rev_parse_stdout(),
-                stderr: Vec::new(),
-            },
-        );
-    }
 
     /// Drive `transition` and frame any returned error as the dispatch seam
     /// does (ADR-0032: `tk <command>: <body>`), so a test asserts the framed
@@ -242,21 +181,6 @@ mod tests {
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk start: Ticket 'tk-1' is done and cannot be reopened"));
-    }
-
-    /// Seed a store frozen at `version`, omitting later migrations — stands in
-    /// for an on-disk store written by an older `tk` binary.
-    fn seed_store_at_version(store: &TmpStore, version: u32) -> Connection {
-        std::fs::create_dir_all(store.tk_dir()).unwrap();
-        let mut conn = Connection::open(store.db_path()).unwrap();
-        conn.execute_batch("pragma foreign_keys = on").unwrap();
-        migrations::apply_through(&mut conn, version, "2026-05-09T00:00:00.000Z").unwrap();
-        conn.execute(
-            "insert into store_config(key, value) values ('display_prefix', 'tk')",
-            [],
-        )
-        .unwrap();
-        conn
     }
 
     const DONE: SuccessLabel = SuccessLabel {
