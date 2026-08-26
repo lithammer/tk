@@ -15,8 +15,8 @@ metadata:
 
 Translate developer-facing git commits into user-facing release notes for a
 GitHub Release. Filters out internal changes, rewrites the rest in language
-that makes sense to people running the `tk` CLI, and presents a draft for
-review.
+that makes sense to people running the `tk` CLI, calls out migrations for
+breaking changes, and presents a draft for review.
 
 ## Workflow
 
@@ -70,6 +70,9 @@ Rewrite each remaining commit as a user-facing note:
   command and later commits add flags or options to that same command, they
   are all one note about the new command — fold the flags in, do not list
   them as separate entries.
+- For a breaking change, name the existing usage that breaks and the action
+  needed to migrate. Put the whole visible change in BREAKING rather than
+  duplicating parts of it under NEW or IMPROVED.
 - Keep each note to one sentence.
 
 **Examples:**
@@ -89,13 +92,17 @@ with `-F` and `-q` flags" — not a NEW command plus two IMPROVED flag entries.
 
 ### 4. Categorize
 
-Group notes under these three section labels (omit empty sections):
+Group notes under these four section labels, in this order (omit empty
+sections):
 
+- **BREAKING** — incompatible changes that require users or scripts to migrate
 - **NEW** — new commands, flags, or behaviour
 - **IMPROVED** — enhancements to existing behaviour
 - **FIXED** — bug fixes
 
-Judge NEW vs IMPROVED against the **last release**, not against earlier commits
+Classify an incompatible change as BREAKING even while tk is below 1.0; the
+version policy does not change the migration need. For the remaining notes,
+judge NEW vs IMPROVED against the **last release**, not against earlier commits
 in this range. A command or flag that did not exist in the last release is NEW
 even if it was built up over several commits here; reserve IMPROVED for changes
 to behaviour that already shipped in a prior release. So flags added to a
@@ -106,6 +113,10 @@ a blank line and `-` bullets. Do not write markdown headings (`#`/`##`)
 yourself — the release pipeline turns these labels into headings.
 
 ```
+BREAKING
+
+- `tk next` now prints `<Display ID>: <title>` by default, so scripts that capture its output must use `tk next -q` to keep receiving only the Display ID.
+
 NEW
 
 - ...

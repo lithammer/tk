@@ -13,16 +13,17 @@ The annotated git tag is the whole release spec. The tag *name*
 `tk --version` reports the tag without any `crates/tk/Cargo.toml` bump.
 The manifest `version` stays a frozen `0.0.0` placeholder and is only
 the local-build fallback. The tag *message* carries the changelog as
-plain text under the `NEW` / `IMPROVED` / `FIXED` labels `tk-changelog`
-already emits; the release workflow promotes those three known labels to
-`####` markdown headings and uses the result as the Release body. Local
-release authoring is therefore `git tag -a vX.Y.Z -F <notes>` followed
-by `git push origin vX.Y.Z`; pushing the `v*` tag fires the workflow,
-which builds and smokes every triple (ADR-0011) and assembles a draft
-Release carrying the smoke-passing binaries, `install.sh`, `install.ps1`
-(see below), and the rendered notes. The draft is pinned to the tagged
-commit (`--target <sha>`) so commits landing on `main` before publish
-never move where the published tag points.
+plain text under the `BREAKING` / `NEW` / `IMPROVED` / `FIXED` labels
+`tk-changelog` emits. `BREAKING` comes first when present and states which
+existing use breaks and how to migrate, including for pre-1.0 releases. The
+release workflow promotes those four known labels to `####` markdown headings
+and uses the result as the Release body. Local release authoring is therefore
+`git tag -a vX.Y.Z -F <notes>` followed by `git push origin vX.Y.Z`; pushing the
+`v*` tag fires the workflow, which builds and smokes every triple (ADR-0011)
+and assembles a draft Release carrying the smoke-passing binaries,
+`install.sh`, `install.ps1` (see below), and the rendered notes. The draft is
+pinned to the tagged commit (`--target <sha>`) so commits landing on `main`
+before publish never move where the published tag points.
 
 The install scripts ship as Release assets, and the install command in
 the README resolves them from `releases/latest/download/install.{sh,ps1}`
