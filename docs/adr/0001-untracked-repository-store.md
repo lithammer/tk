@@ -1,3 +1,6 @@
 # Keep the repository store untracked by default
 
-tk uses an untracked **Repository Store** for local state instead of checking **Ticket** state into git. This diverges from repository-tracked state, where ticket state is committed into git, to avoid merge conflicts, accidental leakage of local triage notes, and noisy commits, while leaving portability to backend sync or explicit import/export.
+tk keeps local state in an untracked **Repository Store** instead of committing
+**Ticket** state to git. This avoids merge conflicts, keeps local triage notes
+out of commits, and cuts commit noise. Portability, when needed, must come from
+**Backend** sync or an explicit import and export path.

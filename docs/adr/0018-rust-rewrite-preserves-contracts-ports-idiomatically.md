@@ -1,21 +1,17 @@
-# A Rust rewrite preserves observable contracts and ports the implementation idiomatically
+# The Rust rewrite preserves observable contracts and uses idiomatic Rust
 
-This ADR records the *method* the Rust rewrite of tk followed. The go/no-go
-was a separate decision: ADR-0019 triggered the rewrite on 2026-05-28
-(fulfilling the second implementation ADR-0004 anticipated), and the
-porting-slice tickets under tk-80 inherited the fixed method recorded here
-instead of relitigating it. The canonical implementation now lives under
-`crates/tk/`.
+This ADR records the method used for tk's Rust rewrite. ADR-0019 made the
+separate go/no-go decision on 2026-05-28, starting the second implementation
+anticipated by ADR-0004. The porting Tickets under tk-80 followed this method.
+The canonical implementation now lives under `crates/tk/`.
 
-**Decision: preserve the observable contracts exactly; write the implementation
-idiomatically.** Conservative about behavior, liberal about structure. This is
-not a midpoint between a mechanical port and a from-scratch rewrite — it is the
-idiomatic rewrite, constrained by the existing specification and a differential
-oracle so it cannot drift.
+**Preserve observable contracts exactly and write idiomatic Rust.** Behavior
+stays fixed while internal structure follows Rust conventions. The existing
+specification and a differential oracle constrain the rewrite.
 
 ## The specification is not the Zig source
 
-tk's behavior was already externalized in three places; the port targeted
+tk's behavior was already recorded in three places; the port targeted
 these, not the `.zig` files (one reference implementation of them):
 
 - **The ADRs** — the durable invariants: untracked Repository Store (0001),
@@ -25,9 +21,9 @@ these, not the `.zig` files (one reference implementation of them):
   Mutation Failure record (0016).
 - **The test corpus** — the CLI byte-output and exit-code contract, encoded
   black-box (txtar scenarios + command-handler + migration tests).
-- **`CONTEXT.md`** — the domain vocabulary. Prose, so it fails no test; drift
-  here yields idiomatic-but-vocabulary-frayed Rust. The names stay (Repository
-  Store, Display ID, Mutation, Backend Adapter, …).
+- **`CONTEXT.md`** — the domain vocabulary. Tests do not catch prose drift, so
+  the Rust names must keep terms such as Repository Store, Display ID,
+  Mutation, and Backend Adapter.
 
 ## Frozen contracts vs. idiomatic internals
 
@@ -54,7 +50,8 @@ these, not the `.zig` files (one reference implementation of them):
   environment-variable stderr) via `insta` filters. The production binary
   reads **no determinism env knobs** — a runtime `SOURCE_DATE_EPOCH` read is
   a determinism seam in disguise, not a reproducible-builds feature (that
-  convention is build-time), and any such ambient-env channel is a footgun.
+  convention is build-time), and any such ambient environment variable would
+  become a hidden production input.
   Because all networking is subprocess (git / `gh` / `acli` / `curl`, per
   tk-80), network test coverage is subprocess test coverage; the standing
   policy for faking non-git subprocesses is ADR-0031 (scenarios exercise
@@ -82,7 +79,7 @@ it:
   out by the no-async constraint) — queries stay runtime-checked by
   migration/store tests.
 - **Cross-compile:** `cargo-zigbuild` uses Zig as the C cross-compiler/linker
-  for bundled SQLite, preserving the single-Linux-host six-triple release
+  for bundled SQLite, preserving the single-Linux-host five-triple release
   (0011).
 - **Styling:** `anstyle` + `anstream`. ADR-0014's *contract* is preserved (named
   semantic styles, policy resolved once and carried on `Deps`, legacy console →
@@ -135,8 +132,8 @@ it:
 
 ## Consequences
 
-- The ~25k-line port was *tractable, not small*: the method controlled risk and
-  quality, it did not shrink the work.
+- The method controlled behavioral drift across the ~25k-line port; it did not
+  reduce the work.
 - Refactor tickets shrank to **genuine design improvements** surfaced mid-port
   (e.g. data-driven dispatch), not cleanup of a mechanical translation — there
   is no Zig-shaped-Rust debt to retire.

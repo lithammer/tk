@@ -31,7 +31,7 @@ it is selectable at all. Execution mode is out of scope here.
   ranks accepted work; it cannot also mean "not accepted yet" without
   overloading ranking with acceptance.
 - **Add a fourth Item Status.** Rejected: lifecycle and selection policy are
-  orthogonal. A parked Ticket has lifecycle `open`; a triage bug is still a
+  independent. A parked Ticket has lifecycle `open`; a triage bug is still a
   bug. Collapsing policy into lifecycle loses that and complicates every
   Item Status transition.
 - **Make Priority optional and treat "no Priority" as untriaged.** Rejected:

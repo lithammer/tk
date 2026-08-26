@@ -1,11 +1,10 @@
 # The Rust rewrite proceeds; Zig main is frozen as the oracle
 
 ADR-0004 chose Zig 0.16 for the *first* implementation as an exploration
-opportunity, anticipating a second. That trigger fires: development moves to
-Rust on `rust-main`; `main` (Zig) is frozen and serves only as the oracle
-source for the differential port governed by ADR-0018. ADR-0004 is left
-unchanged as the historical record; this ADR records that its anticipated
-second implementation begins.
+opportunity and anticipated a second. Development now moves to Rust on
+`rust-main`; `main` (Zig) is frozen and serves only as the oracle source for
+the differential port governed by ADR-0018. ADR-0004 remains the historical
+record of the first implementation.
 
 ## Rationale
 
@@ -23,18 +22,17 @@ ADR-0004 named:
 - **Pre-1.0 language churn.** Zig 0.16 is pinned exactly because the language
   is unstable; the tax is recurring.
 
-The cost of switching is at its minimum (single author, ~3 weeks, ~25k LOC,
-no externally visible users), and the strategy is settled: ADR-0018 fixes the
-method, with its oracle mechanic corrected to match how `script.zig` actually
-runs.
+The switch cost is low: one author, about three weeks of work, about 25,000
+lines, and no externally visible users. ADR-0018 defines the method and aligns
+the oracle plan with how `script.zig` runs.
 
 ## Considered Options
 
 - **Continue in Zig.** Rejected: the friction predicted by ADR-0004 has
   materialized exactly where it was named (errors, test tooling, language
   churn), and the cost of switching compounds with every additional feature.
-- **Defer to a later date.** Rejected: per-feature opportunity cost rises
-  monotonically; "now" is the cheapest moment that will exist.
+- **Defer to a later date.** Rejected: each new Zig feature would make a later
+  switch costlier.
 
 ## Consequences
 

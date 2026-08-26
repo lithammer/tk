@@ -1,3 +1,6 @@
 # Use a current-state store with a mutation outbox
 
-tk keeps current **Ticket** and **Epic** state in the **Repository Store** and uses the **Mutation Log** as an append-only outbox for replayable backend intent. This avoids making normal CLI reads depend on event-sourced replay, while still preserving local intent for retries, receipts, and backend synchronization.
+tk keeps current **Ticket** and **Epic** state in the **Repository Store**.
+Normal CLI reads use that state directly. The append-only **Mutation Log**
+preserves Backend intent for retries, receipts, and sync without making reads
+replay an event history.

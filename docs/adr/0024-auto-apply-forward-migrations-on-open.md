@@ -1,19 +1,18 @@
 # Auto-apply forward migrations on open; refuse future-version stores
 
-The Repository Store opens through a single production constructor,
-`open_existing` (every command funnels through `resolver::open_for_command`).
-That chokepoint now makes **"schema is current" an invariant of holding a
-`Store`**: the version gate is symmetric. A store recorded *newer* than this
-binary is refused fail-closed (`FromFutureVersion`); a store recorded *behind*
-`MAX_KNOWN_VERSION` has its pending forward migrations applied in place before
-the handle is returned. No command performs migration; migration is a property
-of having opened the store.
+The Repository Store opens through one production constructor,
+`open_existing`; every command reaches it through `resolver::open_for_command`.
+This path makes **"schema is current" an invariant of holding a `Store`**. It
+refuses a store recorded *newer* than the binary (`FromFutureVersion`). It
+applies pending forward migrations to a store recorded *behind*
+`MAX_KNOWN_VERSION` before returning the handle. Commands do not perform
+migration themselves; opening the store does.
 
 Migrations previously ran only in `tk init`. A newer binary opening an older
 on-disk store therefore fell through the gate and surfaced a cryptic `no such
 column` at the first write — exactly what shipped with migration 003
 (`closing_reason`, tk-61): `tk done -m` failed until the user manually re-ran
-`tk init`. tk-110 removes that footgun for 003 and every future migration.
+`tk init`. tk-110 fixes that failure mode for 003 and every future migration.
 
 This matches how local-first / embedded-database tools treat state they own.
 The Repository Store is single-owner, app-exclusive, untracked local state
@@ -27,19 +26,17 @@ on-disk version must refuse to operate rather than guess.
 - **Keep migrating only in `tk init`.** Rejected: this *is* the bug. It leaves
   every existing store stranded at the old schema until a manual re-init, and
   the failure is a raw SQLite `no such column`, not a diagnosable tk error.
-- **Add an explicit `tk migrate` command (the ORM / Git "explicit camp").**
-  Diesel, sqlx, Django, and EF Core migrate on an explicit command and fail
-  closed on unknown versions. That camp serves multi-instance server apps
-  pointed at a shared, separately-administered database, where a surprise
+- **Add an explicit `tk migrate` command.** Diesel, sqlx, Django, and EF Core
+  migrate on an explicit command and fail closed on unknown versions. Those
+  tools serve multi-instance server apps pointed at a shared, separately
+  administered database, where an unexpected
   schema write under load is the hazard. tk's store has none of those
   properties — single owner, opened by one short-lived process at a time — so
-  the hazard the explicit camp guards against does not apply (the "startup
-  migration is inherently unsafe" claim was investigated and refuted against
-  primary sources). `open` plus `init` already cover create and upgrade; a
-  standalone command would be ceremony with no store this tool can't reach.
+  the same risk does not apply. `open` plus `init` already cover create and
+  upgrade; a standalone command would add no otherwise unreachable operation.
 - **Lazy / on-demand migration (apply a column when a query first needs it).**
   Rejected: scatters schema knowledge across the read/write paths and defeats
-  the single-chokepoint invariant. The version gate is one place; keep it one
+  the single-entry-point invariant. The version gate is one place; keep it one
   place.
 
 ## Consequences

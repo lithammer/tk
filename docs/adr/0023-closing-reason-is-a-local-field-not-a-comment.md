@@ -10,7 +10,7 @@ Backend in v1.
 
 A closing reason reads like a comment, and v1 defers Comments
 (CONTEXT.md; the `mutations` Mutation Type list; ADR-0021). Treating it as
-a Local Field dissolves that conflict instead of blocking the ticket on
+a Local Field removes that conflict instead of blocking the Ticket on
 the Comments slice: Priority is the precedent — local-only, unsynced,
 shown by `tk show`.
 

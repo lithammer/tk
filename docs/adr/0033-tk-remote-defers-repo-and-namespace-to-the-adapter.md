@@ -1,11 +1,11 @@
-# `tk remote` configures the Primary Backend minimally; repo resolution and Display ID namespace are deferred to the Backend Adapter
+# `tk remote` defers repository and namespace choices to the Backend Adapter
 
 tk-106 ships `tk remote set` / `tk remote clear` / `tk remote` (show) so a GitHub
 Remote becomes configurable and CLI-testable end-to-end, unblocking tk-34 (the
 GitHub Backend Adapter). Two things the tk-106 ticket scoped *in* are
-deliberately cut, both for the same reason: they require backend-specific
+left out, both for the same reason: they require Backend-specific
 knowledge the Backend Adapter owns (tk-34 for GitHub, tk-35 for Jira), not the
-config-CRUD command. This applies the project's "defer evidence-determined
+Remote configuration command. This applies the project's "defer evidence-determined
 types" rule (AGENTS.md) and the ADR-0016 precedent at the command layer.
 
 ## The Display ID namespace a Remote occupies is per-(kind, config), not a property of the kind
@@ -79,7 +79,7 @@ This cut cascades through the command surface:
 
 The cost is that tk-34 must resolve its repository from the checkout rather than
 sync to an arbitrary pinned repo. Accepted: pointing a repository's store at a
-*different* GitHub repository is a near-always-wrong configuration.
+*different* GitHub repository usually indicates a configuration error.
 
 ## Considered Options
 

@@ -1,9 +1,21 @@
 # Keep the architecture document compact
 
-`ARCHITECTURE.md` is an architecture map, not a slice archive. It should describe the current module boundaries and durable implementation contracts. It should not retain detailed plans for features after those features have shipped.
+`ARCHITECTURE.md` maps current module boundaries and durable implementation
+contracts. It does not keep detailed plans after a feature ships.
 
-Future work belongs in Local Tickets so it appears in `tk list` / `tk next` and can carry tactical implementation detail in the ticket body. Durable product language belongs in `CONTEXT.md`; user-visible command reference belongs in command help, `man/tk.1`, and tests; significant design decisions belong in ADRs; agent-facing conventions (code documentation, error handling, testing) belong in `AGENTS.md`. Once a slice lands, its checklist-style notes should be deleted from `ARCHITECTURE.md` unless they still explain an active boundary or invariant.
+Future work belongs in Local Tickets so it appears in `tk list` and `tk next`
+and can carry implementation detail in the Ticket body. Durable product
+language belongs in `CONTEXT.md`. Command reference belongs in command help,
+`man/tk.1`, and tests. Design decisions belong in ADRs. Agent-facing rules
+belong in `AGENTS.md`. Once a slice lands, remove its checklist from
+`ARCHITECTURE.md` unless it still explains an active boundary or invariant.
 
-This keeps agent context small and prevents old slice plans from becoming a second, stale source of truth beside code, tests, tickets, and ADRs. The trade-off is that detailed history moves to git history and ticket bodies instead of remaining inline in the architecture guide.
+This keeps agent context small and stops old slice plans from becoming a stale
+source beside code, tests, Tickets, and ADRs. Detailed history moves to git
+history and Ticket bodies instead of staying in the architecture guide.
 
-(Originally written when the document was called `docs/implementation.md`; renamed to `ARCHITECTURE.md` at the repo root after the v1 implementation slices shipped.)
+## History
+
+This ADR was written when the document was called `docs/implementation.md`.
+The document moved to the repository root as `ARCHITECTURE.md` after the v1
+implementation slices shipped.

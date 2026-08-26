@@ -44,8 +44,8 @@ the Release page still gets headings.
 
 Keeping `crates/tk/Cargo.toml` as the version source — bumping and
 committing it per release, guarded by a workflow check against the tag —
-was rejected: the bump commit is pure ceremony for a crate that is not
-published to a registry, and injecting `TK_VERSION` from the tag removes
+was rejected: the bump commit stores release-only metadata for a crate that is
+not published to a registry, and injecting `TK_VERSION` from the tag removes
 both the edit and the entire class of tag-vs-manifest drift the guard
 existed to catch.
 
