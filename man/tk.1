@@ -373,7 +373,7 @@ On success it prints one
 .RE
 .SS Selecting Ready Work
 .TP
-\fBtk next\fR [\fIepic-id\fR]
+\fBtk next\fR [\fB\-q\fR] [\fIepic-id\fR]
 Select the next ready Ticket.
 .PP
 .B tk next
@@ -401,11 +401,16 @@ writes one rationale line to standard error in the form
 .RE
 so the non-obvious pick is explainable without a follow-up
 .BR "tk show" .
-Standard output stays a single Display ID line, so
-.B id=$(tk next)
+Standard output is a single line carrying the Display ID and the title.
+.B \-q
+.RB ( \-\-quiet )
+prints the Display ID alone, so
+.B id=$(tk next \-q)
 captures only the selection; redirect standard error with
 .B 2>/dev/null
-to suppress the rationale.
+to suppress the rationale, which
+.B \-q
+does not itself silence.
 .PP
 Parent Epic status, Dependencies, and External Blockers do not hide otherwise
 ready child Tickets.
@@ -436,7 +441,17 @@ answers with one Ticket. To inspect the whole ready set instead, use
 .PP
 On success,
 .B tk next
-prints one Display ID:
+prints one line:
+.PP
+.RS 4
+.nf
+<display-id>: <title>
+.fi
+.RE
+.PP
+With
+.BR \-q ,
+that line is the bare Display ID, unstyled whatever the colour policy:
 .PP
 .RS 4
 .nf
@@ -445,8 +460,9 @@ prints one Display ID:
 .RE
 .PP
 .B tk next
-has no JSON or structured-output mode in v1; the Display ID line is the
-machine interface.
+has no JSON or structured-output mode in v1; the
+.B \-q
+Display ID line is the machine interface.
 .PP
 If no ready Ticket matches,
 .B tk next
@@ -640,7 +656,7 @@ run:
 .RS 4
 .nf
 export TK_SCOPE=project-1
-while id=$(tk next); do
+while id=$(tk next \-q); do
     tk start "$id"
     # ... implement ...
     tk done "$id"
