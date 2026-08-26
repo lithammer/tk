@@ -82,9 +82,9 @@ agents the reason.
 
 ## Amendment (tk-171): the supported scripting form is now `tk next -q`
 
-The premise inside **Rationale on stdout** is no longer true. That
-entry reads "Rejected because `id="$(tk next)"` is a supported usage;
-a second stdout line would break it." As of tk-171 `tk next` prints
+The premise inside **Rationale on stdout** is outdated. That entry says
+`id="$(tk next)"` is supported and a second stdout line would break it. As of
+tk-171, `tk next` prints
 `<display-id>: <title>`, so `id="$(tk next)"` captures the title along
 with the **Display ID**. The supported scripting form is
 `id="$(tk next -q)"`, which restores the bare **Display ID** line
@@ -102,17 +102,8 @@ under `CLICOLOR_FORCE=1` the default prints a coloured **Display ID**
 and `-q` prints a plain one. The asymmetry is deliberate: `-q` exists
 to be captured, so its bytes must not vary with colour policy.
 
-`-q` collides with `tk grep -q`, which suppresses all output and lets
-the exit status carry the answer, while `tk next -q` still prints a
-line. Two spellings, two meanings, one CLI.
-
-`tk grep -q` is not the one that should move: it deliberately mimics
-grep(1), where `-q` has meant exactly that for decades, and a tool
-that offers `tk grep` has already promised that shape. `tk next` has
-no such external convention to honour — `-q` there is simply the
-spelling tk-171 chose, ratified with the collision on the table rather
-than discovered afterwards. `--id-only` and `--plain` were the
-alternatives; neither was ruled out on the merits.
-
-The cost lands on tk-173, which can no longer reuse `-q` as the shared
-name for the low-chrome mode across the read commands.
+`-q` has different meanings in `tk grep` and `tk next`. `tk grep -q` follows
+grep(1): it suppresses output and uses the exit status. `tk next -q` prints one
+line. tk-171 chose this spelling after considering the collision;
+`--id-only` and `--plain` remained viable alternatives. As a result, tk-173
+cannot use `-q` as one shared name for a low-chrome mode across read commands.

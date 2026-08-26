@@ -45,11 +45,11 @@ Inferred Workspace Scope was doubly weak: feature branches are named after the
 *Ticket* (`tk/tk-123-…`), so inference resolved to a single Ticket — exactly
 the useless narrowing above — and it was invisible ambient state with no
 off-switch, the property that makes hidden behavior hard to trust. A
-deliberately set `tk.scope` in Worktree Config has the same hidden-state
+deliberately set `tk.scope` value in Worktree Config has the same hidden-state
 shape: durable on disk, outliving the work, silently changing what `tk next`
 considers. `TK_SCOPE` keeps the one workflow that mattered (the AFK epic
-grind) while being ephemeral, inspectable (`echo $TK_SCOPE`), and trivially
-cleared (`unset`, or a fresh shell).
+grind) while being ephemeral, inspectable (`echo $TK_SCOPE`), and easy to
+clear with `unset` or a fresh shell.
 
 Worktree *creation* needs no `tk` abstraction. `git worktree add` plus a
 branch is two commands the harness already runs; `tk worktree start` was a
@@ -65,8 +65,8 @@ principle of ADR-0018 does not bind here.
 ## Considered Options
 
 - **Keep stored scope, set explicitly via a new `tk track <epic-id>`.**
-  Rejected: an explicitly *set* persisted scope has the identical
-  spooky-action-at-a-distance as inference — `tk next` behaves differently
+  Rejected: an explicitly *set* persisted Scope has the same hidden-state
+  problem as inference — `tk next` behaves differently
   because of state set earlier and not visible in the command typed. The
   objection to inference was its invisibility and lack of an off-switch, which
   deliberate persistence does not cure.

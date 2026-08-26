@@ -11,7 +11,7 @@ silence outside an initialized repo.
 
 ## Considered Options
 
-Detection reuses the existing `open_existing` seam and treats **every**
+Detection uses the existing `open_existing` seam and treats **every**
 `OpenError` as silent — no store, outside a git repository, git missing, a
 foreign database, a future-version store, or a SQLite fault all take the
 empty-success path. Keeping genuine faults loud was rejected: Prime is not the

@@ -7,7 +7,6 @@
 > principle — every stable user-visible line findable by exact-string search —
 > survives at body granularity.
 
-
 The per-command message families in the `messages` module —
 `<cmd>_missing_store`, `<cmd>_out_of_memory`, `<cmd>_store_busy_retry`,
 `<cmd>_id_not_found_prefix`, and the byte-identical

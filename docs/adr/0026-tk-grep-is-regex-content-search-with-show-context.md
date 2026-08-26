@@ -1,4 +1,4 @@
-# tk grep is regex content search rendered as streamed tk-show context; ranked recall belongs to tk search
+# `tk grep` is regex content search with `tk show` context
 
 `tk grep <pattern>` (tk-113) finds **Tickets** and **Epics** whose **title** or
 **body** text matches a **regular expression**, and renders each match as a
@@ -19,13 +19,13 @@ ranked**.
 
 ## Considered Options
 
-The decision turned on the matching model. The `grep -C` line-context output is
-matcher-agnostic — every model must materialise a matched body in Rust and slice
-line hunks — so it did not discriminate the options; *name-honesty*, the
-*frozen default-semantics contract*, and *output shape* did.
+The decision turned on the matching model. Every model must load a matched body
+in Rust and slice line hunks for the `grep -C` output. The options instead
+differed in whether the command name matched its behavior, whether the default
+could change later, and which output shape they supported.
 
-- **Literal substring (the `tk search` model).** Rejected as a *trap*, not
-  merely as under-powered. A command named `grep` connotes pattern matching, and
+- **Literal substring (the `tk search` model).** Rejected because a command
+  named `grep` implies pattern matching, and
   the one change that is **not** additive later is flipping the default from
   literal to regex: the day you do, every pattern containing `. * + ? ( ) | [ ]`
   silently changes meaning for existing scripts. "Literal now, regex later" is
@@ -55,7 +55,7 @@ line hunks — so it did not discriminate the options; *name-honesty*, the
   recall in **`tk search`** — the "fuzzy title recall" ADR-0025 already names as
   search's distinct value.
 
-The deciding insight: a ranked, thresholded, scored result is structurally
+The deciding constraint is that a ranked, thresholded result is structurally
 incompatible with streaming one matched item to stdout at a time, so **positional
 order and "never ranked" are the same decision** — and that decision is what
 keeps both FTS5 and fuzzy on the **Search** side of the line, as separate future
@@ -69,8 +69,8 @@ These user-facing contracts are frozen because none can change additively later:
   backreferences/lookaround). Help text states the dialect so the divergence
   from classic BRE `grep` (`+ ? | ( )` are metacharacters) is explicit.
 - **Case-sensitive by default**, with a future `-i`/`--ignore-case`. This
-  deliberately diverges from **`tk search`**'s case-insensitive title match;
-  the divergence matches the `grep` namesake and is intentional.
+  differs from **`tk search`**'s case-insensitive title match. This follows the
+  `grep` namesake.
 - **Whole-store, every Item Status**, and **`TK_SCOPE` is ignored** (ADR-0022):
   a lookup must not be silently narrowed — you grep precisely because you do not
   know where the text lives.
@@ -137,8 +137,8 @@ error. That conflated two cases. Only the **empty** pattern is dangerous: an
 empty regex (and an empty `instr` substring in **`tk search`**) matches every
 row and would dump the whole store. A **whitespace** pattern is an ordinary, if
 unusual, needle — `grep '  '`, `grep -F '  '`, and `rg -F '  '` all match a line
-containing those spaces and exit `0`. There is no name-honest reason for the
-`grep` namesake to refuse what `grep` accepts.
+containing those spaces and exit `0`. The tk command should not refuse a
+pattern that its `grep` namesake accepts.
 
 So the guard narrows from `pattern.trim().is_empty()` to `pattern.is_empty()` in
 both **`tk grep`** and **`tk search`**: a whitespace pattern now searches

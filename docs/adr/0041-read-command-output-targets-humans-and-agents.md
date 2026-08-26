@@ -6,12 +6,12 @@ reading that same text. tk ships no structured serialization of that output:
 no `--json`, no `--porcelain`. Programmatic access to work items is the
 **Repository Store** itself, the SQLite database at `.git/tk/tk.db`.
 
-## Why not a serialization
+## Why not a machine format
 
-Both consumers are readers. An agent reads rendered text as well as a person
-does, and a structured envelope costs it tokens on every call while carrying
-nothing the text does not already say. A person cannot read JSON at all.
-Neither audience walks fields.
+Both intended consumers can read the rendered text. A structured envelope adds
+field names and punctuation to every call. At a terminal, rendered text is
+easier to scan than JSON. Normal read commands do not require field-by-field
+traversal.
 
 The store answers the programmatic question better than a flag could. It has a
 declared schema with CHECK constraints, and it holds columns no renderer shows
@@ -19,7 +19,7 @@ declared schema with CHECK constraints, and it holds columns no renderer shows
 timestamps. A `--json` flag would publish a narrower view through a second
 surface.
 
-A serialization is also a second contract. ADR-0017 fixes the verbatim
+A machine format would also be a second contract. ADR-0017 fixes the verbatim
 user-facing strings; a machine format would add field names, nesting, null
 handling, and its own versioning, kept beside the renderer and free to drift
 from it.
@@ -52,8 +52,8 @@ not contradict it.
 - Output shape does not depend on where stdout points. A reader gets the same
   text piped, redirected, or on a terminal. Only styling adapts, and ADR-0014
   already scopes that to colour through a per-stream `IsTerminal` probe.
-- tk forgoes the `gh --json` integration path. Anything built on tk either
-  parses the rendered text or reads the store.
+- tk forgoes the `gh --json` integration path. A tool that needs structured
+  access must either parse the rendered text or read the store.
 - Programmatic access already lives in the store, and a consumer reading it is
   coupled to a schema that migrations change. This ADR records where that
   access is, not a promise that the schema holds still.

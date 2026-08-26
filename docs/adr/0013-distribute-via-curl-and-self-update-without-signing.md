@@ -1,4 +1,4 @@
-# Distribute via curl|sh and tk self-update without signing in v1
+# Distribute via `curl | sh` and `tk self-update` without signing in v1
 
 Step 1 of release distribution serves bare-binary release assets from
 GitHub Releases through a POSIX install script at
@@ -16,7 +16,7 @@ same smoke-`--version` verification, and — for the same trust-root
 reasoning — no checksum or signature. Homebrew/Scoop manifests and
 minisign signing are deferred to follow-up tickets.
 
-ADR-0029 supersedes the original `raw.githubusercontent.com/.../main/`
+ADR-0030 supersedes the original `raw.githubusercontent.com/.../main/`
 install-script URLs recorded here: the install scripts now ship as
 assets on the immutable latest Release, so the bootstrap command is
 pinned to a published release rather than a mutable `main` path.

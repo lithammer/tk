@@ -37,9 +37,9 @@ The two diverge on the mixed case. A backend-backed Blocked Item still waiting
 on a Local Blocking Item **rejects the whole operation**; a Backend Ticket
 inside a Local Epic **stays local and is not a finding**. The asymmetry is
 about what a half-represented relationship costs. A Dependency is a constraint,
-so a backend-backed item that shows only part of it misrepresents whether the
+so a Backend-bound item that shows only part of it misrepresents whether the
 work can proceed — the wrong answer to a question the Backend is now being
-asked. Membership is grouping: the backend issue simply sits outside a
+asked. Membership is grouping: the Backend issue stays outside a
 grouping, which is what it would look like before any Promotion anyway, and the
 Repository Store keeps the real containment for tk's own views. Rejecting there
 would make an Epic unpromotable until every Ticket it holds was promoted too,

@@ -9,21 +9,21 @@ This supersedes the original tk-34 Pull design — a single
 
 ## Why opt-in, not mirror
 
-The mirror model does not merely strain throughput — it swamps the local
-tracker. `merge_backend_snapshots` imports every Backend issue as an `accepted`
+The mirror model fills the local tracker with unchosen work.
+`merge_backend_snapshots` imports every Backend issue as an `accepted`
 Backend Ticket (ADR-0027), and `accepted` is exactly the state `tk next`
-selects and `tk list` surfaces. A full Pull of a real Backend — a 15k-item Jira
-project, a long-lived GitHub repo — therefore dumps thousands of Tickets the
+selects and `tk list` surfaces. A full Pull of a large Jira project or a
+long-lived GitHub repository can therefore add thousands of Tickets the
 user never chose straight into the selection queue, the opposite of a
 "lightweight local tracker."
 
 A fixed pull cap (the deferred `--limit 1000` + truncation warning) only bounds
-*how much* swamping happens, and silently drops everything past the cap;
-`--state all` makes that realistic rather than theoretical, since a mature repo
-exceeds 1000 closed issues on its own.
+how much unchosen work is imported and silently drops everything past the cap;
+`--state all` makes that likely for a mature repository, which may have more
+than 1,000 closed issues.
 
-Opt-in dissolves the problem at the root: the working set is bounded by what
-the user Adopted, not by the size of the Backend. The 1000 cap, the truncation
+Opt-in removes this problem: the working set is bounded by what
+the user Adopted, not by the size of the Backend. The 1,000-item cap, the truncation
 warning, and the since-timestamp delta optimisation all become moot — there is
 no list to bound.
 
@@ -44,8 +44,8 @@ no list to bound.
 ## Considered Options
 
 - **Mirror the whole Backend every sync** (the original tk-34 / ADR-0021
-  design). Rejected: swamps the selection queue and caps/truncates at scale, as
-  above.
+  design). Rejected: fills the selection queue and requires caps or truncation
+  for large Backends.
 - **Mirror, but import as `triage`** so imported items stay out of `tk next`.
   Rejected: still pulls and stores the entire Backend (the scale ceiling is
   unsolved) and still floods `tk list`.

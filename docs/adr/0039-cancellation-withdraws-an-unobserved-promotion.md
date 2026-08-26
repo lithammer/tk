@@ -5,7 +5,7 @@ naming Promotion Reconciliation and Promotion Retry instead. The tk-142 canary
 (docs/spikes/promotion-operation-canary.md) followed every documented exit to
 its end against a Promotion whose title GitHub will never accept, and none of
 them resolves it. Promotion Retry replays the frozen payload and fails
-identically. Promotion Reconciliation has no honest key to offer for an object
+identically. Promotion Reconciliation has no candidate key for an object
 that was never created. Forced reconciliation against an unrelated issue is the
 only thing that works, and it permanently binds the Ticket to a foreign Backend
 object and queues an overwrite of that object's title and body. Nothing says

@@ -1,4 +1,4 @@
-# Sync failures split into three audiences by persistence lifetime
+# Sync failures follow three persistence rules
 
 The sync engine distinguishes three failure audiences. Each has a different
 persistence lifetime, which drives whether a Mutation row transitions and
@@ -49,10 +49,9 @@ stores it fails, the Mutation remains `applying`. The error preserves the
 canonical Backend identity and warns against automatic retry; a generic Store
 error would hide that the external object already exists.
 
-The two non-obvious claims are that **Pull failures stamp nothing** (they're
-not associated with any outbox row) and that **Apply failures persist per
-Mutation** rather than into a global "last failure" or a separate failures
-table.
+The key rules are that **Pull failures stamp nothing** because they do not map
+to an outbox row, while **Apply failures persist on each Mutation** rather than
+in a global "last failure" record or a separate failures table.
 
 ## Considered Options
 

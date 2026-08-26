@@ -3,9 +3,9 @@
 Release builds produce all five supported triples from one
 `ubuntu-latest` GitHub Actions runner. The active build (Rust) uses
 `cargo-zigbuild`, which keeps Zig as the C cross-compiler/linker for
-bundled SQLite; the toolchain (Rust + Zig CC pin) is recorded so the
-same source revision produces byte-identical outputs across rebuilds
-(Level-2 reproducibility). Smoke verification then runs on per-platform
+bundled SQLite. The recorded Rust and Zig CC versions target Level-2
+reproducibility: rebuilding the same source revision should produce
+byte-identical output. Smoke verification then runs on per-platform
 native GitHub runners against the cross-compiled artifact, so what
 gets tested is the shipped bytes, not a fresh native rebuild.
 
