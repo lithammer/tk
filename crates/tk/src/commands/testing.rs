@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rusqlite::Connection;
+use serde_json::json;
 
 use crate::cli::Deps;
 use crate::clock::FakeClock;
@@ -114,6 +115,55 @@ pub(crate) fn expect_git(h: &Harness<'_>, store: &TmpStore) {
         RunOutput {
             exit_code: 0,
             stdout: store.git_rev_parse_stdout(),
+            stderr: Vec::new(),
+        },
+    );
+}
+
+/// Queue one exact GraphQL Pull request and its matching Issue response.
+pub(crate) fn expect_github_pull(
+    h: &Harness<'_>,
+    owner: &str,
+    name: &str,
+    number: i64,
+    title: &str,
+    body: &str,
+) {
+    let request = crate::remote::github::single_pull_request_body(owner, name, number);
+    let response = serde_json::to_vec(&json!({
+        "data": {
+            "item_0": {
+                "isInOrganization": true,
+                "item": {
+                    "__typename": "Issue",
+                    "number": number,
+                    "title": title,
+                    "body": body,
+                    "state": "OPEN",
+                    "url": format!("https://github.com/{owner}/{name}/issues/{number}"),
+                    "issueType": null,
+                    "labels": { "nodes": [] },
+                },
+            },
+        },
+    }))
+    .unwrap();
+    h.runner.expect_exact_with_stdin(
+        &[
+            "gh",
+            "api",
+            "graphql",
+            "--hostname",
+            "github.com",
+            "-H",
+            "Content-Type: application/json",
+            "--input",
+            "-",
+        ],
+        &request,
+        RunOutput {
+            exit_code: 0,
+            stdout: response,
             stderr: Vec::new(),
         },
     );

@@ -32,12 +32,13 @@ no list to bound.
 - **Adopt is the sole Backend → tk intake path in v1.** Promotion (tk →
   Backend, deferred) is its inverse. Both yield a Backend Ticket and both are
   explicit.
-- **Backend Pull becomes refresh-by-key.** The sync engine derives the active
-  Adopted key set (`status in ('open','active')`) and the Backend Adapter
-  fetches exactly those (`gh issue view <n>` per key). Adopt receives canonical
-  intake data and inserts a Backend Ticket; Pull receives field-only refreshes
-  and cannot insert or alter Backend identity, Display ID, Origin, or Item
-  Class. Pull collects every refresh before its one merge transaction.
+- **Backend Pull refreshes an exact working set.** The sync engine derives the
+  active Adopted key set (`status in ('open','active')`) and gives the complete
+  set to the Backend Adapter. The Adapter may batch those exact-key reads, but
+  cannot list or discover other Backend items. Adopt receives canonical intake
+  data and inserts a Backend Ticket; Pull receives field-only refreshes and
+  cannot insert or alter Backend identity, Display ID, Origin, or Item Class.
+  Pull collects every refresh before its one merge transaction.
 - **No auto-discovery.** A Backend issue the user has not Adopted never appears
   in tk; discovery stays the Backend's own UI.
 
@@ -57,9 +58,26 @@ no list to bound.
   team project) this is a feature, not a regression; for a small personal repo,
   a future bulk `tk adopt --all-open`-style convenience can adopt many at once
   without a second sync engine.
-- tk-34 is re-scoped to the opt-in adapter: canonical `adopt_ticket(input)`
-  and per-key `refresh_item(key)` read primitives plus Apply, with no `gh issue
-  list`, no truncation handling, and no since-timestamp watermark.
+- tk-34 is re-scoped to the opt-in Adapter: canonical `adopt_ticket(input)`, a
+  set-oriented Pull read, and Apply, with no `gh issue list`, no truncation
+  handling, and no since-timestamp watermark. The GitHub Adapter batches Pull
+  through exact-key GraphQL reads instead of starting one `gh issue view`
+  subprocess per item. It executes bounded batches sequentially; concurrency
+  is deferred until measurements justify its rate-limit and error-order policy.
+  One private maximum key count bounds each batch after canonical GitHub
+  identifiers are validated. Its value follows the query shape and GitHub's
+  documented limits; live probes verify compatibility rather than define the
+  bound. It is not a public tk setting.
+- Pull diagnostics remain deterministic after batching. Item-specific GraphQL
+  errors are mapped back to Backend keys, and the earliest failed key in the
+  original input order wins; GitHub's error-array order is not a contract.
+  Whole-request transport failures are reported when their sequential batch is
+  reached.
+- Pull performance is a request-shape contract, not a wall-time promise. Tests
+  prove that an empty working set makes no Backend call and that non-empty work
+  is grouped into bounded Backend batches; reproducible measurements record the
+  observed improvement without treating GitHub or network latency as tk
+  behavior.
 - A new ticket owns the `tk adopt` command; it depends on tk-34 (the adapter)
   and tk-106 (the configured Remote), mirroring how tk-106 was carved out ahead
   of tk-34.

@@ -160,7 +160,7 @@ A component that maps between **tk** domain concepts and a specific **Backend**.
 _Avoid_: Facade, Provider, Connector
 
 **Backend Pull**:
-A **Backend Adapter** operation that refreshes the **Adopted** **Backend** items not yet `done`, importing only backend-owned title, body, **Item Status**, and optional **Ticket Kind** fields. Because a **Backend** distinguishes only open from closed, an imported open state never resets an `active` item. It refreshes only items tk already tracks; it neither mirrors, discovers, nor changes their identity, **Origin**, **Display ID**, or **Item Class**.
+An all-or-nothing **Backend Adapter** operation that refreshes the exact set of **Adopted** **Backend** items not yet `done`, importing only backend-owned title, body, **Item Status**, and optional **Ticket Kind** fields. It never mirrors, discovers, or changes item identity, **Origin**, **Display ID**, or **Item Class**; because a **Backend** distinguishes only open from closed, an imported open state never resets an `active` item.
 _Avoid_: Fetch, Import, Mirror
 
 **Mutation Apply**:

@@ -1131,7 +1131,7 @@ fn render_cancellation<W: Write + ?Sized>(stdout: &mut W, report: &CancellationR
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::testing::{self, Harness, cwd, expect_git};
+    use crate::commands::testing::{self, Harness, cwd, expect_git, expect_github_pull};
     use crate::domain::backend_operation::{
         BackendEdit, BackendItemIdentity, BackendItemInspection, BackendItemRefresh,
     };
@@ -1142,7 +1142,7 @@ mod tests {
     use crate::proc::RunOutput;
     use crate::promotion::plan::ItemRef;
     use crate::remote::fake::{
-        CreateResponse, EditResponse, FakeAdapter, InspectionResponse, RefreshResponse,
+        CreateResponse, EditResponse, FakeAdapter, InspectionResponse, PullResponse,
     };
     use crate::store::sync::{LoadApplicableError, PersistMutationOutcomeError, RefreshStoreError};
     use crate::store::testing::{
@@ -1201,7 +1201,11 @@ mod tests {
 
     fn adapter_with_refresh(edits: Vec<EditResponse>, creates: Vec<CreateResponse>) -> FakeAdapter {
         FakeAdapter::new()
-            .with_refreshes(vec![refresh("Adopted", "", ItemStatus::Open)])
+            .with_pulls(vec![PullResponse::Items(vec![refresh(
+                "Adopted",
+                "",
+                ItemStatus::Open,
+            )])])
             .with_edits(edits)
             .with_creates(creates)
             .with_capabilities(PromotionCapabilities::all())
@@ -1304,13 +1308,13 @@ mod tests {
         })
     }
 
-    fn refresh(title: &str, body: &str, status: ItemStatus) -> RefreshResponse {
-        RefreshResponse::Item(BackendItemRefresh {
+    fn refresh(title: &str, body: &str, status: ItemStatus) -> BackendItemRefresh {
+        BackendItemRefresh {
             title: title.into(),
             body: body.into(),
             status,
             ticket_kind: Some(TicketKind::Task),
-        })
+        }
     }
 
     fn reconcile_rendered(
@@ -1663,23 +1667,22 @@ mod tests {
         let mut h = Harness::with_seed(&cwd_path, 7);
         expect_git(&h, &fixture);
         let issue = br#"{"number":42,"title":"Local work","body":"","state":"OPEN","issueType":null,"url":"https://github.com/o/r/issues/42"}"#;
-        for key in ["42", "https://github.com/o/r/issues/42"] {
-            h.runner.expect_exact(
-                &[
-                    "gh",
-                    "issue",
-                    "view",
-                    key,
-                    "--json",
-                    "number,title,body,state,issueType,labels,url",
-                ],
-                RunOutput {
-                    exit_code: 0,
-                    stdout: issue.to_vec(),
-                    stderr: Vec::new(),
-                },
-            );
-        }
+        h.runner.expect_exact(
+            &[
+                "gh",
+                "issue",
+                "view",
+                "42",
+                "--json",
+                "number,title,body,state,issueType,labels,url",
+            ],
+            RunOutput {
+                exit_code: 0,
+                stdout: issue.to_vec(),
+                stderr: Vec::new(),
+            },
+        );
+        expect_github_pull(&h, "o", "r", 42, "Local work", "");
 
         let code = run_subcommand_rendered(
             &mut h,
@@ -1816,7 +1819,11 @@ mod tests {
                 "Local work",
                 "",
             )])
-            .with_refreshes(vec![refresh("Local work", "", ItemStatus::Done)]);
+            .with_pulls(vec![PullResponse::Items(vec![refresh(
+                "Local work",
+                "",
+                ItemStatus::Done,
+            )])]);
 
         let code = reconcile_rendered(&mut h, &mut store, &mut fake, "tk-1", "42", false);
 
@@ -1832,8 +1839,8 @@ mod tests {
         assert_eq!(row, ("gh-42".into(), "backend".into(), "done".into()));
         assert_eq!(fake.captured_inspection_keys, vec!["42"]);
         assert_eq!(
-            fake.captured_refresh_keys,
-            vec!["https://github.com/o/r/issues/42"]
+            fake.captured_pull_keys,
+            vec![vec!["https://github.com/o/r/issues/42".to_string()]]
         );
     }
 
@@ -1957,11 +1964,11 @@ mod tests {
                 "Different Backend title",
                 "Different Backend body",
             )])
-            .with_refreshes(vec![refresh(
+            .with_pulls(vec![PullResponse::Items(vec![refresh(
                 "Different Backend title",
                 "Different Backend body",
                 ItemStatus::Open,
-            )])
+            )])])
             .with_edits(vec![EditResponse::Success]);
 
         let code = reconcile_rendered(&mut h, &mut store, &mut fake, "tk-1", "42", true);
@@ -2004,7 +2011,11 @@ mod tests {
         let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = FakeAdapter::new()
             .with_inspections(vec![inspection("gh-1", "1", "Local work", "")])
-            .with_refreshes(vec![refresh("Local work", "", ItemStatus::Open)])
+            .with_pulls(vec![PullResponse::Items(vec![refresh(
+                "Local work",
+                "",
+                ItemStatus::Open,
+            )])])
             .with_creates(vec![CreateResponse::Created {
                 backend_key: "2".into(),
                 display_id: "gh-2".into(),
@@ -2037,7 +2048,11 @@ mod tests {
         let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = FakeAdapter::new()
             .with_inspections(vec![inspection("gh-1", "1", "Local work", "")])
-            .with_refreshes(vec![refresh("Local work", "", ItemStatus::Open)])
+            .with_pulls(vec![PullResponse::Items(vec![refresh(
+                "Local work",
+                "",
+                ItemStatus::Open,
+            )])])
             .with_creates(vec![CreateResponse::Rejected(
                 "Backend validation rejected tk-2".into(),
             )]);
@@ -2894,7 +2909,7 @@ mod tests {
         assert_eq!(h.out(), "Already promoted: gh-7\n");
         assert_eq!(mutation_count(&conn).unwrap(), 0);
         // The sync still ran: the Adopted working set's key was pulled.
-        assert_eq!(fake.captured_refresh_keys, vec!["7".to_string()]);
+        assert_eq!(fake.captured_pull_keys, vec![vec!["7".to_string()]]);
     }
 
     #[test]
@@ -3284,7 +3299,7 @@ mod tests {
         );
         assert!(
             fake.captured_adopt_inputs.is_empty()
-                && fake.captured_refresh_keys.is_empty()
+                && fake.captured_pull_keys.is_empty()
                 && fake.captured_edits.is_empty()
                 && fake.captured_creates.is_empty(),
             "a refused preflight calls no Backend"

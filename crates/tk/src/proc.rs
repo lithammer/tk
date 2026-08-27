@@ -5,6 +5,7 @@
 //! can substitute a `FakeRunner` without per-call-site changes.
 
 use std::collections::VecDeque;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -57,6 +58,17 @@ pub trait ProcRunner {
     /// never inherits stdin from the calling process — `tk init` and most
     /// downstream commands do not pipe input into subprocesses.
     fn run(&self, argv: &[&str], cwd: &Path) -> Result<RunOutput, ProcError>;
+
+    /// Run `argv` with the supplied bytes as stdin.
+    ///
+    /// A write failure happens after child creation, so the external outcome
+    /// may be unobserved even when tk later terminates the child.
+    fn run_with_stdin(
+        &self,
+        argv: &[&str],
+        cwd: &Path,
+        stdin: &[u8],
+    ) -> Result<RunOutput, ProcError>;
 }
 
 /// Production runner backed by `std::process::Command`.
@@ -66,6 +78,52 @@ impl RealRunner {
     #[must_use]
     pub fn new() -> Self {
         Self
+    }
+
+    fn run_inner(argv: &[&str], cwd: &Path, stdin: Option<&[u8]>) -> Result<RunOutput, ProcError> {
+        let (program, rest) = argv
+            .split_first()
+            .expect("ProcRunner contract: argv must contain at least the program");
+        let mut child = Command::new(program)
+            .args(rest)
+            .current_dir(cwd)
+            .stdin(if stdin.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|err| match err.kind() {
+                std::io::ErrorKind::NotFound => ProcError::ExecutableNotFound,
+                _ => ProcError::SpawnFailed,
+            })?;
+        let output = if let Some(bytes) = stdin {
+            let mut pipe = child
+                .stdin
+                .take()
+                .expect("piped stdin must exist after child creation");
+            let (write_result, output_result) = std::thread::scope(|scope| {
+                let writer = scope.spawn(move || pipe.write_all(bytes));
+                let output_result = child.wait_with_output();
+                let write_result = writer.join().expect("stdin writer must not panic");
+                (write_result, output_result)
+            });
+            if write_result.is_err() {
+                return Err(ProcError::OutcomeUnobserved);
+            }
+            output_result.map_err(|_| ProcError::OutcomeUnobserved)?
+        } else {
+            child
+                .wait_with_output()
+                .map_err(|_| ProcError::OutcomeUnobserved)?
+        };
+        Ok(RunOutput {
+            exit_code: output.status.code().unwrap_or(255),
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
     }
 }
 
@@ -77,28 +135,16 @@ impl Default for RealRunner {
 
 impl ProcRunner for RealRunner {
     fn run(&self, argv: &[&str], cwd: &Path) -> Result<RunOutput, ProcError> {
-        let (program, rest) = argv
-            .split_first()
-            .expect("ProcRunner contract: argv must contain at least the program");
-        let child = Command::new(program)
-            .args(rest)
-            .current_dir(cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|err| match err.kind() {
-                std::io::ErrorKind::NotFound => ProcError::ExecutableNotFound,
-                _ => ProcError::SpawnFailed,
-            })?;
-        let output = child
-            .wait_with_output()
-            .map_err(|_| ProcError::OutcomeUnobserved)?;
-        Ok(RunOutput {
-            exit_code: output.status.code().unwrap_or(255),
-            stdout: output.stdout,
-            stderr: output.stderr,
-        })
+        Self::run_inner(argv, cwd, None)
+    }
+
+    fn run_with_stdin(
+        &self,
+        argv: &[&str],
+        cwd: &Path,
+        stdin: &[u8],
+    ) -> Result<RunOutput, ProcError> {
+        Self::run_inner(argv, cwd, Some(stdin))
     }
 }
 
@@ -141,6 +187,7 @@ impl ArgvExpectation {
 #[derive(Debug, Clone)]
 struct ExpectedCall {
     argv: ArgvExpectation,
+    stdin: Option<Vec<u8>>,
     output: Result<RunOutput, ProcError>,
     /// Optional file write performed before the call returns. This models a
     /// subprocess that writes a file without mutating PATH or using a shell
@@ -170,6 +217,7 @@ impl FakeRunner {
     pub fn expect(&self, argv_prefix: &[&str], output: RunOutput) {
         self.queue(
             ArgvExpectation::Prefix(strings(argv_prefix)),
+            None,
             Ok(output),
             None,
         );
@@ -180,13 +228,39 @@ impl FakeRunner {
     /// Calls are consumed in FIFO order. Differing and trailing arguments
     /// reject the expectation.
     pub fn expect_exact(&self, argv: &[&str], output: RunOutput) {
-        self.queue(ArgvExpectation::Exact(strings(argv)), Ok(output), None);
+        self.queue(
+            ArgvExpectation::Exact(strings(argv)),
+            None,
+            Ok(output),
+            None,
+        );
+    }
+
+    /// Queue a scripted response that requires exact argv and stdin bytes.
+    pub fn expect_exact_with_stdin(&self, argv: &[&str], stdin: &[u8], output: RunOutput) {
+        self.queue(
+            ArgvExpectation::Exact(strings(argv)),
+            Some(stdin.to_vec()),
+            Ok(output),
+            None,
+        );
+    }
+
+    /// Queue a process error that requires exact argv and stdin bytes.
+    pub fn expect_exact_with_stdin_error(&self, argv: &[&str], stdin: &[u8], error: ProcError) {
+        self.queue(
+            ArgvExpectation::Exact(strings(argv)),
+            Some(stdin.to_vec()),
+            Err(error),
+            None,
+        );
     }
 
     /// Queue a scripted process error matched against an argv prefix.
     pub fn expect_error(&self, argv_prefix: &[&str], error: ProcError) {
         self.queue(
             ArgvExpectation::Prefix(strings(argv_prefix)),
+            None,
             Err(error),
             None,
         );
@@ -194,7 +268,12 @@ impl FakeRunner {
 
     /// Queue a scripted process error that requires an exact argv match.
     pub fn expect_exact_error(&self, argv: &[&str], error: ProcError) {
-        self.queue(ArgvExpectation::Exact(strings(argv)), Err(error), None);
+        self.queue(
+            ArgvExpectation::Exact(strings(argv)),
+            None,
+            Err(error),
+            None,
+        );
     }
 
     /// Queue a prefix-matched response that writes `body` to `path` before
@@ -210,6 +289,7 @@ impl FakeRunner {
     ) {
         self.queue(
             ArgvExpectation::Prefix(strings(argv_prefix)),
+            None,
             Ok(output),
             Some((path, body)),
         );
@@ -230,11 +310,13 @@ impl FakeRunner {
     fn queue(
         &self,
         argv: ArgvExpectation,
+        stdin: Option<Vec<u8>>,
         output: Result<RunOutput, ProcError>,
         side_effect_write: Option<(PathBuf, Vec<u8>)>,
     ) {
         self.calls.borrow_mut().push_back(ExpectedCall {
             argv,
+            stdin,
             output,
             side_effect_write,
         });
@@ -249,6 +331,21 @@ impl Default for FakeRunner {
 
 impl ProcRunner for FakeRunner {
     fn run(&self, argv: &[&str], _cwd: &Path) -> Result<RunOutput, ProcError> {
+        self.run_inner(argv, None)
+    }
+
+    fn run_with_stdin(
+        &self,
+        argv: &[&str],
+        _cwd: &Path,
+        stdin: &[u8],
+    ) -> Result<RunOutput, ProcError> {
+        self.run_inner(argv, Some(stdin))
+    }
+}
+
+impl FakeRunner {
+    fn run_inner(&self, argv: &[&str], stdin: Option<&[u8]>) -> Result<RunOutput, ProcError> {
         let mut calls = self.calls.borrow_mut();
         assert!(
             !calls.is_empty(),
@@ -264,6 +361,11 @@ impl ProcRunner for FakeRunner {
             expected.argv.kind(),
             expected.argv.argv(),
             argv
+        );
+        assert_eq!(
+            expected.stdin.as_deref(),
+            stdin,
+            "FakeRunner: stdin mismatch for {argv:?}"
         );
         if let Some((ref path, ref body)) = expected.side_effect_write {
             std::fs::write(path, body).unwrap_or_else(|err| {
@@ -301,6 +403,41 @@ mod tests {
 
         assert_eq!(result.stdout, b"ok");
         runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn stdin_expectation_accepts_matching_bytes() {
+        let runner = FakeRunner::new();
+        runner.expect_exact_with_stdin(
+            &["gh", "api", "graphql", "--input", "-"],
+            br#"{"query":"query Viewer { viewer { login } }"}"#,
+            output("ok"),
+        );
+
+        let result = runner
+            .run_with_stdin(
+                &["gh", "api", "graphql", "--input", "-"],
+                Path::new("."),
+                br#"{"query":"query Viewer { viewer { login } }"}"#,
+            )
+            .unwrap();
+
+        assert_eq!(result.stdout, b"ok");
+        runner.assert_all_consumed();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_runner_writes_stdin_while_collecting_child_output() {
+        let payload = vec![b'x'; 1024 * 1024];
+
+        let result = RealRunner::new()
+            .run_with_stdin(&["/bin/cat"], Path::new("."), &payload)
+            .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, payload);
+        assert!(result.stderr.is_empty());
     }
 
     #[test]
