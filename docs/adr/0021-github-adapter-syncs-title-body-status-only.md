@@ -70,6 +70,17 @@ personal-repository Issue Types and an upstream single-create contract that
 cannot strand a typeless issue before returning its receipt; personal
 availability alone is insufficient. The revisit is tracked by gh-49.
 
+The GitHub Adapter chooses direct GraphQL by operation contract, not transport
+uniformity. It uses GraphQL when a Backend operation needs exact batching,
+exhaustive negative evidence, or fields coupled in one atomic effect and no
+native `gh` command provides that contract. It keeps a native `gh` command
+when that command already implements one typed Backend operation against a
+canonical URL with the required effect certainty. GraphQL stays private to the
+GitHub Adapter; it is not Backend vocabulary. Shared GraphQL machinery must
+also preserve the different evidence rules for reads, ordinary edits, and
+non-idempotent creation rather than flattening them into one success/error
+policy.
+
 Every Promotion calls the requirements-aware capability resolver established
 by ADR-0036. The GitHub Adapter satisfies static facets without I/O; when Bug
 is requested, it performs a fallible, repository-aware read to resolve

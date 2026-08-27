@@ -16,7 +16,6 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use serde::Deserialize;
-use serde::de::DeserializeOwned;
 
 use crate::domain::backend_kind::BackendKind;
 use crate::domain::backend_operation::{
@@ -33,15 +32,23 @@ use crate::proc::{ProcRunner, RunOutput};
 
 use super::adapter::{Adapter, AdapterReadError, ApplyError};
 
+mod graphql;
+
+use graphql::cli::CliGraphqlTransport;
+#[cfg(test)]
+use graphql::{CREATE_BUG_QUERY, ISSUE_TYPES_QUERY, LABELS_QUERY};
+use graphql::{
+    CreateBugOperation, CreateIssueData, GraphqlCompleted, GraphqlEnvelope, GraphqlObservation,
+    GraphqlOperation, GraphqlTransport, IssueTypePageResponse, IssueTypesField,
+    IssueTypesOperation, LabelPageResponse, LabelsOperation,
+};
+
 /// The `--json` field set tk requests from `gh issue view`. `url` supplies the
 /// canonical Adopt identity, guards Pull identity, and rejects pull requests
 /// (see [`is_pull_request_url`]); `state` arrives UPPERCASE; `issueType` is an
 /// object-or-null; `labels` supplies the personal-repository Bug fallback.
 const ISSUE_JSON_FIELDS: &str = "number,title,body,state,issueType,labels,url";
-const REPOSITORY_JSON_FIELDS: &str = "id,nameWithOwner,isInOrganization";
-const ISSUE_TYPES_QUERY: &str = "query RepositoryIssueTypes($owner: String!, $name: String!, $after: String) { repository(owner: $owner, name: $name) { issueTypes(first: 50, after: $after) { nodes { id name isEnabled } pageInfo { hasNextPage endCursor } } } }";
-const LABELS_QUERY: &str = "query RepositoryLabels($owner: String!, $name: String!, $after: String) { repository(owner: $owner, name: $name) { labels(first: 100, query: \"bug\", after: $after) { nodes { id name } pageInfo { hasNextPage endCursor } } } }";
-const CREATE_BUG_QUERY: &str = "mutation CreateBugIssue($repositoryId: ID!, $title: String!, $body: String!, $issueTypeId: ID, $labelIds: [ID!]) { createIssue(input: { repositoryId: $repositoryId, title: $title, body: $body, issueTypeId: $issueTypeId, labelIds: $labelIds }) { issue { url number } } }";
+const REPOSITORY_JSON_FIELDS: &str = "id,nameWithOwner,isInOrganization,url";
 
 /// GitHub Backend Adapter. Holds the injected runner and the command cwd from
 /// which `gh` resolves the repository (ADR-0033), plus per-invocation
@@ -49,6 +56,7 @@ const CREATE_BUG_QUERY: &str = "mutation CreateBugIssue($repositoryId: ID!, $tit
 pub struct GithubAdapter<'a> {
     runner: &'a dyn ProcRunner,
     cwd: &'a Path,
+    graphql: Box<dyn GraphqlTransport + 'a>,
     repository_ownership: HashMap<String, bool>,
 }
 
@@ -58,6 +66,7 @@ impl<'a> GithubAdapter<'a> {
         Self {
             runner,
             cwd,
+            graphql: Box::new(CliGraphqlTransport::new(runner, cwd)),
             repository_ownership: HashMap::new(),
         }
     }
@@ -318,37 +327,52 @@ impl GithubAdapter<'_> {
             }
             Err(error) => return bug_read_rejection(&error),
         };
-        let repository_id = format!("repositoryId={}", repository.id);
-        let title = format!("title={}", snapshot.title);
-        let body = format!("body={}", snapshot.body);
-        let representation_arg = match representation {
-            BugRepresentation::NativeIssueType(id) => format!("issueTypeId={id}"),
-            BugRepresentation::Label(id) => format!("labelIds[]={id}"),
+        let host = match repository.host() {
+            Ok(host) => host,
+            Err(error) => return bug_read_rejection(&error),
         };
-        let argv = [
-            "gh".to_owned(),
-            "api".to_owned(),
-            "graphql".to_owned(),
-            "-f".to_owned(),
-            format!("query={CREATE_BUG_QUERY}"),
-            "-f".to_owned(),
-            repository_id,
-            "-f".to_owned(),
-            title,
-            "-f".to_owned(),
-            body,
-            "-f".to_owned(),
-            representation_arg,
-        ];
-        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
-        let output = match self.run_creation("gh api graphql", &argv) {
-            Ok(output) => output,
-            Err(outcome) => return outcome,
+        let (issue_type_id, label_id) = match &representation {
+            BugRepresentation::NativeIssueType(id) => (Some(id.as_str()), None),
+            BugRepresentation::Label(id) => (None, Some(id.as_str())),
         };
-        let stderr = stderr_string(&output);
-        let response: Result<GraphQlResponse<CreateIssueData>, _> =
-            serde_json::from_slice(&output.stdout);
-        if let Ok(response) = response {
+        let operation = CreateBugOperation::new(
+            host,
+            &repository.id,
+            &snapshot.title,
+            &snapshot.body,
+            issue_type_id,
+            label_id,
+        );
+        match graphql::execute(self.graphql.as_ref(), &operation) {
+            GraphqlObservation::NotStarted(failure) => BackendCreateOutcome::Rejected(Failure {
+                detail: format!("gh api graphql did not start: {}", failure.detail),
+                class: FailureClass::Unknown,
+                retry_after_s: None,
+            }),
+            GraphqlObservation::OutcomeUnobserved(failure) => {
+                BackendCreateOutcome::Indeterminate(Failure {
+                    detail: format!(
+                        "gh api graphql started, but its outcome is unknown: {}",
+                        failure.detail
+                    ),
+                    class: FailureClass::Unknown,
+                    retry_after_s: None,
+                })
+            }
+            GraphqlObservation::Completed { exchange, envelope } => {
+                Self::classify_bug_creation(&exchange, envelope)
+            }
+        }
+    }
+
+    fn classify_bug_creation(
+        exchange: &GraphqlCompleted,
+        envelope: Result<GraphqlEnvelope<CreateIssueData>, String>,
+    ) -> BackendCreateOutcome {
+        let stderr = String::from_utf8_lossy(&exchange.diagnostics)
+            .trim()
+            .to_owned();
+        if let Ok(response) = envelope {
             if let Some(issue) = response
                 .data
                 .and_then(|data| data.create_issue)
@@ -362,7 +386,7 @@ impl GithubAdapter<'_> {
                 response
                     .errors
                     .into_iter()
-                    .map(|error| error.message)
+                    .map(graphql::GraphqlError::into_message)
                     .collect::<Vec<_>>()
                     .join("\n")
             } else if stderr.is_empty() {
@@ -371,13 +395,13 @@ impl GithubAdapter<'_> {
                 stderr.clone()
             };
             return BackendCreateOutcome::Indeterminate(Failure {
-                class: classify(output.exit_code, &detail),
+                class: classify(exchange.exit_code, &detail),
                 detail,
                 retry_after_s: None,
             });
         }
         BackendCreateOutcome::Indeterminate(Failure {
-            class: classify(output.exit_code, &stderr),
+            class: classify(exchange.exit_code, &stderr),
             detail: if stderr.is_empty() {
                 "gh api graphql returned an unrecognized response".into()
             } else {
@@ -498,20 +522,21 @@ impl GithubAdapter<'_> {
         &self,
         repository: &RepositoryContext,
     ) -> Result<Option<BugRepresentation>, AdapterReadError> {
+        let host = repository.host()?;
         let (owner, name) = repository.name_with_owner.split_once('/').ok_or_else(|| {
             AdapterReadError::Failed(format!(
                 "GitHub returned an invalid repository name '{}'",
                 repository.name_with_owner
             ))
         })?;
-        if let Some(id) = self.find_native_bug_type(owner, name)? {
+        if let Some(id) = self.find_native_bug_type(host, owner, name)? {
             return Ok(Some(BugRepresentation::NativeIssueType(id)));
         }
         if repository.is_in_organization {
             return Ok(None);
         }
         Ok(self
-            .find_bug_label(owner, name)?
+            .find_bug_label(host, owner, name)?
             .map(BugRepresentation::Label))
     }
 
@@ -519,13 +544,18 @@ impl GithubAdapter<'_> {
     /// case-insensitive `Bug` exists (ADR-0021).
     fn find_native_bug_type(
         &self,
+        host: &str,
         owner: &str,
         name: &str,
     ) -> Result<Option<String>, AdapterReadError> {
         let mut after = None;
         loop {
-            let page: IssueTypePageResponse =
-                self.graphql_page(ISSUE_TYPES_QUERY, owner, name, after.as_deref())?;
+            let page: IssueTypePageResponse = self.graphql_read(&IssueTypesOperation::new(
+                host,
+                owner,
+                name,
+                after.as_deref(),
+            ))?;
             let repository = page.repository.ok_or_else(|| {
                 AdapterReadError::Failed(format!(
                     "GitHub returned no repository for {owner}/{name}"
@@ -559,11 +589,16 @@ impl GithubAdapter<'_> {
 
     /// Read Label pages until the exact case-insensitive `bug` fallback is
     /// found or the connection is exhausted.
-    fn find_bug_label(&self, owner: &str, name: &str) -> Result<Option<String>, AdapterReadError> {
+    fn find_bug_label(
+        &self,
+        host: &str,
+        owner: &str,
+        name: &str,
+    ) -> Result<Option<String>, AdapterReadError> {
         let mut after = None;
         loop {
             let page: LabelPageResponse =
-                self.graphql_page(LABELS_QUERY, owner, name, after.as_deref())?;
+                self.graphql_read(&LabelsOperation::new(host, owner, name, after.as_deref()))?;
             let repository = page.repository.ok_or_else(|| {
                 AdapterReadError::Failed(format!(
                     "GitHub returned no repository for {owner}/{name}"
@@ -586,60 +621,48 @@ impl GithubAdapter<'_> {
         }
     }
 
-    /// Run one typed GraphQL page read. Transport, GraphQL, and malformed-data
-    /// failures stay Adapter read errors; they never prove unsupported Bug.
-    fn graphql_page<T: DeserializeOwned>(
+    /// Run one typed GraphQL read without collapsing transport evidence.
+    fn graphql_read<O: GraphqlOperation>(
         &self,
-        query: &str,
-        owner: &str,
-        name: &str,
-        after: Option<&str>,
-    ) -> Result<T, AdapterReadError> {
-        let query_arg = format!("query={query}");
-        let owner_arg = format!("owner={owner}");
-        let name_arg = format!("name={name}");
-        let after_arg = format!("after={}", after.unwrap_or("null"));
-        let argv = [
-            "gh".to_owned(),
-            "api".to_owned(),
-            "graphql".to_owned(),
-            "-f".to_owned(),
-            query_arg,
-            "-f".to_owned(),
-            owner_arg,
-            "-f".to_owned(),
-            name_arg,
-            // `after` must ride `-F`, not `-f`: only `gh`'s typed field
-            // converts the literal `null` into a JSON null for
-            // `$after: String`. Under `-f` the first page would ask GitHub for
-            // the cursor string "null".
-            "-F".to_owned(),
-            after_arg,
-        ];
-        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
-        let output = self.runner.run(&argv, self.cwd)?;
-        if !output.succeeded() {
-            return Err(AdapterReadError::Failed(stderr_string(&output)));
+        operation: &O,
+    ) -> Result<O::Response, AdapterReadError> {
+        match graphql::execute(self.graphql.as_ref(), operation) {
+            GraphqlObservation::NotStarted(failure)
+            | GraphqlObservation::OutcomeUnobserved(failure) => {
+                if let Some(error) = failure.process_error {
+                    Err(AdapterReadError::Env(error))
+                } else {
+                    Err(AdapterReadError::Failed(failure.detail))
+                }
+            }
+            GraphqlObservation::Completed { exchange, envelope } => {
+                let stderr = String::from_utf8_lossy(&exchange.diagnostics)
+                    .trim()
+                    .to_owned();
+                let response = envelope.map_err(|error| {
+                    if exchange.exit_code != 0 && !stderr.is_empty() {
+                        AdapterReadError::Failed(stderr.clone())
+                    } else {
+                        AdapterReadError::Failed(format!(
+                            "could not parse GitHub GraphQL response: {error}"
+                        ))
+                    }
+                })?;
+                if !response.errors.is_empty() {
+                    return Err(AdapterReadError::Failed(
+                        response
+                            .errors
+                            .into_iter()
+                            .map(graphql::GraphqlError::into_message)
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ));
+                }
+                response.data.ok_or_else(|| {
+                    AdapterReadError::Failed("GitHub GraphQL response contained no data".into())
+                })
+            }
         }
-        let response: GraphQlResponse<T> =
-            serde_json::from_slice(&output.stdout).map_err(|error| {
-                AdapterReadError::Failed(format!(
-                    "could not parse GitHub GraphQL response: {error}"
-                ))
-            })?;
-        if !response.errors.is_empty() {
-            return Err(AdapterReadError::Failed(
-                response
-                    .errors
-                    .into_iter()
-                    .map(|error| error.message)
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            ));
-        }
-        response.data.ok_or_else(|| {
-            AdapterReadError::Failed("GitHub GraphQL response contained no data".into())
-        })
     }
 }
 
@@ -679,106 +702,42 @@ struct RepositoryContext {
     name_with_owner: String,
     #[serde(rename = "isInOrganization")]
     is_in_organization: bool,
+    url: String,
+}
+
+impl RepositoryContext {
+    fn host(&self) -> Result<&str, AdapterReadError> {
+        let remainder = self.url.strip_prefix("https://").ok_or_else(|| {
+            AdapterReadError::Failed(format!(
+                "GitHub returned an invalid repository URL '{}'",
+                self.url
+            ))
+        })?;
+        let (host, path) = remainder.split_once('/').ok_or_else(|| {
+            AdapterReadError::Failed(format!(
+                "GitHub returned an invalid repository URL '{}'",
+                self.url
+            ))
+        })?;
+        if host.is_empty()
+            || host.contains('@')
+            || path != self.name_with_owner
+            || path.contains(['?', '#'])
+            || path.chars().any(char::is_whitespace)
+        {
+            return Err(AdapterReadError::Failed(format!(
+                "GitHub returned an invalid repository URL '{}'",
+                self.url
+            )));
+        }
+        Ok(host)
+    }
 }
 
 #[derive(Debug)]
 enum BugRepresentation {
     NativeIssueType(String),
     Label(String),
-}
-
-#[derive(Debug, Deserialize)]
-struct GraphQlResponse<T> {
-    data: Option<T>,
-    #[serde(default)]
-    errors: Vec<GraphQlError>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GraphQlError {
-    message: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateIssueData {
-    #[serde(rename = "createIssue")]
-    create_issue: Option<CreateIssuePayload>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateIssuePayload {
-    issue: Option<CreateIssueReceipt>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateIssueReceipt {
-    url: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct IssueTypePageResponse {
-    repository: Option<IssueTypeRepository>,
-}
-
-#[derive(Debug, Deserialize)]
-struct IssueTypeRepository {
-    #[serde(rename = "issueTypes")]
-    issue_types: IssueTypesField,
-}
-
-/// Keeps ADR-0021's initial-null policy distinct from a missing
-/// `issueTypes` field.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum IssueTypesField {
-    Connection(IssueTypeConnection),
-    Null(()),
-}
-
-#[derive(Debug, Deserialize)]
-struct IssueTypeConnection {
-    nodes: Vec<NativeIssueType>,
-    #[serde(rename = "pageInfo")]
-    page_info: PageInfo,
-}
-
-#[derive(Debug, Deserialize)]
-struct NativeIssueType {
-    id: String,
-    name: String,
-    #[serde(rename = "isEnabled")]
-    is_enabled: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct LabelPageResponse {
-    repository: Option<LabelRepository>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LabelRepository {
-    labels: LabelConnection,
-}
-
-#[derive(Debug, Deserialize)]
-struct LabelConnection {
-    nodes: Vec<GraphQlLabel>,
-    #[serde(rename = "pageInfo")]
-    page_info: PageInfo,
-}
-
-#[derive(Debug, Deserialize)]
-struct GraphQlLabel {
-    id: String,
-    name: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct PageInfo {
-    #[serde(rename = "hasNextPage")]
-    has_next_page: bool,
-    #[serde(rename = "endCursor")]
-    end_cursor: Option<String>,
 }
 
 /// The `issueType` object; `null` for an untyped issue or a repo without issue
@@ -1065,21 +1024,32 @@ mod tests {
         after: Option<&str>,
         response: &str,
     ) {
-        let argv = [
-            "gh".to_owned(),
-            "api".to_owned(),
-            "graphql".to_owned(),
-            "-f".to_owned(),
-            format!("query={query}"),
-            "-f".to_owned(),
-            format!("owner={owner}"),
-            "-f".to_owned(),
-            format!("name={name}"),
-            "-F".to_owned(),
-            format!("after={}", after.unwrap_or("null")),
-        ];
-        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
-        runner.expect_exact(&argv, ok(response));
+        expect_graphql_page_output(runner, query, owner, name, after, ok(response));
+    }
+
+    fn expect_graphql_page_output(
+        runner: &FakeRunner,
+        query: &str,
+        owner: &str,
+        name: &str,
+        after: Option<&str>,
+        output: RunOutput,
+    ) {
+        let operation_name = if query == ISSUE_TYPES_QUERY {
+            "RepositoryIssueTypes"
+        } else if query == LABELS_QUERY {
+            "RepositoryLabels"
+        } else {
+            panic!("unexpected GraphQL page query")
+        };
+        let after = after.map_or_else(|| "null".into(), json_string);
+        let body = format!(
+            r#"{{"query":{},"operationName":"{operation_name}","variables":{{"after":{after},"name":{},"owner":{}}}}}"#,
+            json_string(query),
+            json_string(name),
+            json_string(owner),
+        );
+        runner.expect_exact_with_stdin(&graphql_argv("github.com"), body.as_bytes(), output);
     }
 
     fn expect_bug_create(
@@ -1090,23 +1060,45 @@ mod tests {
         representation: &str,
         response: &str,
     ) {
-        let argv = [
-            "gh".to_owned(),
-            "api".to_owned(),
-            "graphql".to_owned(),
-            "-f".to_owned(),
-            format!("query={CREATE_BUG_QUERY}"),
-            "-f".to_owned(),
-            format!("repositoryId={repository_id}"),
-            "-f".to_owned(),
-            format!("title={title}"),
-            "-f".to_owned(),
-            format!("body={body}"),
-            "-f".to_owned(),
-            representation.to_owned(),
-        ];
-        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
-        runner.expect_exact(&argv, ok(response));
+        let (issue_type_id, label_ids) = representation.strip_prefix("issueTypeId=").map_or_else(
+            || {
+                let id = representation
+                    .strip_prefix("labelIds[]=")
+                    .expect("test Bug representation must be an Issue Type or Label");
+                ("null".into(), format!("[{}]", json_string(id)))
+            },
+            |id| (json_string(id), "null".into()),
+        );
+        let request_body = format!(
+            r#"{{"query":{},"operationName":"CreateBugIssue","variables":{{"body":{},"issueTypeId":{issue_type_id},"labelIds":{label_ids},"repositoryId":{},"title":{}}}}}"#,
+            json_string(CREATE_BUG_QUERY),
+            json_string(body),
+            json_string(repository_id),
+            json_string(title),
+        );
+        runner.expect_exact_with_stdin(
+            &graphql_argv("github.com"),
+            request_body.as_bytes(),
+            ok(response),
+        );
+    }
+
+    fn graphql_argv(host: &str) -> [&str; 9] {
+        [
+            "gh",
+            "api",
+            "graphql",
+            "--hostname",
+            host,
+            "-H",
+            "Content-Type: application/json",
+            "--input",
+            "-",
+        ]
+    }
+
+    fn json_string(value: &str) -> String {
+        serde_json::to_string(value).expect("test string must serialize")
     }
 
     /// Build a `gh issue view --json` object. `issue_type` is either `"null"`
@@ -2261,11 +2253,15 @@ mod tests {
         let runner = FakeRunner::new();
         runner.expect_exact(
             &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
-            ok(r#"{"id":"R_1","nameWithOwner":"o/r","isInOrganization":true}"#),
+            ok(r#"{"id":"R_1","nameWithOwner":"o/r","isInOrganization":true,"url":"https://github.com/o/r"}"#),
         );
-        runner.expect(
-            &["gh", "api", "graphql"],
-            ok(r#"{"data":{"repository":{"issueTypes":{"nodes":[{"id":"IT_1","name":"bug","isEnabled":true}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#),
+        expect_graphql_page(
+            &runner,
+            ISSUE_TYPES_QUERY,
+            "o",
+            "r",
+            None,
+            r#"{"data":{"repository":{"issueTypes":{"nodes":[{"id":"IT_1","name":"bug","isEnabled":true}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#,
         );
         let mut adapter = GithubAdapter::new(&runner, cwd());
 
@@ -2283,7 +2279,7 @@ mod tests {
         let runner = FakeRunner::new();
         runner.expect_exact(
             &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
-            ok(r#"{"id":"R_1","nameWithOwner":"o/r","isInOrganization":true}"#),
+            ok(r#"{"id":"R_1","nameWithOwner":"o/r","isInOrganization":true,"url":"https://github.com/o/r"}"#),
         );
         expect_graphql_page(
             &runner,
@@ -2317,15 +2313,23 @@ mod tests {
         let runner = FakeRunner::new();
         runner.expect_exact(
             &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
-            ok(r#"{"id":"R_1","nameWithOwner":"o/r","isInOrganization":true}"#),
+            ok(r#"{"id":"R_1","nameWithOwner":"o/r","isInOrganization":true,"url":"https://github.com/o/r"}"#),
         );
-        runner.expect(
-            &["gh", "api", "graphql"],
-            ok(r#"{"data":{"repository":{"issueTypes":{"nodes":[{"id":"IT_1","name":"Task","isEnabled":true}],"pageInfo":{"hasNextPage":true,"endCursor":"CURSOR"}}}}}"#),
+        expect_graphql_page(
+            &runner,
+            ISSUE_TYPES_QUERY,
+            "o",
+            "r",
+            None,
+            r#"{"data":{"repository":{"issueTypes":{"nodes":[{"id":"IT_1","name":"Task","isEnabled":true}],"pageInfo":{"hasNextPage":true,"endCursor":"CURSOR"}}}}}"#,
         );
-        runner.expect(
-            &["gh", "api", "graphql"],
-            ok(r#"{"data":{"repository":{"issueTypes":{"nodes":[{"id":"IT_2","name":"Bug","isEnabled":false}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#),
+        expect_graphql_page(
+            &runner,
+            ISSUE_TYPES_QUERY,
+            "o",
+            "r",
+            Some("CURSOR"),
+            r#"{"data":{"repository":{"issueTypes":{"nodes":[{"id":"IT_2","name":"Bug","isEnabled":false}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#,
         );
         let mut adapter = GithubAdapter::new(&runner, cwd());
 
@@ -2343,10 +2347,14 @@ mod tests {
         let runner = FakeRunner::new();
         runner.expect_exact(
             &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
-            ok(r#"{"id":"R_1","nameWithOwner":"o/r","isInOrganization":true}"#),
+            ok(r#"{"id":"R_1","nameWithOwner":"o/r","isInOrganization":true,"url":"https://github.com/o/r"}"#),
         );
-        runner.expect(
-            &["gh", "api", "graphql"],
+        expect_graphql_page_output(
+            &runner,
+            ISSUE_TYPES_QUERY,
+            "o",
+            "r",
+            None,
             fail(1, "GraphQL: taxonomy read failed"),
         );
         let mut adapter = GithubAdapter::new(&runner, cwd());
@@ -2365,11 +2373,15 @@ mod tests {
         let runner = FakeRunner::new();
         runner.expect_exact(
             &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
-            ok(r#"{"id":"R_1","nameWithOwner":"o/r","isInOrganization":true}"#),
+            ok(r#"{"id":"R_1","nameWithOwner":"o/r","isInOrganization":true,"url":"https://github.com/o/r"}"#),
         );
-        runner.expect(
-            &["gh", "api", "graphql"],
-            ok(r#"{"data":{"repository":{"issueTypes":{"nodes":[{"id":"IT_1","name":"Bug","isEnabled":true}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#),
+        expect_graphql_page(
+            &runner,
+            ISSUE_TYPES_QUERY,
+            "o",
+            "r",
+            None,
+            r#"{"data":{"repository":{"issueTypes":{"nodes":[{"id":"IT_1","name":"Bug","isEnabled":true}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#,
         );
         expect_bug_create(
             &runner,
@@ -2400,7 +2412,7 @@ mod tests {
         let runner = FakeRunner::new();
         runner.expect_exact(
             &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
-            ok(r#"{"id":"R_1","nameWithOwner":"p/r","isInOrganization":false}"#),
+            ok(r#"{"id":"R_1","nameWithOwner":"p/r","isInOrganization":false,"url":"https://github.com/p/r"}"#),
         );
         expect_graphql_page(
             &runner,
@@ -2434,7 +2446,7 @@ mod tests {
         let runner = FakeRunner::new();
         runner.expect_exact(
             &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
-            ok(r#"{"id":"R_1","nameWithOwner":"p/r","isInOrganization":false}"#),
+            ok(r#"{"id":"R_1","nameWithOwner":"p/r","isInOrganization":false,"url":"https://github.com/p/r"}"#),
         );
         expect_graphql_page(
             &runner,
@@ -2469,15 +2481,23 @@ mod tests {
         let runner = FakeRunner::new();
         runner.expect_exact(
             &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
-            ok(r#"{"id":"R_1","nameWithOwner":"p/r","isInOrganization":false}"#),
+            ok(r#"{"id":"R_1","nameWithOwner":"p/r","isInOrganization":false,"url":"https://github.com/p/r"}"#),
         );
-        runner.expect(
-            &["gh", "api", "graphql"],
-            ok(r#"{"data":{"repository":{"issueTypes":null}}}"#),
+        expect_graphql_page(
+            &runner,
+            ISSUE_TYPES_QUERY,
+            "p",
+            "r",
+            None,
+            r#"{"data":{"repository":{"issueTypes":null}}}"#,
         );
-        runner.expect(
-            &["gh", "api", "graphql"],
-            ok(r#"{"data":{"repository":{"labels":{"nodes":[{"id":"L_1","name":"bug"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#),
+        expect_graphql_page(
+            &runner,
+            LABELS_QUERY,
+            "p",
+            "r",
+            None,
+            r#"{"data":{"repository":{"labels":{"nodes":[{"id":"L_1","name":"bug"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#,
         );
         expect_bug_create(
             &runner,
@@ -2508,15 +2528,23 @@ mod tests {
         let runner = FakeRunner::new();
         runner.expect_exact(
             &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
-            ok(r#"{"id":"R_1","nameWithOwner":"p/r","isInOrganization":false}"#),
+            ok(r#"{"id":"R_1","nameWithOwner":"p/r","isInOrganization":false,"url":"https://github.com/p/r"}"#),
         );
-        runner.expect(
-            &["gh", "api", "graphql"],
-            ok(r#"{"data":{"repository":{"issueTypes":{"nodes":[{"id":"IT_1","name":"Task","isEnabled":true}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#),
+        expect_graphql_page(
+            &runner,
+            ISSUE_TYPES_QUERY,
+            "p",
+            "r",
+            None,
+            r#"{"data":{"repository":{"issueTypes":{"nodes":[{"id":"IT_1","name":"Task","isEnabled":true}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#,
         );
-        runner.expect(
-            &["gh", "api", "graphql"],
-            ok(r#"{"data":{"repository":{"labels":{"nodes":[{"id":"L_1","name":"BUG"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#),
+        expect_graphql_page(
+            &runner,
+            LABELS_QUERY,
+            "p",
+            "r",
+            None,
+            r#"{"data":{"repository":{"labels":{"nodes":[{"id":"L_1","name":"BUG"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#,
         );
         let mut adapter = GithubAdapter::new(&runner, cwd());
 

@@ -29,7 +29,9 @@ crates/tk/src/
   promotion/               Promotion engine: the `tk promote` preflight planner
                            over a Repository Store snapshot (sibling of
                            sync.rs)
-  remote/                  Backend Adapter trait, factory, and FakeAdapter
+  remote/                  Backend Adapter trait, factory, and FakeAdapter;
+                           GitHub owns typed GraphQL operations and a private,
+                           replaceable wire transport under remote/github/
   render/                  terminal-rendering subsystem (palette, styler,
                            sanitize)
   store/                   Repository Store, migrations, Mutation Log, and
