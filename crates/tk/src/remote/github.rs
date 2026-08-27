@@ -6,21 +6,19 @@
 //! repository from the command cwd; canonical issue URLs then pin existing
 //! Item operations to their repository (ADR-0033).
 //!
-//! Pull is refresh-by-key: the engine hands the Adopted working set's active
-//! keys to [`GithubAdapter::refresh_item`], which fetches each with one
-//! `gh issue view`. A typeless issue carrying the private `bug` label adds a
-//! cached repository-ownership read. There is no issue listing or discovery
-//! (ADR-0034).
+//! Pull is exact-key batching: the engine hands the Adapter the Adopted working
+//! set, which the Adapter groups by host and reads through bounded GraphQL
+//! operations. There is no issue listing or discovery (ADR-0034).
 
 use std::collections::HashMap;
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 use crate::domain::backend_kind::BackendKind;
 use crate::domain::backend_operation::{
-    AdoptedItem, BackendCreate, BackendEdit, BackendItemIdentity, BackendItemInspection,
-    BackendItemRefresh,
+    AdoptedItem, BackendCreate, BackendEdit, BackendItemAddress, BackendItemIdentity,
+    BackendItemInspection, BackendItemRefresh, BackendPull, BackendPullItem,
 };
 use crate::domain::backend_outcome::{
     BackendCreateOutcome, BackendEditOutcome, Failure, FailureClass,
@@ -36,23 +34,36 @@ mod graphql;
 
 use graphql::cli::CliGraphqlTransport;
 #[cfg(test)]
-use graphql::{CREATE_BUG_QUERY, ISSUE_TYPES_QUERY, LABELS_QUERY};
+use graphql::{CREATE_BUG_QUERY, GraphqlExchange, GraphqlRequest, ISSUE_TYPES_QUERY, LABELS_QUERY};
 use graphql::{
-    CreateBugOperation, CreateIssueData, GraphqlCompleted, GraphqlEnvelope, GraphqlObservation,
-    GraphqlOperation, GraphqlTransport, IssueTypePageResponse, IssueTypesField,
-    IssueTypesOperation, LabelPageResponse, LabelsOperation,
+    CreateBugOperation, CreateIssueData, GraphqlCompleted, GraphqlEnvelope, GraphqlError,
+    GraphqlObservation, GraphqlOperation, GraphqlStartFailure, GraphqlTransport,
+    IssueTypePageResponse, IssueTypesField, IssueTypesOperation, LabelPageResponse,
+    LabelsOperation, MAX_PULL_KEYS_PER_QUERY, PullData, PullObject, PullOperation, PullRepository,
+    PullTarget,
 };
 
+/// Encode a one-item request through the production Pull operation.
+#[cfg(test)]
+pub(crate) fn single_pull_request_body(owner: &str, name: &str, number: i64) -> Vec<u8> {
+    let targets = [PullTarget {
+        input_index: 0,
+        owner: owner.into(),
+        name: name.into(),
+        number,
+    }];
+    PullOperation::new("github.com", &targets).request().body()
+}
+
 /// The `--json` field set tk requests from `gh issue view`. `url` supplies the
-/// canonical Adopt identity, guards Pull identity, and rejects pull requests
+/// canonical Adopt and Promotion-recovery identity and rejects pull requests
 /// (see [`is_pull_request_url`]); `state` arrives UPPERCASE; `issueType` is an
 /// object-or-null; `labels` supplies the personal-repository Bug fallback.
 const ISSUE_JSON_FIELDS: &str = "number,title,body,state,issueType,labels,url";
 const REPOSITORY_JSON_FIELDS: &str = "id,nameWithOwner,isInOrganization,url";
 
-/// GitHub Backend Adapter. Holds the injected runner and the command cwd from
-/// which `gh` resolves the repository (ADR-0033), plus per-invocation
-/// repository-ownership observations used by Pull classification.
+/// GitHub Backend Adapter. `gh` resolves bare inputs from the command cwd
+/// (ADR-0033); repository ownership is cached for one Adapter invocation.
 pub struct GithubAdapter<'a> {
     runner: &'a dyn ProcRunner,
     cwd: &'a Path,
@@ -70,6 +81,20 @@ impl<'a> GithubAdapter<'a> {
             repository_ownership: HashMap::new(),
         }
     }
+
+    #[cfg(test)]
+    fn with_graphql_transport(
+        runner: &'a dyn ProcRunner,
+        cwd: &'a Path,
+        graphql: Box<dyn GraphqlTransport + 'a>,
+    ) -> Self {
+        Self {
+            runner,
+            cwd,
+            graphql,
+            repository_ownership: HashMap::new(),
+        }
+    }
 }
 
 impl Adapter for GithubAdapter<'_> {
@@ -84,11 +109,8 @@ impl Adapter for GithubAdapter<'_> {
         issue.into_adopted_item(identity, ticket_kind)
     }
 
-    fn refresh_item(&mut self, key: &str) -> Result<BackendItemRefresh, AdapterReadError> {
-        let issue = self.view_matching_issue(key)?;
-        let identity = issue.validated_identity()?;
-        let ticket_kind = self.ticket_kind(&issue, &identity)?;
-        issue.into_refresh(ticket_kind)
+    fn pull(&mut self, items: &[BackendItemAddress]) -> Result<BackendPull, AdapterReadError> {
+        self.pull_items(items)
     }
 
     fn inspect_item(&mut self, key: &str) -> Result<BackendItemInspection, AdapterReadError> {
@@ -215,6 +237,94 @@ impl Adapter for GithubAdapter<'_> {
 }
 
 impl GithubAdapter<'_> {
+    fn pull_items(
+        &mut self,
+        items: &[BackendItemAddress],
+    ) -> Result<BackendPull, AdapterReadError> {
+        let groups = plan_pull(items)?;
+        let mut pulled = vec![None; items.len()];
+        let mut item_errors = Vec::new();
+        for group in groups {
+            for targets in group.targets.chunks(MAX_PULL_KEYS_PER_QUERY) {
+                let mut data = match self.pull_chunk(&group.host, targets) {
+                    Ok(data) => data,
+                    Err(PullChunkError::Items(errors)) => {
+                        item_errors.extend(errors);
+                        continue;
+                    }
+                    Err(PullChunkError::Request(error)) => return Err(error),
+                };
+                for target in targets {
+                    let alias = target.alias();
+                    let Some(repository) = data.items.remove(&alias) else {
+                        item_errors.push(PullItemError {
+                            input_index: target.input_index,
+                            message: "GitHub GraphQL response omitted its Pull field".into(),
+                        });
+                        continue;
+                    };
+                    match decode_pull_item(&items[target.input_index], repository) {
+                        Ok(item) => pulled[target.input_index] = Some(item),
+                        Err(error) => item_errors.push(PullItemError {
+                            input_index: target.input_index,
+                            message: error.to_string(),
+                        }),
+                    }
+                }
+            }
+        }
+        if !item_errors.is_empty() {
+            return Err(AdapterReadError::Failed(pull_item_error_detail(
+                item_errors,
+                items,
+            )));
+        }
+        let pulled = pulled
+            .into_iter()
+            .enumerate()
+            .map(|(index, item)| {
+                item.ok_or_else(|| {
+                    AdapterReadError::Failed(format!(
+                        "GitHub Pull did not return requested key '{}' at index {index}",
+                        items[index].backend_key
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        BackendPull::new(items, pulled).map_err(|error| AdapterReadError::Failed(error.to_string()))
+    }
+
+    fn pull_chunk(&self, host: &str, targets: &[PullTarget]) -> Result<PullData, PullChunkError> {
+        let operation = PullOperation::new(host, targets);
+        match graphql::execute(self.graphql.as_ref(), &operation) {
+            GraphqlObservation::NotStarted(failure) => Err(PullChunkError::Request(
+                AdapterReadError::Env(start_failure_as_proc_error(&failure)),
+            )),
+            GraphqlObservation::OutcomeUnobserved(_) => Err(PullChunkError::Request(
+                AdapterReadError::Env(crate::proc::ProcError::OutcomeUnobserved),
+            )),
+            GraphqlObservation::Completed { exchange, envelope } => {
+                let delivery_failure = exchange.completion.failure_detail().unwrap_or_default();
+                let response = envelope.map_err(|error| {
+                    if delivery_failure.is_empty() {
+                        pull_request_error(
+                            host,
+                            format!("could not parse GitHub GraphQL response: {error}"),
+                        )
+                    } else {
+                        pull_request_error(host, delivery_failure)
+                    }
+                })?;
+                if !response.errors.is_empty() {
+                    return Err(classify_pull_errors(response.errors, targets, host));
+                }
+                response.data.ok_or_else(|| {
+                    pull_request_error(host, "GitHub GraphQL response contained no data")
+                })
+            }
+        }
+    }
+
     /// Run one edit `gh` invocation and map its outcome. Success is judged by
     /// **exit code 0**, never by stderr emptiness: `gh issue close`/`reopen`
     /// print an informational "is already closed/open" line to stderr on their
@@ -295,7 +405,7 @@ impl GithubAdapter<'_> {
         }
 
         let stderr = stderr_string(&output);
-        let class = classify(output.exit_code, &stderr);
+        let class = classify(&stderr);
         let failure = Failure {
             detail: create_failure_detail(&output, &stderr),
             class,
@@ -345,15 +455,14 @@ impl GithubAdapter<'_> {
         );
         match graphql::execute(self.graphql.as_ref(), &operation) {
             GraphqlObservation::NotStarted(failure) => BackendCreateOutcome::Rejected(Failure {
-                detail: format!("gh api graphql did not start: {}", failure.detail),
+                detail: format!("GraphQL request did not start: {}", failure.detail()),
                 class: FailureClass::Unknown,
                 retry_after_s: None,
             }),
-            GraphqlObservation::OutcomeUnobserved(failure) => {
+            GraphqlObservation::OutcomeUnobserved(detail) => {
                 BackendCreateOutcome::Indeterminate(Failure {
                     detail: format!(
-                        "gh api graphql started, but its outcome is unknown: {}",
-                        failure.detail
+                        "GraphQL request started, but its outcome is unknown: {detail}"
                     ),
                     class: FailureClass::Unknown,
                     retry_after_s: None,
@@ -369,9 +478,7 @@ impl GithubAdapter<'_> {
         exchange: &GraphqlCompleted,
         envelope: Result<GraphqlEnvelope<CreateIssueData>, String>,
     ) -> BackendCreateOutcome {
-        let stderr = String::from_utf8_lossy(&exchange.diagnostics)
-            .trim()
-            .to_owned();
+        let delivery_detail = exchange.completion.detail().to_owned();
         if let Ok(response) = envelope {
             if let Some(issue) = response
                 .data
@@ -389,23 +496,23 @@ impl GithubAdapter<'_> {
                     .map(graphql::GraphqlError::into_message)
                     .collect::<Vec<_>>()
                     .join("\n")
-            } else if stderr.is_empty() {
-                "gh api graphql returned no GitHub issue URL receipt".into()
+            } else if delivery_detail.is_empty() {
+                "GitHub GraphQL returned no issue URL receipt".into()
             } else {
-                stderr.clone()
+                delivery_detail.clone()
             };
             return BackendCreateOutcome::Indeterminate(Failure {
-                class: classify(exchange.exit_code, &detail),
+                class: classify(&detail),
                 detail,
                 retry_after_s: None,
             });
         }
         BackendCreateOutcome::Indeterminate(Failure {
-            class: classify(exchange.exit_code, &stderr),
-            detail: if stderr.is_empty() {
-                "gh api graphql returned an unrecognized response".into()
+            class: classify(&delivery_detail),
+            detail: if delivery_detail.is_empty() {
+                "GitHub GraphQL returned an unrecognized response".into()
             } else {
-                stderr
+                delivery_detail
             },
             retry_after_s: None,
         })
@@ -441,19 +548,9 @@ impl GithubAdapter<'_> {
         issue: &GhIssue,
         identity: &BackendItemIdentity,
     ) -> Result<TicketKind, AdapterReadError> {
-        if let Some(issue_type) = issue.issue_type.as_ref() {
-            return Ok(if issue_type.name.eq_ignore_ascii_case("Bug") {
-                TicketKind::Bug
-            } else {
-                TicketKind::Task
-            });
-        }
-        if !issue
-            .labels
-            .iter()
-            .any(|label| label.name.eq_ignore_ascii_case("bug"))
-        {
-            return Ok(TicketKind::Task);
+        match classify_ticket_kind(issue) {
+            TicketKindClassification::Resolved(kind) => return Ok(kind),
+            TicketKindClassification::RequiresOwnership => {}
         }
 
         let repository = identity
@@ -462,15 +559,11 @@ impl GithubAdapter<'_> {
             .map(|(repository, _)| repository)
             .expect("validated GitHub issue identity contains its repository URL");
         let is_organization = self.repository_is_organization(repository)?;
-        Ok(if is_organization {
-            TicketKind::Task
-        } else {
-            TicketKind::Bug
-        })
+        Ok(TicketKindClassification::RequiresOwnership.resolve(is_organization))
     }
 
-    /// Read repository ownership once per canonical repository URL so Pull
-    /// does not repeat the extra lookup for each labeled Bug.
+    /// Cache repository ownership by canonical URL for repeated Adopt or
+    /// Promotion-recovery classification of labeled Bugs.
     fn repository_is_organization(&mut self, repository: &str) -> Result<bool, AdapterReadError> {
         if let Some(&is_organization) = self.repository_ownership.get(repository) {
             return Ok(is_organization);
@@ -627,25 +720,21 @@ impl GithubAdapter<'_> {
         operation: &O,
     ) -> Result<O::Response, AdapterReadError> {
         match graphql::execute(self.graphql.as_ref(), operation) {
-            GraphqlObservation::NotStarted(failure)
-            | GraphqlObservation::OutcomeUnobserved(failure) => {
-                if let Some(error) = failure.process_error {
-                    Err(AdapterReadError::Env(error))
-                } else {
-                    Err(AdapterReadError::Failed(failure.detail))
-                }
+            GraphqlObservation::NotStarted(failure) => {
+                Err(AdapterReadError::Env(start_failure_as_proc_error(&failure)))
             }
+            GraphqlObservation::OutcomeUnobserved(_) => Err(AdapterReadError::Env(
+                crate::proc::ProcError::OutcomeUnobserved,
+            )),
             GraphqlObservation::Completed { exchange, envelope } => {
-                let stderr = String::from_utf8_lossy(&exchange.diagnostics)
-                    .trim()
-                    .to_owned();
+                let delivery_failure = exchange.completion.failure_detail().unwrap_or_default();
                 let response = envelope.map_err(|error| {
-                    if exchange.exit_code != 0 && !stderr.is_empty() {
-                        AdapterReadError::Failed(stderr.clone())
-                    } else {
+                    if delivery_failure.is_empty() {
                         AdapterReadError::Failed(format!(
                             "could not parse GitHub GraphQL response: {error}"
                         ))
+                    } else {
+                        AdapterReadError::Failed(delivery_failure.to_owned())
                     }
                 })?;
                 if !response.errors.is_empty() {
@@ -666,8 +755,8 @@ impl GithubAdapter<'_> {
     }
 }
 
-/// Raw `gh issue view --json` shape. Only the fields tk maps are named; serde
-/// ignores the rest (e.g. the issueType object's `id`/`description`/`color`).
+/// GitHub Issue fields shared by native `gh issue view` and GraphQL Pull.
+/// Serde ignores fields tk does not map.
 #[derive(Debug, Deserialize)]
 struct GhIssue {
     number: i64,
@@ -678,7 +767,7 @@ struct GhIssue {
     state: String,
     #[serde(rename = "issueType")]
     issue_type: Option<GhIssueType>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_labels")]
     labels: Vec<GhLabel>,
     /// Canonical issue/PR URL used for identity and the PR guard.
     url: String,
@@ -687,6 +776,23 @@ struct GhIssue {
 #[derive(Debug, Deserialize)]
 struct GhLabel {
     name: String,
+}
+
+fn deserialize_labels<'de, D>(deserializer: D) -> Result<Vec<GhLabel>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Labels {
+        Native(Vec<GhLabel>),
+        Graphql { nodes: Vec<GhLabel> },
+    }
+
+    Ok(match Labels::deserialize(deserializer)? {
+        Labels::Native(labels) => labels,
+        Labels::Graphql { nodes } => nodes,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -734,6 +840,195 @@ impl RepositoryContext {
     }
 }
 
+struct PullGroup {
+    host: String,
+    targets: Vec<PullTarget>,
+}
+
+enum PullChunkError {
+    /// A request-wide failure; later chunks must not run.
+    Request(AdapterReadError),
+    /// Path-attributed failures retained until every sequential chunk runs.
+    Items(Vec<PullItemError>),
+}
+
+/// One item-scoped Pull failure tied to the caller's original input order.
+struct PullItemError {
+    input_index: usize,
+    message: String,
+}
+
+/// Preserve the CLI-backed Adapter's environment error contract without
+/// exposing [`crate::proc::ProcError`] through the ADR-0042 transport port.
+fn start_failure_as_proc_error(failure: &GraphqlStartFailure) -> crate::proc::ProcError {
+    match failure {
+        GraphqlStartFailure::Unavailable(_) => crate::proc::ProcError::ExecutableNotFound,
+        GraphqlStartFailure::Failed(_) => crate::proc::ProcError::SpawnFailed,
+    }
+}
+
+/// Name the failed GitHub host on every request-wide Pull diagnostic.
+fn pull_request_error(host: &str, detail: impl std::fmt::Display) -> PullChunkError {
+    PullChunkError::Request(AdapterReadError::Failed(format!("{host}: {detail}")))
+}
+
+fn plan_pull(items: &[BackendItemAddress]) -> Result<Vec<PullGroup>, AdapterReadError> {
+    let mut groups: Vec<PullGroup> = Vec::new();
+    let mut group_by_host: HashMap<&str, usize> = HashMap::new();
+    for (input_index, item) in items.iter().enumerate() {
+        let address = GithubIssueAddress::parse(&item.backend_key).ok_or_else(|| {
+            AdapterReadError::Failed(format!(
+                "'{}' is not a canonical GitHub issue URL",
+                item.backend_key
+            ))
+        })?;
+        let target = PullTarget {
+            input_index,
+            owner: address.owner.into(),
+            name: address.repository.into(),
+            number: address.number,
+        };
+        if let Some(&group_index) = group_by_host.get(address.host) {
+            groups[group_index].targets.push(target);
+        } else {
+            group_by_host.insert(address.host, groups.len());
+            groups.push(PullGroup {
+                host: address.host.into(),
+                targets: vec![target],
+            });
+        }
+    }
+    Ok(groups)
+}
+
+/// Split one GraphQL error list at the request-wide certainty boundary.
+fn classify_pull_errors(
+    errors: Vec<GraphqlError>,
+    targets: &[PullTarget],
+    host: &str,
+) -> PullChunkError {
+    let mut request_errors = Vec::new();
+    let mut item_errors = Vec::new();
+    for error in errors {
+        let input_index = error.root_field().and_then(|field| {
+            targets
+                .iter()
+                .find(|target| target.alias() == field)
+                .map(|target| target.input_index)
+        });
+        let message = error.into_message();
+        if let Some(index) = input_index {
+            item_errors.push(PullItemError {
+                input_index: index,
+                message,
+            });
+        } else {
+            request_errors.push(message);
+        }
+    }
+    if !request_errors.is_empty() {
+        request_errors.sort();
+        request_errors.dedup();
+        return pull_request_error(host, request_errors.join("\n"));
+    }
+    PullChunkError::Items(item_errors)
+}
+
+/// Build the earliest item failure detail in original input order.
+fn pull_item_error_detail(
+    mut item_errors: Vec<PullItemError>,
+    items: &[BackendItemAddress],
+) -> String {
+    item_errors.sort_by(|left, right| {
+        left.input_index
+            .cmp(&right.input_index)
+            .then(left.message.cmp(&right.message))
+    });
+    let first_index = item_errors
+        .first()
+        .expect("a non-empty GraphQL error list must classify at least one error")
+        .input_index;
+    let mut messages = item_errors
+        .into_iter()
+        .take_while(|error| error.input_index == first_index)
+        .map(|error| error.message)
+        .collect::<Vec<_>>();
+    messages.dedup();
+    format!(
+        "{}: {}",
+        items[first_index].backend_key,
+        messages.join("\n")
+    )
+}
+
+fn decode_pull_item(
+    address: &BackendItemAddress,
+    repository: Option<PullRepository>,
+) -> Result<BackendPullItem, AdapterReadError> {
+    let key = &address.backend_key;
+    let repository = repository.ok_or_else(|| {
+        AdapterReadError::Failed(format!(
+            "{key}: GitHub returned no repository for the requested issue"
+        ))
+    })?;
+    let object = repository.item.ok_or_else(|| {
+        AdapterReadError::Failed(format!("{key}: GitHub returned no issue or pull request"))
+    })?;
+    let refresh = match object {
+        PullObject::PullRequest { number, url } => {
+            return Err(AdapterReadError::Failed(format!(
+                "#{number}: GitHub returned a pull request, not an issue ({url})"
+            )));
+        }
+        PullObject::Issue { issue } => {
+            issue.validate_key(key)?;
+            issue.validate_identity()?;
+            let ticket_kind = classify_ticket_kind(&issue).resolve(repository.is_in_organization);
+            issue.into_refresh(ticket_kind)?
+        }
+    };
+    Ok(BackendPullItem {
+        address: address.clone(),
+        refresh,
+    })
+}
+
+enum TicketKindClassification {
+    Resolved(TicketKind),
+    RequiresOwnership,
+}
+
+impl TicketKindClassification {
+    fn resolve(self, is_organization: bool) -> TicketKind {
+        match self {
+            Self::Resolved(kind) => kind,
+            Self::RequiresOwnership if is_organization => TicketKind::Task,
+            Self::RequiresOwnership => TicketKind::Bug,
+        }
+    }
+}
+
+fn classify_ticket_kind(issue: &GhIssue) -> TicketKindClassification {
+    if let Some(issue_type) = issue.issue_type.as_ref() {
+        return TicketKindClassification::Resolved(
+            if issue_type.name.eq_ignore_ascii_case("Bug") {
+                TicketKind::Bug
+            } else {
+                TicketKind::Task
+            },
+        );
+    }
+    if issue
+        .labels
+        .iter()
+        .any(|label| label.name.eq_ignore_ascii_case("bug"))
+    {
+        TicketKindClassification::RequiresOwnership
+    } else {
+        TicketKindClassification::Resolved(TicketKind::Task)
+    }
+}
+
 #[derive(Debug)]
 enum BugRepresentation {
     NativeIssueType(String),
@@ -762,31 +1057,37 @@ impl GhIssue {
     /// Canonical identity, or a read failure when `gh` returns something tk
     /// must not bind an Item to.
     ///
-    /// PR guard (ADR-0034): `gh issue view <n>` resolves a pull request too
-    /// (issue and PR numbers share one sequence) and returns it as an
-    /// issue-shaped object, so reject when the canonical url is a /pull/<n>
-    /// path. tk has no PR concept; the user meant an issue.
+    /// PR guard (ADR-0034): native issue reads can resolve a pull request too
+    /// because issues and PRs share one number sequence. Reject a `/pull/<n>`
+    /// URL before it becomes a Backend Item; tk has no PR concept.
     fn validated_identity(&self) -> Result<BackendItemIdentity, AdapterReadError> {
+        self.validate_identity()?;
+        Ok(BackendItemIdentity {
+            backend_key: self.url.clone(),
+            display_id: format!("gh-{}", self.number),
+        })
+    }
+
+    fn validate_identity(&self) -> Result<(), AdapterReadError> {
         if is_pull_request_url(&self.url) {
             return Err(AdapterReadError::Failed(format!(
                 "#{} is a pull request, not an issue",
                 self.number
             )));
         }
-        let identity = parse_issue_url(&self.url).ok_or_else(|| {
+        let address = GithubIssueAddress::parse(&self.url).ok_or_else(|| {
             AdapterReadError::Failed(format!(
                 "#{}: GitHub returned a non-canonical issue URL ({})",
                 self.number, self.url
             ))
         })?;
-        let display_id = format!("gh-{}", self.number);
-        if identity.display_id != display_id {
+        if address.number != self.number {
             return Err(AdapterReadError::Failed(format!(
                 "#{}: GitHub returned an issue URL for a different number ({})",
                 self.number, self.url
             )));
         }
-        Ok(identity)
+        Ok(())
     }
 
     /// Map the backend-owned issue state onto Item Status; GitHub distinguishes
@@ -862,39 +1163,57 @@ fn is_pull_request_url(url: &str) -> bool {
 /// Display ID consistent before the identity crosses into the Repository
 /// Store.
 fn parse_issue_url(url: &str) -> Option<BackendItemIdentity> {
-    let mut segments = url.split('/');
-    let scheme = segments.next()?;
-    let empty = segments.next()?;
-    let host = segments.next()?;
-    let owner = segments.next()?;
-    let repository = segments.next()?;
-    let collection = segments.next()?;
-    let number = segments.next()?;
-    if segments.next().is_some()
-        || scheme != "https:"
-        || !empty.is_empty()
-        || host.is_empty()
-        || host.contains('@')
-        || owner.is_empty()
-        || repository.is_empty()
-        || collection != "issues"
-        || !number.bytes().all(|byte| byte.is_ascii_digit())
-        || (number.len() > 1 && number.starts_with('0'))
-        || [host, owner, repository, number]
-            .iter()
-            .any(|segment| segment.contains(['?', '#']) || segment.chars().any(char::is_whitespace))
-    {
-        return None;
-    }
-    let number: i64 = number.parse().ok()?;
-    if number <= 0 {
-        return None;
-    }
-    let backend_key = url.to_owned();
+    let address = GithubIssueAddress::parse(url)?;
     Some(BackendItemIdentity {
-        display_id: format!("gh-{number}"),
-        backend_key,
+        display_id: format!("gh-{}", address.number),
+        backend_key: url.to_owned(),
     })
+}
+
+struct GithubIssueAddress<'a> {
+    host: &'a str,
+    owner: &'a str,
+    repository: &'a str,
+    number: i64,
+}
+
+impl<'a> GithubIssueAddress<'a> {
+    fn parse(url: &'a str) -> Option<Self> {
+        let mut segments = url.split('/');
+        let scheme = segments.next()?;
+        let empty = segments.next()?;
+        let host = segments.next()?;
+        let owner = segments.next()?;
+        let repository = segments.next()?;
+        let collection = segments.next()?;
+        let number = segments.next()?;
+        if segments.next().is_some()
+            || scheme != "https:"
+            || !empty.is_empty()
+            || host.is_empty()
+            || host.contains('@')
+            || owner.is_empty()
+            || repository.is_empty()
+            || collection != "issues"
+            || !number.bytes().all(|byte| byte.is_ascii_digit())
+            || (number.len() > 1 && number.starts_with('0'))
+            || [host, owner, repository, number].iter().any(|segment| {
+                segment.contains(['?', '#']) || segment.chars().any(char::is_whitespace)
+            })
+        {
+            return None;
+        }
+        let number: i64 = number.parse().ok()?;
+        if number <= 0 {
+            return None;
+        }
+        Some(Self {
+            host,
+            owner,
+            repository,
+            number,
+        })
+    }
 }
 
 /// Parse the canonical one-line URL receipt emitted by `gh issue create`.
@@ -947,11 +1266,11 @@ fn certifies_auth_rejection(output: &RunOutput, stderr: &str) -> bool {
 /// stable `HTTP <code>:` prefix). Precedence matters: a 403 collides between
 /// auth and rate-limit, so the rate-limit anchors are tested first.
 ///
-/// `exit_code` is part of the ADR-0016 contract but unused: `gh` exits 1 for
-/// almost everything and even exit-4-for-auth is unreliable (cli/cli#9338), so
-/// the classification gates on stderr alone. `retry_after_s` stays `None` — gh
-/// discards the rate-limit reset header from its stderr.
-fn classify(_exit_code: i32, stderr: &str) -> FailureClass {
+/// Exit status does not enter classification: `gh` exits 1 for almost
+/// everything and even exit-4-for-auth is unreliable (cli/cli#9338). The
+/// classification therefore gates on diagnostic text alone. `retry_after_s`
+/// stays `None` because gh discards the rate-limit reset header from stderr.
+fn classify(stderr: &str) -> FailureClass {
     let s = stderr.to_ascii_lowercase();
     if s.contains("rate limit exceeded") || s.contains("secondary rate limit") {
         FailureClass::RateLimited
@@ -976,7 +1295,7 @@ fn stderr_string(output: &RunOutput) -> String {
 fn rejected_edit(output: &RunOutput) -> BackendEditOutcome {
     let detail = stderr_string(output);
     BackendEditOutcome::Rejected(Failure {
-        class: classify(output.exit_code, &detail),
+        class: classify(&detail),
         detail,
         retry_after_s: None,
     })
@@ -1101,6 +1420,286 @@ mod tests {
         serde_json::to_string(value).expect("test string must serialize")
     }
 
+    struct PullTransport {
+        calls: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+
+    impl GraphqlTransport for PullTransport {
+        fn exchange(&self, request: &GraphqlRequest) -> GraphqlExchange {
+            self.calls.set(self.calls.get() + 1);
+            assert_eq!(request.host, "github.com");
+            assert_eq!(request.operation_name, "PullItems");
+            assert!(request.document.contains("item_0: repository"));
+            assert!(request.document.contains("item_1: repository"));
+            assert!(request.document.contains("issueOrPullRequest"));
+            assert_eq!(
+                request.variables,
+                serde_json::json!({
+                    "owner_0": "o",
+                    "name_0": "r",
+                    "number_0": 1,
+                    "owner_1": "p",
+                    "name_1": "q",
+                    "number_1": 2,
+                })
+            );
+            GraphqlExchange::Completed(GraphqlCompleted {
+                body: br#"{"data":{"item_0":{"isInOrganization":false,"item":{"__typename":"Issue","number":1,"title":"First","body":"B1","state":"OPEN","url":"https://github.com/o/r/issues/1","issueType":null,"labels":{"nodes":[{"name":"bug"}]} }},"item_1":{"isInOrganization":true,"item":{"__typename":"Issue","number":2,"title":"Second","body":"B2","state":"CLOSED","url":"https://github.com/p/q/issues/2","issueType":{"name":"Bug"},"labels":{"nodes":[]}}}}}"#.to_vec(),
+                completion: graphql::GraphqlCompletion::Succeeded {
+                    detail: String::new(),
+                },
+            })
+        }
+    }
+
+    struct GeneratedPullTransport {
+        calls: std::rc::Rc<std::cell::RefCell<Vec<(String, usize)>>>,
+    }
+
+    impl GraphqlTransport for GeneratedPullTransport {
+        fn exchange(&self, request: &GraphqlRequest) -> GraphqlExchange {
+            let mut indices = request
+                .variables
+                .as_object()
+                .unwrap()
+                .keys()
+                .filter_map(|key| key.strip_prefix("number_"))
+                .map(|index| index.parse::<usize>().unwrap())
+                .collect::<Vec<_>>();
+            indices.sort_unstable();
+            self.calls
+                .borrow_mut()
+                .push((request.host.clone(), indices.len()));
+            let variables = request.variables.as_object().unwrap();
+            let mut data = serde_json::Map::new();
+            for index in indices {
+                let owner = variables[&format!("owner_{index}")].as_str().unwrap();
+                let name = variables[&format!("name_{index}")].as_str().unwrap();
+                let number = variables[&format!("number_{index}")].as_i64().unwrap();
+                data.insert(
+                    format!("item_{index}"),
+                    serde_json::json!({
+                        "isInOrganization": false,
+                        "item": {
+                            "__typename": "Issue",
+                            "number": number,
+                            "title": format!("Issue {number}"),
+                            "body": "",
+                            "state": "OPEN",
+                            "url": format!(
+                                "https://{}/{owner}/{name}/issues/{number}",
+                                request.host
+                            ),
+                            "issueType": null,
+                            "labels": {"nodes": []},
+                        }
+                    }),
+                );
+            }
+            GraphqlExchange::Completed(GraphqlCompleted {
+                body: serde_json::to_vec(&serde_json::json!({"data": data})).unwrap(),
+                completion: graphql::GraphqlCompletion::Succeeded {
+                    detail: String::new(),
+                },
+            })
+        }
+    }
+
+    struct StaticPullTransport {
+        body: Vec<u8>,
+    }
+
+    impl GraphqlTransport for StaticPullTransport {
+        fn exchange(&self, _request: &GraphqlRequest) -> GraphqlExchange {
+            GraphqlExchange::Completed(GraphqlCompleted {
+                body: self.body.clone(),
+                completion: graphql::GraphqlCompletion::Succeeded {
+                    detail: String::new(),
+                },
+            })
+        }
+    }
+
+    struct CrossHostErrorTransport {
+        calls: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    }
+
+    impl GraphqlTransport for CrossHostErrorTransport {
+        fn exchange(&self, request: &GraphqlRequest) -> GraphqlExchange {
+            self.calls.borrow_mut().push(request.host.clone());
+            let body = if request.host == "one.example" {
+                br#"{"data":{"item_0":null,"item_2":null},"errors":[{"message":"later input failed","path":["item_2","item"]}]}"#.to_vec()
+            } else {
+                br#"{"data":{"item_1":null},"errors":[{"message":"earlier input failed","path":["item_1","item"]}]}"#.to_vec()
+            };
+            GraphqlExchange::Completed(GraphqlCompleted {
+                body,
+                completion: graphql::GraphqlCompletion::Failed {
+                    detail: String::new(),
+                },
+            })
+        }
+    }
+
+    struct CrossChunkErrorTransport {
+        calls: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+
+    impl GraphqlTransport for CrossChunkErrorTransport {
+        fn exchange(&self, _request: &GraphqlRequest) -> GraphqlExchange {
+            let call = self.calls.get();
+            self.calls.set(call + 1);
+            let body = if call == 0 {
+                br#"{"data":{"item_0":null},"errors":[{"message":"first input failed","path":["item_0","item"]}]}"#.to_vec()
+            } else {
+                br#"{"data":{"item_50":{"isInOrganization":false,"item":{"__typename":"Issue","number":51,"title":"Last","body":"","state":"OPEN","url":"https://github.com/o/r/issues/51","issueType":null,"labels":{"nodes":[]}}}}}"#.to_vec()
+            };
+            GraphqlExchange::Completed(GraphqlCompleted {
+                body,
+                completion: if call == 0 {
+                    graphql::GraphqlCompletion::Failed {
+                        detail: String::new(),
+                    }
+                } else {
+                    graphql::GraphqlCompletion::Succeeded {
+                        detail: String::new(),
+                    }
+                },
+            })
+        }
+    }
+
+    struct ItemThenRequestErrorTransport {
+        calls: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+
+    impl GraphqlTransport for ItemThenRequestErrorTransport {
+        fn exchange(&self, _request: &GraphqlRequest) -> GraphqlExchange {
+            let call = self.calls.get();
+            self.calls.set(call + 1);
+            let body = if call == 0 {
+                br#"{"data":{"item_0":null},"errors":[{"message":"first input failed","path":["item_0","item"]}]}"#.to_vec()
+            } else {
+                br#"{"data":null,"errors":[{"message":"service unavailable"}]}"#.to_vec()
+            };
+            GraphqlExchange::Completed(GraphqlCompleted {
+                body,
+                completion: graphql::GraphqlCompletion::Failed {
+                    detail: String::new(),
+                },
+            })
+        }
+    }
+
+    struct CrossHostDecodeErrorTransport;
+
+    impl GraphqlTransport for CrossHostDecodeErrorTransport {
+        fn exchange(&self, request: &GraphqlRequest) -> GraphqlExchange {
+            let body = if request.host == "one.example" {
+                br#"{"data":{"item_0":{"isInOrganization":false,"item":{"__typename":"Issue","number":1,"title":"Valid","body":"","state":"OPEN","url":"https://one.example/o/r/issues/1","issueType":null,"labels":{"nodes":[]}}},"item_2":{"isInOrganization":false,"item":{"__typename":"Issue","number":3,"title":"Later","body":"","state":"FUTURE","url":"https://one.example/o/r/issues/3","issueType":null,"labels":{"nodes":[]}}}}}"#.to_vec()
+            } else {
+                br#"{"data":{"item_1":{"isInOrganization":false,"item":{"__typename":"Issue","number":2,"title":"Earlier","body":"","state":"FUTURE","url":"https://two.example/o/r/issues/2","issueType":null,"labels":{"nodes":[]}}}}}"#.to_vec()
+            };
+            GraphqlExchange::Completed(GraphqlCompleted {
+                body,
+                completion: graphql::GraphqlCompletion::Succeeded {
+                    detail: String::new(),
+                },
+            })
+        }
+    }
+
+    struct PanicPullTransport;
+
+    impl GraphqlTransport for PanicPullTransport {
+        fn exchange(&self, _request: &GraphqlRequest) -> GraphqlExchange {
+            panic!("invalid Pull input must be rejected before transport")
+        }
+    }
+
+    struct PullStartFailureTransport {
+        failure: std::cell::RefCell<Option<GraphqlStartFailure>>,
+    }
+
+    impl GraphqlTransport for PullStartFailureTransport {
+        fn exchange(&self, _request: &GraphqlRequest) -> GraphqlExchange {
+            GraphqlExchange::NotStarted(
+                self.failure
+                    .borrow_mut()
+                    .take()
+                    .expect("test transport is called once"),
+            )
+        }
+    }
+
+    struct ScriptedGraphqlTransport {
+        exchanges: std::cell::RefCell<std::collections::VecDeque<GraphqlExchange>>,
+        operations: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>,
+    }
+
+    impl GraphqlTransport for ScriptedGraphqlTransport {
+        fn exchange(&self, request: &GraphqlRequest) -> GraphqlExchange {
+            self.operations.borrow_mut().push(request.operation_name);
+            self.exchanges
+                .borrow_mut()
+                .pop_front()
+                .expect("test transport must script every GraphQL exchange")
+        }
+    }
+
+    fn completed_graphql(body: &str, failure: Option<&str>) -> GraphqlExchange {
+        GraphqlExchange::Completed(GraphqlCompleted {
+            body: body.as_bytes().to_vec(),
+            completion: failure.map_or_else(
+                || graphql::GraphqlCompletion::Succeeded {
+                    detail: String::new(),
+                },
+                |detail| graphql::GraphqlCompletion::Failed {
+                    detail: detail.into(),
+                },
+            ),
+        })
+    }
+
+    fn create_bug_with_exchange(exchange: GraphqlExchange) -> BackendCreateOutcome {
+        let runner = FakeRunner::new();
+        runner.expect_exact(
+            &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
+            ok(r#"{"id":"R_1","nameWithOwner":"o/r","isInOrganization":true,"url":"https://github.com/o/r"}"#),
+        );
+        let operations = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let transport = ScriptedGraphqlTransport {
+            exchanges: std::cell::RefCell::new(
+                [
+                    completed_graphql(
+                        r#"{"data":{"repository":{"issueTypes":{"nodes":[{"id":"IT_1","name":"Bug","isEnabled":true}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#,
+                        None,
+                    ),
+                    exchange,
+                ]
+                .into(),
+            ),
+            operations: operations.clone(),
+        };
+        let mut adapter =
+            GithubAdapter::with_graphql_transport(&runner, cwd(), Box::new(transport));
+
+        let outcome = adapter.create_item(&BackendCreate::Ticket {
+            snapshot: TitleBody {
+                title: "Bug title".into(),
+                body: "Bug body".into(),
+            },
+            ticket_kind: TicketKind::Bug,
+        });
+
+        assert_eq!(
+            operations.borrow().as_slice(),
+            ["RepositoryIssueTypes", "CreateBugIssue"]
+        );
+        runner.assert_all_consumed();
+        outcome
+    }
+
     /// Build a `gh issue view --json` object. `issue_type` is either `"null"`
     /// or a type name; the extra object fields exercise serde's field-skipping.
     fn issue_json(number: i64, state: &str, issue_type: &str, url: &str) -> String {
@@ -1182,6 +1781,364 @@ mod tests {
         }
     }
 
+    #[test]
+    fn pull_batches_multiple_repositories_and_restores_input_order() {
+        let runner = FakeRunner::new();
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let mut adapter = GithubAdapter::with_graphql_transport(
+            &runner,
+            cwd(),
+            Box::new(PullTransport {
+                calls: calls.clone(),
+            }),
+        );
+        let items = [
+            address("https://github.com/o/r/issues/1"),
+            address("https://github.com/p/q/issues/2"),
+        ];
+
+        let pulled = adapter.pull(&items).unwrap().into_refreshes();
+
+        assert_eq!(calls.get(), 1);
+        assert_eq!(pulled[0].0, items[0].backend_key);
+        assert_eq!(pulled[0].1.title, "First");
+        assert_eq!(pulled[0].1.ticket_kind, Some(TicketKind::Bug));
+        assert_eq!(pulled[1].0, items[1].backend_key);
+        assert_eq!(pulled[1].1.status, ItemStatus::Done);
+        assert_eq!(pulled[1].1.ticket_kind, Some(TicketKind::Bug));
+        runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn pull_preserves_issue_type_and_personal_label_classification() {
+        let runner = FakeRunner::new();
+        let mut adapter = GithubAdapter::with_graphql_transport(
+            &runner,
+            cwd(),
+            Box::new(StaticPullTransport {
+                body: br#"{"data":{"item_0":{"isInOrganization":true,"item":{"__typename":"Issue","number":1,"title":"Organization","body":"","state":"OPEN","url":"https://github.com/o/r/issues/1","issueType":null,"labels":{"nodes":[{"name":"bug"}]}}},"item_1":{"isInOrganization":false,"item":{"__typename":"Issue","number":2,"title":"Typed","body":"","state":"OPEN","url":"https://github.com/o/r/issues/2","issueType":{"name":"Feature"},"labels":{"nodes":[{"name":"bug"}]}}}}}"#.to_vec(),
+            }),
+        );
+        let items = [
+            address("https://github.com/o/r/issues/1"),
+            address("https://github.com/o/r/issues/2"),
+        ];
+
+        let pulled = adapter.pull(&items).unwrap().into_refreshes();
+
+        assert_eq!(pulled[0].1.ticket_kind, Some(TicketKind::Task));
+        assert_eq!(pulled[1].1.ticket_kind, Some(TicketKind::Task));
+    }
+
+    #[test]
+    fn pull_chunks_each_host_at_the_private_key_cap() {
+        let runner = FakeRunner::new();
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut adapter = GithubAdapter::with_graphql_transport(
+            &runner,
+            cwd(),
+            Box::new(GeneratedPullTransport {
+                calls: calls.clone(),
+            }),
+        );
+        let items = (1..=MAX_PULL_KEYS_PER_QUERY + 1)
+            .map(|number| address(&format!("https://github.com/o/r/issues/{number}")))
+            .collect::<Vec<_>>();
+
+        let pulled = adapter.pull(&items).unwrap().into_refreshes();
+
+        assert_eq!(pulled.len(), items.len());
+        assert_eq!(
+            calls.borrow().as_slice(),
+            [
+                ("github.com".to_string(), MAX_PULL_KEYS_PER_QUERY),
+                ("github.com".to_string(), 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn pull_groups_hosts_in_first_seen_order_without_reordering_results() {
+        let runner = FakeRunner::new();
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut adapter = GithubAdapter::with_graphql_transport(
+            &runner,
+            cwd(),
+            Box::new(GeneratedPullTransport {
+                calls: calls.clone(),
+            }),
+        );
+        let items = [
+            address("https://one.example/o/r/issues/1"),
+            address("https://two.example/o/r/issues/2"),
+            address("https://one.example/o/r/issues/3"),
+        ];
+
+        let pulled = adapter.pull(&items).unwrap().into_refreshes();
+
+        assert_eq!(
+            calls.borrow().as_slice(),
+            [
+                ("one.example".to_string(), 2),
+                ("two.example".to_string(), 1),
+            ]
+        );
+        assert_eq!(
+            pulled.into_iter().map(|(key, _)| key).collect::<Vec<_>>(),
+            items
+                .iter()
+                .map(|item| item.backend_key.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn pull_reports_item_errors_in_original_input_order() {
+        let runner = FakeRunner::new();
+        let mut adapter = GithubAdapter::with_graphql_transport(
+            &runner,
+            cwd(),
+            Box::new(StaticPullTransport {
+                body: br#"{"data":{"item_0":null,"item_1":null},"errors":[{"message":"second failed","path":["item_1","item"]},{"message":"first failed","path":["item_0","item"]}]}"#.to_vec(),
+            }),
+        );
+        let items = [
+            address("https://github.com/o/r/issues/1"),
+            address("https://github.com/o/r/issues/2"),
+        ];
+
+        let error = adapter.pull(&items).unwrap_err().to_string();
+
+        assert_eq!(error, "https://github.com/o/r/issues/1: first failed");
+    }
+
+    #[test]
+    fn pull_reports_the_earliest_item_error_across_host_batches() {
+        let runner = FakeRunner::new();
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut adapter = GithubAdapter::with_graphql_transport(
+            &runner,
+            cwd(),
+            Box::new(CrossHostErrorTransport {
+                calls: calls.clone(),
+            }),
+        );
+        let items = [
+            address("https://one.example/o/r/issues/1"),
+            address("https://two.example/o/r/issues/2"),
+            address("https://one.example/o/r/issues/3"),
+        ];
+
+        let error = adapter.pull(&items).unwrap_err().to_string();
+
+        assert_eq!(
+            error,
+            "https://two.example/o/r/issues/2: earlier input failed"
+        );
+        assert_eq!(
+            calls.borrow().as_slice(),
+            ["one.example".to_string(), "two.example".to_string()]
+        );
+    }
+
+    #[test]
+    fn pull_checks_later_chunks_before_reporting_item_errors() {
+        let runner = FakeRunner::new();
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let mut adapter = GithubAdapter::with_graphql_transport(
+            &runner,
+            cwd(),
+            Box::new(CrossChunkErrorTransport {
+                calls: calls.clone(),
+            }),
+        );
+        let items = (1..=MAX_PULL_KEYS_PER_QUERY + 1)
+            .map(|number| address(&format!("https://github.com/o/r/issues/{number}")))
+            .collect::<Vec<_>>();
+
+        let error = adapter.pull(&items).unwrap_err().to_string();
+
+        assert_eq!(error, "https://github.com/o/r/issues/1: first input failed");
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn pull_request_failure_overrides_an_earlier_item_failure() {
+        let runner = FakeRunner::new();
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let mut adapter = GithubAdapter::with_graphql_transport(
+            &runner,
+            cwd(),
+            Box::new(ItemThenRequestErrorTransport {
+                calls: calls.clone(),
+            }),
+        );
+        let items = (1..=MAX_PULL_KEYS_PER_QUERY + 1)
+            .map(|number| address(&format!("https://github.com/o/r/issues/{number}")))
+            .collect::<Vec<_>>();
+
+        let error = adapter.pull(&items).unwrap_err().to_string();
+
+        assert_eq!(error, "github.com: service unavailable");
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn pull_reports_the_earliest_decode_failure_across_hosts() {
+        let runner = FakeRunner::new();
+        let mut adapter = GithubAdapter::with_graphql_transport(
+            &runner,
+            cwd(),
+            Box::new(CrossHostDecodeErrorTransport),
+        );
+        let items = [
+            address("https://one.example/o/r/issues/1"),
+            address("https://two.example/o/r/issues/2"),
+            address("https://one.example/o/r/issues/3"),
+        ];
+
+        let error = adapter.pull(&items).unwrap_err().to_string();
+
+        assert!(
+            error.starts_with("https://two.example/o/r/issues/2:"),
+            "error={error:?}"
+        );
+        assert!(error.contains("unexpected issue state 'FUTURE'"));
+    }
+
+    #[test]
+    fn pull_reports_pathless_and_unknown_path_errors_as_request_wide() {
+        let runner = FakeRunner::new();
+        let mut adapter = GithubAdapter::with_graphql_transport(
+            &runner,
+            cwd(),
+            Box::new(StaticPullTransport {
+                body: br#"{"data":null,"errors":[{"message":"z pathless"},{"message":"a unknown","path":["item_999"]}]}"#.to_vec(),
+            }),
+        );
+
+        let error = adapter
+            .pull(&[address("https://github.com/o/r/issues/1")])
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(error, "github.com: a unknown\nz pathless");
+    }
+
+    #[test]
+    fn pull_keeps_transport_availability_as_a_bare_environment_error() {
+        for (failure, expected) in [
+            (
+                GraphqlStartFailure::Unavailable("missing transport".into()),
+                ProcError::ExecutableNotFound,
+            ),
+            (
+                GraphqlStartFailure::Failed("could not start".into()),
+                ProcError::SpawnFailed,
+            ),
+        ] {
+            let runner = FakeRunner::new();
+            let mut adapter = GithubAdapter::with_graphql_transport(
+                &runner,
+                cwd(),
+                Box::new(PullStartFailureTransport {
+                    failure: std::cell::RefCell::new(Some(failure)),
+                }),
+            );
+
+            let error = adapter
+                .pull(&[address("https://github.example/o/r/issues/1")])
+                .unwrap_err();
+
+            assert!(matches!(
+                (error, expected),
+                (
+                    AdapterReadError::Env(ProcError::ExecutableNotFound),
+                    ProcError::ExecutableNotFound
+                ) | (
+                    AdapterReadError::Env(ProcError::SpawnFailed),
+                    ProcError::SpawnFailed
+                )
+            ));
+        }
+    }
+
+    #[test]
+    fn pull_names_the_backend_key_when_a_response_field_is_missing() {
+        let runner = FakeRunner::new();
+        let mut adapter = GithubAdapter::with_graphql_transport(
+            &runner,
+            cwd(),
+            Box::new(StaticPullTransport {
+                body: br#"{"data":{}}"#.to_vec(),
+            }),
+        );
+        let key = "https://github.com/o/r/issues/52";
+
+        let error = adapter.pull(&[address(key)]).unwrap_err().to_string();
+
+        assert_eq!(
+            error,
+            format!("{key}: GitHub GraphQL response omitted its Pull field")
+        );
+        assert!(!error.contains("item_"));
+    }
+
+    #[test]
+    fn pull_rejects_noncanonical_keys_before_transport() {
+        let runner = FakeRunner::new();
+        let mut adapter =
+            GithubAdapter::with_graphql_transport(&runner, cwd(), Box::new(PanicPullTransport));
+
+        let error = adapter.pull(&[address("1")]).unwrap_err().to_string();
+
+        assert_eq!(error, "'1' is not a canonical GitHub issue URL");
+    }
+
+    #[test]
+    fn pull_rejects_missing_pull_request_malformed_and_mismatched_results() {
+        let cases = [
+            (
+                br#"{"data":{"item_0":null}}"#.as_slice(),
+                "returned no repository",
+            ),
+            (
+                br#"{"data":{"item_0":{"isInOrganization":false,"item":null}}}"#.as_slice(),
+                "returned no issue or pull request",
+            ),
+            (
+                br#"{"data":{"item_0":{"isInOrganization":false,"item":{"__typename":"PullRequest","number":1,"url":"https://github.com/o/r/pull/1"}}}}"#.as_slice(),
+                "returned a pull request",
+            ),
+            (b"not json".as_slice(), "could not parse GitHub GraphQL response"),
+            (
+                br#"{"data":{"item_0":{"isInOrganization":false,"item":{"__typename":"Issue","number":1,"title":"Wrong","body":"","state":"OPEN","url":"https://github.com/o/r/issues/2","issueType":null,"labels":{"nodes":[]}}}}}"#.as_slice(),
+                "different issue",
+            ),
+            (
+                br#"{"data":{"item_0":{"isInOrganization":false,"item":{"__typename":"Issue","number":1,"title":"Future","body":"","state":"FUTURE","url":"https://github.com/o/r/issues/1","issueType":null,"labels":{"nodes":[]}}}}}"#.as_slice(),
+                "unexpected issue state",
+            ),
+        ];
+        for (body, expected) in cases {
+            let runner = FakeRunner::new();
+            let mut adapter = GithubAdapter::with_graphql_transport(
+                &runner,
+                cwd(),
+                Box::new(StaticPullTransport {
+                    body: body.to_vec(),
+                }),
+            );
+
+            let error = adapter
+                .pull(&[address("https://github.com/o/r/issues/1")])
+                .unwrap_err()
+                .to_string();
+
+            assert!(error.contains(expected), "error={error:?}");
+        }
+    }
+
     fn identity(url: &str) -> BackendItemIdentity {
         let key = url.rsplit('/').next().unwrap();
         BackendItemIdentity {
@@ -1240,25 +2197,6 @@ mod tests {
         assert_eq!(s.ticket_kind, TicketKind::Task);
         assert_eq!(s.status, ItemStatus::Open);
         assert_eq!(s.title, "T42");
-        runner.assert_all_consumed();
-    }
-
-    #[test]
-    fn refresh_maps_closed_to_done_and_bug_kind() {
-        let runner = FakeRunner::new();
-        runner.expect_exact(
-            &["gh", "issue", "view", "7", "--json", ISSUE_JSON_FIELDS],
-            ok(&issue_json(
-                7,
-                "CLOSED",
-                "Bug",
-                "https://github.com/o/r/issues/7",
-            )),
-        );
-        let mut adapter = GithubAdapter::new(&runner, cwd());
-        let s = adapter.refresh_item("7").unwrap();
-        assert_eq!(s.status, ItemStatus::Done);
-        assert_eq!(s.ticket_kind, Some(TicketKind::Bug));
         runner.assert_all_consumed();
     }
 
@@ -1448,141 +2386,6 @@ mod tests {
     }
 
     #[test]
-    fn refresh_maps_non_bug_and_null_issue_type_to_task() {
-        for it in ["Feature", "null", "CustomOrgType"] {
-            let runner = FakeRunner::new();
-            runner.expect_exact(
-                &["gh", "issue", "view", "1", "--json", ISSUE_JSON_FIELDS],
-                ok(&issue_json(
-                    1,
-                    "OPEN",
-                    it,
-                    "https://github.com/o/r/issues/1",
-                )),
-            );
-            let mut adapter = GithubAdapter::new(&runner, cwd());
-            let s = adapter.refresh_item("1").unwrap();
-            assert_eq!(
-                s.ticket_kind,
-                Some(TicketKind::Task),
-                "issueType {it} → Task"
-            );
-            runner.assert_all_consumed();
-        }
-    }
-
-    #[test]
-    fn refresh_maps_typeless_bug_label_to_bug_in_a_user_repository() {
-        let runner = FakeRunner::new();
-        runner.expect_exact(
-            &["gh", "issue", "view", "1", "--json", ISSUE_JSON_FIELDS],
-            ok(&issue_json_with_labels(
-                1,
-                "OPEN",
-                "null",
-                "https://github.com/o/r/issues/1",
-                r#"[{"name":"BUG"}]"#,
-            )),
-        );
-        runner.expect_exact(
-            &[
-                "gh",
-                "repo",
-                "view",
-                "https://github.com/o/r",
-                "--json",
-                "isInOrganization",
-            ],
-            ok(r#"{"isInOrganization":false}"#),
-        );
-        let mut adapter = GithubAdapter::new(&runner, cwd());
-
-        assert_eq!(
-            adapter.refresh_item("1").unwrap().ticket_kind,
-            Some(TicketKind::Bug)
-        );
-        runner.assert_all_consumed();
-    }
-
-    #[test]
-    fn refresh_maps_typeless_bug_label_to_task_in_an_organization_repository() {
-        let runner = FakeRunner::new();
-        runner.expect_exact(
-            &["gh", "issue", "view", "1", "--json", ISSUE_JSON_FIELDS],
-            ok(&issue_json_with_labels(
-                1,
-                "OPEN",
-                "null",
-                "https://github.com/o/r/issues/1",
-                r#"[{"name":"bug"}]"#,
-            )),
-        );
-        runner.expect_exact(
-            &[
-                "gh",
-                "repo",
-                "view",
-                "https://github.com/o/r",
-                "--json",
-                "isInOrganization",
-            ],
-            ok(r#"{"isInOrganization":true}"#),
-        );
-        let mut adapter = GithubAdapter::new(&runner, cwd());
-
-        assert_eq!(
-            adapter.refresh_item("1").unwrap().ticket_kind,
-            Some(TicketKind::Task)
-        );
-        runner.assert_all_consumed();
-    }
-
-    #[test]
-    fn refresh_native_issue_type_wins_over_a_bug_label() {
-        let runner = FakeRunner::new();
-        runner.expect_exact(
-            &["gh", "issue", "view", "1", "--json", ISSUE_JSON_FIELDS],
-            ok(&issue_json_with_labels(
-                1,
-                "OPEN",
-                "Feature",
-                "https://github.com/o/r/issues/1",
-                r#"[{"name":"bug"}]"#,
-            )),
-        );
-        let mut adapter = GithubAdapter::new(&runner, cwd());
-
-        assert_eq!(
-            adapter.refresh_item("1").unwrap().ticket_kind,
-            Some(TicketKind::Task)
-        );
-        runner.assert_all_consumed();
-    }
-
-    #[test]
-    fn refresh_rejects_a_key_that_resolves_to_another_issue() {
-        let key = "https://github.com/o/r/issues/1";
-        let runner = FakeRunner::new();
-        runner.expect_exact(
-            &["gh", "issue", "view", key, "--json", ISSUE_JSON_FIELDS],
-            ok(&issue_json(
-                2,
-                "OPEN",
-                "Task",
-                "https://github.com/o/r/issues/2",
-            )),
-        );
-        let mut adapter = GithubAdapter::new(&runner, cwd());
-
-        let AdapterReadError::Failed(detail) = adapter.refresh_item(key).unwrap_err() else {
-            panic!("redirected identity must be a Backend read failure")
-        };
-        assert!(detail.contains("resolved"));
-        assert!(detail.contains("issues/2"));
-        runner.assert_all_consumed();
-    }
-
-    #[test]
     fn adopt_rejects_a_pull_request() {
         let runner = FakeRunner::new();
         runner.expect_exact(
@@ -1599,84 +2402,6 @@ mod tests {
             AdapterReadError::Failed(d) => assert!(d.contains("#99 is a pull request"), "{d}"),
             AdapterReadError::Env(e) => panic!("expected Failed, got Env({e:?})"),
         }
-        runner.assert_all_consumed();
-    }
-
-    #[test]
-    fn refresh_non_zero_exit_is_pull_failed_with_stderr() {
-        // Verbatim not-found stderr observed in the tk-gh-playground spike
-        // (docs/spikes/gh-cli-issue-behavior.md).
-        let stderr = "GraphQL: Could not resolve to an issue or pull request \
-                      with the number of 5. (repository.issue)";
-        let runner = FakeRunner::new();
-        runner.expect_exact(
-            &["gh", "issue", "view", "5", "--json", ISSUE_JSON_FIELDS],
-            fail(1, stderr),
-        );
-        let mut adapter = GithubAdapter::new(&runner, cwd());
-        match adapter.refresh_item("5").unwrap_err() {
-            AdapterReadError::Failed(d) => assert_eq!(d, stderr),
-            AdapterReadError::Env(e) => panic!("expected Failed, got Env({e:?})"),
-        }
-        runner.assert_all_consumed();
-    }
-
-    #[test]
-    fn refresh_spawn_failure_is_pull_env() {
-        let runner = FakeRunner::new();
-        runner.expect_exact_error(
-            &["gh", "issue", "view", "1", "--json", ISSUE_JSON_FIELDS],
-            ProcError::ExecutableNotFound,
-        );
-        let mut adapter = GithubAdapter::new(&runner, cwd());
-        assert!(matches!(
-            adapter.refresh_item("1").unwrap_err(),
-            AdapterReadError::Env(ProcError::ExecutableNotFound)
-        ));
-        runner.assert_all_consumed();
-    }
-
-    #[test]
-    fn refresh_calls_are_independent_and_preserve_order() {
-        let runner = FakeRunner::new();
-        runner.expect_exact(
-            &["gh", "issue", "view", "1", "--json", ISSUE_JSON_FIELDS],
-            ok(&issue_json(
-                1,
-                "OPEN",
-                "null",
-                "https://github.com/o/r/issues/1",
-            )),
-        );
-        runner.expect_exact(
-            &["gh", "issue", "view", "2", "--json", ISSUE_JSON_FIELDS],
-            ok(&issue_json(
-                2,
-                "CLOSED",
-                "null",
-                "https://github.com/o/r/issues/2",
-            )),
-        );
-        let mut adapter = GithubAdapter::new(&runner, cwd());
-        let first = adapter.refresh_item("1").unwrap();
-        let second = adapter.refresh_item("2").unwrap();
-        assert_eq!(first.status, ItemStatus::Open);
-        assert_eq!(second.status, ItemStatus::Done);
-        runner.assert_all_consumed();
-    }
-
-    #[test]
-    fn refresh_unparseable_json_is_pull_failed() {
-        let runner = FakeRunner::new();
-        runner.expect_exact(
-            &["gh", "issue", "view", "1", "--json", ISSUE_JSON_FIELDS],
-            ok("not json"),
-        );
-        let mut adapter = GithubAdapter::new(&runner, cwd());
-        assert!(matches!(
-            adapter.refresh_item("1").unwrap_err(),
-            AdapterReadError::Failed(_)
-        ));
         runner.assert_all_consumed();
     }
 
@@ -2408,6 +3133,91 @@ mod tests {
     }
 
     #[test]
+    fn bug_creation_rejects_when_the_graphql_exchange_does_not_start() {
+        for failure in [
+            GraphqlStartFailure::Unavailable("transport unavailable".into()),
+            GraphqlStartFailure::Failed("request setup failed".into()),
+        ] {
+            let BackendCreateOutcome::Rejected(failure) =
+                create_bug_with_exchange(GraphqlExchange::NotStarted(failure))
+            else {
+                panic!("a request that did not start cannot create an issue");
+            };
+            assert!(failure.detail.starts_with("GraphQL request did not start:"));
+        }
+    }
+
+    #[test]
+    fn bug_creation_is_indeterminate_when_the_exchange_outcome_is_unobserved() {
+        let BackendCreateOutcome::Indeterminate(failure) = create_bug_with_exchange(
+            GraphqlExchange::OutcomeUnobserved("connection closed while sending".into()),
+        ) else {
+            panic!("a started mutation without an observed outcome is indeterminate");
+        };
+
+        assert!(failure.detail.contains("outcome is unknown"));
+        assert!(failure.detail.contains("connection closed while sending"));
+    }
+
+    #[test]
+    fn bug_creation_accepts_a_valid_receipt_after_delivery_failure() {
+        let outcome = create_bug_with_exchange(completed_graphql(
+            r#"{"data":{"createIssue":{"issue":{"url":"https://github.com/o/r/issues/42","number":42}}}}"#,
+            Some("delivery reported failure"),
+        ));
+
+        assert_eq!(
+            outcome,
+            BackendCreateOutcome::Created(identity("https://github.com/o/r/issues/42"))
+        );
+    }
+
+    #[test]
+    fn bug_creation_keeps_graphql_errors_as_indeterminate_detail() {
+        let BackendCreateOutcome::Indeterminate(failure) =
+            create_bug_with_exchange(completed_graphql(
+                r#"{"data":{"createIssue":null},"errors":[{"message":"permission denied"}]}"#,
+                Some("delivery reported failure"),
+            ))
+        else {
+            panic!("GraphQL errors without a receipt leave creation indeterminate");
+        };
+
+        assert_eq!(failure.detail, "permission denied");
+    }
+
+    #[test]
+    fn bug_creation_keeps_transport_detail_without_a_receipt() {
+        let exchange = GraphqlExchange::Completed(GraphqlCompleted {
+            body: br#"{"data":{"createIssue":null}}"#.to_vec(),
+            completion: graphql::GraphqlCompletion::Succeeded {
+                detail: "transport warning".into(),
+            },
+        });
+
+        let BackendCreateOutcome::Indeterminate(failure) = create_bug_with_exchange(exchange)
+        else {
+            panic!("a response without a receipt leaves creation indeterminate");
+        };
+
+        assert_eq!(failure.detail, "transport warning");
+    }
+
+    #[test]
+    fn bug_creation_treats_a_malformed_graphql_envelope_as_indeterminate() {
+        let BackendCreateOutcome::Indeterminate(failure) =
+            create_bug_with_exchange(completed_graphql("not json", None))
+        else {
+            panic!("a malformed response cannot prove whether creation ran");
+        };
+
+        assert_eq!(
+            failure.detail,
+            "GitHub GraphQL returned an unrecognized response"
+        );
+    }
+
+    #[test]
     fn resolves_a_personal_bug_label_after_an_initial_null_issue_type_connection() {
         let runner = FakeRunner::new();
         runner.expect_exact(
@@ -2562,47 +3372,42 @@ mod tests {
     #[test]
     fn classify_uses_mechanical_anchors_with_rate_limit_precedence() {
         assert_eq!(
-            classify(1, "API rate limit exceeded for user"),
+            classify("API rate limit exceeded for user"),
             FailureClass::RateLimited
         );
         assert_eq!(
-            classify(1, "You have exceeded a secondary rate limit"),
+            classify("You have exceeded a secondary rate limit"),
             FailureClass::RateLimited
         );
-        assert_eq!(classify(1, "HTTP 401: Bad credentials"), FailureClass::Auth);
+        assert_eq!(classify("HTTP 401: Bad credentials"), FailureClass::Auth);
         assert_eq!(
-            classify(4, "To get started, please run:  gh auth login"),
+            classify("To get started, please run:  gh auth login"),
             FailureClass::Auth
         );
         assert_eq!(
-            classify(1, "HTTP 422: Validation Failed"),
+            classify("HTTP 422: Validation Failed"),
             FailureClass::Validation
         );
         assert_eq!(
-            classify(1, "HTTP 503: Service Unavailable"),
+            classify("HTTP 503: Service Unavailable"),
             FailureClass::Transient
         );
-        assert_eq!(
-            classify(1, "some unrecognised error"),
-            FailureClass::Unknown
-        );
+        assert_eq!(classify("some unrecognised error"), FailureClass::Unknown);
         // A 403 collides between auth and rate-limit; rate-limit wins.
         assert_eq!(
-            classify(1, "HTTP 403: API rate limit exceeded"),
+            classify("HTTP 403: API rate limit exceeded"),
             FailureClass::RateLimited
         );
         // Verbatim gh outputs observed in the tk-gh-playground spike
         // (docs/spikes/gh-cli-issue-behavior.md).
         assert_eq!(
             classify(
-                1,
                 "HTTP 401: Bad credentials (https://api.github.com/graphql)\nTry authenticating with:  gh auth login -h github.com"
             ),
             FailureClass::Auth
         );
         assert_eq!(
             classify(
-                1,
                 "GraphQL: Could not resolve to an issue or pull request with the number of 999999. (repository.issue)"
             ),
             FailureClass::Unknown

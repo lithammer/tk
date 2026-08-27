@@ -1,13 +1,12 @@
-//! `gh api graphql` transport adapter.
+//! GraphQL transport backed by `gh api graphql`.
 
 use std::path::Path;
-
-use serde::Serialize;
 
 use crate::proc::ProcRunner;
 
 use super::transport::{
-    GraphqlCompleted, GraphqlExchange, GraphqlRequest, GraphqlTransport, GraphqlTransportFailure,
+    GraphqlCompleted, GraphqlCompletion, GraphqlExchange, GraphqlRequest, GraphqlStartFailure,
+    GraphqlTransport,
 };
 
 /// GraphQL transport backed by the authenticated `gh` CLI.
@@ -17,6 +16,7 @@ pub(in crate::remote::github) struct CliGraphqlTransport<'a> {
 }
 
 impl<'a> CliGraphqlTransport<'a> {
+    /// Bind GraphQL delivery to the shared subprocess seam and command cwd.
     pub(in crate::remote::github) fn new(runner: &'a dyn ProcRunner, cwd: &'a Path) -> Self {
         Self { runner, cwd }
     }
@@ -24,20 +24,7 @@ impl<'a> CliGraphqlTransport<'a> {
 
 impl GraphqlTransport for CliGraphqlTransport<'_> {
     fn exchange(&self, request: &GraphqlRequest) -> GraphqlExchange {
-        #[derive(Serialize)]
-        struct Body<'a> {
-            query: &'a str,
-            #[serde(rename = "operationName")]
-            operation_name: &'a str,
-            variables: &'a serde_json::Value,
-        }
-
-        let body = serde_json::to_vec(&Body {
-            query: &request.document,
-            operation_name: request.operation_name,
-            variables: &request.variables,
-        })
-        .expect("GraphQL request values must serialize as JSON");
+        let body = request.body();
         let argv = [
             "gh",
             "api",
@@ -50,23 +37,26 @@ impl GraphqlTransport for CliGraphqlTransport<'_> {
             "-",
         ];
         match self.runner.run_with_stdin(&argv, self.cwd, &body) {
-            Ok(output) => GraphqlExchange::Completed(GraphqlCompleted {
-                body: output.stdout,
-                exit_code: output.exit_code,
-                diagnostics: output.stderr,
-            }),
-            Err(
-                error @ (crate::proc::ProcError::ExecutableNotFound
-                | crate::proc::ProcError::SpawnFailed),
-            ) => GraphqlExchange::NotStarted(GraphqlTransportFailure {
-                detail: error.to_string(),
-                process_error: Some(error),
-            }),
-            Err(error @ crate::proc::ProcError::OutcomeUnobserved) => {
-                GraphqlExchange::OutcomeUnobserved(GraphqlTransportFailure {
-                    detail: error.to_string(),
-                    process_error: Some(error),
+            Ok(output) => {
+                let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+                let completion = if output.succeeded() {
+                    GraphqlCompletion::Succeeded { detail }
+                } else {
+                    GraphqlCompletion::Failed { detail }
+                };
+                GraphqlExchange::Completed(GraphqlCompleted {
+                    body: output.stdout,
+                    completion,
                 })
+            }
+            Err(error @ crate::proc::ProcError::ExecutableNotFound) => {
+                GraphqlExchange::NotStarted(GraphqlStartFailure::Unavailable(error.to_string()))
+            }
+            Err(error @ crate::proc::ProcError::SpawnFailed) => {
+                GraphqlExchange::NotStarted(GraphqlStartFailure::Failed(error.to_string()))
+            }
+            Err(error @ crate::proc::ProcError::OutcomeUnobserved) => {
+                GraphqlExchange::OutcomeUnobserved(error.to_string())
             }
         }
     }
@@ -113,12 +103,14 @@ mod tests {
         let GraphqlExchange::Completed(completed) = exchange else {
             panic!("completed child must remain an observed exchange");
         };
-        assert_eq!(completed.exit_code, 1);
+        assert!(matches!(
+            completed.completion,
+            GraphqlCompletion::Failed { ref detail } if detail == "GraphQL: denied"
+        ));
         assert_eq!(
             completed.body,
             br#"{"data":{"viewer":null},"errors":[{"message":"denied"}]}"#
         );
-        assert_eq!(completed.diagnostics, b"GraphQL: denied");
         runner.assert_all_consumed();
     }
 

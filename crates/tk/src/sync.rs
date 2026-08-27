@@ -5,7 +5,7 @@
 //! SQL helpers in [`crate::store::sync`]:
 //!
 //! 1. Pull. The engine derives the Adopted working set's active backend keys
-//!    ([`active_backend_keys`]) and refreshes each through [`Adapter::refresh_item`].
+//!    ([`active_backend_keys`]) and gives the complete set to [`Adapter::pull`].
 //!    It collects every result before the single Store merge transaction.
 //!    The merge transaction is skipped when the Pull is empty so an idle sync
 //!    takes no write lock.
@@ -24,7 +24,7 @@
 use rusqlite::Connection;
 use thiserror::Error;
 
-use crate::domain::backend_operation::{BackendItemIdentity, BackendOperation};
+use crate::domain::backend_operation::{BackendItemAddress, BackendItemIdentity, BackendOperation};
 use crate::domain::backend_outcome::{BackendCreateOutcome, BackendEditOutcome};
 use crate::remote::adapter::{Adapter, AdapterReadError, ApplyError};
 use crate::store::repository::RemoteWorkflowGuard;
@@ -223,16 +223,19 @@ pub fn run_sync(
     };
 
     // Pull and merge. The engine derives the Adopted working set's active keys
-    // and the adapter fetches exactly those (ADR-0034 opt-in refresh-by-key);
+    // and the adapter fetches exactly those (ADR-0034 exact-key Pull);
     // an empty set means no backend call. A storage fault deriving the keys is
     // a pull-side store error, surfaced through the merge boundary.
     let kind = adapter.backend_kind();
-    let keys = active_backend_keys(conn, kind)?;
-    let mut refreshes = Vec::with_capacity(keys.len());
-    for key in keys {
-        let refresh = adapter.refresh_item(&key)?;
-        refreshes.push((key, refresh));
-    }
+    let items: Vec<_> = active_backend_keys(conn, kind)?
+        .into_iter()
+        .map(|backend_key| BackendItemAddress { backend_key })
+        .collect();
+    let refreshes = if items.is_empty() {
+        Vec::new()
+    } else {
+        adapter.pull(&items)?.into_refreshes()
+    };
     report.pulled_count = refreshes.len();
     if !refreshes.is_empty() {
         merge_backend_refreshes(conn, kind, &refreshes, now)?;
@@ -300,7 +303,7 @@ mod tests {
     use crate::domain::status::ItemStatus;
     use crate::domain::ticket_kind::TicketKind;
     use crate::proc::{FakeRunner, ProcError};
-    use crate::remote::fake::{CreateResponse, EditResponse, FakeAdapter, RefreshResponse};
+    use crate::remote::fake::{CreateResponse, EditResponse, FakeAdapter, PullResponse};
     use crate::remote::github::GithubAdapter;
     use crate::store::migrations;
     use crate::store::testing::{
@@ -353,30 +356,30 @@ mod tests {
         .unwrap();
     }
 
-    fn refresh(title: &str) -> RefreshResponse {
-        RefreshResponse::Item(BackendItemRefresh {
+    fn refresh(title: &str) -> BackendItemRefresh {
+        BackendItemRefresh {
             ticket_kind: Some(TicketKind::Task),
             title: title.into(),
             body: String::new(),
             status: ItemStatus::Open,
-        })
+        }
     }
 
-    fn fake(refreshes: Vec<RefreshResponse>, edits: Vec<EditResponse>) -> FakeAdapter {
-        FakeAdapter::new()
-            .with_refreshes(refreshes)
-            .with_edits(edits)
+    fn fake(refreshes: Vec<BackendItemRefresh>, edits: Vec<EditResponse>) -> FakeAdapter {
+        let fake = FakeAdapter::new().with_edits(edits);
+        if refreshes.is_empty() {
+            fake
+        } else {
+            fake.with_pulls(vec![PullResponse::Items(refreshes)])
+        }
     }
 
     fn fake_with_create(
-        refreshes: Vec<RefreshResponse>,
+        refreshes: Vec<BackendItemRefresh>,
         edits: Vec<EditResponse>,
         creates: Vec<CreateResponse>,
     ) -> FakeAdapter {
-        FakeAdapter::new()
-            .with_refreshes(refreshes)
-            .with_edits(edits)
-            .with_creates(creates)
+        fake(refreshes, edits).with_creates(creates)
     }
 
     fn run(conn: &mut Connection, fake: &mut FakeAdapter) -> Result<SyncReport, RunSyncError> {
@@ -431,7 +434,7 @@ mod tests {
             run(&mut conn, &mut fake),
             Err(RunSyncError::ApplyingMutation(7))
         ));
-        assert!(fake.captured_refresh_keys.is_empty());
+        assert!(fake.captured_pull_keys.is_empty());
         assert!(fake.captured_edits.is_empty());
         assert!(fake.captured_creates.is_empty());
     }
@@ -474,7 +477,7 @@ mod tests {
                 crate::store::sync::BackendCohortError::MultipleBackendKinds
             ))
         ));
-        assert!(fake.captured_refresh_keys.is_empty());
+        assert!(fake.captured_pull_keys.is_empty());
         assert!(fake.captured_edits.is_empty());
     }
 
@@ -518,7 +521,7 @@ mod tests {
                 }
             ))
         ));
-        assert!(fake.captured_refresh_keys.is_empty());
+        assert!(fake.captured_pull_keys.is_empty());
         assert!(fake.captured_edits.is_empty());
     }
 
@@ -533,7 +536,7 @@ mod tests {
         assert_eq!(report.pulled_count, 1);
 
         // The engine derived the active Adopted key set and asked for exactly it.
-        assert_eq!(fake.captured_refresh_keys, vec!["42".to_string()]);
+        assert_eq!(fake.captured_pull_keys, vec![vec!["42".to_string()]]);
 
         // The known row was refreshed in place.
         let title: String = conn
@@ -544,6 +547,23 @@ mod tests {
             )
             .unwrap();
         assert_eq!(title, "Refreshed");
+    }
+
+    #[test]
+    fn pull_gives_the_adapter_the_complete_working_set_once() {
+        let mut conn = open_seeded();
+        backend_ticket(&conn, "t1", "gh-1", "1", 1);
+        backend_ticket(&conn, "t2", "gh-2", "2", 2);
+        seed_remote(&conn);
+        let mut fake = fake(vec![refresh("First"), refresh("Second")], vec![]);
+
+        let report = run(&mut conn, &mut fake).unwrap();
+
+        assert_eq!(report.pulled_count, 2);
+        assert_eq!(
+            fake.captured_pull_keys,
+            vec![vec!["1".to_string(), "2".to_string()]]
+        );
     }
 
     #[test]
@@ -584,7 +604,7 @@ mod tests {
         let mut fake = fake(vec![refresh("Old")], vec![]);
         run(&mut conn, &mut fake).unwrap();
 
-        assert_eq!(fake.captured_refresh_keys, vec!["1".to_string()]);
+        assert_eq!(fake.captured_pull_keys, vec![vec!["1".to_string()]]);
     }
 
     #[test]
@@ -815,20 +835,15 @@ mod tests {
     }
 
     #[test]
-    fn later_refresh_failure_prevents_all_refreshes_from_merging_and_skips_apply() {
+    fn pull_failure_prevents_all_refreshes_from_merging_and_skips_apply() {
         let mut conn = open_seeded();
         backend_ticket(&conn, "t1", "gh-1", "1", 1);
         backend_ticket(&conn, "t2", "gh-2", "2", 2);
         seed_remote(&conn);
         update_ticket_mutation(&conn, 1, "t1", "A");
 
-        let mut fake = fake(
-            vec![
-                refresh("Should Not Merge"),
-                RefreshResponse::RecordedFailure("gh: HTTP 502".into()),
-            ],
-            vec![],
-        );
+        let mut fake = FakeAdapter::new()
+            .with_pulls(vec![PullResponse::RecordedFailure("gh: HTTP 502".into())]);
         let err = run(&mut conn, &mut fake).unwrap_err();
         match err {
             RunSyncError::Pull(AdapterReadError::Failed(detail)) => {
@@ -839,7 +854,10 @@ mod tests {
 
         // Apply never invoked; row still pending.
         assert!(fake.captured_edits.is_empty());
-        assert_eq!(fake.captured_refresh_keys, ["1", "2"]);
+        assert_eq!(
+            fake.captured_pull_keys,
+            [vec!["1".to_string(), "2".to_string()]]
+        );
         let title: String = conn
             .query_row("select title from items where id = 't1'", [], |r| r.get(0))
             .unwrap();

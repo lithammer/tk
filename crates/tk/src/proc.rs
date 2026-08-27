@@ -99,21 +99,26 @@ impl RealRunner {
                 std::io::ErrorKind::NotFound => ProcError::ExecutableNotFound,
                 _ => ProcError::SpawnFailed,
             })?;
-        if let Some(bytes) = stdin {
-            let write_result = child
+        let output = if let Some(bytes) = stdin {
+            let mut pipe = child
                 .stdin
                 .take()
-                .expect("piped stdin must exist after child creation")
-                .write_all(bytes);
+                .expect("piped stdin must exist after child creation");
+            let (write_result, output_result) = std::thread::scope(|scope| {
+                let writer = scope.spawn(move || pipe.write_all(bytes));
+                let output_result = child.wait_with_output();
+                let write_result = writer.join().expect("stdin writer must not panic");
+                (write_result, output_result)
+            });
             if write_result.is_err() {
-                let _ = child.kill();
-                let _ = child.wait();
                 return Err(ProcError::OutcomeUnobserved);
             }
-        }
-        let output = child
-            .wait_with_output()
-            .map_err(|_| ProcError::OutcomeUnobserved)?;
+            output_result.map_err(|_| ProcError::OutcomeUnobserved)?
+        } else {
+            child
+                .wait_with_output()
+                .map_err(|_| ProcError::OutcomeUnobserved)?
+        };
         Ok(RunOutput {
             exit_code: output.status.code().unwrap_or(255),
             stdout: output.stdout,
@@ -419,6 +424,20 @@ mod tests {
 
         assert_eq!(result.stdout, b"ok");
         runner.assert_all_consumed();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_runner_writes_stdin_while_collecting_child_output() {
+        let payload = vec![b'x'; 1024 * 1024];
+
+        let result = RealRunner::new()
+            .run_with_stdin(&["/bin/cat"], Path::new("."), &payload)
+            .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, payload);
+        assert!(result.stderr.is_empty());
     }
 
     #[test]

@@ -10,7 +10,7 @@ GitHub repository, chiefly through the `gh issue` subcommands:
 - Ticket Kind — Promotion sets the initial Bug representation described below,
   and Pull maps the current Backend representation to `TicketKind`. No later
   Mutation pushes Kind, so Pull remains authoritative after creation,
-- the issue refresh (`gh issue view <n>` → `BackendItemRefresh`).
+- the exact-key GraphQL Pull (`issueOrPullRequest` → `BackendItemRefresh`).
 
 GitHub Bug Promotion prefers a usable native `Bug` Issue Type for any
 repository. When that capability is unavailable, a personal repository falls
@@ -35,12 +35,12 @@ changing a native Issue Type away from `Bug`, refreshes the local Ticket as
 
 The installed `gh` 2.98.0 source exposes `issueType` and `labels`, but not
 repository ownership, through `gh issue view --json`; `gh repo view --json`
-separately exposes `isInOrganization`. Adopt, Pull, and Promotion
-Reconciliation retain the existing issue-read and identity-validation path.
-Only a typeless issue carrying the reserved Label needs the additional
-repository-ownership read, whose result the Adapter caches by repository for
-that invocation. Native types and ordinary typeless Tasks require no ownership
-call.
+separately exposes `isInOrganization`. Adopt and Promotion Reconciliation keep
+that issue-read and identity-validation path. A typeless issue carrying the
+reserved Label needs the additional repository-ownership read, whose result
+the Adapter caches by repository for that invocation. Pull instead reads the
+issue fields and `isInOrganization` in the same exact-key GraphQL operation.
+Native types and ordinary typeless Tasks need no separate ownership call.
 
 Promotion Reconciliation also maps the candidate's Ticket Kind through that
 repository-specific representation. The mapped Kind must equal the retained
@@ -193,6 +193,9 @@ The original deferral rested on scope, not capability:
   discovers un-Adopted issues. The field set, the two-state status axis, the
   relationship-deferral decision, and the issueType → `TicketKind` mapping
   recorded above are unaffected — only the list-everything ingest is replaced.
+- (tk-181, 2026-08) ADR-0034 still defines the same exact opt-in working set,
+  but the GitHub Adapter now batches those exact-key reads through GraphQL
+  instead of starting one `gh issue view` process per item.
 - (tk-107, 2026-06) Dependency sync lands, **push-only**. Apply for
   `add_dependency` / `remove_dependency` drives the native `gh issue edit
   --add-blocked-by` / `--remove-blocked-by` flags (`gh` ≥ 2.94.0), replacing

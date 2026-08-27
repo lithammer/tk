@@ -8,6 +8,7 @@
 use super::mutation_payload::{StatusChange, TitleBody};
 use super::status::ItemStatus;
 use super::ticket_kind::TicketKind;
+use thiserror::Error;
 
 /// Backend-owned identity assigned to one Backend Item.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,4 +128,121 @@ pub struct BackendItemRefresh {
     pub status: ItemStatus,
     /// Ticket Kind when the Backend can refresh it; `None` preserves it.
     pub ticket_kind: Option<TicketKind>,
+}
+
+/// One keyed refresh returned as part of a Backend Pull.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackendPullItem {
+    /// The exact requested Backend address this refresh answers.
+    pub address: BackendItemAddress,
+    /// Backend-owned fields observed for the addressed Item.
+    pub refresh: BackendItemRefresh,
+}
+
+/// A validated, all-or-nothing refresh of an exact Backend working set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackendPull {
+    items: Vec<BackendPullItem>,
+}
+
+impl BackendPull {
+    /// Validate exact count, order, and byte-for-byte Backend keys.
+    pub fn new(
+        requested: &[BackendItemAddress],
+        items: Vec<BackendPullItem>,
+    ) -> Result<Self, BackendPullError> {
+        if requested.len() != items.len() {
+            return Err(BackendPullError::Count {
+                requested: requested.len(),
+                returned: items.len(),
+            });
+        }
+        for (index, (expected, item)) in requested.iter().zip(&items).enumerate() {
+            if item.address.backend_key != expected.backend_key {
+                return Err(BackendPullError::Key {
+                    index,
+                    requested: expected.backend_key.clone(),
+                    returned: item.address.backend_key.clone(),
+                });
+            }
+        }
+        Ok(Self { items })
+    }
+
+    /// Consume the validated Pull in Repository Store merge shape.
+    #[must_use]
+    pub fn into_refreshes(self) -> Vec<(String, BackendItemRefresh)> {
+        self.items
+            .into_iter()
+            .map(|item| (item.address.backend_key, item.refresh))
+            .collect()
+    }
+}
+
+/// A Backend Adapter returned a Pull that did not match its request.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum BackendPullError {
+    #[error("Backend Pull returned {returned} items for {requested} requested keys")]
+    Count { requested: usize, returned: usize },
+    #[error(
+        "Backend Pull item at index {index} returned key '{returned}' for requested key '{requested}'"
+    )]
+    Key {
+        index: usize,
+        requested: String,
+        returned: String,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn address(key: &str) -> BackendItemAddress {
+        BackendItemAddress {
+            backend_key: key.into(),
+        }
+    }
+
+    fn item(key: &str) -> BackendPullItem {
+        BackendPullItem {
+            address: address(key),
+            refresh: BackendItemRefresh {
+                title: key.into(),
+                body: String::new(),
+                status: ItemStatus::Open,
+                ticket_kind: Some(TicketKind::Task),
+            },
+        }
+    }
+
+    #[test]
+    fn backend_pull_requires_exact_count_order_and_keys() {
+        let requested = [address("a"), address("b")];
+
+        assert!(matches!(
+            BackendPull::new(&requested, vec![item("a")]),
+            Err(BackendPullError::Count {
+                requested: 2,
+                returned: 1
+            })
+        ));
+        assert!(matches!(
+            BackendPull::new(&requested, vec![item("b"), item("a")]),
+            Err(BackendPullError::Key {
+                index: 0,
+                requested,
+                returned
+            }) if requested == "a" && returned == "b"
+        ));
+
+        let pull = BackendPull::new(&requested, vec![item("a"), item("b")]).unwrap();
+        assert_eq!(
+            pull.into_refreshes()
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+    }
 }

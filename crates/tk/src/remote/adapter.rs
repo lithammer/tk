@@ -12,7 +12,7 @@
 
 use crate::domain::backend_kind::BackendKind;
 use crate::domain::backend_operation::{
-    AdoptedItem, BackendCreate, BackendEdit, BackendItemInspection, BackendItemRefresh,
+    AdoptedItem, BackendCreate, BackendEdit, BackendItemAddress, BackendItemInspection, BackendPull,
 };
 use crate::domain::backend_outcome::{BackendCreateOutcome, BackendEditOutcome};
 use crate::domain::promotion_capability::{PromotionCapabilities, PromotionRequirements};
@@ -54,11 +54,11 @@ pub trait Adapter {
     /// Canonicalize one Backend issue into full intake data for `tk adopt`.
     fn adopt_ticket(&mut self, input: &str) -> Result<AdoptedItem, AdapterReadError>;
 
-    /// Refresh backend-owned fields of one existing Backend Item.
+    /// Refresh backend-owned fields for the exact requested working set.
     ///
-    /// The sync engine owns the working set and calls this once per key; a
-    /// failure prevents every collected refresh from being merged.
-    fn refresh_item(&mut self, key: &str) -> Result<BackendItemRefresh, AdapterReadError>;
+    /// A successful Pull has one ordered result for every requested address
+    /// and no extras. A failure prevents any refresh from being merged.
+    fn pull(&mut self, items: &[BackendItemAddress]) -> Result<BackendPull, AdapterReadError>;
 
     /// Inspect one Backend object for Promotion recovery.
     ///

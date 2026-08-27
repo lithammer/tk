@@ -413,7 +413,7 @@ fn render_log_detail<W: Write + ?Sized>(stdout: &mut W, detail: &LogDetailRow) {
 mod tests {
     use super::*;
     use crate::clock::FakeClock;
-    use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
+    use crate::commands::testing::{Harness, cwd, expect_git, expect_github_pull, seed_store};
     use crate::domain::backend_kind::BackendKind;
     use crate::domain::backend_operation::BackendItemIdentity;
     use crate::domain::mutation_payload::Promotion;
@@ -606,7 +606,8 @@ mod tests {
             },
         )
         .unwrap();
-        backend_ticket(&conn, "t1", "gh-1", "1", 1);
+        let backend_key = "https://github.com/o/r/issues/1";
+        backend_ticket(&conn, "t1", "gh-1", backend_key, 1);
         insert_fixture_mutation(
             &conn,
             FixtureMutation {
@@ -624,16 +625,9 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
+        expect_github_pull(&h, "o", "r", 1, "Backend", "B");
         h.runner.expect(
-            &["gh", "issue", "view", "1"],
-            RunOutput {
-                exit_code: 0,
-                stdout: br#"{"number":1,"title":"Backend","body":"B","state":"OPEN","issueType":null,"updatedAt":"2026-05-19T00:00:00Z","url":"https://github.com/o/r/issues/1"}"#.to_vec(),
-                stderr: Vec::new(),
-            },
-        );
-        h.runner.expect(
-            &["gh", "issue", "edit", "1"],
+            &["gh", "issue", "edit", backend_key],
             RunOutput {
                 exit_code: 0,
                 stdout: Vec::new(),

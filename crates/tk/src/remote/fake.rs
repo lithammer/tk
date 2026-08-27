@@ -9,8 +9,8 @@ use std::collections::VecDeque;
 
 use crate::domain::backend_kind::BackendKind;
 use crate::domain::backend_operation::{
-    AdoptedItem, BackendCreate, BackendEdit, BackendItemIdentity, BackendItemInspection,
-    BackendItemRefresh,
+    AdoptedItem, BackendCreate, BackendEdit, BackendItemAddress, BackendItemIdentity,
+    BackendItemInspection, BackendItemRefresh, BackendPull, BackendPullItem,
 };
 use crate::domain::backend_outcome::{BackendCreateOutcome, BackendEditOutcome};
 use crate::domain::promotion_capability::{PromotionCapabilities, PromotionRequirements};
@@ -27,11 +27,11 @@ pub enum AdoptResponse {
     EnvFailure(ProcError),
 }
 
-/// Scripted response for one [`Adapter::refresh_item`] call.
+/// Scripted response for one [`Adapter::pull`] call.
 #[derive(Debug)]
-pub enum RefreshResponse {
-    /// Success — the fake returns backend-owned fields for this key.
-    Item(BackendItemRefresh),
+pub enum PullResponse {
+    /// Success — the fake pairs these fields with the requested working set.
+    Items(Vec<BackendItemRefresh>),
     /// Adapter-level rejection with this detail.
     RecordedFailure(String),
     /// Environment failure — returns this bare error tag.
@@ -80,7 +80,7 @@ pub enum CreateResponse {
 /// so a test that under-declared its interactions fails loudly.
 pub struct FakeAdapter {
     adopt_script: VecDeque<AdoptResponse>,
-    refresh_script: VecDeque<RefreshResponse>,
+    pull_script: VecDeque<PullResponse>,
     inspection_script: VecDeque<InspectionResponse>,
     edit_script: VecDeque<EditResponse>,
     create_script: VecDeque<CreateResponse>,
@@ -91,8 +91,8 @@ pub struct FakeAdapter {
     pub captured_creates: Vec<BackendCreate>,
     /// Inputs passed to `adopt_ticket`, in call order.
     pub captured_adopt_inputs: Vec<String>,
-    /// Backend keys passed to `refresh_item`, in call order.
-    pub captured_refresh_keys: Vec<String>,
+    /// Complete Backend key sets passed to Pull, in call order.
+    pub captured_pull_keys: Vec<Vec<String>>,
     /// Backend keys passed to `inspect_item`, in call order.
     pub captured_inspection_keys: Vec<String>,
     /// This fake's resolved capability value. Static data, not a script entry,
@@ -108,14 +108,14 @@ impl FakeAdapter {
     pub fn new() -> Self {
         Self {
             adopt_script: VecDeque::new(),
-            refresh_script: VecDeque::new(),
+            pull_script: VecDeque::new(),
             inspection_script: VecDeque::new(),
             edit_script: VecDeque::new(),
             create_script: VecDeque::new(),
             captured_edits: Vec::new(),
             captured_creates: Vec::new(),
             captured_adopt_inputs: Vec::new(),
-            captured_refresh_keys: Vec::new(),
+            captured_pull_keys: Vec::new(),
             captured_inspection_keys: Vec::new(),
             capabilities: PromotionCapabilities::none(),
             capability_error: None,
@@ -129,8 +129,8 @@ impl FakeAdapter {
     }
 
     #[must_use]
-    pub fn with_refreshes(mut self, script: Vec<RefreshResponse>) -> Self {
-        self.refresh_script = script.into();
+    pub fn with_pulls(mut self, script: Vec<PullResponse>) -> Self {
+        self.pull_script = script.into();
         self
     }
 
@@ -192,17 +192,33 @@ impl Adapter for FakeAdapter {
         }
     }
 
-    fn refresh_item(&mut self, key: &str) -> Result<BackendItemRefresh, AdapterReadError> {
-        self.captured_refresh_keys.push(key.to_string());
+    fn pull(&mut self, items: &[BackendItemAddress]) -> Result<BackendPull, AdapterReadError> {
+        self.captured_pull_keys
+            .push(items.iter().map(|item| item.backend_key.clone()).collect());
         let response = self
-            .refresh_script
+            .pull_script
             .pop_front()
-            .expect("FakeAdapter: refresh script exhausted");
-        match response {
-            RefreshResponse::Item(item) => Ok(item),
-            RefreshResponse::RecordedFailure(detail) => Err(AdapterReadError::Failed(detail)),
-            RefreshResponse::EnvFailure(err) => Err(AdapterReadError::Env(err)),
-        }
+            .expect("FakeAdapter: pull script exhausted");
+        let refreshes = match response {
+            PullResponse::Items(refreshes) => refreshes,
+            PullResponse::RecordedFailure(detail) => {
+                return Err(AdapterReadError::Failed(detail));
+            }
+            PullResponse::EnvFailure(err) => return Err(AdapterReadError::Env(err)),
+        };
+        assert_eq!(
+            refreshes.len(),
+            items.len(),
+            "FakeAdapter: scripted Pull must cover the complete working set"
+        );
+        let pulled = items
+            .iter()
+            .cloned()
+            .zip(refreshes)
+            .map(|(address, refresh)| BackendPullItem { address, refresh })
+            .collect();
+        Ok(BackendPull::new(items, pulled)
+            .expect("FakeAdapter pairs each scripted refresh with its requested key"))
     }
 
     fn inspect_item(&mut self, key: &str) -> Result<BackendItemInspection, AdapterReadError> {
@@ -293,6 +309,12 @@ mod tests {
         }
     }
 
+    fn address(key: &str) -> BackendItemAddress {
+        BackendItemAddress {
+            backend_key: key.into(),
+        }
+    }
+
     fn inspection(title: &str) -> BackendItemInspection {
         BackendItemInspection {
             identity: BackendItemIdentity {
@@ -338,13 +360,19 @@ mod tests {
     }
 
     #[test]
-    fn refresh_returns_scripted_fields_and_captures_key() {
+    fn pull_returns_scripted_fields_and_captures_the_working_set() {
         let mut fake =
-            FakeAdapter::new().with_refreshes(vec![RefreshResponse::Item(refresh("Refreshed"))]);
-        let got = fake.refresh_item("42").unwrap();
+            FakeAdapter::new().with_pulls(vec![PullResponse::Items(vec![refresh("Refreshed")])]);
+        let got = fake
+            .pull(&[address("42")])
+            .unwrap()
+            .into_refreshes()
+            .pop()
+            .unwrap()
+            .1;
         assert_eq!(got.title, "Refreshed");
         assert_eq!(got.ticket_kind, Some(TicketKind::Task));
-        assert_eq!(fake.captured_refresh_keys, ["42"]);
+        assert_eq!(fake.captured_pull_keys, [vec!["42".to_string()]]);
     }
 
     #[test]
@@ -380,11 +408,10 @@ mod tests {
     }
 
     #[test]
-    fn refresh_recorded_failure_returns_failed_with_detail() {
-        let mut fake = FakeAdapter::new().with_refreshes(vec![RefreshResponse::RecordedFailure(
-            "gh: HTTP 502".into(),
-        )]);
-        let err = fake.refresh_item("42").unwrap_err();
+    fn pull_recorded_failure_returns_failed_with_detail() {
+        let mut fake = FakeAdapter::new()
+            .with_pulls(vec![PullResponse::RecordedFailure("gh: HTTP 502".into())]);
+        let err = fake.pull(&[address("42")]).unwrap_err();
         match err {
             AdapterReadError::Failed(detail) => assert!(detail.contains("HTTP 502")),
             AdapterReadError::Env(e) => panic!("expected Failed, got Env({e:?})"),
@@ -403,14 +430,21 @@ mod tests {
     }
 
     #[test]
-    fn refresh_advances_script_across_calls() {
-        let mut fake = FakeAdapter::new().with_refreshes(vec![
-            RefreshResponse::Item(refresh("First")),
-            RefreshResponse::EnvFailure(ProcError::ExecutableNotFound),
+    fn pull_advances_script_across_calls() {
+        let mut fake = FakeAdapter::new().with_pulls(vec![
+            PullResponse::Items(vec![refresh("First")]),
+            PullResponse::EnvFailure(ProcError::ExecutableNotFound),
         ]);
-        assert_eq!(fake.refresh_item("1").unwrap().title, "First");
-        assert!(fake.refresh_item("2").is_err());
-        assert_eq!(fake.captured_refresh_keys.len(), 2);
+        let first = fake
+            .pull(&[address("1")])
+            .unwrap()
+            .into_refreshes()
+            .pop()
+            .unwrap()
+            .1;
+        assert_eq!(first.title, "First");
+        assert!(fake.pull(&[address("2")]).is_err());
+        assert_eq!(fake.captured_pull_keys.len(), 2);
     }
 
     #[test]
