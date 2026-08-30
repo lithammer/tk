@@ -1,7 +1,7 @@
 //! SQLite value mapping for the schema-determined domain enums.
 //!
-//! The `items.*` columns carry CHECK constraints that pin the legal spellings,
-//! so [`FromSql`] accepts only those spellings; an unrecognized value is
+//! A CHECK constraint, or the ADR that introduces one, pins each column's
+//! legal spellings, so [`FromSql`] accepts only those; an unrecognized value is
 //! Repository Store corruption, surfaced as a [`FromSqlError`] rather than a
 //! panic so it rides the store's `rusqlite::Error` path and renders through the
 //! storage-error frame. [`ToSql`] single-sources each spelling on the enum's
@@ -15,6 +15,7 @@ use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, 
 use std::str::FromStr;
 
 use crate::domain::item_class::ItemClass;
+use crate::domain::lifecycle::Lifecycle;
 use crate::domain::mutation_state::MutationState;
 use crate::domain::mutation_type::MutationType;
 use crate::domain::origin::Origin;
@@ -22,6 +23,7 @@ use crate::domain::priority::Priority;
 use crate::domain::selection_state::SelectionState;
 use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
+use crate::domain::work_state::WorkState;
 
 impl FromSql for ItemClass {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
@@ -164,6 +166,38 @@ impl ToSql for MutationState {
     }
 }
 
+impl FromSql for Lifecycle {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        match value.as_str()? {
+            "open" => Ok(Self::Open),
+            "done" => Ok(Self::Done),
+            other => Err(corrupt("status", other)),
+        }
+    }
+}
+
+impl ToSql for Lifecycle {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        self.text().to_sql()
+    }
+}
+
+impl FromSql for WorkState {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        match value.as_str()? {
+            "idle" => Ok(Self::Idle),
+            "active" => Ok(Self::Active),
+            other => Err(corrupt("work_state", other)),
+        }
+    }
+}
+
+impl ToSql for WorkState {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        self.text().to_sql()
+    }
+}
+
 /// Build the corruption error for a CHECK-violating column value. The message
 /// names the column and the offending spelling so a corrupt Repository Store is
 /// diagnosable from the rendered storage error.
@@ -222,6 +256,44 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "repository store corruption: unknown status `archived`"
+        );
+    }
+
+    #[test]
+    fn round_trips_through_text_and_from_sql() {
+        // Going through `text()` rather than a literal per variant catches
+        // one-sided drift a paired literal assertion would miss. A failure
+        // means `text()` and the `FromSql` arm disagree for some variant;
+        // fix whichever drifted.
+        for v in [Lifecycle::Open, Lifecycle::Done] {
+            assert_eq!(
+                Lifecycle::column_result(ValueRef::Text(v.text().as_bytes())).unwrap(),
+                v
+            );
+        }
+        for v in [WorkState::Idle, WorkState::Active] {
+            assert_eq!(
+                WorkState::column_result(ValueRef::Text(v.text().as_bytes())).unwrap(),
+                v
+            );
+        }
+    }
+
+    #[test]
+    fn from_sql_rejects_the_other_axis_spelling() {
+        // Neither axis may quietly accept the other's spelling. `active` is
+        // what leaves `items.status` at migration 011, and an ADR-0028 rebuild
+        // that copied the old column verbatim is how `open` would reach
+        // `work_state`. Both must decode as corruption, not as a valid value.
+        let err = Lifecycle::column_result(ValueRef::Text(b"active")).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "repository store corruption: unknown status `active`"
+        );
+        let err = WorkState::column_result(ValueRef::Text(b"open")).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "repository store corruption: unknown work_state `open`"
         );
     }
 }
