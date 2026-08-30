@@ -20,7 +20,7 @@ pub mod grep;
 pub mod init;
 pub mod item_header;
 pub mod item_row;
-pub mod lifecycle;
+pub mod item_status;
 pub mod list;
 pub mod manpage;
 pub mod message;
