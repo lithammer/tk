@@ -1,7 +1,7 @@
 //! Selection State is a local, Ticket-only intake/selection policy.
 //!
 //! Selection State decides whether an open Ticket is *selectable now*,
-//! separately from Item Status (lifecycle) and Priority (ranking). The three
+//! separately from Item Status (work progress) and Priority (ranking). The three
 //! values are mirrored verbatim in the V1 `items.selection_state` CHECK
 //! constraint, so the SQL spelling returned by [`SelectionState::text`] is the
 //! storage contract — not just a rendering convenience (ADR-0027).

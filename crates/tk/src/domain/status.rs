@@ -10,8 +10,10 @@ use std::fmt;
 use crate::domain::lifecycle::Lifecycle;
 use crate::domain::work_state::WorkState;
 
-/// Lifecycle state shared by Tickets and Epics. `ItemStatus::Open` is the
-/// default for newly-created local work.
+/// Derived state shown for Tickets and Epics.
+///
+/// Newly created local work has open Lifecycle and idle Work State, so its
+/// Item Status is `Open`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ItemStatus {
     Open,

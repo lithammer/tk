@@ -492,7 +492,8 @@ body to match the retained Promotion snapshot exactly.
 accepts a content mismatch only after the operator confirms the candidate.
 The confirmed identity is attached atomically and current local title and body
 are queued to converge the Backend object. Normal Backend Pull remains
-authoritative for lifecycle state after attachment. A Backend object another
+authoritative for whether the Item is open or done after attachment. A Backend
+object another
 Item already tracks is refused with or without
 .BR \-\-force .
 .TP

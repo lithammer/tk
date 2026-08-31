@@ -4,6 +4,13 @@
 > `failed` Promotion may be cancelled, because both are certified no-effect —
 > no longer holds. An `applying` Promotion may be withdrawn too, reaching the
 > distinct terminal state `abandoned`. Every other rule here stands as written.
+>
+> **Amended by ADR-0043.** Migration 011 cancels pending or failed non-closing
+> `set_item_status` Mutations that tk manufactured before Work State split out.
+> No human withdrew them, so `cancelled` now has a third provenance. Because
+> the default Sync Log includes cancelled rows, the first `tk sync log` after
+> upgrade may show withdrawals the operator did not request, stamped with their
+> original append times.
 
 A Promotion the Backend will never accept has no exit. `tk sync --skip` refuses
 a Promotion, `tk remote clear` refuses while one is pending and recommends the

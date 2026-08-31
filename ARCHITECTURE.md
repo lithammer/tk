@@ -141,6 +141,9 @@ Important stable contracts:
   is the backstop for a writer that holds the lock past the timeout.
 - `items` stores current Ticket/Epic state. Current state is the read model;
   the Mutation Log is an outbox, not an event-sourced source of truth.
+- `items.work_state` is a Local Field. `tk start` and `tk stop` write it
+  directly; `tk done` and Backend Pull may clear it only when closing an Item.
+  Work State itself is never recorded as a Mutation (ADR-0043).
 - `item_ids` resolves current Display IDs and Aliases case-insensitively.
   Promotion changes the current Display ID and preserves the old one as an
   Alias.
@@ -154,10 +157,13 @@ Important stable contracts:
   failure JSON is a typed record carrying detail, classification, and an
   optional retry hint ([ADR 0009](./docs/adr/0009-sync-failure-taxonomy.md)).
   `domain::mutation_state::MutationState` carries the transition table, and
-  `store::mutations::transition` is the only writer of the `state` column: it
-  refuses an edge the table omits and owns the `failure_json` and
+  `store::mutations::transition` is the only runtime writer of the `state`
+  column: it refuses an edge the table omits and owns the `failure_json` and
   `state_changed_at` bookkeeping each edge implies, so a workflow contributes
-  only the domain preconditions it names its own diagnostics for.
+  only the domain preconditions it names its own diagnostics for. A migration
+  runs raw SQL through `apply_one_txn` and has no `transition` to call, so it
+  may write `state` directly only along an edge the transition table names and
+  must cite that row in its SQL (ADR-0043).
   A Mutation optionally carries the Promotion
   Operation grouping every Mutation one `tk promote` invocation appended, so
   the command can ask whether its whole operation resolved ([ADR
@@ -207,9 +213,11 @@ Promotion intent updates current state only. Priority remains a Local Field and
 does not emit Mutations.
 
 `done` is terminal in v1 per
-[ADR 0006](./docs/adr/0006-done-is-terminal-in-v1.md). Store-facing status
-changes route through `setItemStatus`, and the schema trigger backstops future
-writers.
+[ADR 0006](./docs/adr/0006-done-is-terminal-in-v1.md). `items.status` changes
+through `tk done` and Backend Pull; a Backend-bound `tk done` appends
+`set_item_status`. `items.work_state` changes through `tk start`, `tk stop`,
+and the clear-on-close in `tk done` or Backend Pull. The schema trigger
+backstops the terminal Lifecycle rule for future writers.
 
 ## IDs
 
