@@ -42,6 +42,13 @@ must be set before `BEGIN`, but `apply_one` runs every migration inside
   including error, so a failed rebuild cannot leave the connection with
   enforcement off.
 
+- **Every rebuild ships a copy-fidelity test.** The pre-migration row gives
+  every copied column a distinct value, and the post-migration assertion checks
+  every value verbatim. This catches omitted or transposed columns, including
+  Local Fields whose only durable copy is in the Repository Store.
+  `split_rebuild_copies_every_local_field_verbatim` in `store/migrations.rs`
+  is the template.
+
 ## Considered Options
 
 - **Run every migration foreign-keys-off with a trailing

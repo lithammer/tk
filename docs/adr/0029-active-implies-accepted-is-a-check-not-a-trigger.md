@@ -1,5 +1,10 @@
 # Enforce `active ⟹ accepted` with a row-shape CHECK, not a trigger
 
+> **Amended by ADR-0043.** The row-shape invariant still holds, relocated to
+> `work_state <> 'active' or selection_state = 'accepted'`. Only the Backend
+> Pull clamp in Consequences is superseded: Pull still writes Lifecycle, but
+> its refresh type carries no Work State and cannot produce `active`.
+
 A Ticket that is `active` must have Selection State `accepted` — you cannot
 actively work `triage` or `parked` work (tk-72, tk-76). We enforce this in the
 Repository Store schema as a conjunct on the existing combined Ticket invariant

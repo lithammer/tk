@@ -1,12 +1,17 @@
 # The v1 GitHub Backend Adapter syncs fields and pushes relationships
 
+> **Amended by ADR-0043.** Item Status is now derived from Lifecycle and Work
+> State. Backend Pull imports Lifecycle and clears Work State only when it
+> imports `done`; outbound `set_item_status` Apply is close-only. The earlier
+> `open`/`active` → OPEN outbound mapping no longer holds.
+
 The v1 GitHub Backend Adapter (tk-34) maps item *fields* between tk and a
 GitHub repository, chiefly through the `gh issue` subcommands:
 
 - title and body — bidirectional for Backend Tickets and Backend Epics (`gh
   issue edit`, from `update_ticket` / `update_epic`; read back on Pull),
-- Item Status as a two-state axis — `done` ↔ CLOSED (`gh issue close`),
-  `open`/`active` ↔ OPEN (`gh issue reopen`) — bidirectional,
+- Lifecycle — OPEN/CLOSED map to `open`/`done` on Pull; outbound
+  `set_item_status` is close-only (`done` → `gh issue close`),
 - Ticket Kind — Promotion sets the initial Bug representation described below,
   and Pull maps the current Backend representation to `TicketKind`. No later
   Mutation pushes Kind, so Pull remains authoritative after creation,
@@ -171,11 +176,10 @@ The original deferral rested on scope, not capability:
 - Dependency and Epic-membership Apply use the native `gh issue` flags above
   rather than raw `gh api`. Backend Pull does not read either relationship;
   reconciliation remains a separate concern.
-- `active` has no GitHub representation, so an incoming OPEN says only that
-  the issue is not closed. Pull therefore never resets a locally-`active`
-  Ticket; it writes `open` only where the local status was already `open`
-  (tk-108). Remote reopens of an item already imported as `done` remain
-  deferred per ADR-0006.
+- Backend Pull imports Lifecycle and never writes a Backend value to Work
+  State. OPEN lands `open` while preserving local Work State; CLOSED lands
+  `done` and clears Work State to `idle`. Remote reopens of an item already
+  imported as `done` remain deferred per ADR-0006.
 
 ## History
 
@@ -265,3 +269,8 @@ The original deferral rested on scope, not capability:
   *second* `tk sync` after `tk start`: the first is protected by the merge's
   in-flight guard while the Ticket's own status Mutation is still queued,
   which is why it survived earlier lifecycle checks.
+- (tk-184, 2026-08) ADR-0043 split Work State out of Item Status. Backend Pull
+  now carries Lifecycle only, so it cannot produce `active` from Backend input
+  and the ADR-0029 clamp no longer exists. OPEN preserves Work State because
+  the merge leaves `work_state` untouched; CLOSED clears it to `idle` while
+  landing `done`. Outbound status Apply is close-only.

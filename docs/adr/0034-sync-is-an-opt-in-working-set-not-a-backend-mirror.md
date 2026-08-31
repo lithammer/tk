@@ -1,5 +1,9 @@
 # Sync is an opt-in working set, not a Backend mirror
 
+> **Amended by ADR-0043.** The working set below still contains every Adopted
+> Item not yet `done`, but its stored predicate is now `status = 'open'`.
+> `status` stores Lifecycle, and Work State does not affect Pull eligibility.
+
 tk is a local-first work tracker. A configured Remote does not mirror its
 Backend into the Repository Store; instead the user **Adopts** specific Backend
 issues to work them locally. **Backend Pull** refreshes only the Adopted items

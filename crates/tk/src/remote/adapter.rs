@@ -63,7 +63,7 @@ pub trait Adapter {
     /// Inspect one Backend object for Promotion recovery.
     ///
     /// This narrow read returns canonical identity, content, and Ticket Kind.
-    /// It does not map Backend lifecycle state.
+    /// It does not map the Backend object's Lifecycle.
     fn inspect_item(&mut self, key: &str) -> Result<BackendItemInspection, AdapterReadError>;
 
     /// Apply one non-Promotion Mutation to an existing Backend object.
