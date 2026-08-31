@@ -1,5 +1,11 @@
 # Work State splits out of Item Status
 
+> **Amended by ADR-0044.** Backend Pull may preserve `title` and `body` for an
+> Item with unresolved content intent, but it still imports Backend Lifecycle
+> and a present Ticket Kind. `None` preserves the stored Kind, `done` clears
+> Work State to `idle`, and a refresh keeps `updated_at` at the later of the
+> stored value and refresh time.
+
 `items.status` currently fuses two orthogonal concerns into one column: a
 lifecycle the **Backend Adapter** shares with its **Backend** — open or
 closed — and a purely local fact, whether someone is working the item right
@@ -212,8 +218,8 @@ can only refuse one already produced.
   of the `state` column, owning the `failure_json` and `state_changed_at`
   bookkeeping each edge implies, becomes true only of runtime writers.
 - gh-52 closes only its expressibility half: pushing Work State to a Backend
-  becomes structurally impossible rather than discouraged. The
-  **Backend Pull** shield stays, so a pending content Mutation still hides a
-  Backend close from Pull; that family is tk-157's, tk-126's and gh-53's to
-  answer. gh-68 becomes a cleaner question once Work State could carry its
-  own Mutation Type.
+  becomes structurally impossible rather than discouraged. ADR-0044 narrows
+  the **Backend Pull** shield to title/body, so a pending content Mutation no
+  longer hides a Backend close from Pull. tk-126 and gh-53 still own broader
+  done-Item reconciliation. gh-68 becomes a cleaner question once Work State
+  could carry its own Mutation Type.

@@ -11,7 +11,7 @@
 //! helpers take `&Connection`.
 
 use rusqlite::{Connection, OptionalExtension, params};
-use std::str::FromStr;
+use std::{collections::HashMap, str::FromStr};
 use thiserror::Error;
 
 use crate::domain::backend_kind::BackendKind;
@@ -1006,10 +1006,12 @@ pub fn merge_backend_refreshes(
     }
     ensure_refresh_remote(&tx, expected_kind)?;
     ensure_backend_cohort(&tx, expected_kind)?;
+    let local_content_targets = local_content_targets(&tx)?;
     for (key, refresh) in refreshes {
         let existing: Option<(String, ItemClass)> = tx
             .query_row(
-                "select id, item_class from items where backend_kind = ?1 and backend_key = ?2",
+                "select id, item_class from items \
+                  where backend_kind = ?1 and backend_key = ?2 and status = 'open'",
                 params![expected_kind.text(), key],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -1017,36 +1019,90 @@ pub fn merge_backend_refreshes(
         let Some((item_id, item_class)) = existing else {
             continue;
         };
-        let in_flight: Option<i64> = tx
-            .query_row(
-                "select 1 from mutations where item_id = ?1 and item_class = ?2 \
-             and state in ('pending','failed') limit 1",
-                params![item_id, item_class.text()],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if in_flight.is_some() {
-            continue;
-        }
-        let work_state_write: Option<WorkState> = match refresh.status {
+        let content_authority = if local_content_targets.get(item_id.as_str()) == Some(&item_class)
+        {
+            ContentAuthority::Local
+        } else {
+            ContentAuthority::Backend
+        };
+        let BackendItemRefresh {
+            title,
+            body,
+            status,
+            ticket_kind,
+        } = refresh;
+        let (title_write, body_write) = if content_authority == ContentAuthority::Local {
+            (None, None)
+        } else {
+            (Some(title.as_str()), Some(body.as_str()))
+        };
+        let work_state_write: Option<WorkState> = match status {
             Lifecycle::Open => None,
             Lifecycle::Done => Some(WorkState::Idle),
         };
         // Pull never imports Work State. A Backend close still clears it as a
         // local consequence, while an open refresh must not undo `tk start`
-        // (ADR-0043, ADR-0021).
+        // (ADR-0043, ADR-0021). Title/body shielding does not affect Lifecycle
+        // or Ticket Kind (ADR-0044).
         tx.execute(
-            "update items set title = ?2, body = ?3, updated_at = ?5, \
+            "update items set title = coalesce(?2, title), body = coalesce(?3, body), updated_at = max(updated_at, ?5), \
               ticket_kind = case when item_class = 'ticket' then coalesce(?6, ticket_kind) else ticket_kind end, \
               status = ?4, \
               work_state = coalesce(?7, work_state) \
               where id = ?1",
-            params![item_id, refresh.title, refresh.body, refresh.status.text(), now,
-                refresh.ticket_kind.map(TicketKind::text), work_state_write],
+            params![item_id, title_write, body_write, status.text(), now,
+                ticket_kind.map(TicketKind::text), work_state_write],
         )?;
     }
     tx.commit()?;
     Ok(())
+}
+
+/// Whether unresolved local content intent shields Backend Pull's title/body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContentAuthority {
+    Backend,
+    Local,
+}
+
+impl ContentAuthority {
+    fn for_mutation(mutation_type: MutationType) -> Self {
+        match mutation_type {
+            MutationType::UpdateTicket | MutationType::UpdateEpic => Self::Local,
+            MutationType::SetItemStatus
+            | MutationType::AddTicketToEpic
+            | MutationType::RemoveTicketFromEpic
+            | MutationType::AddDependency
+            | MutationType::RemoveDependency
+            | MutationType::AddExternalBlocker
+            | MutationType::ResolveExternalBlocker
+            | MutationType::PromoteTicket
+            | MutationType::PromoteEpic => Self::Backend,
+        }
+    }
+}
+
+/// Collect exact Items whose unresolved content Mutations shield title/body.
+///
+/// Decoding every unresolved Mutation row before the first write exposes
+/// unknown Mutation Type or Item Class spellings. The map only adds targets,
+/// so non-content Mutations cannot remove a shield added by an earlier row.
+fn local_content_targets(conn: &Connection) -> rusqlite::Result<HashMap<String, ItemClass>> {
+    let mut stmt = conn.prepare(
+        "select item_id, item_class, mutation_type from mutations \
+          where state in ('pending', 'failed')",
+    )?;
+    let mut rows = stmt.query([])?;
+    let mut targets = HashMap::new();
+    while let Some(row) = rows.next()? {
+        let item_id: String = row.get(0)?;
+        let item_class: ItemClass = row.get(1)?;
+        let mutation_type: MutationType = row.get(2)?;
+        if ContentAuthority::for_mutation(mutation_type) == ContentAuthority::Local {
+            targets.insert(item_id, item_class);
+        }
+    }
+    Ok(targets)
 }
 
 /// The single Backend kind retained backend-bound state belongs to, or `None`
@@ -1594,7 +1650,86 @@ mod tests {
     }
 
     #[test]
-    fn refresh_skips_item_with_pending_mutation() {
+    fn content_authority_is_local_only_for_content_mutations() {
+        for mutation_type in MutationType::ALL {
+            let expected = matches!(
+                mutation_type,
+                MutationType::UpdateTicket | MutationType::UpdateEpic
+            );
+            assert_eq!(
+                ContentAuthority::for_mutation(mutation_type) == ContentAuthority::Local,
+                expected,
+                "unexpected content authority for {mutation_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn refresh_preserves_content_for_pending_and_failed_content_mutations() {
+        for state in ["pending", "failed"] {
+            let mut conn = open_seeded();
+            seed_remote(&conn);
+            backend_ticket(&conn, "t1", "gh-1", "1", 1);
+            conn.execute(
+                "update items set ticket_kind = 'bug', status = 'open', work_state = 'active' \
+                 where id = 't1'",
+                [],
+            )
+            .unwrap();
+            insert_fixture_mutation(
+                &conn,
+                FixtureMutation {
+                    sequence: 1,
+                    mutation_type: "update_ticket",
+                    item_id: "t1",
+                    payload_json: r#"{"title":"Local title","body":"Local body"}"#,
+                    state,
+                    failure_json: (state == "failed").then_some(r#"{"detail":"prior"}"#),
+                    ..FixtureMutation::default()
+                },
+            )
+            .unwrap();
+            conn.execute(
+                "update items set title = 'Local title', body = 'Local body' where id = 't1'",
+                [],
+            )
+            .unwrap();
+
+            merge_backend_refreshes(
+                &mut conn,
+                BackendKind::Github,
+                &[(
+                    "1".into(),
+                    BackendItemRefresh {
+                        title: "Stale Backend title".into(),
+                        body: "Stale Backend body".into(),
+                        status: Lifecycle::Done,
+                        ticket_kind: Some(TicketKind::Task),
+                    },
+                )],
+                "2026-05-20T00:00:00Z",
+            )
+            .unwrap();
+
+            let (title, body, kind, updated): (String, String, Option<String>, String) = conn
+                .query_row(
+                    "select title, body, ticket_kind, updated_at from items where id = 't1'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .unwrap();
+            assert_eq!((title, body), ("Local title".into(), "Local body".into()));
+            assert_eq!(kind.as_deref(), Some("task"));
+            assert_eq!(updated, "2026-05-20T00:00:00Z");
+            assert_eq!(
+                item_axes(&conn, "t1").unwrap(),
+                (Lifecycle::Done, WorkState::Idle)
+            );
+        }
+    }
+
+    #[test]
+    fn refresh_content_shield_is_monotone_across_all_unresolved_mutations() {
         let mut conn = open_seeded();
         seed_remote(&conn);
         backend_ticket(&conn, "t1", "gh-1", "1", 1);
@@ -1602,32 +1737,459 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                mutation_type: "update_ticket",
+                mutation_type: "add_dependency",
                 item_id: "t1",
-                payload_json: r#"{"title":"Local Edit","body":""}"#,
+                payload_json: r#"{"blocking_id":"other"}"#,
                 state: "pending",
                 ..FixtureMutation::default()
             },
         )
         .unwrap();
-        // Local title set to the in-flight edit.
-        conn.execute("update items set title = 'Local Edit' where id = 't1'", [])
-            .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 2,
+                mutation_type: "update_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"Local title","body":"Local body"}"#,
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 3,
+                mutation_type: "add_dependency",
+                item_id: "t1",
+                payload_json: r#"{"blocking_id":"later"}"#,
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "update items set title = 'Local title', body = 'Local body' where id = 't1'",
+            [],
+        )
+        .unwrap();
 
         merge_backend_refreshes(
             &mut conn,
             BackendKind::Github,
-            &[("1".into(), refresh("Stale Backend View", Lifecycle::Open))],
-            "2026-05-19T00:00:00Z",
+            &[("1".into(), refresh("Backend title", Lifecycle::Done))],
+            "2026-05-20T00:00:00Z",
+        )
+        .unwrap();
+
+        let (title, body): (String, String) = conn
+            .query_row("select title, body from items where id = 't1'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((title, body), ("Local title".into(), "Local body".into()));
+        assert_eq!(
+            item_axes(&conn, "t1").unwrap(),
+            (Lifecycle::Done, WorkState::Idle)
+        );
+    }
+
+    #[test]
+    fn refresh_keeps_newer_timestamp_from_concurrent_content_edit() {
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        backend_ticket(&conn, "t1", "gh-1", "1", 1);
+        assert_eq!(
+            working_set_keys(&conn, BackendKind::Github).unwrap(),
+            vec!["1".to_owned()]
+        );
+
+        // A local edit can commit while sync waits for the Backend. Pull must
+        // preserve both its content and its newer Repository Store timestamp.
+        conn.execute(
+            "update items set title = 'Local title', body = 'Local body', \
+             updated_at = '2026-05-21T00:00:00.000Z' where id = 't1'",
+            [],
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "update_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"Local title","body":"Local body"}"#,
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        merge_backend_refreshes(
+            &mut conn,
+            BackendKind::Github,
+            &[("1".into(), refresh("Stale title", Lifecycle::Done))],
+            "2026-05-20T00:00:00.000Z",
+        )
+        .unwrap();
+
+        let (title, body, updated): (String, String, String) = conn
+            .query_row(
+                "select title, body, updated_at from items where id = 't1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((title, body), ("Local title".into(), "Local body".into()));
+        assert_eq!(updated, "2026-05-21T00:00:00.000Z");
+        assert_eq!(
+            item_axes(&conn, "t1").unwrap(),
+            (Lifecycle::Done, WorkState::Idle)
+        );
+    }
+
+    #[test]
+    fn refresh_content_shield_is_scoped_to_its_exact_item() {
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        backend_ticket(&conn, "t1", "gh-1", "1", 1);
+        backend_ticket(&conn, "t2", "gh-2", "2", 2);
+        conn.execute(
+            "update items set title = 'Local title', body = 'Local body', ticket_kind = 'bug' \
+             where id = 't1'",
+            [],
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "update_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"Local title","body":"Local body"}"#,
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        merge_backend_refreshes(
+            &mut conn,
+            BackendKind::Github,
+            &[
+                (
+                    "1".into(),
+                    BackendItemRefresh {
+                        title: "Stale title".into(),
+                        body: "Stale body".into(),
+                        status: Lifecycle::Done,
+                        ticket_kind: Some(TicketKind::Task),
+                    },
+                ),
+                (
+                    "2".into(),
+                    BackendItemRefresh {
+                        title: "Backend title".into(),
+                        body: "Backend body".into(),
+                        status: Lifecycle::Done,
+                        ticket_kind: Some(TicketKind::Bug),
+                    },
+                ),
+            ],
+            "2026-05-20T00:00:00Z",
+        )
+        .unwrap();
+
+        let rows = conn
+            .prepare("select title, body, ticket_kind, status from items order by created_seq")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "Local title".into(),
+                    "Local body".into(),
+                    "task".into(),
+                    "done".into()
+                ),
+                (
+                    "Backend title".into(),
+                    "Backend body".into(),
+                    "bug".into(),
+                    "done".into()
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn refresh_admits_content_for_non_content_mutations_only() {
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        backend_ticket(&conn, "t1", "gh-1", "1", 1);
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "add_dependency",
+                item_id: "t1",
+                payload_json: r#"{"blocking_id":"other"}"#,
+                state: "failed",
+                failure_json: Some(r#"{"detail":"prior"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        merge_backend_refreshes(
+            &mut conn,
+            BackendKind::Github,
+            &[("1".into(), refresh("Backend title", Lifecycle::Open))],
+            "2026-05-20T00:00:00Z",
         )
         .unwrap();
 
         let title: String = conn
             .query_row("select title from items where id = 't1'", [], |r| r.get(0))
             .unwrap();
+        assert_eq!(title, "Backend title");
+    }
+
+    #[test]
+    fn refresh_admits_content_after_content_mutation_is_terminal() {
+        for state in ["applied", "skipped"] {
+            let mut conn = open_seeded();
+            seed_remote(&conn);
+            backend_ticket(&conn, "t1", "gh-1", "1", 1);
+            conn.execute(
+                "update items set title = 'Local title', body = 'Local body' where id = 't1'",
+                [],
+            )
+            .unwrap();
+            insert_fixture_mutation(
+                &conn,
+                FixtureMutation {
+                    sequence: 1,
+                    mutation_type: "update_ticket",
+                    item_id: "t1",
+                    payload_json: r#"{"title":"Local title","body":"Local body"}"#,
+                    state,
+                    ..FixtureMutation::default()
+                },
+            )
+            .unwrap();
+
+            merge_backend_refreshes(
+                &mut conn,
+                BackendKind::Github,
+                &[("1".into(), refresh("Backend title", Lifecycle::Open))],
+                "2026-05-20T00:00:00Z",
+            )
+            .unwrap();
+
+            let (title, body): (String, String) = conn
+                .query_row("select title, body from items where id = 't1'", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .unwrap();
+            assert_eq!((title, body), ("Backend title".into(), "Body".into()));
+        }
+    }
+
+    #[test]
+    fn refresh_preserves_ticket_kind_when_backend_omits_it() {
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        backend_ticket(&conn, "t1", "gh-1", "1", 1);
+        conn.execute(
+            "update items set ticket_kind = 'bug', title = 'Local title' where id = 't1'",
+            [],
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "update_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"Local title","body":""}"#,
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        merge_backend_refreshes(
+            &mut conn,
+            BackendKind::Github,
+            &[(
+                "1".into(),
+                BackendItemRefresh {
+                    title: "Backend title".into(),
+                    body: "Body".into(),
+                    status: Lifecycle::Done,
+                    ticket_kind: None,
+                },
+            )],
+            "2026-05-20T00:00:00Z",
+        )
+        .unwrap();
+
+        let (title, kind, updated): (String, String, String) = conn
+            .query_row(
+                "select title, ticket_kind, updated_at from items where id = 't1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(title, "Local title");
+        assert_eq!(kind, "bug");
+        assert_eq!(updated, "2026-05-20T00:00:00Z");
         assert_eq!(
-            title, "Local Edit",
-            "pending mutation must shield the local edit"
+            item_axes(&conn, "t1").unwrap(),
+            (Lifecycle::Done, WorkState::Idle)
+        );
+    }
+
+    #[test]
+    fn refresh_preserves_epic_content_and_ticket_kind_null_with_content_mutation() {
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "e1",
+                display: "gh-9",
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                title: "Local epic title",
+                body: "Local epic body",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("9"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "update_epic",
+                item_id: "e1",
+                item_class: "epic",
+                payload_json: r#"{"title":"Local epic title","body":"Local epic body"}"#,
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        merge_backend_refreshes(
+            &mut conn,
+            BackendKind::Github,
+            &[(
+                "9".into(),
+                BackendItemRefresh {
+                    title: "Backend epic title".into(),
+                    body: "Backend epic body".into(),
+                    status: Lifecycle::Done,
+                    ticket_kind: Some(TicketKind::Task),
+                },
+            )],
+            "2026-05-20T00:00:00Z",
+        )
+        .unwrap();
+
+        let (title, body, kind, updated): (String, String, Option<String>, String) = conn
+            .query_row(
+                "select title, body, ticket_kind, updated_at from items where id = 'e1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (title, body),
+            ("Local epic title".into(), "Local epic body".into())
+        );
+        assert_eq!(kind, None);
+        assert_eq!(updated, "2026-05-20T00:00:00Z");
+        assert_eq!(
+            item_axes(&conn, "e1").unwrap(),
+            (Lifecycle::Done, WorkState::Idle)
+        );
+    }
+
+    #[test]
+    fn refresh_skips_item_that_left_the_working_set_during_pull() {
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        backend_ticket(&conn, "t1", "gh-1", "1", 1);
+        backend_ticket(&conn, "t2", "gh-2", "2", 2);
+        assert_eq!(
+            working_set_keys(&conn, BackendKind::Github).unwrap(),
+            vec!["1".to_owned(), "2".to_owned()]
+        );
+
+        // A local close can commit while sync waits for the Backend. The
+        // stale refresh must not reopen the Item or abort the batch.
+        conn.execute(
+            "update items set status = 'done', work_state = 'idle' where id = 't1'",
+            [],
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "set_item_status",
+                item_id: "t1",
+                payload_json: r#"{"status":"done"}"#,
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        merge_backend_refreshes(
+            &mut conn,
+            BackendKind::Github,
+            &[
+                ("1".into(), refresh("Stale open", Lifecycle::Open)),
+                ("2".into(), refresh("Closed upstream", Lifecycle::Done)),
+            ],
+            "2026-05-20T00:00:00Z",
+        )
+        .unwrap();
+
+        let rows = conn
+            .prepare("select title, status from items order by created_seq")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("Old".into(), "done".into()),
+                ("Closed upstream".into(), "done".into())
+            ]
         );
     }
 

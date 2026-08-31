@@ -38,8 +38,8 @@ use crate::store::sync::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncReport {
     /// Number of Backend Items fetched during Pull. An Item still counts when
-    /// the merge leaves its row untouched because a pending or failed
-    /// Mutation targets it (ADR-0010).
+    /// unresolved local content intent preserves its title and body while
+    /// Pull updates Backend Lifecycle and Ticket Kind (ADR-0044).
     pub pulled_count: usize,
     /// Number of Mutations that transitioned to `applied` during this run.
     pub applied_count: usize,
@@ -924,26 +924,62 @@ mod tests {
     }
 
     #[test]
-    fn pull_refresh_for_item_with_pending_mutation_is_skipped() {
+    fn pull_refresh_with_pending_content_mutation_merges_authoritative_fields() {
         let mut conn = open_seeded();
         backend_ticket(&conn, "t1", "gh-1", "1", 1);
         seed_remote(&conn);
-        update_ticket_mutation(&conn, 1, "t1", "Local Edit");
-        conn.execute("update items set title = 'Local Edit' where id = 't1'", [])
-            .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "update_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"Local title","body":"Local body"}"#,
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "update items set title = 'Local title', body = 'Local body' where id = 't1'",
+            [],
+        )
+        .unwrap();
 
-        // Pull returns a stale backend view; apply the in-flight mutation.
+        // Pull must land the Backend close without exposing stale content
+        // before Apply acknowledges the local edit.
         let mut fake = fake(
-            vec![refresh("Stale Backend View")],
+            vec![BackendItemRefresh {
+                title: "Stale Backend title".into(),
+                body: "Stale Backend body".into(),
+                status: Lifecycle::Done,
+                ticket_kind: Some(TicketKind::Task),
+            }],
             vec![EditResponse::Success],
         );
-        run(&mut conn, &mut fake).unwrap();
+        let report = run(&mut conn, &mut fake).unwrap();
 
-        // The pending Mutation shielded the local edit from the stale Pull.
-        let title: String = conn
-            .query_row("select title from items where id = 't1'", [], |r| r.get(0))
+        assert_eq!(report.pulled_count, 1);
+        assert_eq!(report.applied_count, 1);
+        let (title, body, status, work_state, mutation_state): (
+            String,
+            String,
+            String,
+            String,
+            String,
+        ) = conn
+            .query_row(
+                "select i.title, i.body, i.status, i.work_state, m.state \
+                   from items i join mutations m on m.item_id = i.id \
+                  where i.id = 't1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
             .unwrap();
-        assert_eq!(title, "Local Edit");
+        assert_eq!((title, body), ("Local title".into(), "Local body".into()));
+        assert_eq!(status, "done");
+        assert_eq!(work_state, "idle");
+        assert_eq!(mutation_state, "applied");
     }
 
     #[test]
