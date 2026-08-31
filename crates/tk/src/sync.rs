@@ -4,8 +4,8 @@
 //! It composes the backend-blind [`Adapter`] trait with the
 //! SQL helpers in [`crate::store::sync`]:
 //!
-//! 1. Pull. The engine derives the Adopted working set's active backend keys
-//!    ([`active_backend_keys`]) and gives the complete set to [`Adapter::pull`].
+//! 1. Pull. The engine gives the complete Adopted working set
+//!    ([`working_set_keys`]) to [`Adapter::pull`].
 //!    It collects every result before the single Store merge transaction.
 //!    The merge transaction is skipped when the Pull is empty so an idle sync
 //!    takes no write lock.
@@ -30,9 +30,8 @@ use crate::remote::adapter::{Adapter, AdapterReadError, ApplyError};
 use crate::store::repository::RemoteWorkflowGuard;
 use crate::store::sync::{
     BackendCohortError, LoadApplicableError, PersistMutationOutcomeError, RefreshStoreError,
-    active_backend_keys, applying_mutation_sequence, begin_create, load_applicable_mutations,
-    merge_backend_refreshes, persist_create_outcome, persist_edit_outcome,
-    resolve_backend_operation,
+    applying_mutation_sequence, begin_create, load_applicable_mutations, merge_backend_refreshes,
+    persist_create_outcome, persist_edit_outcome, resolve_backend_operation, working_set_keys,
 };
 
 /// Summary of one sync run for the calling command to render.
@@ -222,12 +221,12 @@ pub fn run_sync(
         stopped_at_sequence: None,
     };
 
-    // Pull and merge. The engine derives the Adopted working set's active keys
-    // and the adapter fetches exactly those (ADR-0034 exact-key Pull);
-    // an empty set means no backend call. A storage fault deriving the keys is
-    // a pull-side store error, surfaced through the merge boundary.
+    // Pull and merge. The engine gives the Adapter the Adopted working set
+    // (ADR-0034 exact-key Pull); an empty set means no Backend call. A Store
+    // error while reading the keys becomes a pull-side error at the merge
+    // boundary.
     let kind = adapter.backend_kind();
-    let items: Vec<_> = active_backend_keys(conn, kind)?
+    let items: Vec<_> = working_set_keys(conn, kind)?
         .into_iter()
         .map(|backend_key| BackendItemAddress { backend_key })
         .collect();
@@ -535,7 +534,6 @@ mod tests {
         let report = run(&mut conn, &mut fake).unwrap();
         assert_eq!(report.pulled_count, 1);
 
-        // The engine derived the active Adopted key set and asked for exactly it.
         assert_eq!(fake.captured_pull_keys, vec![vec!["42".to_string()]]);
 
         // The known row was refreshed in place.
@@ -567,7 +565,7 @@ mod tests {
     }
 
     #[test]
-    fn pull_requests_only_active_adopted_keys() {
+    fn pull_requests_the_open_adopted_working_set() {
         let mut conn = open_seeded();
         // Adopted and open -> in the refresh set.
         backend_ticket(&conn, "t1", "gh-1", "1", 1);
@@ -599,12 +597,33 @@ mod tests {
             },
         )
         .unwrap();
+        // Pull includes open Backend Tickets regardless of Work State
+        // (ADR-0034).
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t4",
+                display: "gh-4",
+                title: "Started",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("4"),
+                status: "open",
+                work_state: Some("active"),
+                created_seq: 4,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
         seed_remote(&conn);
 
-        let mut fake = fake(vec![refresh("Old")], vec![]);
+        let mut fake = fake(vec![refresh("Old"), refresh("Started")], vec![]);
         run(&mut conn, &mut fake).unwrap();
 
-        assert_eq!(fake.captured_pull_keys, vec![vec!["1".to_string()]]);
+        assert_eq!(
+            fake.captured_pull_keys,
+            vec![vec!["1".to_string(), "4".to_string()]]
+        );
     }
 
     #[test]
