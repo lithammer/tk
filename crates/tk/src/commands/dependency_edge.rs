@@ -3,7 +3,7 @@
 //! Both commands open the Repository Store, resolve the Blocked Item and the
 //! Blocking Item from a Display ID or Alias, and refuse a self-edge before
 //! their own Mutation. The blocked/blocking not-found phrasing is owned by
-//! exactly this command family, as `lifecycle` owns the phrasing shared by
+//! exactly this command family, as `item_status` owns the phrasing shared by
 //! `tk start` / `tk stop` / `tk done`; the `tk <command>:` frame is supplied
 //! by the dispatch seam (ADR-0032).
 

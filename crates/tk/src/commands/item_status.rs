@@ -1,10 +1,9 @@
-//! Shared lifecycle-transition implementation for `tk start` / `tk stop` /
-//! `tk done`.
+//! Shared Item Status transition for `tk start` / `tk stop` / `tk done`.
 //!
-//! All three commands open the store, resolve a Display ID or Alias,
-//! attempt a [`set_item_status`] write to a fixed target, and return the
-//! same shape of success / not-found / locked-done outcomes. The `target`
-//! and `success` parameters carry the only per-command variation; the
+//! All three commands open the store, resolve a Display ID or Alias, attempt
+//! a [`status::set_item_status`] write to a fixed target, and return the same
+//! shape of success / not-found / locked-done outcomes. The `target` and
+//! `success` parameters carry the only per-command variation; the
 //! `tk <command>:` frame is supplied by the dispatch seam (ADR-0032).
 
 use crate::cli::{CommandError, Deps, Exit};
@@ -32,9 +31,9 @@ impl SuccessLabel {
     }
 }
 
-/// Run a lifecycle transition against the supplied Deps. On failure returns the
-/// [`CommandError`] for the dispatch seam to frame as `tk start:` / `tk stop:` /
-/// `tk done:` (ADR-0032); `success` selects the per-command success phrasing.
+/// Run an Item Status transition. On failure returns the [`CommandError`] for
+/// the dispatch seam to frame as `tk start:` / `tk stop:` / `tk done:`
+/// (ADR-0032); `success` selects the per-command success phrasing.
 pub fn transition(
     deps: &mut Deps<'_>,
     id: &str,
