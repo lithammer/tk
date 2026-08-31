@@ -2,8 +2,8 @@
 //!
 //! All three commands open the store, resolve a Display ID or Alias, attempt
 //! a [`status::set_item_status`] write to a fixed target, and return the same
-//! shape of success / not-found / locked-done outcomes. The `target` and
-//! `success` parameters carry the only per-command variation; the
+//! shape of success / not-found / locked-done outcomes. The [`Transition`]
+//! and `success` parameters carry the only per-command variation; the
 //! `tk <command>:` frame is supplied by the dispatch seam (ADR-0032).
 
 use crate::cli::{CommandError, Deps, Exit};
@@ -31,15 +31,53 @@ impl SuccessLabel {
     }
 }
 
+/// The Item Status transition one of `tk start` / `tk stop` / `tk done`
+/// performs. One variant per command, so no caller can name a status apart
+/// from the command asking for it, or pair one with a Closing Reason the
+/// command has no way to supply — only [`Transition::Done`] carries one
+/// (ADR-0023), since only `tk done -m` has one to give.
+///
+/// Reopen stays a runtime refusal rather than a type error: `tk stop` on a
+/// `done` Item still asks for `Open`, and the store answers `LockedDone`
+/// (ADR-0006).
+#[derive(Debug, Clone, Copy)]
+pub enum Transition<'a> {
+    /// `tk start`: Open → Active.
+    Start,
+    /// `tk stop`: Active → Open.
+    Stop,
+    /// `tk done`: → Done, with an optional Closing Reason (ADR-0023).
+    Done { closing_reason: Option<&'a str> },
+}
+
+impl<'a> Transition<'a> {
+    /// The [`ItemStatus`] this variant asks the store to write.
+    fn target(self) -> ItemStatus {
+        match self {
+            Self::Start => ItemStatus::Active,
+            Self::Stop => ItemStatus::Open,
+            Self::Done { .. } => ItemStatus::Done,
+        }
+    }
+
+    /// The Closing Reason to persist, if any. Only [`Transition::Done`]
+    /// carries one.
+    fn closing_reason(self) -> Option<&'a str> {
+        match self {
+            Self::Done { closing_reason } => closing_reason,
+            Self::Start | Self::Stop => None,
+        }
+    }
+}
+
 /// Run an Item Status transition. On failure returns the [`CommandError`] for
 /// the dispatch seam to frame as `tk start:` / `tk stop:` / `tk done:`
 /// (ADR-0032); `success` selects the per-command success phrasing.
 pub fn transition(
     deps: &mut Deps<'_>,
     id: &str,
-    target: ItemStatus,
+    change: Transition<'_>,
     success: SuccessLabel,
-    closing_reason: Option<&str>,
 ) -> Result<Exit, CommandError> {
     let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
         .map_err(|err| resolver::open_error(&err))?;
@@ -59,8 +97,8 @@ pub fn transition(
         deps.clock,
         SetStatusRequest {
             id: &resolved.id,
-            status: target,
-            closing_reason,
+            status: change.target(),
+            closing_reason: change.closing_reason(),
         },
     ) {
         Ok(item) => {
@@ -109,12 +147,11 @@ mod tests {
         h: &mut Harness<'_>,
         command: &str,
         id: &str,
-        target: ItemStatus,
+        change: Transition<'_>,
         success: SuccessLabel,
-        closing_reason: Option<&str>,
     ) -> Exit {
         let mut deps = h.deps();
-        match transition(&mut deps, id, target, success, closing_reason) {
+        match transition(&mut deps, id, change, success) {
             Ok(exit) => exit,
             Err(err) => {
                 let exit = err.exit();
@@ -149,7 +186,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run_rendered(&mut h, "start", "tk-1", ItemStatus::Active, STARTED, None);
+        let code = run_rendered(&mut h, "start", "tk-1", Transition::Start, STARTED);
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(stdout.contains("Started Ticket: tk-1 - Subject"));
@@ -176,11 +213,16 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run_rendered(&mut h, "start", "tk-1", ItemStatus::Active, STARTED, None);
+        let code = run_rendered(&mut h, "start", "tk-1", Transition::Start, STARTED);
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk start: Ticket 'tk-1' is done and cannot be reopened"));
     }
+
+    const STOPPED: SuccessLabel = SuccessLabel {
+        ticket: "Stopped Ticket: ",
+        epic: "Stopped Epic: ",
+    };
 
     const DONE: SuccessLabel = SuccessLabel {
         ticket: "Done Ticket: ",
@@ -227,9 +269,10 @@ mod tests {
             &mut h,
             "done",
             "tk-1",
-            ItemStatus::Done,
+            Transition::Done {
+                closing_reason: Some("Fixed in PR #12"),
+            },
             DONE,
-            Some("Fixed in PR #12"),
         );
         assert_eq!(
             code,
@@ -283,7 +326,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run_rendered(&mut h, "start", "tk-1", ItemStatus::Active, STARTED, None);
+        let code = run_rendered(&mut h, "start", "tk-1", Transition::Start, STARTED);
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(
@@ -304,7 +347,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run_rendered(&mut h, "start", "tk-1", ItemStatus::Active, STARTED, None);
+        let code = run_rendered(&mut h, "start", "tk-1", Transition::Start, STARTED);
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(
@@ -320,7 +363,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run_rendered(&mut h, "stop", "tk-9999", ItemStatus::Open, STARTED, None);
+        let code = run_rendered(&mut h, "stop", "tk-9999", Transition::Stop, STOPPED);
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk stop: 'tk-9999' is not a known Display ID or Alias"));
