@@ -19,7 +19,9 @@ use super::list::{ListRow, row_from_sql};
 /// pattern or regex, so `%` and `_` match themselves. The
 /// `has_unresolved_blocker`, `has_pending_mutation`, and `has_failed_mutation`
 /// expressions mirror the List Tree read so both commands feed the shared row
-/// renderer the same derived flags.
+/// renderer the same derived flags. The select list is ordinal-for-ordinal the
+/// List Tree read's, `work_state` last, because `row_from_sql` is shared: the
+/// two lists must be changed together.
 const SEARCH_ROWS_SQL: &str = "\
 select i.id, i.display_value, i.item_class, i.ticket_kind, i.priority, i.title, \
        i.status, i.container_id, i.selection_state, \
@@ -51,7 +53,8 @@ select i.id, i.display_value, i.item_class, i.ticket_kind, i.priority, i.title, 
             where m.item_id = i.id \
               and m.state = 'failed' \
               and m.mutation_type not in ('promote_ticket', 'promote_epic') \
-       ) as has_failed_mutation \
+       ) as has_failed_mutation, \
+       i.work_state \
   from items i \
  where instr(lower(i.title), lower(?1)) > 0 \
  order by i.created_seq asc";
@@ -71,6 +74,7 @@ pub fn search_rows(store: &Store, query: &str) -> Result<Vec<ListRow>, rusqlite:
 mod tests {
     use super::super::list::{ListOptions, list_rows};
     use super::*;
+    use crate::domain::status::ItemStatus;
     use crate::store::migrations;
     use crate::store::testing::{
         FixtureItem, FixtureMutation, insert_external_blocker, insert_fixture_item,
@@ -181,6 +185,39 @@ mod tests {
         seed_ticket(&store, "t3", "tk-3", "Auth done", "done", 3);
         let rows = search_rows(&store, "auth").unwrap();
         assert_eq!(display_ids(&rows), vec!["tk-1", "tk-2", "tk-3"]);
+        assert_eq!(
+            rows.iter().map(|r| r.status).collect::<Vec<_>>(),
+            vec![ItemStatus::Open, ItemStatus::Active, ItemStatus::Done],
+            "the shared carrier derives all three rendered values"
+        );
+    }
+
+    #[test]
+    fn a_done_item_left_active_carries_done() {
+        // The schema admits `(done, active)` — both `done` writers clear Work
+        // State instead of a CHECK aborting the write (ADR-0043) — so a row
+        // repaired by hand or restored from a partial write can hold it. The
+        // shared carrier `tk list` and `tk search` both map through must derive
+        // `done` from it, not `active`. The fixture keeps the default
+        // `accepted` Selection State: the relocated conjunct rejects the pair
+        // on a triage or parked Ticket.
+        let store = open_seeded();
+        insert_fixture_item(
+            &store.conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Auth rework",
+                status: "done",
+                work_state: Some("active"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+
+        let rows = search_rows(&store, "auth").unwrap();
+        assert_eq!(rows[0].status, ItemStatus::Done);
     }
 
     #[test]

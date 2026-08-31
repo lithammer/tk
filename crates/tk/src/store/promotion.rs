@@ -1355,10 +1355,10 @@ mod tests {
     use super::*;
     use crate::domain::backend_binding::BackendBinding;
     use crate::domain::item_class::ItemClass;
+    use crate::domain::lifecycle::Lifecycle;
     use crate::domain::mutation_payload::{MutationPayload, Promotion, TitleBody};
     use crate::domain::mutation_type::MutationType;
     use crate::domain::promotion_plan::MutationDraft;
-    use crate::domain::status::ItemStatus;
     use crate::store::migrations;
     use crate::store::repository::resolve_item_ref;
     use crate::store::testing::{
@@ -1676,7 +1676,7 @@ mod tests {
         let target = &graph.items[0];
         assert_eq!(target.display_id, "tk-1");
         assert_eq!(target.item_class, ItemClass::Ticket);
-        assert_eq!(target.status, ItemStatus::Open);
+        assert_eq!(target.status, Lifecycle::Open);
         assert_eq!(target.created_seq, 1);
         assert_eq!(target.container_id, None);
     }
@@ -1785,7 +1785,7 @@ mod tests {
         // A done Blocking Item resolves readiness but keeps its Dependency
         // (ADR-0035), so the resulting backend graph still carries the edge.
         assert_eq!(edges(&graph), vec![("t1", "finished")]);
-        assert_eq!(graph.items[1].status, ItemStatus::Done);
+        assert_eq!(graph.items[1].status, Lifecycle::Done);
     }
 
     #[test]

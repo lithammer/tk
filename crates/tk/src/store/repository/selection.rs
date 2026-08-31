@@ -4,8 +4,9 @@
 //! current state only and never append a Mutation, even for a Backend Ticket,
 //! and they leave Dependencies and External Blockers untouched, so accepting a
 //! blocked triage Ticket keeps it blocked. `accept` and `unpark` touch only
-//! `selection_state` / `priority`; `park` additionally reads `status` to refuse
-//! an `active` Ticket, upholding the `active ⟹ accepted` invariant (ADR-0029).
+//! `selection_state` / `priority`; `park` additionally reads `work_state` to
+//! refuse an `active` Ticket, upholding the `active ⟹ accepted` invariant the
+//! relocated ADR-0029 conjunct now states over that column (ADR-0043).
 
 use rusqlite::{OptionalExtension, params};
 
@@ -13,7 +14,7 @@ use crate::clock::Clock;
 use crate::domain::item_class::ItemClass;
 use crate::domain::priority::Priority;
 use crate::domain::selection_state::SelectionState;
-use crate::domain::status::ItemStatus;
+use crate::domain::work_state::WorkState;
 
 use super::Store;
 
@@ -76,8 +77,8 @@ pub fn accept_ticket<C: Clock + ?Sized>(
         item_class,
         selection_state,
         // Acceptance takes its Priority from the caller's `--priority`, not
-        // from the row, and is invariant-safe at any status, so neither
-        // `priority` nor `status` is consulted here.
+        // from the row, and is invariant-safe at any Work State, so neither
+        // `priority` nor `work_state` is consulted here.
         ..
     }) = read_selection_row(&tx, id)?
     else {
@@ -128,10 +129,10 @@ struct SelectionRow {
     item_class: ItemClass,
     selection_state: Option<SelectionState>,
     priority: Option<Priority>,
-    /// Item Status, read so `park_ticket` can refuse an `active` Ticket
+    /// Work State, read so `park_ticket` can refuse an `active` Ticket
     /// (ADR-0029). `accept_ticket` and `unpark_ticket` ignore it — accepting
-    /// and unparking are invariant-safe at any status.
-    status: ItemStatus,
+    /// and unparking are invariant-safe at any Work State.
+    work_state: WorkState,
 }
 
 /// Read the [`SelectionRow`] for `id` within an open write transaction, or
@@ -141,7 +142,7 @@ fn read_selection_row(
     id: &str,
 ) -> rusqlite::Result<Option<SelectionRow>> {
     tx.query_row(
-        "select display_value, title, item_class, selection_state, priority, status \
+        "select display_value, title, item_class, selection_state, priority, work_state \
          from items where id = ?1",
         params![id],
         |r| {
@@ -151,7 +152,7 @@ fn read_selection_row(
                 item_class: r.get(2)?,
                 selection_state: r.get(3)?,
                 priority: r.get(4)?,
-                status: r.get(5)?,
+                work_state: r.get(5)?,
             })
         },
     )
@@ -199,9 +200,9 @@ pub enum ParkError {
 /// Park a Ticket: move it from accepted to parked, preserving Priority, or
 /// confirm an already-parked Ticket as an idempotent no-op.
 ///
-/// Writes `selection_state` only, never `status` (ADR-0027). It does read
-/// `status`: an `active` Ticket is refused so `active ⟹ accepted` holds, and
-/// this transition owns that diagnostic — the schema CHECK is the backstop
+/// Writes `selection_state` only, never `work_state` (ADR-0027). It does read
+/// `work_state`: an `active` Ticket is refused so `active ⟹ accepted` holds,
+/// and this transition owns that diagnostic — the schema CHECK is the backstop
 /// (ADR-0029). `id` is the resolved internal `items.id`.
 pub fn park_ticket<C: Clock + ?Sized>(
     store: &mut Store,
@@ -216,7 +217,7 @@ pub fn park_ticket<C: Clock + ?Sized>(
         item_class,
         selection_state,
         priority,
-        status,
+        work_state,
     }) = read_selection_row(&tx, id)?
     else {
         return Err(ParkError::NotFound);
@@ -233,7 +234,7 @@ pub fn park_ticket<C: Clock + ?Sized>(
             // Only `accepted` open work can be held: an `active` Ticket must be
             // stopped first, so `active ⟹ accepted` holds (ADR-0029). Door 2 of
             // the invariant; `tk start`'s guard is Door 1.
-            if status == ItemStatus::Active {
+            if work_state == WorkState::Active {
                 return Err(ParkError::Active);
             }
             // Accepted Tickets carry a Priority by the schema invariant
@@ -315,8 +316,8 @@ pub fn unpark_ticket<C: Clock + ?Sized>(
         item_class,
         selection_state,
         priority,
-        // `status` is read for `park_ticket`'s active guard; unparking is
-        // invariant-safe at any status, so it is not consulted here.
+        // `work_state` is read for `park_ticket`'s active guard; unparking is
+        // invariant-safe at any Work State, so it is not consulted here.
         ..
     }) = read_selection_row(&tx, id)?
     else {

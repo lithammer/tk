@@ -1,16 +1,25 @@
 //! Shared Item Status transition for `tk start` / `tk stop` / `tk done`.
 //!
 //! All three commands open the store, resolve a Display ID or Alias, attempt
-//! a [`status::set_item_status`] write to a fixed target, and return the same
-//! shape of success / not-found / locked-done outcomes. The `target` and
-//! `success` parameters carry the only per-command variation; the
-//! `tk <command>:` frame is supplied by the dispatch seam (ADR-0032).
+//! one axis write, and return the same shape of success / not-found /
+//! locked-done outcomes. The [`Transition`] and `success` parameters carry the
+//! only per-command variation; the `tk <command>:` frame is supplied by the
+//! dispatch seam (ADR-0032).
+//!
+//! Which axis a variant writes is the split ADR-0043 records: `tk start` and
+//! `tk stop` move Work State, `tk done` closes the Lifecycle. Each writer
+//! raises its OWN error — narrowness is what stops the Work State one naming a
+//! Mutation failure — and they flatten into [`SetStatusError`] here, variant
+//! onto same-named variant. That flattening is what lets the render match
+//! below stay the single source of every ADR-0017 diagnostic while the writers
+//! stay apart.
 
 use crate::cli::{CommandError, Deps, Exit};
 use crate::commands::resolver;
 use crate::domain::item_class::ItemClass;
-use crate::domain::status::ItemStatus;
-use crate::store::repository::status::{self, SetStatusError, SetStatusRequest};
+use crate::domain::work_state::WorkState;
+use crate::store::repository::status::{self, SetStatusError};
+use crate::store::repository::work_state;
 
 /// Per-command success prefix tokens. `tk start` says "Started Ticket: …";
 /// `tk stop` says "Stopped Ticket: …"; `tk done` says "Done Ticket: …".
@@ -31,15 +40,35 @@ impl SuccessLabel {
     }
 }
 
+/// The Item Status transition one of `tk start` / `tk stop` / `tk done`
+/// performs. One variant per command, so no caller can name a status apart
+/// from the command asking for it, or pair one with a Closing Reason the
+/// command has no way to supply — only [`Transition::Done`] carries one
+/// (ADR-0023), since only `tk done -m` has one to give.
+///
+/// No variant can ask for a lifecycle reopen — a change from refusing one at
+/// runtime: `Start` and `Stop` reach only the Work State column, and the close writer
+/// takes no target, so no variant can name a Lifecycle other than `done`
+/// (ADR-0006, ADR-0043). `tk stop` on a `done` Item is still refused with the
+/// same diagnostic — done work has no Work State to move either.
+#[derive(Debug, Clone, Copy)]
+pub enum Transition<'a> {
+    /// `tk start`: Work State → Active.
+    Start,
+    /// `tk stop`: Work State → Idle.
+    Stop,
+    /// `tk done`: → Done, with an optional Closing Reason (ADR-0023).
+    Done { closing_reason: Option<&'a str> },
+}
+
 /// Run an Item Status transition. On failure returns the [`CommandError`] for
 /// the dispatch seam to frame as `tk start:` / `tk stop:` / `tk done:`
 /// (ADR-0032); `success` selects the per-command success phrasing.
 pub fn transition(
     deps: &mut Deps<'_>,
     id: &str,
-    target: ItemStatus,
+    change: Transition<'_>,
     success: SuccessLabel,
-    closing_reason: Option<&str>,
 ) -> Result<Exit, CommandError> {
     let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
         .map_err(|err| resolver::open_error(&err))?;
@@ -54,15 +83,21 @@ pub fn transition(
         Err(resolver::ResolveError::Storage(err)) => return Err(resolver::storage_error(&err)),
     };
 
-    match status::set_item_status(
-        &mut store,
-        deps.clock,
-        SetStatusRequest {
-            id: &resolved.id,
-            status: target,
-            closing_reason,
-        },
-    ) {
+    let written = match change {
+        Transition::Start => {
+            work_state::set_work_state(&mut store, deps.clock, &resolved.id, WorkState::Active)
+                .map_err(SetStatusError::from)
+        }
+        Transition::Stop => {
+            work_state::set_work_state(&mut store, deps.clock, &resolved.id, WorkState::Idle)
+                .map_err(SetStatusError::from)
+        }
+        Transition::Done { closing_reason } => {
+            status::close_item(&mut store, deps.clock, &resolved.id, closing_reason)
+        }
+    };
+
+    match written {
         Ok(item) => {
             let prefix = success.select(item.item_class);
             let _ = writeln!(deps.stdout, "{prefix}{} - {}", item.display_id, item.title);
@@ -109,12 +144,11 @@ mod tests {
         h: &mut Harness<'_>,
         command: &str,
         id: &str,
-        target: ItemStatus,
+        change: Transition<'_>,
         success: SuccessLabel,
-        closing_reason: Option<&str>,
     ) -> Exit {
         let mut deps = h.deps();
-        match transition(&mut deps, id, target, success, closing_reason) {
+        match transition(&mut deps, id, change, success) {
             Ok(exit) => exit,
             Err(err) => {
                 let exit = err.exit();
@@ -149,7 +183,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run_rendered(&mut h, "start", "tk-1", ItemStatus::Active, STARTED, None);
+        let code = run_rendered(&mut h, "start", "tk-1", Transition::Start, STARTED);
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(stdout.contains("Started Ticket: tk-1 - Subject"));
@@ -176,11 +210,16 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run_rendered(&mut h, "start", "tk-1", ItemStatus::Active, STARTED, None);
+        let code = run_rendered(&mut h, "start", "tk-1", Transition::Start, STARTED);
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk start: Ticket 'tk-1' is done and cannot be reopened"));
     }
+
+    const STOPPED: SuccessLabel = SuccessLabel {
+        ticket: "Stopped Ticket: ",
+        epic: "Stopped Epic: ",
+    };
 
     const DONE: SuccessLabel = SuccessLabel {
         ticket: "Done Ticket: ",
@@ -227,9 +266,10 @@ mod tests {
             &mut h,
             "done",
             "tk-1",
-            ItemStatus::Done,
+            Transition::Done {
+                closing_reason: Some("Fixed in PR #12"),
+            },
             DONE,
-            Some("Fixed in PR #12"),
         );
         assert_eq!(
             code,
@@ -283,7 +323,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run_rendered(&mut h, "start", "tk-1", ItemStatus::Active, STARTED, None);
+        let code = run_rendered(&mut h, "start", "tk-1", Transition::Start, STARTED);
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(
@@ -304,7 +344,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run_rendered(&mut h, "start", "tk-1", ItemStatus::Active, STARTED, None);
+        let code = run_rendered(&mut h, "start", "tk-1", Transition::Start, STARTED);
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(
@@ -320,7 +360,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        let code = run_rendered(&mut h, "stop", "tk-9999", ItemStatus::Open, STARTED, None);
+        let code = run_rendered(&mut h, "stop", "tk-9999", Transition::Stop, STOPPED);
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(stderr.contains("tk stop: 'tk-9999' is not a known Display ID or Alias"));

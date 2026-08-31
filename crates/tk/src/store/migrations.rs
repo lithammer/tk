@@ -54,6 +54,7 @@ const MIGRATION_7_SQL: &str = include_str!("migrations/007_promotion_operation.s
 const MIGRATION_8_SQL: &str = include_str!("migrations/008_mutation_applying.sql");
 const MIGRATION_9_SQL: &str = include_str!("migrations/009_mutation_cancelled.sql");
 const MIGRATION_10_SQL: &str = include_str!("migrations/010_mutation_abandoned.sql");
+const MIGRATION_11_SQL: &str = include_str!("migrations/011_split_work_state.sql");
 
 /// V1 Repository Store schema skeleton.
 pub const MIGRATION_1: Migration = Migration {
@@ -155,6 +156,19 @@ pub const MIGRATION_10: Migration = Migration {
     foreign_keys: ForeignKeys::Off,
 };
 
+/// Rebuilds `items` to split Work State out of Item Status (ADR-0043):
+/// `status` narrows to the two-valued Lifecycle a Backend Adapter shares, and
+/// the new `work_state` column carries the local idle/active axis ADR-0029's
+/// `active ⟹ accepted` conjunct now reads. Also cancels the `set_item_status`
+/// Mutations the fused column manufactured for `tk start` / `tk stop`, sparing
+/// those a Promotion Operation owns. Runs `ForeignKeys::Off` for the same
+/// table-rebuild reason as MIGRATION_5 and MIGRATION_6.
+pub const MIGRATION_11: Migration = Migration {
+    version: 11,
+    sql: MIGRATION_11_SQL,
+    foreign_keys: ForeignKeys::Off,
+};
+
 /// Ordered migration list applied by [`apply_all`].
 pub const ALL_MIGRATIONS: &[Migration] = &[
     MIGRATION_1,
@@ -167,13 +181,14 @@ pub const ALL_MIGRATIONS: &[Migration] = &[
     MIGRATION_8,
     MIGRATION_9,
     MIGRATION_10,
+    MIGRATION_11,
 ];
 
 /// Highest schema version this binary can apply. Named so future migrations
 /// surface the threshold to `grep` instead of hiding it behind `.last()`.
 /// Adding a migration is a two-line patch: append to `ALL_MIGRATIONS`, bump
 /// this constant, with a debug_assert below catching the drift.
-pub const MAX_KNOWN_VERSION: u32 = MIGRATION_10.version;
+pub const MAX_KNOWN_VERSION: u32 = MIGRATION_11.version;
 
 /// Errors returned while applying migrations.
 ///
@@ -788,11 +803,11 @@ mod tests {
         // `active` + triage rows — legal under v5, illegal under v6's CHECK.
         // The rebuild copy must heal them (demote to `open`, the equivalent of
         // a stop), not abort the upgrade.
-        use crate::store::testing::{FixtureItem, insert_fixture_item};
+        use crate::store::testing::{FixtureItem, insert_pre_split_fixture_item};
 
         let mut conn = open_memory();
         apply_through(&mut conn, 5, "2026-05-09T00:00:00.000Z").unwrap();
-        insert_fixture_item(
+        insert_pre_split_fixture_item(
             &conn,
             FixtureItem {
                 id: "a",
@@ -806,7 +821,7 @@ mod tests {
             },
         )
         .unwrap();
-        insert_fixture_item(
+        insert_pre_split_fixture_item(
             &conn,
             FixtureItem {
                 id: "b",
@@ -912,11 +927,11 @@ mod tests {
     fn rebuild_preserves_existing_priority_and_selection_state() {
         // Heal a v4 store with real rows through the v5 rebuild and confirm the
         // copy is lossless for the columns the rebuild reshapes.
-        use crate::store::testing::{FixtureItem, insert_fixture_item};
+        use crate::store::testing::{FixtureItem, insert_pre_split_fixture_item};
 
         let mut conn = open_memory();
         apply_through(&mut conn, 4, "2026-05-09T00:00:00.000Z").unwrap();
-        insert_fixture_item(
+        insert_pre_split_fixture_item(
             &conn,
             FixtureItem {
                 id: "e1",
@@ -930,7 +945,7 @@ mod tests {
             },
         )
         .unwrap();
-        insert_fixture_item(
+        insert_pre_split_fixture_item(
             &conn,
             FixtureItem {
                 id: "t1",
@@ -1020,11 +1035,11 @@ mod tests {
         // predate the Promotion Operation column. Upgrading to v7 must add
         // the column without disturbing those existing rows (migration 007
         // is a plain ADD COLUMN, not a rebuild).
-        use crate::store::testing::{FixtureItem, insert_fixture_item};
+        use crate::store::testing::{FixtureItem, insert_pre_split_fixture_item};
 
         let mut conn = open_memory();
         apply_through(&mut conn, 6, "2026-05-09T00:00:00.000Z").unwrap();
-        insert_fixture_item(
+        insert_pre_split_fixture_item(
             &conn,
             FixtureItem {
                 id: "t1",
@@ -1078,12 +1093,12 @@ mod tests {
     #[test]
     fn applying_state_upgrade_preserves_rows_foreign_keys_and_indexes() {
         use crate::store::testing::{
-            FixtureItem, FixtureMutation, insert_fixture_item, insert_fixture_mutation,
+            FixtureItem, FixtureMutation, insert_fixture_mutation, insert_pre_split_fixture_item,
         };
 
         let mut conn = open_memory();
         apply_through(&mut conn, 7, "2026-05-09T00:00:00.000Z").unwrap();
-        insert_fixture_item(
+        insert_pre_split_fixture_item(
             &conn,
             FixtureItem {
                 id: "t1",
@@ -1215,12 +1230,12 @@ mod tests {
     #[test]
     fn cancelled_state_upgrade_preserves_rows_and_the_promotion_foreign_key() {
         use crate::store::testing::{
-            FixtureItem, FixtureMutation, insert_fixture_item, insert_fixture_mutation,
+            FixtureItem, FixtureMutation, insert_fixture_mutation, insert_pre_split_fixture_item,
         };
 
         let mut conn = open_memory();
         apply_through(&mut conn, 8, "2026-05-09T00:00:00.000Z").unwrap();
-        insert_fixture_item(
+        insert_pre_split_fixture_item(
             &conn,
             FixtureItem {
                 id: "t1",
@@ -1389,6 +1404,439 @@ mod tests {
         assert!(
             insert(4, "promote_epic", "t1", "ticket", "abandoned").is_err(),
             "the clause pins the Mutation Type to the Item Class, as `applying` does"
+        );
+    }
+
+    /// Seed one Item at the pre-split schema, where `items.status` still holds
+    /// the fused three-valued spelling.
+    /// Seed an item into a store frozen at v10, where `items.status` still
+    /// carries the fused three-valued spelling this migration splits.
+    fn insert_v10_item(conn: &Connection, id: &str, display: &str, status: &str, seq: i64) {
+        use crate::store::testing::{FixtureItem, insert_pre_split_fixture_item};
+
+        insert_pre_split_fixture_item(
+            conn,
+            FixtureItem {
+                id,
+                display,
+                title: "Work",
+                status,
+                created_seq: seq,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+    }
+
+    /// The `(status, work_state)` pair stored for `id`, as raw strings.
+    ///
+    /// Deliberately not `store::testing::item_axes`, which decodes into
+    /// [`Lifecycle`] and [`WorkState`]. A migration's job is to put particular
+    /// spellings in the columns, so these tests assert the stored bytes rather
+    /// than routing them through the `FromSql` layer — which would let a
+    /// migration and a decoder be wrong together and still agree.
+    fn axes(conn: &Connection, id: &str) -> (String, String) {
+        conn.query_row(
+            "select status, work_state from items where id = ?1",
+            rusqlite::params![id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn split_rewrites_active_rows_across_both_axes() {
+        // The upgrade's whole job on `items`: `active` was the fused value, so
+        // it becomes an open Lifecycle carrying an active Work State, while
+        // `open` and `done` keep their Lifecycle and land idle. One column
+        // could never hold both, so no row can come out `(done, active)`.
+        let mut conn = open_memory();
+        apply_through(&mut conn, 10, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_v10_item(&conn, "o", "tk-1", "open", 1);
+        insert_v10_item(&conn, "a", "tk-2", "active", 2);
+        insert_v10_item(&conn, "d", "tk-3", "done", 3);
+
+        apply_all(&mut conn, "2026-05-09T00:00:01.000Z").unwrap();
+
+        assert_eq!(axes(&conn, "o"), ("open".into(), "idle".into()));
+        assert_eq!(axes(&conn, "a"), ("open".into(), "active".into()));
+        assert_eq!(axes(&conn, "d"), ("done".into(), "idle".into()));
+    }
+
+    #[test]
+    fn status_check_rejects_the_departed_active_spelling() {
+        // `active` left `items.status` with this migration. A writer still
+        // spelling it must fail loudly rather than store a value no reader
+        // decodes.
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_v10_item(&conn, "t1", "tk-1", "open", 1);
+
+        let err = conn
+            .execute("update items set status = 'active' where id = 't1'", [])
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("CHECK"),
+            "`active` must no longer be a legal Lifecycle: {err}"
+        );
+    }
+
+    #[test]
+    fn work_state_check_rejects_an_unknown_value() {
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_v10_item(&conn, "t1", "tk-1", "open", 1);
+
+        let err = conn
+            .execute("update items set work_state = 'paused' where id = 't1'", [])
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("CHECK"),
+            "Work State is idle or active and nothing else: {err}"
+        );
+    }
+
+    #[test]
+    fn an_active_ticket_must_still_be_accepted_after_the_conjunct_moves() {
+        // ADR-0029 relocated, not retired: the conjunct now reads `work_state`
+        // and still lives in the Ticket branch, because Selection State is what
+        // it compares against. `tk start`'s guard owns the diagnostic; this is
+        // the schema backstop behind it.
+        use crate::store::testing::{FixtureItem, insert_fixture_item};
+
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        for (id, display, selection, priority, seq) in [
+            ("t1", "tk-1", "triage", None, 1),
+            ("t2", "tk-2", "parked", Some("P2"), 2),
+        ] {
+            insert_fixture_item(
+                &conn,
+                FixtureItem {
+                    id,
+                    display,
+                    title: "Work",
+                    priority,
+                    selection_state: Some(selection),
+                    created_seq: seq,
+                    ..FixtureItem::default()
+                },
+            )
+            .unwrap();
+            let err = conn
+                .execute(
+                    "update items set work_state = 'active' where id = ?1",
+                    rusqlite::params![id],
+                )
+                .unwrap_err();
+            assert!(
+                format!("{err}").contains("CHECK"),
+                "a {selection} Ticket must not go active: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_relocated_conjunct_admits_an_active_epic() {
+        // Work State covers Epics as well as Tickets (ADR-0043), and an Epic
+        // carries a NULL Selection State. The conjunct sits inside the Ticket
+        // branch of the combined CHECK, so the Epic branch must not read it —
+        // otherwise `tk start` on an Epic would abort against the schema and,
+        // worse, a store holding an active Epic could not upgrade at all.
+        use crate::store::testing::{FixtureItem, insert_pre_split_fixture_item};
+
+        let mut conn = open_memory();
+        apply_through(&mut conn, 10, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_pre_split_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "e1",
+                display: "tk-1",
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                title: "Epic under way",
+                status: "active",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+
+        apply_all(&mut conn, "2026-05-09T00:00:01.000Z")
+            .expect("an active Epic must survive the upgrade, not abort it");
+
+        assert_eq!(axes(&conn, "e1"), ("open".into(), "active".into()));
+    }
+
+    #[test]
+    fn split_cancels_only_the_status_mutations_it_manufactured() {
+        // Every `pending`/`failed` `set_item_status` Mutation targeting a
+        // non-`done` status is tk's own record of the defect this split
+        // removes: nobody asked tk to push "start working" to a Backend. Rows
+        // belonging to a Promotion Operation are left queued instead — ADR-0038
+        // reserves that withdrawal for a human — and every other Mutation is
+        // none of this migration's business.
+        //
+        // Three of the WHERE clause's four conjuncts are pinned here; the
+        // `mutation_type` one is not, and cannot be. The `update_ticket` row
+        // below looks like its guard but is not: `json_extract` returns NULL
+        // for a payload carrying no `$.status`, and `NULL <> 'done'` is not
+        // TRUE, so the status conjunct already excluded it. `ItemStatus` is the
+        // only `MutationPayload` variant that serializes a `status` key, so no
+        // fixture can separate the two terms. The Mutation Type conjunct is
+        // defence in depth against a payload shape that does not exist yet.
+        use crate::store::testing::{FixtureMutation, insert_fixture_mutation};
+
+        const TO_OPEN: &str = r#"{"status":"open"}"#;
+        const TO_ACTIVE: &str = r#"{"status":"active"}"#;
+        const TO_DONE: &str = r#"{"status":"done"}"#;
+        const AN_EDIT: &str = r#"{"title":"T","body":""}"#;
+        const REJECTION: &str = r#"{"detail":"rejected"}"#;
+
+        let mut conn = open_memory();
+        apply_through(&mut conn, 10, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_v10_item(&conn, "t1", "tk-1", "active", 1);
+
+        let seeded = [
+            // (sequence, mutation_type, payload, state, failure, operation)
+            (1, "set_item_status", TO_OPEN, "pending", None, None),
+            (
+                2,
+                "set_item_status",
+                TO_ACTIVE,
+                "failed",
+                Some(REJECTION),
+                None,
+            ),
+            (3, "set_item_status", TO_DONE, "pending", None, None),
+            (4, "set_item_status", TO_OPEN, "applied", None, None),
+            (5, "set_item_status", TO_OPEN, "skipped", None, None),
+            (6, "set_item_status", TO_OPEN, "pending", None, Some("op-1")),
+            (7, "update_ticket", AN_EDIT, "pending", None, None),
+        ];
+        for (sequence, mutation_type, payload_json, state, failure_json, operation) in seeded {
+            insert_fixture_mutation(
+                &conn,
+                FixtureMutation {
+                    sequence,
+                    mutation_type,
+                    item_id: "t1",
+                    payload_json,
+                    state,
+                    failure_json,
+                    promotion_operation_id: operation,
+                    ..FixtureMutation::default()
+                },
+            )
+            .unwrap();
+        }
+
+        apply_all(&mut conn, "2026-05-09T00:00:01.000Z").unwrap();
+
+        let rows: Vec<(i64, String, Option<String>, String)> = conn
+            .prepare(
+                "select sequence, state, failure_json, state_changed_at \
+                   from mutations order by sequence",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (1, "cancelled".into(), None, SEEDED_AT.into()),
+                (
+                    2,
+                    "cancelled".into(),
+                    // `Preserve`, per the transition table's row for this edge:
+                    // the earlier rejection's evidence outlives the withdrawal.
+                    Some(REJECTION.into()),
+                    SEEDED_AT.into()
+                ),
+                (3, "pending".into(), None, SEEDED_AT.into()),
+                (4, "applied".into(), None, SEEDED_AT.into()),
+                (5, "skipped".into(), None, SEEDED_AT.into()),
+                (6, "pending".into(), None, SEEDED_AT.into()),
+                (7, "pending".into(), None, SEEDED_AT.into()),
+            ],
+            "only non-closing, non-Promotion-Operation status Mutations withdraw, \
+             and none of them takes a fresh state_changed_at"
+        );
+    }
+
+    /// The `created_at` / `state_changed_at` every fixture seeds. Migration 011
+    /// must leave the latter alone: it has no `Clock` seam to stamp a new one.
+    const SEEDED_AT: &str = "2026-05-09T00:00:00.000Z";
+
+    #[test]
+    fn split_rebuild_copies_every_local_field_verbatim() {
+        // The other half of an ADR-0028 rebuild: it retypes the table by
+        // copying it, so a column dropped from the copy list, or two columns
+        // transposed within it, is silent. The store keeps working and the
+        // value is simply gone. Closing Reason (ADR-0023) is the one that
+        // cannot be recovered — it is a Local Field the Repository Store is
+        // the only copy of, so losing it here loses it for good.
+        //
+        // Every value below differs from every other, so a transposition
+        // cannot hide behind two columns holding the same literal.
+        //
+        // This test pins ONE rebuild by hand-enumerated columns, and nothing
+        // makes the next one arrive with its own. Every ADR-0028 rebuild needs
+        // a copy-fidelity test, because the suite cannot otherwise tell a
+        // lossy copy from a good one: the fixtures a migration test seeds are
+        // not the rows a real store holds. Treat this as the template.
+        //
+        // `container_class` is asserted explicitly rather than left to the
+        // CHECK that appears to guard it. That CHECK cannot catch a NULL here:
+        // with `container_id` set and `container_class` NULL it evaluates
+        // `false or (true and null)` = NULL, and SQLite fails a CHECK only on
+        // FALSE. `pragma foreign_key_check` misses it too, since an FK with a
+        // NULL component is not enforced — so the row would keep rendering its
+        // Epic membership while having silently lost the FK that guards it.
+        use crate::store::testing::{FixtureItem, insert_pre_split_fixture_item};
+
+        let mut conn = open_memory();
+        apply_through(&mut conn, 10, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_pre_split_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "e1",
+                display: "tk-9",
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                title: "Epic",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_pre_split_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Subject",
+                body: "Body text",
+                status: "done",
+                container_id: Some("e1"),
+                created_at: "2026-01-01T00:00:00.000Z",
+                updated_at: "2026-02-02T00:00:00.000Z",
+                created_seq: 7,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        // Not a `FixtureItem` field, and the column CHECK confines it to
+        // `done` rows, which the fixture above already is.
+        conn.execute(
+            "update items set closing_reason = 'Fixed in PR #12' where id = 't1'",
+            [],
+        )
+        .unwrap();
+
+        apply_all(&mut conn, "2026-05-09T00:00:01.000Z").unwrap();
+
+        let row: (
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            i64,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "select display_value, title, body, created_at, updated_at, \
+                        closing_reason, created_seq, container_class \
+                   from items where id = 't1'",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                "tk-1".to_owned(),
+                "Subject".to_owned(),
+                "Body text".to_owned(),
+                "2026-01-01T00:00:00.000Z".to_owned(),
+                "2026-02-02T00:00:00.000Z".to_owned(),
+                Some("Fixed in PR #12".to_owned()),
+                7,
+                Some("epic".to_owned()),
+            )
+        );
+    }
+
+    #[test]
+    fn split_rebuild_preserves_every_items_object() {
+        // An ADR-0028 rebuild recreates the table from scratch, so every index
+        // and trigger has to be written out again. A forgotten one fails
+        // silently — the store keeps working until some later insert loses its
+        // uniqueness guard or escapes `done`. Assert the whole set by name.
+        let mut conn = open_memory();
+        apply_through(&mut conn, 10, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_v10_item(&conn, "t1", "tk-1", "active", 1);
+
+        apply_all(&mut conn, "2026-05-09T00:00:01.000Z").unwrap();
+
+        let mut objects: Vec<String> = conn
+            .prepare(
+                "select name from sqlite_master \
+                  where name in ('items_backend_unique', 'items_container_idx', \
+                                 'items_id_class_unique', 'items_next_idx', \
+                                 'items_no_escape_from_done')",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        objects.sort();
+        assert_eq!(
+            objects,
+            vec![
+                "items_backend_unique",
+                "items_container_idx",
+                "items_id_class_unique",
+                "items_next_idx",
+                "items_no_escape_from_done",
+            ]
+        );
+
+        // The trigger is the one object with observable behaviour rather than a
+        // plan effect, so it is worth firing as well as naming.
+        conn.execute("update items set status = 'done' where id = 't1'", [])
+            .unwrap();
+        let escape = conn.execute("update items set status = 'open' where id = 't1'", []);
+        assert!(
+            escape.is_err(),
+            "the rebuilt table must keep refusing to leave done (ADR-0006)"
+        );
+
+        let dangling = conn.execute(
+            "update items set container_id = 'missing', container_class = 'epic' where id = 't1'",
+            [],
+        );
+        assert!(
+            dangling.is_err(),
+            "the rebuilt table must retain its container foreign key"
         );
     }
 

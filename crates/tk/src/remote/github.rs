@@ -23,8 +23,8 @@ use crate::domain::backend_operation::{
 use crate::domain::backend_outcome::{
     BackendCreateOutcome, BackendEditOutcome, Failure, FailureClass,
 };
+use crate::domain::lifecycle::Lifecycle;
 use crate::domain::promotion_capability::{PromotionCapabilities, PromotionRequirements};
-use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
 use crate::proc::{ProcRunner, RunOutput};
 
@@ -1090,12 +1090,13 @@ impl GhIssue {
         Ok(())
     }
 
-    /// Map the backend-owned issue state onto Item Status; GitHub distinguishes
-    /// only open from closed.
-    fn item_status(&self) -> Result<ItemStatus, AdapterReadError> {
+    /// Map the backend-owned issue state onto Lifecycle; GitHub distinguishes
+    /// only open from closed, which is exactly the axis an Adapter sees
+    /// (ADR-0043).
+    fn lifecycle(&self) -> Result<Lifecycle, AdapterReadError> {
         match self.state.as_str() {
-            "OPEN" => Ok(ItemStatus::Open),
-            "CLOSED" => Ok(ItemStatus::Done),
+            "OPEN" => Ok(Lifecycle::Open),
+            "CLOSED" => Ok(Lifecycle::Done),
             other => Err(AdapterReadError::Failed(format!(
                 "#{}: unexpected issue state '{other}'",
                 self.number
@@ -1108,7 +1109,7 @@ impl GhIssue {
         identity: BackendItemIdentity,
         ticket_kind: TicketKind,
     ) -> Result<AdoptedItem, AdapterReadError> {
-        let status = self.item_status()?;
+        let status = self.lifecycle()?;
         Ok(AdoptedItem {
             display_id: identity.display_id,
             backend_key: identity.backend_key,
@@ -1120,7 +1121,7 @@ impl GhIssue {
     }
 
     fn into_refresh(self, ticket_kind: TicketKind) -> Result<BackendItemRefresh, AdapterReadError> {
-        let status = self.item_status()?;
+        let status = self.lifecycle()?;
         Ok(BackendItemRefresh {
             title: self.title,
             body: self.body,
@@ -1804,7 +1805,7 @@ mod tests {
         assert_eq!(pulled[0].1.title, "First");
         assert_eq!(pulled[0].1.ticket_kind, Some(TicketKind::Bug));
         assert_eq!(pulled[1].0, items[1].backend_key);
-        assert_eq!(pulled[1].1.status, ItemStatus::Done);
+        assert_eq!(pulled[1].1.status, Lifecycle::Done);
         assert_eq!(pulled[1].1.ticket_kind, Some(TicketKind::Bug));
         runner.assert_all_consumed();
     }
@@ -2195,7 +2196,7 @@ mod tests {
         assert_eq!(s.backend_key, "https://github.com/o/r/issues/42");
         assert_eq!(s.display_id, "gh-42");
         assert_eq!(s.ticket_kind, TicketKind::Task);
-        assert_eq!(s.status, ItemStatus::Open);
+        assert_eq!(s.status, Lifecycle::Open);
         assert_eq!(s.title, "T42");
         runner.assert_all_consumed();
     }

@@ -96,7 +96,8 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
         .conn
         .query_row(
             "select display_value, item_class, ticket_kind, priority, selection_state, title, \
-                    body, closing_reason, status, created_at, updated_at, container_id \
+                    body, closing_reason, status, created_at, updated_at, container_id, \
+                    work_state \
                from items where id = ?1",
             params![&reference.id],
             |r| {
@@ -109,7 +110,8 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
                     r.get::<_, String>(5)?,
                     r.get::<_, String>(6)?,
                     r.get::<_, Option<String>>(7)?,
-                    r.get::<_, ItemStatus>(8)?,
+                    // Item Status is derived, not stored (ADR-0043).
+                    ItemStatus::of(r.get(8)?, r.get(12)?),
                     r.get::<_, String>(9)?,
                     r.get::<_, String>(10)?,
                     r.get::<_, Option<String>>(11)?,
@@ -177,7 +179,7 @@ fn read_item_summary_by_id(
     id: &str,
 ) -> Result<Option<ItemSummary>, rusqlite::Error> {
     conn.query_row(
-        "select display_value, title, item_class, status, priority \
+        "select display_value, title, item_class, status, priority, work_state \
            from items where id = ?1",
         params![id],
         item_summary_from_row,
@@ -190,7 +192,7 @@ fn read_children(
     parent_id: &str,
 ) -> Result<Vec<ItemSummary>, rusqlite::Error> {
     let mut stmt = conn.prepare(
-        "select display_value, title, item_class, status, priority \
+        "select display_value, title, item_class, status, priority, work_state \
            from items \
           where container_id = ?1 \
           order by created_seq asc",
@@ -204,7 +206,7 @@ fn read_blocked_by(
     item_id: &str,
 ) -> Result<Vec<ItemSummary>, rusqlite::Error> {
     let mut stmt = conn.prepare(
-        "select i.display_value, i.title, i.item_class, i.status, i.priority \
+        "select i.display_value, i.title, i.item_class, i.status, i.priority, i.work_state \
            from dependencies d \
            join items i on i.id = d.blocking_id \
           where d.blocked_id = ?1 \
@@ -220,7 +222,7 @@ fn read_blocking(
     item_id: &str,
 ) -> Result<Vec<ItemSummary>, rusqlite::Error> {
     let mut stmt = conn.prepare(
-        "select i.display_value, i.title, i.item_class, i.status, i.priority \
+        "select i.display_value, i.title, i.item_class, i.status, i.priority, i.work_state \
            from dependencies d \
            join items i on i.id = d.blocked_id \
           where d.blocking_id = ?1 \
@@ -270,12 +272,15 @@ fn read_mutations(
     .collect()
 }
 
+/// Shared by the parent, children, `BLOCKED BY`, and `BLOCKING` sub-reads, so
+/// all four select the same column list — Item Status is derived from the
+/// Lifecycle at column 3 and the Work State at column 5 (ADR-0043).
 fn item_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemSummary> {
     Ok(ItemSummary {
         display_id: row.get(0)?,
         title: row.get(1)?,
         item_class: row.get(2)?,
-        status: row.get(3)?,
+        status: ItemStatus::of(row.get(3)?, row.get(5)?),
         priority: row.get(4)?,
     })
 }

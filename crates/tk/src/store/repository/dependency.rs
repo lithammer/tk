@@ -14,9 +14,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::clock::Clock;
 use crate::domain::dependency_rule::{self, DependencyClassification, DependencyRejection};
 use crate::domain::item_class::ItemClass;
+use crate::domain::lifecycle::Lifecycle;
 use crate::domain::mutation_payload::{DependencyRef, MutationPayload};
 use crate::domain::mutation_type::MutationType;
-use crate::domain::status::ItemStatus;
 use crate::store::mutations;
 
 use super::Store;
@@ -91,10 +91,13 @@ pub enum RemoveDependencyError {
     Mutation(#[from] mutations::AppendError),
 }
 
+/// Both endpoints' Lifecycle plus the Blocked Item's class. Only the pure
+/// Lifecycle question — is the endpoint `done`? — is asked of either status,
+/// so neither reads Work State (ADR-0043).
 struct EndpointInfo {
-    blocked_status: ItemStatus,
+    blocked_status: Lifecycle,
     blocked_class: ItemClass,
-    blocking_status: ItemStatus,
+    blocking_status: Lifecycle,
 }
 
 /// Insert a Dependency edge from `blocking_id` to `blocked_id`.
@@ -110,10 +113,10 @@ pub fn add_dependency<C: Clock + ?Sized>(
         return Err(AddDependencyError::EndpointMissing);
     };
 
-    if info.blocked_status == ItemStatus::Done {
+    if info.blocked_status == Lifecycle::Done {
         return Err(AddDependencyError::BlockedDone);
     }
-    if info.blocking_status == ItemStatus::Done {
+    if info.blocking_status == Lifecycle::Done {
         return Err(AddDependencyError::BlockingDone);
     }
 

@@ -1,65 +1,59 @@
-//! Item Status lifecycle write (`tk start` / `tk stop` / `tk done`).
+//! Item Status close write (`tk done`).
 //!
-//! A transition on a backend-bound Item appends a `set_item_status` Mutation
-//! in the same transaction; a Local Item with no Promotion intent only updates
-//! current state. Idempotent calls (already at the requested state) succeed
-//! without bumping `updated_at` or writing a Mutation row.
+//! Closing is the only Lifecycle transition tk performs: this writer takes no
+//! target, so a reopen is not constructible (ADR-0006 makes `done` terminal in
+//! v1). It lands `status = 'done'` and clears Work State in the same statement,
+//! which is what keeps a `(done, active)` row unreachable without asking a
+//! CHECK to abort a write (ADR-0043). Closing a backend-bound Item appends a
+//! `set_item_status` Mutation in the same transaction; a Local Item with no
+//! Promotion intent only updates current state. An already-`done` Item closes
+//! idempotently, without bumping `updated_at` or writing a Mutation row.
 //!
-//! ADR-0006 makes `Done` terminal in v1. A pre-read short-circuit refuses
-//! any request that would leave `Done`, returning [`SetStatusError::LockedDone`]
-//! so callers can render a typed diagnostic before the
-//! `items_no_escape_from_done` schema trigger fires. The trigger remains
-//! as defence-in-depth for write paths that skip the pre-read.
+//! The other axis is [`super::work_state`], which appends nothing; both share
+//! the `begin_transition` preamble so the two reads cannot drift.
 
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::clock::Clock;
 use crate::domain::item_class::ItemClass;
+use crate::domain::lifecycle::Lifecycle;
 use crate::domain::mutation_payload::{MutationPayload, StatusChange};
 use crate::domain::mutation_type::MutationType;
 use crate::domain::selection_state::SelectionState;
-use crate::domain::status::ItemStatus;
+use crate::domain::work_state::WorkState;
 use crate::store::mutations;
 
 use super::Store;
 
-/// Input for [`set_item_status`].
-#[derive(Debug, Clone)]
-pub struct SetStatusRequest<'a> {
-    /// Internal stable `items.id` of the row to transition.
-    pub id: &'a str,
-    /// Target Item Status to persist.
-    pub status: ItemStatus,
-    /// Optional Closing Reason captured on the `→ done` transition (ADR-0023).
-    /// A Local Field: persisted to `items.closing_reason`, never to the
-    /// Mutation Log. Only `tk done -m` supplies it; `tk start`/`tk stop` pass
-    /// `None`. Set-once — a reason against an already-`done` item is refused
-    /// with [`SetStatusError::AlreadyClosed`].
-    pub closing_reason: Option<&'a str>,
-}
-
-/// Snapshot returned on a successful lifecycle write.
+/// Snapshot returned on a successful Item Status write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusChangedItem {
     pub display_id: String,
     pub title: String,
     pub item_class: ItemClass,
-    pub status: ItemStatus,
 }
 
-/// Why [`set_item_status`] did not commit a transition. Success is
+/// Why an Item Status write did not commit a transition. Success is
 /// `Ok(StatusChangedItem)` — a real transition or a no-op for an
 /// already-current state. The miss variants render at exit 1; the `#[error]`
 /// strings are internal — `tk start` / `tk stop` / `tk done` interpolate the id
 /// into their own lines.
+///
+/// This is the COMMAND-FACING surface: `commands::item_status` calls both
+/// writers, so every variant is reachable where it is matched, and the render
+/// match holding the ADR-0017 byte-identity contracts stays single-sourced.
+/// The Work State writer raises the narrower
+/// [`super::work_state::SetWorkStateError`], which flattens into this one.
 #[derive(Debug, thiserror::Error)]
 pub enum SetStatusError {
     /// The requested `id` does not resolve to a live row.
     #[error("item not found")]
     NotFound,
-    /// Refused: the item is already `Done` and the request is for any
-    /// non-`Done` status. Carries the persisted [`ItemClass`] so callers
-    /// can render "Ticket" vs "Epic" without a second round-trip.
+    /// Refused: the item is already `Done`, and Work State is not writable on
+    /// closed work. Carries the persisted [`ItemClass`] so callers can render
+    /// "Ticket" vs "Epic" without a second round-trip. Produced only by
+    /// [`super::work_state::set_work_state`], which raises its own variant —
+    /// closing an already-closed Item is idempotent, not a refusal.
     #[error("item is already done")]
     LockedDone(ItemClass),
     /// Refused: a Closing Reason was supplied for an item already `Done`.
@@ -69,12 +63,12 @@ pub enum SetStatusError {
     AlreadyClosed(ItemClass),
     /// Refused: cannot start a `triage` Ticket — only `accepted` work becomes
     /// `active` (ADR-0029). The Ticket must be accepted first. Produced only by
-    /// the `Active` target.
+    /// the [`WorkState::Active`] target.
     #[error("triage Ticket cannot be started")]
     TriageNotStartable,
     /// Refused: cannot start a `parked` Ticket — only `accepted` work becomes
     /// `active` (ADR-0029). The Ticket must be unparked first. Produced only by
-    /// the `Active` target.
+    /// the [`WorkState::Active`] target.
     #[error("parked Ticket cannot be started")]
     ParkedNotStartable,
     #[error(transparent)]
@@ -85,88 +79,148 @@ pub enum SetStatusError {
     Mutation(#[from] mutations::AppendError),
 }
 
-/// Apply a lifecycle Item Status transition to a Ticket or Epic.
-pub fn set_item_status<C: Clock + ?Sized>(
-    store: &mut Store,
-    clock: &C,
-    req: SetStatusRequest<'_>,
-) -> Result<StatusChangedItem, SetStatusError> {
-    let now_iso = clock.now_iso();
-    let tx = crate::store::write_transaction(&mut store.conn)?;
+/// Why the shared preamble could not hand back a row.
+///
+/// Deliberately narrower than either writer's error: reading a row can fail
+/// in exactly two ways, and giving the preamble its own type keeps each
+/// writer's `?` from silently widening what that writer can raise.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum TransitionReadError {
+    #[error("item not found")]
+    NotFound,
+    #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
+}
 
-    let current = tx
+impl From<TransitionReadError> for SetStatusError {
+    /// Flattening, not wrapping: each variant maps onto the wide variant of
+    /// the same name so the command's render match never has to destructure.
+    fn from(err: TransitionReadError) -> Self {
+        match err {
+            TransitionReadError::NotFound => Self::NotFound,
+            TransitionReadError::Sqlite(err) => Self::Sqlite(err),
+        }
+    }
+}
+
+/// Current state both Item Status writers decide from. Each reads the whole
+/// row and consults its own subset: the close writer never looks at
+/// `selection_state`, the Work State writer never at `lifecycle` beyond the
+/// done lock.
+pub(super) struct TransitionRow {
+    pub(super) lifecycle: Lifecycle,
+    pub(super) work_state: WorkState,
+    pub(super) item_class: ItemClass,
+    pub(super) display_id: String,
+    pub(super) title: String,
+    pub(super) selection_state: Option<SelectionState>,
+}
+
+impl TransitionRow {
+    /// The snapshot a write or a no-op returns; built from the same pre-read
+    /// either way, so an idempotent call reports what a transition would have.
+    pub(super) fn changed(self) -> StatusChangedItem {
+        StatusChangedItem {
+            display_id: self.display_id,
+            title: self.title,
+            item_class: self.item_class,
+        }
+    }
+}
+
+/// Open the write transaction and read the row, sampling `now_iso` once.
+///
+/// Shared by both axes so their reads cannot drift, and so the `updated_at`
+/// discipline stays in one place: the timestamp is sampled here but spent only
+/// by a branch that actually writes, which is what keeps an idempotent call
+/// from bumping the column. The helper takes no decision and appends no
+/// Mutation — every guard belongs to the writer that owns its diagnostic.
+///
+/// A missing row leaves the transaction unwritten, so dropping it rolls back
+/// nothing.
+pub(super) fn begin_transition<'a, C: Clock + ?Sized>(
+    conn: &'a mut Connection,
+    clock: &C,
+    id: &str,
+) -> Result<(Transaction<'a>, String, TransitionRow), TransitionReadError> {
+    let now_iso = clock.now_iso();
+    let tx = crate::store::write_transaction(conn)?;
+    let row = tx
         .query_row(
-            "select status, item_class, display_value, title, selection_state \
+            "select status, work_state, item_class, display_value, title, selection_state \
                from items where id = ?1",
-            params![req.id],
+            params![id],
             |row| {
-                Ok((
-                    row.get::<_, ItemStatus>(0)?,
-                    row.get::<_, ItemClass>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, Option<SelectionState>>(4)?,
-                ))
+                Ok(TransitionRow {
+                    lifecycle: row.get(0)?,
+                    work_state: row.get(1)?,
+                    item_class: row.get(2)?,
+                    display_id: row.get(3)?,
+                    title: row.get(4)?,
+                    selection_state: row.get(5)?,
+                })
             },
         )
         .optional()?;
-    let Some((current_status, item_class, display_id, title, selection_state)) = current else {
-        // No write happened — drop the transaction implicitly.
-        return Err(SetStatusError::NotFound);
-    };
-
-    if current_status == ItemStatus::Done && req.status != ItemStatus::Done {
-        return Err(SetStatusError::LockedDone(item_class));
+    match row {
+        Some(row) => Ok((tx, now_iso, row)),
+        None => Err(TransitionReadError::NotFound),
     }
+}
 
-    // Only `accepted` work becomes `active` (ADR-0029): a `triage` or `parked`
-    // Ticket cannot be started. No write happened, so the transaction drops.
-    // The CHECK added in migration 006 backstops any path that skips this guard.
-    if req.status == ItemStatus::Active {
-        match selection_state {
-            Some(SelectionState::Triage) => return Err(SetStatusError::TriageNotStartable),
-            Some(SelectionState::Parked) => return Err(SetStatusError::ParkedNotStartable),
-            Some(SelectionState::Accepted) | None => {}
-        }
-    }
+/// Close a Ticket or Epic, optionally recording a Closing Reason (ADR-0023).
+///
+/// There is no target parameter: `done` is the only Lifecycle value this
+/// writer can land, so no caller can ask for the reopen ADR-0006 forbids.
+/// Work State is cleared alongside, because closed work is not in progress.
+/// An already-`done` Item succeeds as a no-op unless a Closing Reason is
+/// supplied, which is refused as [`SetStatusError::AlreadyClosed`].
+pub fn close_item<C: Clock + ?Sized>(
+    store: &mut Store,
+    clock: &C,
+    id: &str,
+    closing_reason: Option<&str>,
+) -> Result<StatusChangedItem, SetStatusError> {
+    let (tx, now_iso, row) = begin_transition(&mut store.conn, clock, id)?;
 
-    if current_status == req.status {
-        // Set-once (ADR-0023): a Closing Reason against an already-`done`
-        // item is not an amend path. Re-closing without a reason stays the
-        // idempotent no-op `tk done`/`tk start`/`tk stop` rely on.
-        if req.status == ItemStatus::Done && req.closing_reason.is_some() {
-            return Err(SetStatusError::AlreadyClosed(item_class));
+    if row.lifecycle == Lifecycle::Done {
+        // Set-once (ADR-0023): a Closing Reason against an already-`done` item
+        // is not an amend path. Re-closing without a reason stays the
+        // idempotent no-op `tk done` relies on, so `updated_at` is untouched.
+        if closing_reason.is_some() {
+            return Err(SetStatusError::AlreadyClosed(row.item_class));
         }
         tx.commit()?;
-        return Ok(StatusChangedItem {
-            display_id,
-            title,
-            item_class,
-            status: req.status,
-        });
+        return Ok(row.changed());
     }
 
-    // `closing_reason` is unconditionally written: only the `→ done`
-    // transition carries a reason, and a non-`done` target always pairs with
-    // `None`, so a `start`/`stop` write simply re-nulls an already-null field.
-    // The column CHECK confines a non-null reason to `done` items.
+    // Work State is cleared in the same statement that lands `done`: a write
+    // can decline to produce `(done, active)`, where a CHECK could only abort
+    // the write after the fact (ADR-0043).
     tx.execute(
-        "update items set status = ?2, closing_reason = ?3, updated_at = ?4 where id = ?1",
-        params![req.id, req.status, req.closing_reason, now_iso],
+        "update items set status = ?2, work_state = ?3, closing_reason = ?4, updated_at = ?5 \
+           where id = ?1",
+        params![
+            id,
+            Lifecycle::Done.text(),
+            WorkState::Idle.text(),
+            closing_reason,
+            now_iso,
+        ],
     )?;
 
-    // Backend Binding, not Origin, decides whether the transition is also
-    // backend intent (ADR-0036): a Pending Promotion Item's status change is
-    // ordered behind the Promotion that will give it a backend identity.
-    if mutations::resolve_backend_binding(&tx, req.id)?.is_backend_bound() {
+    // Backend Binding, not Origin, decides whether the close is also backend
+    // intent (ADR-0036): a Pending Promotion Item's close is ordered behind the
+    // Promotion that will give it a backend identity.
+    if mutations::resolve_backend_binding(&tx, id)?.is_backend_bound() {
         mutations::append(
             &tx,
             mutations::AppendRequest {
                 mutation_type: MutationType::SetItemStatus,
-                item_id: req.id,
-                item_class,
+                item_id: id,
+                item_class: row.item_class,
                 payload: &MutationPayload::ItemStatus(StatusChange {
-                    status: req.status.text().to_owned(),
+                    status: Lifecycle::Done.text().to_owned(),
                 }),
                 promotion_operation_id: None,
                 now_iso: &now_iso,
@@ -175,12 +229,7 @@ pub fn set_item_status<C: Clock + ?Sized>(
     }
 
     tx.commit()?;
-    Ok(StatusChangedItem {
-        display_id,
-        title,
-        item_class,
-        status: req.status,
-    })
+    Ok(row.changed())
 }
 
 #[cfg(test)]
@@ -189,7 +238,8 @@ mod tests {
     use crate::clock::FakeClock;
     use crate::store::migrations;
     use crate::store::testing::{
-        FixtureItem, commit_promotion, insert_fixture_item, mutation_types,
+        FixtureItem, commit_promotion, insert_fixture_item, item_axes, mutation_count,
+        mutation_types,
     };
     use rusqlite::Connection;
 
@@ -246,57 +296,79 @@ mod tests {
         .unwrap();
     }
 
+    fn seed_ticket_with_selection(
+        store: &Store,
+        id: &str,
+        display: &str,
+        selection: &str,
+        priority: Option<&str>,
+    ) {
+        insert_fixture_item(
+            &store.conn,
+            FixtureItem {
+                id,
+                display,
+                title: "Subject",
+                priority,
+                selection_state: Some(selection),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+    }
+
     fn clock() -> FakeClock {
         FakeClock::new(1_778_284_800_000)
     }
 
     #[test]
-    fn sets_status_to_active_on_a_local_ticket() {
+    fn closing_a_local_ticket_writes_no_mutation() {
         let mut store = open_seeded();
         seed_open_ticket(&store, "t1", "tk-1", 1);
 
-        let item = set_item_status(
-            &mut store,
-            &clock(),
-            SetStatusRequest {
-                id: "t1",
-                status: ItemStatus::Active,
-                closing_reason: None,
-            },
-        )
-        .unwrap();
+        let item = close_item(&mut store, &clock(), "t1", None).unwrap();
 
-        assert_eq!(item.status, ItemStatus::Active);
         assert_eq!(item.item_class, ItemClass::Ticket);
+        assert_eq!(
+            item_axes(&store.conn, "t1").unwrap(),
+            (Lifecycle::Done, WorkState::Idle)
+        );
 
-        let stored: String = store
-            .conn
-            .query_row("select status from items where id = 't1'", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(stored, "active");
-
-        let mutation_count: i64 = store
-            .conn
-            .query_row("select count(*) from mutations", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(mutation_count, 0);
+        assert_eq!(mutation_count(&store.conn).unwrap(), 0);
     }
 
     #[test]
-    fn backend_transition_appends_set_item_status_mutation() {
+    fn close_clears_work_state_on_an_active_item() {
+        // The clear has no other witness: a `(done, active)` row derives
+        // Item Status `done` at every carrier, so a close that forgot it would
+        // render identically and break nothing until the row was read as two
+        // axes. Only the read-back catches it.
+        let mut store = open_seeded();
+        seed_open_ticket(&store, "t1", "tk-1", 1);
+        crate::store::repository::work_state::set_work_state(
+            &mut store,
+            &clock(),
+            "t1",
+            WorkState::Active,
+        )
+        .unwrap();
+
+        close_item(&mut store, &clock(), "t1", None).unwrap();
+
+        assert_eq!(
+            item_axes(&store.conn, "t1").unwrap(),
+            (Lifecycle::Done, WorkState::Idle),
+            "closing must clear Work State, not just land the Lifecycle"
+        );
+    }
+
+    #[test]
+    fn closing_a_backend_item_appends_a_set_item_status_mutation() {
         let mut store = open_seeded();
         seed_backend_ticket(&store, "t1", "tk-1", 1);
 
-        set_item_status(
-            &mut store,
-            &clock(),
-            SetStatusRequest {
-                id: "t1",
-                status: ItemStatus::Active,
-                closing_reason: None,
-            },
-        )
-        .unwrap();
+        close_item(&mut store, &clock(), "t1", None).unwrap();
 
         let (mt, payload): (String, String) = store
             .conn
@@ -307,27 +379,18 @@ mod tests {
             )
             .unwrap();
         assert_eq!(mt, "set_item_status");
-        assert_eq!(payload, r#"{"status":"active"}"#);
+        assert_eq!(payload, r#"{"status":"done"}"#);
     }
 
     #[test]
-    fn pending_promotion_transition_appends_set_item_status_behind_the_promotion() {
-        // ADR-0036: `tk start` between `tk promote` and the next `tk sync`
-        // still reaches the Backend, ordered behind the Promotion.
+    fn pending_promotion_close_appends_set_item_status_behind_the_promotion() {
+        // ADR-0036: `tk done` between `tk promote` and the next `tk sync` still
+        // reaches the Backend, ordered behind the Promotion.
         let mut store = open_seeded();
         seed_open_ticket(&store, "t1", "tk-1", 1);
         commit_promotion(&mut store.conn, "t1");
 
-        set_item_status(
-            &mut store,
-            &clock(),
-            SetStatusRequest {
-                id: "t1",
-                status: ItemStatus::Active,
-                closing_reason: None,
-            },
-        )
-        .unwrap();
+        close_item(&mut store, &clock(), "t1", None).unwrap();
 
         assert_eq!(
             mutation_types(&store.conn).unwrap(),
@@ -341,79 +404,38 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(payload, r#"{"status":"active"}"#);
-    }
-
-    #[test]
-    fn idempotent_call_does_not_write_mutation_or_change_timestamp() {
-        let mut store = open_seeded();
-        seed_backend_ticket(&store, "t1", "tk-1", 1);
-
-        // The fixture is already at status `open`, so asking for `open` is a
-        // no-op.
-        set_item_status(
-            &mut store,
-            &clock(),
-            SetStatusRequest {
-                id: "t1",
-                status: ItemStatus::Open,
-                closing_reason: None,
-            },
-        )
-        .unwrap();
-
-        let updated_at: String = store
-            .conn
-            .query_row("select updated_at from items", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(updated_at, "2026-05-09T00:00:00.000Z");
-        let mutation_count: i64 = store
-            .conn
-            .query_row("select count(*) from mutations", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(mutation_count, 0);
-    }
-
-    #[test]
-    fn reopening_a_done_item_returns_locked_done() {
-        let mut store = open_seeded();
-        seed_done_ticket(&store, "t1", "tk-1", 1);
-
-        let err = set_item_status(
-            &mut store,
-            &clock(),
-            SetStatusRequest {
-                id: "t1",
-                status: ItemStatus::Open,
-                closing_reason: None,
-            },
-        )
-        .unwrap_err();
-        assert!(matches!(err, SetStatusError::LockedDone(ItemClass::Ticket)));
-
-        let stored: String = store
-            .conn
-            .query_row("select status from items where id = 't1'", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(stored, "done");
+        assert_eq!(payload, r#"{"status":"done"}"#);
     }
 
     #[test]
     fn closing_a_done_item_is_allowed_and_idempotent() {
         let mut store = open_seeded();
         seed_done_ticket(&store, "t1", "tk-1", 1);
+        let before: String = store
+            .conn
+            .query_row("select updated_at from items where id = 't1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
 
-        let item = set_item_status(
-            &mut store,
-            &clock(),
-            SetStatusRequest {
-                id: "t1",
-                status: ItemStatus::Done,
-                closing_reason: None,
-            },
-        )
-        .unwrap();
-        assert_eq!(item.status, ItemStatus::Done);
+        // A later clock would prove a spurious updated_at bump if one happened.
+        let item = close_item(&mut store, &FakeClock::new(1_900_000_000_000), "t1", None).unwrap();
+        // The no-op branch builds its snapshot from the same pre-read the
+        // write branch uses; nothing else asserts the fields it returns.
+        assert_eq!(item.display_id, "tk-1");
+        assert_eq!(item.title, "Done Ticket");
+
+        assert_eq!(
+            item_axes(&store.conn, "t1").unwrap(),
+            (Lifecycle::Done, WorkState::Idle)
+        );
+        let updated_at: String = store
+            .conn
+            .query_row("select updated_at from items where id = 't1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(updated_at, before, "no-op must not bump updated_at");
     }
 
     #[test]
@@ -421,19 +443,14 @@ mod tests {
         let mut store = open_seeded();
         seed_open_ticket(&store, "t1", "tk-1", 1);
 
-        let item = set_item_status(
-            &mut store,
-            &clock(),
-            SetStatusRequest {
-                id: "t1",
-                status: ItemStatus::Done,
-                closing_reason: Some("Fixed in PR #12"),
-            },
-        )
-        .unwrap();
-        assert_eq!(item.status, ItemStatus::Done);
+        close_item(&mut store, &clock(), "t1", Some("Fixed in PR #12")).unwrap();
 
-        let stored: Option<String> = store
+        assert_eq!(
+            item_axes(&store.conn, "t1").unwrap(),
+            (Lifecycle::Done, WorkState::Idle)
+        );
+
+        let stored_reason: Option<String> = store
             .conn
             .query_row(
                 "select closing_reason from items where id = 't1'",
@@ -441,15 +458,11 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(stored.as_deref(), Some("Fixed in PR #12"));
+        assert_eq!(stored_reason.as_deref(), Some("Fixed in PR #12"));
 
         // Closing Reason is a Local Field (ADR-0023): it never rides the
         // Mutation Log, not even for the status change on a backend item.
-        let mutation_count: i64 = store
-            .conn
-            .query_row("select count(*) from mutations", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(mutation_count, 0);
+        assert_eq!(mutation_count(&store.conn).unwrap(), 0);
     }
 
     #[test]
@@ -457,16 +470,7 @@ mod tests {
         let mut store = open_seeded();
         seed_backend_ticket(&store, "t1", "tk-1", 1);
 
-        set_item_status(
-            &mut store,
-            &clock(),
-            SetStatusRequest {
-                id: "t1",
-                status: ItemStatus::Done,
-                closing_reason: Some("Shipped"),
-            },
-        )
-        .unwrap();
+        close_item(&mut store, &clock(), "t1", Some("Shipped")).unwrap();
 
         // The set_item_status Mutation still fires for a Backend item, but the
         // Closing Reason stays out of its payload — sync deferred to tk-109.
@@ -492,16 +496,7 @@ mod tests {
         let mut store = open_seeded();
         seed_done_ticket(&store, "t1", "tk-1", 1);
 
-        let err = set_item_status(
-            &mut store,
-            &clock(),
-            SetStatusRequest {
-                id: "t1",
-                status: ItemStatus::Done,
-                closing_reason: Some("too late"),
-            },
-        )
-        .unwrap_err();
+        let err = close_item(&mut store, &clock(), "t1", Some("too late")).unwrap_err();
         assert!(matches!(
             err,
             SetStatusError::AlreadyClosed(ItemClass::Ticket)
@@ -519,168 +514,31 @@ mod tests {
         assert_eq!(stored, None);
     }
 
-    fn seed_ticket_with_selection(
-        store: &Store,
-        id: &str,
-        display: &str,
-        status: &str,
-        selection: &str,
-        priority: Option<&str>,
-    ) {
-        insert_fixture_item(
-            &store.conn,
-            FixtureItem {
-                id,
-                display,
-                title: "Subject",
-                status,
-                priority,
-                selection_state: Some(selection),
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-    }
-
     #[test]
-    fn starting_a_triage_ticket_is_rejected() {
-        let mut store = open_seeded();
-        seed_ticket_with_selection(&store, "t1", "tk-1", "open", "triage", None);
+    fn closing_is_allowed_from_every_selection_state() {
+        // `tk done` closes captured and held work without accepting it first:
+        // the start-guard is the Work State writer's, not this one's.
+        for (id, display, selection, priority) in [
+            ("t1", "tk-1", "triage", None),
+            ("t2", "tk-2", "parked", Some("P2")),
+        ] {
+            let mut store = open_seeded();
+            seed_ticket_with_selection(&store, id, display, selection, priority);
 
-        let err = set_item_status(
-            &mut store,
-            &clock(),
-            SetStatusRequest {
-                id: "t1",
-                status: ItemStatus::Active,
-                closing_reason: None,
-            },
-        )
-        .unwrap_err();
-        assert!(matches!(err, SetStatusError::TriageNotStartable));
+            close_item(&mut store, &clock(), id, None).unwrap();
 
-        let stored: String = store
-            .conn
-            .query_row("select status from items where id = 't1'", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(stored, "open", "rejected start must not transition");
-    }
-
-    #[test]
-    fn starting_a_parked_ticket_is_rejected() {
-        let mut store = open_seeded();
-        seed_ticket_with_selection(&store, "t1", "tk-1", "open", "parked", Some("P2"));
-
-        let err = set_item_status(
-            &mut store,
-            &clock(),
-            SetStatusRequest {
-                id: "t1",
-                status: ItemStatus::Active,
-                closing_reason: None,
-            },
-        )
-        .unwrap_err();
-        assert!(matches!(err, SetStatusError::ParkedNotStartable));
-    }
-
-    #[test]
-    fn starting_an_accepted_ticket_still_succeeds() {
-        // The start-guard must reject only non-accepted work; accepted Tickets
-        // start as before.
-        let mut store = open_seeded();
-        seed_ticket_with_selection(&store, "t1", "tk-1", "open", "accepted", Some("P2"));
-
-        let item = set_item_status(
-            &mut store,
-            &clock(),
-            SetStatusRequest {
-                id: "t1",
-                status: ItemStatus::Active,
-                closing_reason: None,
-            },
-        )
-        .unwrap();
-        assert_eq!(item.status, ItemStatus::Active);
-    }
-
-    #[test]
-    fn done_is_allowed_from_triage_and_stays_terminal() {
-        // tk-76 AC: `done` closes captured work from any Selection State, and
-        // the v1 terminal rule still holds afterward.
-        let mut store = open_seeded();
-        seed_ticket_with_selection(&store, "t1", "tk-1", "open", "triage", None);
-
-        let item = set_item_status(
-            &mut store,
-            &clock(),
-            SetStatusRequest {
-                id: "t1",
-                status: ItemStatus::Done,
-                closing_reason: None,
-            },
-        )
-        .unwrap();
-        assert_eq!(item.status, ItemStatus::Done);
-
-        // Terminal: a subsequent start is refused as done, not as triage.
-        let err = set_item_status(
-            &mut store,
-            &clock(),
-            SetStatusRequest {
-                id: "t1",
-                status: ItemStatus::Active,
-                closing_reason: None,
-            },
-        )
-        .unwrap_err();
-        assert!(matches!(err, SetStatusError::LockedDone(_)));
-    }
-
-    #[test]
-    fn done_is_allowed_from_parked_and_stays_terminal() {
-        let mut store = open_seeded();
-        seed_ticket_with_selection(&store, "t1", "tk-1", "open", "parked", Some("P2"));
-
-        let item = set_item_status(
-            &mut store,
-            &clock(),
-            SetStatusRequest {
-                id: "t1",
-                status: ItemStatus::Done,
-                closing_reason: None,
-            },
-        )
-        .unwrap();
-        assert_eq!(item.status, ItemStatus::Done);
-
-        let err = set_item_status(
-            &mut store,
-            &clock(),
-            SetStatusRequest {
-                id: "t1",
-                status: ItemStatus::Open,
-                closing_reason: None,
-            },
-        )
-        .unwrap_err();
-        assert!(matches!(err, SetStatusError::LockedDone(_)));
+            assert_eq!(
+                item_axes(&store.conn, id).unwrap(),
+                (Lifecycle::Done, WorkState::Idle),
+                "a {selection} Ticket must close"
+            );
+        }
     }
 
     #[test]
     fn unknown_id_returns_not_found() {
         let mut store = open_seeded();
-        let err = set_item_status(
-            &mut store,
-            &clock(),
-            SetStatusRequest {
-                id: "missing",
-                status: ItemStatus::Active,
-                closing_reason: None,
-            },
-        )
-        .unwrap_err();
+        let err = close_item(&mut store, &clock(), "missing", None).unwrap_err();
         assert!(matches!(err, SetStatusError::NotFound));
     }
 }

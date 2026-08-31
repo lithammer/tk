@@ -300,7 +300,7 @@ mod tests {
     use super::*;
     use crate::domain::backend_kind::BackendKind;
     use crate::domain::backend_operation::{BackendCreate, BackendEdit, BackendItemRefresh};
-    use crate::domain::status::ItemStatus;
+    use crate::domain::lifecycle::Lifecycle;
     use crate::domain::ticket_kind::TicketKind;
     use crate::proc::{FakeRunner, ProcError};
     use crate::remote::fake::{CreateResponse, EditResponse, FakeAdapter, PullResponse};
@@ -361,7 +361,7 @@ mod tests {
             ticket_kind: Some(TicketKind::Task),
             title: title.into(),
             body: String::new(),
-            status: ItemStatus::Open,
+            status: Lifecycle::Open,
         }
     }
 

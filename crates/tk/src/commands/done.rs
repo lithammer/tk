@@ -7,8 +7,7 @@
 use clap::Args as ClapArgs;
 
 use crate::cli::{CommandError, Deps, Exit};
-use crate::commands::item_status::{self, SuccessLabel};
-use crate::domain::status::ItemStatus;
+use crate::commands::item_status::{self, SuccessLabel, Transition};
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
@@ -34,5 +33,5 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         }
         other => other,
     };
-    item_status::transition(deps, &args.id, ItemStatus::Done, SUCCESS, closing_reason)
+    item_status::transition(deps, &args.id, Transition::Done { closing_reason }, SUCCESS)
 }

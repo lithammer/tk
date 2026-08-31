@@ -11,11 +11,13 @@ use rusqlite::{OptionalExtension, params};
 
 use crate::clock::Clock;
 use crate::domain::item_class::ItemClass;
+use crate::domain::lifecycle::Lifecycle;
 use crate::domain::origin::Origin;
 use crate::domain::priority::Priority;
 use crate::domain::selection_state::SelectionState;
 use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
+use crate::domain::work_state::WorkState;
 use crate::store::sequences;
 
 use super::Store;
@@ -104,6 +106,10 @@ where
     R: Rng + ?Sized,
 {
     let now_iso = clock.now_iso();
+    // Bound once so the row written below and the snapshot returned at the end
+    // agree by construction, not by calling `default()` twice.
+    let lifecycle = Lifecycle::default();
+    let work_state = WorkState::default();
     let tx = crate::store::write_transaction(&mut store.conn)?;
 
     let id = generate_internal_id(rng);
@@ -118,12 +124,15 @@ where
         NewTicketSelection::Accepted(priority) => (SelectionState::Accepted, Some(priority)),
     };
     let container_class: Option<&str> = input.parent_id.map(|_| ItemClass::Epic.text());
+    // Both axes are bound side by side, rather than letting the `work_state`
+    // DDL default supply one, so "a newly created Item is open and idle"
+    // (ADR-0043) is visible where it is decided.
     tx.execute(
         "insert into items(\
             id, display_value, item_class, ticket_kind, priority, title, body, \
-            container_id, container_class, origin, status, selection_state, created_seq, \
-            created_at, updated_at\
-         ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)",
+            container_id, container_class, origin, status, work_state, \
+            selection_state, created_seq, created_at, updated_at\
+         ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15)",
         params![
             id,
             display_id,
@@ -135,7 +144,8 @@ where
             input.parent_id,
             container_class,
             Origin::Local.text(),
-            ItemStatus::default().text(),
+            lifecycle.text(),
+            work_state.text(),
             selection_state.text(),
             created_seq,
             now_iso,
@@ -150,7 +160,7 @@ where
         kind: input.kind,
         priority,
         selection_state,
-        status: ItemStatus::default(),
+        status: ItemStatus::of(lifecycle, work_state),
         origin: Origin::Local,
         title: input.title.to_owned(),
         body: input.body.to_owned(),
@@ -169,6 +179,10 @@ where
     R: Rng + ?Sized,
 {
     let now_iso = clock.now_iso();
+    // Bound once so the row written below and the snapshot returned at the end
+    // agree by construction, not by calling `default()` twice.
+    let lifecycle = Lifecycle::default();
+    let work_state = WorkState::default();
     let tx = crate::store::write_transaction(&mut store.conn)?;
 
     let id = generate_internal_id(rng);
@@ -178,8 +192,8 @@ where
     tx.execute(
         "insert into items(\
             id, display_value, item_class, title, body, origin, status, \
-            created_seq, created_at, updated_at\
-         ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+            work_state, created_seq, created_at, updated_at\
+         ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
         params![
             id,
             display_id,
@@ -187,7 +201,8 @@ where
             input.title,
             input.body,
             Origin::Local.text(),
-            ItemStatus::default().text(),
+            lifecycle.text(),
+            work_state.text(),
             created_seq,
             now_iso,
         ],
@@ -198,7 +213,7 @@ where
     Ok(CreatedEpic {
         id,
         display_id,
-        status: ItemStatus::default(),
+        status: ItemStatus::of(lifecycle, work_state),
         origin: Origin::Local,
         title: input.title.to_owned(),
         body: input.body.to_owned(),

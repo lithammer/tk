@@ -448,6 +448,52 @@ fn plain_list_badges_every_selection_state() {
     assert!(conflict.contains("exit 2"), "conflict={conflict}");
 }
 
+/// `tk done` fires on a Ticket that is *being worked*, which `start -> stop
+/// -> done` never reaches: the close has to clear Work State as well as land
+/// the Lifecycle. `tk list` renders the glyph for the first three steps; the
+/// default List Tree drops closed work, so `tk search` — the one view that
+/// spans every Item Status — shows the last.
+#[test]
+fn a_ticket_is_started_stopped_restarted_and_then_closed() {
+    let p = Repo::new("project");
+    p.run("init");
+    p.run("add -m 'Auth rework'"); // project-1 (accepted, P2)
+
+    tk!(p, "start project-1", @"Started Ticket: project-1 - Auth rework");
+    tk!(p, "list", @"
+    ◐ project-1 ● P2 Auth rework
+    --------------------------------------------------------------------------------
+    Total: 1 item (1 active)
+
+    Status: ○ open  ◐ active  ✓ done
+    Blocked: ⊘ blocked
+    ");
+
+    tk!(p, "stop project-1", @"Stopped Ticket: project-1 - Auth rework");
+    tk!(p, "list", @"
+    ○ project-1 ● P2 Auth rework
+    --------------------------------------------------------------------------------
+    Total: 1 item (1 open)
+
+    Status: ○ open  ◐ active  ✓ done
+    Blocked: ⊘ blocked
+    ");
+
+    // The restart is what gives the close something to clear; the glyph it
+    // produces is already pinned by the first `list` above.
+    tk!(p, "start project-1", @"Started Ticket: project-1 - Auth rework");
+
+    tk!(p, "done project-1", @"Done Ticket: project-1 - Auth rework");
+    tk!(p, "search auth", @"
+    ✓ project-1 ● P2 Auth rework
+    --------------------------------------------------------------------------------
+    Total: 1 item (1 done)
+
+    Status: ○ open  ◐ active  ✓ done
+    Blocked: ⊘ blocked
+    ");
+}
+
 #[test]
 fn lifecycle_guards_respect_selection_state() {
     let p = Repo::new("project");

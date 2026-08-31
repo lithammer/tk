@@ -1,12 +1,13 @@
 //! `tk next` ready-Ticket selection with Effective Priority (ADR-0015).
 //!
-//! A ready Ticket is one with `status = open`, no unresolved Dependencies,
-//! and no unresolved External Blockers. Each ready candidate's *Effective
-//! Priority* is the lowest Priority reachable through unresolved
-//! Dependency edges or Epic-membership edges, walked only within the active
-//! Scope. Selection sorts by `(effective_priority, own_priority,
-//! created_seq)` so a ticket inherits urgency from work that transitively
-//! waits on it.
+//! A ready Ticket is one whose Item Status is `open` — an open Lifecycle and
+//! an idle Work State (ADR-0043), so work already under way is never offered
+//! again — with no unresolved Dependencies and no unresolved External
+//! Blockers. Each ready candidate's *Effective Priority* is the lowest
+//! Priority reachable through unresolved Dependency edges or Epic-membership
+//! edges, walked only within the active Scope. Selection sorts by
+//! `(effective_priority, own_priority, created_seq)` so a ticket inherits
+//! urgency from work that transitively waits on it.
 //!
 //! The Repository Store owns readiness, scope interpretation, Effective
 //! Priority computation, and creation-order tie breaks. The command
@@ -85,7 +86,8 @@ const NEXT_READY_TICKET_SQL: &str = "\
 with recursive \
   annotated as ( \
       select i.id, i.display_value, i.item_class, i.priority, i.status, \
-             i.selection_state, i.container_id, i.created_seq, i.title, \
+             i.work_state, i.selection_state, i.container_id, i.created_seq, \
+             i.title, \
              exists ( \
                  select 1 \
                    from dependencies d \
@@ -126,6 +128,7 @@ with recursive \
         from items \
        where item_class = 'ticket' \
          and status = 'open' \
+         and work_state = 'idle' \
          and ( \
              ?1 = 'all' \
              or (?1 = 'epic' and container_id = ?2) \
@@ -166,6 +169,7 @@ select ann.display_value, ann.priority, eff.ep, \
   join eff on eff.start_id = ann.id \
  where ann.item_class = 'ticket' \
    and ann.status = 'open' \
+   and ann.work_state = 'idle' \
    and ann.selection_state = 'accepted' \
    and not ann.has_unresolved_dependency \
    and not ann.has_unresolved_external_blocker \
@@ -497,6 +501,35 @@ mod tests {
             .unwrap()
             .expect("a ready ticket");
         assert_eq!(ticket.display_id, "tk-3");
+    }
+
+    #[test]
+    fn an_active_ticket_is_never_selected() {
+        // Readiness spans both axes after ADR-0043 split them: an `open`
+        // Lifecycle no longer means "not started". Without the
+        // `work_state = 'idle'` term the P0 someone is already working would
+        // outrank the untouched P2 and `tk next` would keep recommending work
+        // in progress.
+        let store = open_seeded();
+        insert_fixture_item(
+            &store.conn,
+            FixtureItem {
+                id: "working",
+                display: "tk-1",
+                title: "working",
+                status: "active",
+                priority: Some("P0"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        seed(&store, "ready", "tk-2", "P2", 2);
+
+        let ticket = next_ready_ticket(&store, NextOptions::default())
+            .unwrap()
+            .expect("a ready ticket");
+        assert_eq!(ticket.display_id, "tk-2");
     }
 
     fn seed_parked(store: &Store, id: &str, display: &str, priority: &str, created_seq: i64) {
