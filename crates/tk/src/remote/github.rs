@@ -139,19 +139,12 @@ impl Adapter for GithubAdapter<'_> {
                 "--body",
                 &snapshot.body,
             ]),
-            BackendEdit::SetItemStatus { item, change, .. } => {
-                // done is terminal (ADR-0006), so reopen-from-done never occurs.
-                let verb = match change.status.as_str() {
-                    "done" => "close",
-                    "open" | "active" => "reopen",
-                    other => {
-                        return Ok(BackendEditOutcome::rejected(format!(
-                            "unexpected target status '{other}'"
-                        )));
-                    }
-                };
-                self.run_edit(&["gh", "issue", verb, &item.backend_key])
-            }
+            BackendEdit::SetItemStatus { item, change, .. } => match change.status.as_str() {
+                "done" => self.run_edit(&["gh", "issue", "close", &item.backend_key]),
+                other => Ok(BackendEditOutcome::rejected(format!(
+                    "unexpected target status '{other}'"
+                ))),
+            },
             // Relationship sync (ADR-0021, tk-107 Dependencies, tk-132 Epic
             // membership): every arm edits the Mutation's own item, and any
             // counterpart address is resolved store-side onto the operation's
@@ -325,12 +318,11 @@ impl GithubAdapter<'_> {
         }
     }
 
-    /// Run one edit `gh` invocation and map its outcome. Success is judged by
-    /// **exit code 0**, never by stderr emptiness: `gh issue close`/`reopen`
-    /// print an informational "is already closed/open" line to stderr on their
-    /// idempotent no-op path yet still exit 0, so a harmless re-apply must read
-    /// as Acknowledged. A non-zero exit is a per-Mutation rejection carrying the
-    /// classified stderr.
+    /// Run one edit through `gh` and map its outcome.
+    ///
+    /// A zero exit code is success even when stderr is not empty. `gh issue
+    /// close` writes "is already closed" on a harmless repeat and exits zero.
+    /// A nonzero exit rejects the Mutation with the stderr text and class.
     fn run_edit(&self, argv: &[&str]) -> Result<BackendEditOutcome, ApplyError> {
         let output = self.runner.run(argv, self.cwd)?;
         if output.succeeded() {
@@ -2453,10 +2445,9 @@ mod tests {
     }
 
     #[test]
-    fn apply_set_status_open_or_active_reopens() {
+    fn apply_set_status_non_closing_rejects_without_running_gh() {
         for status in ["open", "active"] {
             let runner = FakeRunner::new();
-            runner.expect_exact(&["gh", "issue", "reopen", "42"], ok(""));
             let mut adapter = GithubAdapter::new(&runner, cwd());
             let v = edit(
                 MutationType::SetItemStatus,
@@ -2465,11 +2456,9 @@ mod tests {
                 }),
                 "42",
             );
-            assert!(
-                matches!(
-                    adapter.apply_edit(&v).unwrap(),
-                    BackendEditOutcome::Acknowledged
-                ),
+            assert_eq!(
+                adapter.apply_edit(&v).unwrap(),
+                BackendEditOutcome::rejected(format!("unexpected target status '{status}'")),
                 "{status}"
             );
             runner.assert_all_consumed();
