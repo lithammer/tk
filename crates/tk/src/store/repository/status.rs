@@ -44,7 +44,6 @@ pub struct StatusChangedItem {
     pub display_id: String,
     pub title: String,
     pub item_class: ItemClass,
-    pub status: ItemStatus,
 }
 
 /// Why [`set_item_status`] did not commit a transition. Success is
@@ -142,7 +141,6 @@ pub fn set_item_status<C: Clock + ?Sized>(
             display_id,
             title,
             item_class,
-            status: req.status,
         });
     }
 
@@ -179,7 +177,6 @@ pub fn set_item_status<C: Clock + ?Sized>(
         display_id,
         title,
         item_class,
-        status: req.status,
     })
 }
 
@@ -266,7 +263,6 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(item.status, ItemStatus::Active);
         assert_eq!(item.item_class, ItemClass::Ticket);
 
         let stored: String = store
@@ -350,10 +346,12 @@ mod tests {
         seed_backend_ticket(&store, "t1", "tk-1", 1);
 
         // The fixture is already at status `open`, so asking for `open` is a
-        // no-op.
+        // no-op. A later clock would prove a spurious updated_at bump if one
+        // happened; `clock()` renders the very string the fixture seeds, so it
+        // could not.
         set_item_status(
             &mut store,
-            &clock(),
+            &FakeClock::new(1_900_000_000_000),
             SetStatusRequest {
                 id: "t1",
                 status: ItemStatus::Open,
@@ -366,7 +364,10 @@ mod tests {
             .conn
             .query_row("select updated_at from items", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(updated_at, "2026-05-09T00:00:00.000Z");
+        assert_eq!(
+            updated_at, "2026-05-09T00:00:00.000Z",
+            "no-op must not bump updated_at"
+        );
         let mutation_count: i64 = store
             .conn
             .query_row("select count(*) from mutations", [], |r| r.get(0))
@@ -402,10 +403,17 @@ mod tests {
     fn closing_a_done_item_is_allowed_and_idempotent() {
         let mut store = open_seeded();
         seed_done_ticket(&store, "t1", "tk-1", 1);
+        let before: String = store
+            .conn
+            .query_row("select updated_at from items where id = 't1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
 
+        // A later clock would prove a spurious updated_at bump if one happened.
         let item = set_item_status(
             &mut store,
-            &clock(),
+            &FakeClock::new(1_900_000_000_000),
             SetStatusRequest {
                 id: "t1",
                 status: ItemStatus::Done,
@@ -413,7 +421,21 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(item.status, ItemStatus::Done);
+        // The no-op branch builds its snapshot from the same pre-read the
+        // write branch uses; nothing else asserts the fields it returns.
+        assert_eq!(item.display_id, "tk-1");
+        assert_eq!(item.title, "Done Ticket");
+
+        let (stored, updated_at): (String, String) = store
+            .conn
+            .query_row(
+                "select status, updated_at from items where id = 't1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored, "done");
+        assert_eq!(updated_at, before, "no-op must not bump updated_at");
     }
 
     #[test]
@@ -421,7 +443,7 @@ mod tests {
         let mut store = open_seeded();
         seed_open_ticket(&store, "t1", "tk-1", 1);
 
-        let item = set_item_status(
+        set_item_status(
             &mut store,
             &clock(),
             SetStatusRequest {
@@ -431,9 +453,14 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(item.status, ItemStatus::Done);
 
-        let stored: Option<String> = store
+        let stored_status: String = store
+            .conn
+            .query_row("select status from items where id = 't1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored_status, "done");
+
+        let stored_reason: Option<String> = store
             .conn
             .query_row(
                 "select closing_reason from items where id = 't1'",
@@ -441,7 +468,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(stored.as_deref(), Some("Fixed in PR #12"));
+        assert_eq!(stored_reason.as_deref(), Some("Fixed in PR #12"));
 
         // Closing Reason is a Local Field (ADR-0023): it never rides the
         // Mutation Log, not even for the status change on a backend item.
@@ -592,7 +619,7 @@ mod tests {
         let mut store = open_seeded();
         seed_ticket_with_selection(&store, "t1", "tk-1", "open", "accepted", Some("P2"));
 
-        let item = set_item_status(
+        set_item_status(
             &mut store,
             &clock(),
             SetStatusRequest {
@@ -602,7 +629,12 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(item.status, ItemStatus::Active);
+
+        let stored: String = store
+            .conn
+            .query_row("select status from items where id = 't1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored, "active");
     }
 
     #[test]
@@ -612,7 +644,7 @@ mod tests {
         let mut store = open_seeded();
         seed_ticket_with_selection(&store, "t1", "tk-1", "open", "triage", None);
 
-        let item = set_item_status(
+        set_item_status(
             &mut store,
             &clock(),
             SetStatusRequest {
@@ -622,7 +654,12 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(item.status, ItemStatus::Done);
+
+        let stored: String = store
+            .conn
+            .query_row("select status from items where id = 't1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored, "done");
 
         // Terminal: a subsequent start is refused as done, not as triage.
         let err = set_item_status(
@@ -643,7 +680,7 @@ mod tests {
         let mut store = open_seeded();
         seed_ticket_with_selection(&store, "t1", "tk-1", "open", "parked", Some("P2"));
 
-        let item = set_item_status(
+        set_item_status(
             &mut store,
             &clock(),
             SetStatusRequest {
@@ -653,7 +690,12 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(item.status, ItemStatus::Done);
+
+        let stored: String = store
+            .conn
+            .query_row("select status from items where id = 't1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored, "done");
 
         let err = set_item_status(
             &mut store,
