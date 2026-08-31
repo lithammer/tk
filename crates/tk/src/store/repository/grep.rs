@@ -55,7 +55,7 @@ where
 {
     const SCAN_SQL: &str = "\
 select display_value, item_class, ticket_kind, priority, title, body, status, \
-       created_at, updated_at \
+       created_at, updated_at, work_state \
   from items \
  order by created_seq asc";
 
@@ -78,7 +78,9 @@ fn item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GrepItem> {
         priority: row.get(3)?,
         title: row.get(4)?,
         body: row.get(5)?,
-        status: row.get(6)?,
+        // Item Status is derived, not stored (ADR-0043): Lifecycle and Work
+        // State together.
+        status: ItemStatus::of(row.get(6)?, row.get(9)?),
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
     })

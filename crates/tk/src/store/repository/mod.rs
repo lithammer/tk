@@ -43,6 +43,7 @@ pub mod selection;
 pub mod show;
 pub mod status;
 pub mod update;
+pub mod work_state;
 
 /// Handle to an opened Repository Store.
 ///

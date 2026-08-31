@@ -285,8 +285,8 @@ mod tests {
     use super::*;
     use crate::domain::backend_operation::BackendItemAddress;
     use crate::domain::item_class::ItemClass;
+    use crate::domain::lifecycle::Lifecycle;
     use crate::domain::mutation_payload::TitleBody;
-    use crate::domain::status::ItemStatus;
     use crate::domain::ticket_kind::TicketKind;
 
     fn adopted_item(backend_key: &str, display_id: &str) -> AdoptedItem {
@@ -296,7 +296,7 @@ mod tests {
             ticket_kind: TicketKind::Task,
             title: "Title".into(),
             body: "Body".into(),
-            status: ItemStatus::Open,
+            status: Lifecycle::Open,
         }
     }
 
@@ -304,7 +304,7 @@ mod tests {
         BackendItemRefresh {
             title: title.into(),
             body: "Body".into(),
-            status: ItemStatus::Open,
+            status: Lifecycle::Open,
             ticket_kind: Some(TicketKind::Task),
         }
     }

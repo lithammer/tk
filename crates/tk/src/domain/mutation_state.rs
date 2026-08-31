@@ -14,8 +14,10 @@ use std::fmt;
 ///
 /// # Transition table
 ///
-/// `crate::store::mutations::transition` is the only writer of
-/// `mutations.state`, and it refuses every edge this table omits. The
+/// `crate::store::mutations::transition` is the only *runtime* writer of
+/// `mutations.state`, and it refuses every edge this table omits. A migration
+/// has no `transition` to call and writes the column directly, so it may take
+/// only an edge listed here and must cite the row (ADR-0043). The
 /// `failure_json` column is bookkeeping of the edge, not of the caller: an
 /// edge either clears the previous attempt's evidence, records fresh evidence,
 /// or preserves what is already there.
@@ -27,7 +29,7 @@ use std::fmt;
 /// | `applying` | `pending` | cleared | Promotion Retry |
 /// | `pending`, `failed`, `applying` | `failed` | recorded | a certified Backend rejection |
 /// | `failed` | `skipped` | preserved | Sync Skip |
-/// | `pending`, `failed` | `cancelled` | preserved | Promotion Cancellation |
+/// | `pending`, `failed` | `cancelled` | preserved | Promotion Cancellation; migration 011 |
 /// | `applying` | `abandoned` | preserved | Promotion Cancellation |
 /// | `pending`, `failed`, `applying` | `applied` | cleared | a persisted Backend effect |
 ///

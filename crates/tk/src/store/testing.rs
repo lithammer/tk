@@ -19,6 +19,9 @@ use rand::SeedableRng;
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
 
+use crate::domain::lifecycle::Lifecycle;
+use crate::domain::work_state::WorkState;
+
 /// On-disk scaffolding for a fake Git repository plus its `git rev-parse`
 /// stdout payload. The `tk init` discovery layer expects two newline-
 /// separated absolute paths (git-common-dir, top-level); planting the same
@@ -88,7 +91,17 @@ pub struct FixtureItem<'a> {
     pub priority: Option<&'a str>,
     pub title: &'a str,
     pub body: &'a str,
+    /// Item Status the fixture seeds. Split across the two stored axes on the
+    /// way in, mirroring production, so `"active"` keeps meaning what it did
+    /// before ADR-0043 split the column.
     pub status: &'a str,
+    /// Work State override. `None` derives it from `status`, which is what
+    /// every ordinary fixture wants; set it to seed the `(done, active)` row
+    /// no writer produces. Only valid on an `accepted` Ticket or an Epic —
+    /// the relocated ADR-0029 conjunct rejects `active` on triage or parked —
+    /// and only against a store past the split, since a pre-split `items` has
+    /// no column to put it in. Setting it on an older store panics.
+    pub work_state: Option<&'a str>,
     pub origin: &'a str,
     pub backend_kind: Option<&'a str>,
     pub backend_key: Option<&'a str>,
@@ -117,6 +130,7 @@ impl Default for FixtureItem<'_> {
             title: "",
             body: "",
             status: "open",
+            work_state: None,
             origin: "local",
             backend_kind: None,
             backend_key: None,
@@ -137,9 +151,6 @@ impl Default for FixtureItem<'_> {
 // gain in a test-only builder.
 #[allow(clippy::large_types_passed_by_value)]
 pub fn insert_fixture_item(conn: &Connection, item: FixtureItem<'_>) -> rusqlite::Result<()> {
-    // `items` CHECK admits only ('epic') alongside a container_id, so the
-    // class is fully determined by whether the fixture has a parent.
-    let container_class = item.container_id.map(|_| "epic");
     // Selection State (ADR-0027) is Ticket-only: a Ticket takes the explicit
     // `selection_state` override or defaults to `accepted`; an Epic always
     // stores NULL. Deriving from item_class keeps every Epic call site correct
@@ -147,6 +158,58 @@ pub fn insert_fixture_item(conn: &Connection, item: FixtureItem<'_>) -> rusqlite
     // field (paired with `priority: None` for triage, per the combined CHECK).
     let selection_state =
         (item.item_class == "ticket").then(|| item.selection_state.unwrap_or("accepted"));
+    // Item Status is derived, not stored (ADR-0043): split the three-valued
+    // fixture spelling across the two columns the way production writes them,
+    // so callers seeding `"active"` keep working untouched. An explicit
+    // `work_state` overrides the derivation — the only way to reach a
+    // `(done, active)` row, which no writer produces.
+    let (status, work_state) = match item.status {
+        "active" => ("open", item.work_state.unwrap_or("active")),
+        lifecycle => (lifecycle, item.work_state.unwrap_or("idle")),
+    };
+    insert_item_row(conn, &item, status, Some(work_state), selection_state)
+}
+
+/// Seed one item into a store frozen BELOW the schema version that split Work
+/// State out of Item Status.
+///
+/// Migration tests reach back past the split with `apply_through`, where
+/// `items.status` still carries the fused three-valued spelling and
+/// `work_state` does not exist. They call this rather than
+/// [`insert_fixture_item`] so the schema version stays where it is statically
+/// known — at the call site that pinned it — instead of being re-discovered
+/// per insert. Both share the `items` + `item_ids` write below, which is the
+/// only part that was ever common.
+// By value for the same reason as its sibling above: callers pass a fresh
+// inline literal, and the struct sits just over clippy's pedantic threshold.
+#[allow(clippy::large_types_passed_by_value)]
+pub fn insert_pre_split_fixture_item(
+    conn: &Connection,
+    item: FixtureItem<'_>,
+) -> rusqlite::Result<()> {
+    assert!(
+        item.work_state.is_none(),
+        "a store below the split has no `work_state` column to seed"
+    );
+    let selection_state =
+        (item.item_class == "ticket").then(|| item.selection_state.unwrap_or("accepted"));
+    insert_item_row(conn, &item, item.status, None, selection_state)
+}
+
+/// Write the `items` row and its `display`-source resolver row together.
+///
+/// The two are a pair: `items` carries a deferred composite foreign key onto
+/// `item_ids`, so a fixture that writes one without the other leaves the
+/// transaction unable to commit. `work_state` is `None` only for a store below
+/// the split, where the column does not exist.
+fn insert_item_row(
+    conn: &Connection,
+    item: &FixtureItem<'_>,
+    status: &str,
+    work_state: Option<&str>,
+    selection_state: Option<&str>,
+) -> rusqlite::Result<()> {
+    let container_class = item.container_id.map(|_| "epic");
     let tx = conn.unchecked_transaction()?;
     tx.execute(
         "insert into items(\
@@ -167,13 +230,23 @@ pub fn insert_fixture_item(conn: &Connection, item: FixtureItem<'_>) -> rusqlite
             item.origin,
             item.backend_kind,
             item.backend_key,
-            item.status,
+            status,
             selection_state,
             item.created_seq,
             item.created_at,
             item.updated_at,
         ],
     )?;
+    // `idle` is what migration 011 declares as the column default, so writing
+    // it back would be a no-op on every ordinary fixture. Only a deliberate
+    // `active` — or the `(done, active)` pair no writer produces — needs the
+    // second statement.
+    if let Some(work_state) = work_state.filter(|w| *w != "idle") {
+        tx.execute(
+            "update items set work_state = ?2 where id = ?1",
+            params![item.id, work_state],
+        )?;
+    }
     tx.execute(
         "insert into item_ids(value, source, item_id, created_at) values (?1, 'display', ?2, ?3)",
         params![item.display, item.id, item.created_at],
@@ -223,6 +296,18 @@ pub fn insert_external_blocker(
 /// Return the current count of rows in the `mutations` outbox.
 pub fn mutation_count(conn: &Connection) -> rusqlite::Result<i64> {
     conn.query_row("select count(*) from mutations", [], |r| r.get(0))
+}
+
+/// The two stored Item Status axes for one Item, as the read-back every
+/// transition test needs: a writer that lands the right Lifecycle while
+/// forgetting its Work State clear leaves a row that renders correctly
+/// everywhere, so only reading both columns catches it (ADR-0043).
+pub fn item_axes(conn: &Connection, id: &str) -> rusqlite::Result<(Lifecycle, WorkState)> {
+    conn.query_row(
+        "select status, work_state from items where id = ?1",
+        params![id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
 }
 
 /// Every Mutation Type in the outbox in Mutation Sequence order — the shape

@@ -1135,9 +1135,9 @@ mod tests {
     use crate::domain::backend_operation::{
         BackendEdit, BackendItemIdentity, BackendItemInspection, BackendItemRefresh,
     };
+    use crate::domain::lifecycle::Lifecycle;
     use crate::domain::mutation_state::MutationState;
     use crate::domain::promotion_capability::PromotionCapabilities;
-    use crate::domain::status::ItemStatus;
     use crate::domain::ticket_kind::TicketKind;
     use crate::proc::RunOutput;
     use crate::promotion::plan::ItemRef;
@@ -1204,7 +1204,7 @@ mod tests {
             .with_pulls(vec![PullResponse::Items(vec![refresh(
                 "Adopted",
                 "",
-                ItemStatus::Open,
+                Lifecycle::Open,
             )])])
             .with_edits(edits)
             .with_creates(creates)
@@ -1308,7 +1308,7 @@ mod tests {
         })
     }
 
-    fn refresh(title: &str, body: &str, status: ItemStatus) -> BackendItemRefresh {
+    fn refresh(title: &str, body: &str, status: Lifecycle) -> BackendItemRefresh {
         BackendItemRefresh {
             title: title.into(),
             body: body.into(),
@@ -1822,7 +1822,7 @@ mod tests {
             .with_pulls(vec![PullResponse::Items(vec![refresh(
                 "Local work",
                 "",
-                ItemStatus::Done,
+                Lifecycle::Done,
             )])]);
 
         let code = reconcile_rendered(&mut h, &mut store, &mut fake, "tk-1", "42", false);
@@ -1967,7 +1967,7 @@ mod tests {
             .with_pulls(vec![PullResponse::Items(vec![refresh(
                 "Different Backend title",
                 "Different Backend body",
-                ItemStatus::Open,
+                Lifecycle::Open,
             )])])
             .with_edits(vec![EditResponse::Success]);
 
@@ -2014,7 +2014,7 @@ mod tests {
             .with_pulls(vec![PullResponse::Items(vec![refresh(
                 "Local work",
                 "",
-                ItemStatus::Open,
+                Lifecycle::Open,
             )])])
             .with_creates(vec![CreateResponse::Created {
                 backend_key: "2".into(),
@@ -2051,7 +2051,7 @@ mod tests {
             .with_pulls(vec![PullResponse::Items(vec![refresh(
                 "Local work",
                 "",
-                ItemStatus::Open,
+                Lifecycle::Open,
             )])])
             .with_creates(vec![CreateResponse::Rejected(
                 "Backend validation rejected tk-2".into(),

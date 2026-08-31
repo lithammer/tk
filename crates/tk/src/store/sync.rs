@@ -916,7 +916,8 @@ fn find_adopted_ticket_by_identity(
 ) -> Result<Option<BackendItemRow>, AdoptStoreError> {
     let row = conn
         .query_row(
-            "select item_class, display_value, ticket_kind, priority, status, title \
+            "select item_class, display_value, ticket_kind, priority, status, title, \
+                  work_state \
            from items \
           where backend_kind = ?1 \
             and (backend_key = ?2 or (?3 is not null and backend_key = ?3))",
@@ -928,7 +929,8 @@ fn find_adopted_ticket_by_identity(
                         display_id: row.get(1)?,
                         ticket_kind: row.get(2)?,
                         priority: row.get(3)?,
-                        status: row.get(4)?,
+                        // Item Status is derived, not stored (ADR-0043).
+                        status: ItemStatus::of(row.get(4)?, row.get(6)?),
                         title: row.get(5)?,
                     },
                 ))
@@ -1024,19 +1026,29 @@ pub fn merge_backend_refreshes(
         if in_flight.is_some() {
             continue;
         }
-        // Two guards on the imported Item Status, in CASE order. `active`
-        // implies `accepted` (ADR-0029): an incoming `active` on a non-accepted
-        // Ticket clamps to `open`, so a Backend signal cannot flip held work
-        // into progress. `open` and `active` are one Backend state (ADR-0021):
-        // an incoming `open` is no evidence that started work stopped, so it
-        // leaves a local `active` alone.
+        // Both `status` CASE arms are dead: `?4` binds a two-valued `Lifecycle`,
+        // so nothing binds `'active'` to it, and the narrowed column CHECK
+        // holds no `'active'` row either. ADR-0043 records collapsing them as a
+        // follow-on rather than part of the split, so they stand for now — and
+        // they cannot announce their own deadness, since SQL inside a Rust
+        // string literal is invisible to rustc and clippy. This comment is the
+        // only notice they get.
+        //
+        // The `work_state` clause is the one write Pull makes to a Local Field
+        // (ADR-0043): not an import, since a Backend has no Work State to
+        // report, but the local consequence of landing a closed Lifecycle,
+        // because a closed issue means the work is over. Leaving the column
+        // alone otherwise is what upholds ADR-0021's guarantee that an incoming
+        // `open` must not stop started work. `tk done` clears it the
+        // same way.
         tx.execute(
             "update items set title = ?2, body = ?3, updated_at = ?5, \
               ticket_kind = case when item_class = 'ticket' then coalesce(?6, ticket_kind) else ticket_kind end, \
               status = case \
                 when ?4 = 'active' and selection_state <> 'accepted' then 'open' \
                 when ?4 = 'open' and status = 'active' then 'active' \
-                else ?4 end \
+                else ?4 end, \
+              work_state = case when ?4 = 'done' then 'idle' else work_state end \
               where id = ?1",
             params![item_id, refresh.title, refresh.body, refresh.status.text(), now,
                 refresh.ticket_kind.map(TicketKind::text)],
@@ -1478,12 +1490,13 @@ fn decode_failure(raw: &str) -> Result<Failure, LogError> {
 mod tests {
     use super::*;
     use crate::domain::backend_operation::BackendItemIdentity;
-    use crate::domain::status::ItemStatus;
+    use crate::domain::lifecycle::Lifecycle;
     use crate::domain::ticket_kind::TicketKind;
+    use crate::domain::work_state::WorkState;
     use crate::store::migrations;
     use crate::store::testing::{
         FixtureItem, FixtureMutation, FixtureRemote, insert_fixture_item, insert_fixture_mutation,
-        insert_fixture_remote,
+        insert_fixture_remote, item_axes,
     };
     use rand::SeedableRng;
     use rand::rngs::StdRng;
@@ -1499,12 +1512,7 @@ mod tests {
         conn
     }
 
-    fn adopted(
-        backend_key: &str,
-        display_id: &str,
-        title: &str,
-        status: ItemStatus,
-    ) -> AdoptedItem {
+    fn adopted(backend_key: &str, display_id: &str, title: &str, status: Lifecycle) -> AdoptedItem {
         AdoptedItem {
             backend_key: backend_key.into(),
             display_id: display_id.into(),
@@ -1515,7 +1523,7 @@ mod tests {
         }
     }
 
-    fn refresh(title: &str, status: ItemStatus) -> BackendItemRefresh {
+    fn refresh(title: &str, status: Lifecycle) -> BackendItemRefresh {
         BackendItemRefresh {
             title: title.into(),
             body: "Body".into(),
@@ -1552,7 +1560,7 @@ mod tests {
             &mut conn,
             BackendKind::Github,
             &mut rng,
-            &adopted("1", "gh-1", "First", ItemStatus::Open),
+            &adopted("1", "gh-1", "First", Lifecycle::Open),
             "2026-05-19T00:00:00Z",
         )
         .unwrap();
@@ -1618,7 +1626,7 @@ mod tests {
         merge_backend_refreshes(
             &mut conn,
             BackendKind::Github,
-            &[("1".into(), refresh("Stale Backend View", ItemStatus::Open))],
+            &[("1".into(), refresh("Stale Backend View", Lifecycle::Open))],
             "2026-05-19T00:00:00Z",
         )
         .unwrap();
@@ -1641,20 +1649,23 @@ mod tests {
         merge_backend_refreshes(
             &mut conn,
             BackendKind::Github,
-            &[("1".into(), refresh("Backend Wins", ItemStatus::Active))],
+            &[("1".into(), refresh("Backend Wins", Lifecycle::Done))],
             "2026-05-20T00:00:00Z",
         )
         .unwrap();
 
-        let (title, status, updated): (String, String, String) = conn
+        let (title, updated): (String, String) = conn
             .query_row(
-                "select title, status, updated_at from items where id = 't1'",
+                "select title, updated_at from items where id = 't1'",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
         assert_eq!(title, "Backend Wins");
-        assert_eq!(status, "active");
+        assert_eq!(
+            item_axes(&conn, "t1").unwrap(),
+            (Lifecycle::Done, WorkState::Idle)
+        );
         assert_eq!(updated, "2026-05-20T00:00:00Z");
     }
 
@@ -1670,8 +1681,8 @@ mod tests {
             &mut conn,
             BackendKind::Github,
             &[
-                ("1".into(), refresh("New one", ItemStatus::Done)),
-                ("2".into(), refresh("New two", ItemStatus::Active)),
+                ("1".into(), refresh("New one", Lifecycle::Done)),
+                ("2".into(), refresh("New two", Lifecycle::Open)),
             ],
             "2026-05-20T00:00:00Z",
         )
@@ -1730,8 +1741,8 @@ mod tests {
             &mut conn,
             BackendKind::Github,
             &[
-                ("1".into(), refresh("New one", ItemStatus::Done)),
-                ("2".into(), refresh("New two", ItemStatus::Active)),
+                ("1".into(), refresh("New one", Lifecycle::Done)),
+                ("2".into(), refresh("New two", Lifecycle::Open)),
             ],
             "2026-05-20T00:00:00Z",
         )
@@ -1763,7 +1774,7 @@ mod tests {
         merge_backend_refreshes(
             &mut conn,
             BackendKind::Github,
-            &[("404".into(), refresh("Unknown", ItemStatus::Open))],
+            &[("404".into(), refresh("Unknown", Lifecycle::Open))],
             "2026-05-20T00:00:00Z",
         )
         .unwrap();
@@ -1799,7 +1810,7 @@ mod tests {
         merge_backend_refreshes(
             &mut conn,
             BackendKind::Github,
-            &[("9".into(), refresh("Fresh Epic", ItemStatus::Active))],
+            &[("9".into(), refresh("Fresh Epic", Lifecycle::Open))],
             "2026-05-20T00:00:00Z",
         )
         .unwrap();
@@ -1838,7 +1849,7 @@ mod tests {
             &mut conn,
             BackendKind::Github,
             &mut rng,
-            &adopted("99", "gh-1", "Backend", ItemStatus::Open),
+            &adopted("99", "gh-1", "Backend", Lifecycle::Open),
             "2026-05-19T00:00:00Z",
         )
         .unwrap_err();
@@ -1860,9 +1871,12 @@ mod tests {
     #[test]
     fn refresh_preserves_local_selection_state_and_priority() {
         // Selection State is a Local Field (ADR-0027); Backend Pull never reads
-        // it back, so a non-active Pull merging title/status must leave a local
-        // `parked` state and its Priority untouched. Regression lock against a
-        // future edit adding Selection State or Priority to the refresh write.
+        // it back, so a Pull merging title/status must leave a local `parked`
+        // state and its Priority untouched. Regression lock against a future
+        // edit adding Selection State or Priority to the refresh write. Its
+        // sibling below draws the other side of the same boundary: Work State
+        // is equally local, and Pull writes it only as the consequence of a
+        // Lifecycle transition Pull is authoritative for (ADR-0043).
         let mut conn = open_seeded();
         seed_remote(&conn);
         insert_fixture_item(
@@ -1885,7 +1899,7 @@ mod tests {
         merge_backend_refreshes(
             &mut conn,
             BackendKind::Github,
-            &[("1".into(), refresh("Backend Title", ItemStatus::Open))],
+            &[("1".into(), refresh("Backend Title", Lifecycle::Open))],
             "2026-05-20T00:00:00Z",
         )
         .unwrap();
@@ -1903,63 +1917,13 @@ mod tests {
     }
 
     #[test]
-    fn refresh_clamps_active_to_open_on_a_parked_ticket() {
-        // A backend Ticket imported `accepted`, then locally parked (status
-        // open at park time — tk-76 Door 2). A later Pull reports it `active`.
-        // Backend Pull is the fourth door on `active ⟹ accepted` (ADR-0029):
-        // it must not flip held work `active`, so the incoming status clamps to
-        // `open` while the local Selection State and Priority are preserved.
-        let mut conn = open_seeded();
-        seed_remote(&conn);
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "t1",
-                display: "gh-1",
-                title: "Old",
-                origin: "backend",
-                backend_kind: Some("github"),
-                backend_key: Some("1"),
-                selection_state: Some("parked"),
-                priority: Some("P1"),
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-
-        merge_backend_refreshes(
-            &mut conn,
-            BackendKind::Github,
-            &[("1".into(), refresh("Backend Active", ItemStatus::Active))],
-            "2026-05-20T00:00:00Z",
-        )
-        .unwrap();
-
-        let (title, status, selection, priority): (String, String, String, String) = conn
-            .query_row(
-                "select title, status, selection_state, priority from items where id = 't1'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )
-            .unwrap();
-        assert_eq!(title, "Backend Active", "non-status fields still merge");
-        assert_eq!(
-            status, "open",
-            "active clamped to open on a non-accepted row"
-        );
-        assert_eq!(selection, "parked", "local Selection State preserved");
-        assert_eq!(priority, "P1", "local Priority preserved");
-    }
-
-    #[test]
-    fn refresh_keeps_active_when_the_backend_reports_open() {
-        // `open` and `active` are one Backend state (ADR-0021), so an imported
-        // OPEN must not reset a start. A failure here loses `tk start` on a
-        // Backend Ticket at the next sync (tk-108). The test pins the merge
-        // rather than a whole sync because in the field the reset lands on the
-        // *second* one: the first skips this item while its own status Mutation
-        // is still queued.
+    fn refresh_clears_work_state_on_close() {
+        // The one Work State write Backend Pull is allowed (ADR-0043): not an
+        // imported value — the Adapter reads no in-progress state — but the
+        // local consequence of landing a closed Lifecycle, since a closed issue
+        // means the work is over. `tk done` clears it the same way. Without
+        // this the merge would leave a `(done, active)` row, which nothing else
+        // in the store can produce.
         let mut conn = open_seeded();
         seed_remote(&conn);
         insert_fixture_item(
@@ -1981,18 +1945,60 @@ mod tests {
         merge_backend_refreshes(
             &mut conn,
             BackendKind::Github,
-            &[("1".into(), refresh("Backend Title", ItemStatus::Open))],
+            &[("1".into(), refresh("Closed Upstream", Lifecycle::Done))],
             "2026-05-20T00:00:00Z",
         )
         .unwrap();
 
-        let (title, status): (String, String) = conn
-            .query_row("select title, status from items where id = 't1'", [], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
+        assert_eq!(
+            item_axes(&conn, "t1").unwrap(),
+            (Lifecycle::Done, WorkState::Idle)
+        );
+    }
+
+    #[test]
+    fn refresh_keeps_active_when_the_backend_reports_open() {
+        // Work State is a Local Field Backend Pull never reads (ADR-0043), so
+        // an imported OPEN must not reset a start. A failure here loses
+        // `tk start` on a Backend Ticket at the next sync (tk-108). The test
+        // pins the merge rather than a whole sync because in the field the
+        // reset lands on the *second* one: the first skips this item while its
+        // own status Mutation is still queued.
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "gh-1",
+                title: "Old",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("1"),
+                status: "active",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+
+        merge_backend_refreshes(
+            &mut conn,
+            BackendKind::Github,
+            &[("1".into(), refresh("Backend Title", Lifecycle::Open))],
+            "2026-05-20T00:00:00Z",
+        )
+        .unwrap();
+
+        let title: String = conn
+            .query_row("select title from items where id = 't1'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(title, "Backend Title", "non-status fields still merge");
-        assert_eq!(status, "active", "an incoming open must not stop the work");
+        assert_eq!(
+            item_axes(&conn, "t1").unwrap(),
+            (Lifecycle::Open, WorkState::Active),
+            "an incoming open must not stop the work"
+        );
     }
 
     #[test]
@@ -2020,7 +2026,7 @@ mod tests {
         merge_backend_refreshes(
             &mut conn,
             BackendKind::Github,
-            &[("1".into(), refresh("Closed Upstream", ItemStatus::Done))],
+            &[("1".into(), refresh("Closed Upstream", Lifecycle::Done))],
             "2026-05-20T00:00:00Z",
         )
         .unwrap();
@@ -3763,13 +3769,13 @@ mod tests {
             &mut conn,
             BackendKind::Github,
             &mut rng,
-            &adopted("42", "gh-42", "Original", ItemStatus::Open),
+            &adopted("42", "gh-42", "Original", Lifecycle::Open),
             NOW,
         )
         .unwrap();
         assert!(matches!(first, AdoptOutcome::Inserted(_)));
 
-        let mut canonical = adopted("42", "gh-42", "Original", ItemStatus::Open);
+        let mut canonical = adopted("42", "gh-42", "Original", Lifecycle::Open);
         canonical.title = "Changed remotely".into();
         let second =
             adopt_backend_ticket(&mut conn, BackendKind::Github, &mut rng, &canonical, NOW)
@@ -3797,7 +3803,7 @@ mod tests {
                 "https://github.com/one/repo/issues/42",
                 "gh-42",
                 "Original",
-                ItemStatus::Open,
+                Lifecycle::Open,
             ),
             NOW,
         )
@@ -3817,7 +3823,7 @@ mod tests {
                 &mut conn,
                 BackendKind::Github,
                 &mut rng,
-                &adopted("https://github.com/other/repo/issues/42", "gh-42", "Original", ItemStatus::Open),
+                &adopted("https://github.com/other/repo/issues/42", "gh-42", "Original", Lifecycle::Open),
                 NOW,
             ),
             Err(AdoptStoreError::DisplayIdCollision(id)) if id == "gh-42"
@@ -3850,7 +3856,7 @@ mod tests {
                     &mut conn,
                     BackendKind::Github,
                     &mut rng,
-                    &adopted("42", "gh-42", "Original", ItemStatus::Open),
+                    &adopted("42", "gh-42", "Original", Lifecycle::Open),
                     NOW,
                 )
                 .map(|outcome| matches!(outcome, AdoptOutcome::Inserted(_)))
@@ -3893,7 +3899,7 @@ mod tests {
             &mut conn,
             BackendKind::Github,
             &mut rng,
-            &adopted("42", "gh-42", "Original", ItemStatus::Open),
+            &adopted("42", "gh-42", "Original", Lifecycle::Open),
             NOW,
         )
         .unwrap_err();
@@ -3930,7 +3936,7 @@ mod tests {
             &mut conn,
             BackendKind::Github,
             &mut rng,
-            &adopted("42", "gh-42", "Original", ItemStatus::Open),
+            &adopted("42", "gh-42", "Original", Lifecycle::Open),
             NOW,
         )
         .unwrap_err();
@@ -3964,7 +3970,7 @@ mod tests {
             &mut conn,
             BackendKind::Github,
             &mut rng,
-            &adopted("1", "gh-1", "Original", ItemStatus::Open),
+            &adopted("1", "gh-1", "Original", Lifecycle::Open),
             NOW,
         )
         .unwrap();
@@ -3978,7 +3984,7 @@ mod tests {
             &mut conn,
             BackendKind::Jira,
             &mut rng,
-            &adopted("2", "jira-2", "Original", ItemStatus::Open),
+            &adopted("2", "jira-2", "Original", Lifecycle::Open),
             NOW,
         )
         .unwrap_err();
@@ -4005,7 +4011,7 @@ mod tests {
             &mut conn,
             BackendKind::Github,
             &mut rng,
-            &adopted("42", "gh-42", "Original", ItemStatus::Open),
+            &adopted("42", "gh-42", "Original", Lifecycle::Open),
             NOW,
         )
         .unwrap();
@@ -4017,7 +4023,7 @@ mod tests {
                 BackendItemRefresh {
                     title: "Fresh".into(),
                     body: "Fresh body".into(),
-                    status: ItemStatus::Active,
+                    status: Lifecycle::Open,
                     ticket_kind: Some(TicketKind::Bug),
                 },
             )],

@@ -5,8 +5,8 @@
 //! fields for an existing Backend Item, so a Backend Pull cannot redefine its
 //! Repository Store identity or Item Class (ADR-0034).
 
+use super::lifecycle::Lifecycle;
 use super::mutation_payload::{StatusChange, TitleBody};
-use super::status::ItemStatus;
 use super::ticket_kind::TicketKind;
 use thiserror::Error;
 
@@ -115,8 +115,9 @@ pub struct AdoptedItem {
     pub ticket_kind: TicketKind,
     pub title: String,
     pub body: String,
-    /// Backend lifecycle mapped to tk's Item Status.
-    pub status: ItemStatus,
+    /// Backend Lifecycle: the only Item Status axis an Adapter observes
+    /// (ADR-0043).
+    pub status: Lifecycle,
 }
 
 /// Backend-owned fields returned by one Backend Pull refresh.
@@ -124,8 +125,9 @@ pub struct AdoptedItem {
 pub struct BackendItemRefresh {
     pub title: String,
     pub body: String,
-    /// Backend lifecycle mapped to tk's Item Status.
-    pub status: ItemStatus,
+    /// Backend Lifecycle: the only Item Status axis an Adapter observes
+    /// (ADR-0043). Work State is local and is not part of what Pull reads.
+    pub status: Lifecycle,
     /// Ticket Kind when the Backend can refresh it; `None` preserves it.
     pub ticket_kind: Option<TicketKind>,
 }
@@ -210,7 +212,7 @@ mod tests {
             refresh: BackendItemRefresh {
                 title: key.into(),
                 body: String::new(),
-                status: ItemStatus::Open,
+                status: Lifecycle::Open,
                 ticket_kind: Some(TicketKind::Task),
             },
         }

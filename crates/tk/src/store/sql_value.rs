@@ -21,7 +21,6 @@ use crate::domain::mutation_type::MutationType;
 use crate::domain::origin::Origin;
 use crate::domain::priority::Priority;
 use crate::domain::selection_state::SelectionState;
-use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
 use crate::domain::work_state::WorkState;
 
@@ -71,23 +70,6 @@ impl FromSql for Priority {
 }
 
 impl ToSql for Priority {
-    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
-        self.text().to_sql()
-    }
-}
-
-impl FromSql for ItemStatus {
-    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
-        match value.as_str()? {
-            "open" => Ok(Self::Open),
-            "active" => Ok(Self::Active),
-            "done" => Ok(Self::Done),
-            other => Err(corrupt("status", other)),
-        }
-    }
-}
-
-impl ToSql for ItemStatus {
     fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
         self.text().to_sql()
     }
@@ -230,10 +212,6 @@ mod tests {
             SelectionState::Parked
         );
         assert_eq!(
-            ItemStatus::column_result(ValueRef::Text(b"active")).unwrap(),
-            ItemStatus::Active
-        );
-        assert_eq!(
             Origin::column_result(ValueRef::Text(b"backend")).unwrap(),
             Origin::Backend
         );
@@ -244,18 +222,6 @@ mod tests {
         assert_eq!(
             MutationType::column_result(ValueRef::Text(b"set_item_status")).unwrap(),
             MutationType::SetItemStatus
-        );
-    }
-
-    #[test]
-    fn from_sql_rejects_corrupt_value_instead_of_panicking() {
-        // A value the CHECK constraint should have rejected must surface as a
-        // recoverable FromSqlError the store renders as corruption — never a
-        // thread abort.
-        let err = ItemStatus::column_result(ValueRef::Text(b"archived")).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "repository store corruption: unknown status `archived`"
         );
     }
 

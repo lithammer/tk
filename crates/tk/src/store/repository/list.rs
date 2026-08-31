@@ -145,8 +145,8 @@ pub struct ListOptions<'a> {
 const LIST_ROWS_SQL: &str = "\
 with annotated as ( \
     select i.id, i.display_value, i.item_class, i.ticket_kind, \
-           i.priority, i.title, i.status, i.origin, i.container_id, \
-           i.selection_state, i.created_seq, \
+           i.priority, i.title, i.status, i.work_state, i.origin, \
+           i.container_id, i.selection_state, i.created_seq, \
            exists ( \
                select 1 \
                  from dependencies d \
@@ -165,20 +165,21 @@ with annotated as ( \
 matching as ( \
     select *, \
            case ?1 \
-             when 'default' then status in ('open', 'active') \
+             when 'default' then status = 'open' \
              when 'ready' then item_class = 'ticket' \
                                and status = 'open' \
+                               and work_state = 'idle' \
                                and selection_state = 'accepted' \
                                and not has_unresolved_dependency \
                                and not has_unresolved_external_blocker \
              when 'blocked' then item_class = 'ticket' \
-                                 and status in ('open', 'active') \
+                                 and status = 'open' \
                                  and selection_state <> 'triage' \
                                  and ( \
                                      has_unresolved_dependency \
                                      or has_unresolved_external_blocker \
                                  ) \
-             when 'active' then status = 'active' \
+             when 'active' then status = 'open' and work_state = 'active' \
              when 'triage' then item_class = 'ticket' \
                                 and status = 'open' \
                                 and selection_state = 'triage' \
@@ -204,7 +205,8 @@ select id, display_value, item_class, ticket_kind, priority, title, \
             where m.item_id = parent.id \
               and m.state = 'failed' \
               and m.mutation_type not in ('promote_ticket', 'promote_epic') \
-       ) as has_failed_mutation \
+       ) as has_failed_mutation, \
+       work_state \
   from matching parent \
  where (?2 = 'any' or parent.origin = ?2) \
    and (?3 = 'any' or parent.item_class = ?3) \
@@ -251,7 +253,10 @@ pub(super) fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<ListRow>
         ticket_kind: row.get(3)?,
         priority: row.get(4)?,
         title: row.get(5)?,
-        status: row.get(6)?,
+        // Item Status is derived, not stored (ADR-0043): column 6 is the
+        // Lifecycle and column 12 the Work State, appended last so the
+        // ordinals `tk search`'s twin SELECT shares stay put.
+        status: ItemStatus::of(row.get(6)?, row.get(12)?),
         container_id: row.get(7)?,
         selection_state: row.get(8)?,
         has_unresolved_blocker: row.get(9)?,
@@ -718,6 +723,26 @@ mod tests {
         let store = open_seeded();
         seed_ticket(&store, "accepted", "tk-1", "open", 1);
         seed_parked(&store, "parked", "tk-2", 2);
+        let rows = list_rows(
+            &store,
+            ListOptions {
+                view: ListView::Ready,
+                ..ListOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(display_ids(&rows), vec!["tk-1"]);
+    }
+
+    #[test]
+    fn ready_excludes_an_active_ticket() {
+        // The ready arm used to spell "not started" as `status = 'open'`; after
+        // ADR-0043 split the column that predicate also matches work under way,
+        // so the arm carries `work_state = 'idle'` too. Without it `tk list
+        // --ready` lists a Ticket someone is already working.
+        let store = open_seeded();
+        seed_ticket(&store, "idle", "tk-1", "open", 1);
+        seed_ticket(&store, "working", "tk-2", "active", 2);
         let rows = list_rows(
             &store,
             ListOptions {

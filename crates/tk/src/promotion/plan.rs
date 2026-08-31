@@ -14,6 +14,7 @@ use crate::domain::backend_binding::BackendBinding;
 use crate::domain::backend_kind::BackendKind;
 use crate::domain::dependency_rule::{self, DependencyClassification, DependencyRejection};
 use crate::domain::item_class::ItemClass;
+use crate::domain::lifecycle::Lifecycle;
 use crate::domain::mutation_payload::{
     DependencyRef, EpicRef, MutationPayload, Promotion, StatusChange,
 };
@@ -22,7 +23,6 @@ use crate::domain::promotion_capability::{PromotionCapabilities, PromotionRequir
 use crate::domain::promotion_graph::{GraphItem, PromotionGraph};
 use crate::domain::promotion_plan::{MutationDraft, PromotionPlan};
 use crate::domain::selection_state::SelectionState;
-use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
 
 /// The Item a finding names: the internal stable `items.id` that keys it, and
@@ -446,8 +446,8 @@ fn promotion_draft(item: &GraphItem, backend: BackendKind) -> MutationDraft {
 
 fn status_draft(item: &GraphItem) -> Option<MutationDraft> {
     match item.status {
-        ItemStatus::Open => None,
-        ItemStatus::Active | ItemStatus::Done => Some(MutationDraft {
+        Lifecycle::Open => None,
+        Lifecycle::Done => Some(MutationDraft {
             mutation_type: MutationType::SetItemStatus,
             item_id: item.id.clone(),
             item_class: item.item_class,
@@ -492,7 +492,7 @@ mod tests {
             item_class: ItemClass::Ticket,
             ticket_kind: Some(TicketKind::Task),
             selection_state: Some(SelectionState::Accepted),
-            status: ItemStatus::Open,
+            status: Lifecycle::Open,
             title: format!("Title of {id}"),
             body: String::new(),
             created_seq,
@@ -841,7 +841,7 @@ mod tests {
                 vec![
                     ticket("t1", 1),
                     GraphItem {
-                        status: ItemStatus::Done,
+                        status: Lifecycle::Done,
                         ..ticket("blocker", 2)
                     },
                 ],
@@ -1024,7 +1024,10 @@ mod tests {
     }
 
     #[test]
-    fn active_and_done_items_push_their_status_but_open_ones_do_not() {
+    fn done_items_push_their_status_but_open_ones_do_not() {
+        // Only a closed Lifecycle is worth pushing. Work State is local
+        // (ADR-0043), so the planner has no third value to draft, and an `open`
+        // Item needs no status Mutation because a Promotion creates it open.
         let g = with_children(graph(
             "e1",
             vec![
@@ -1032,18 +1035,11 @@ mod tests {
                 contained_in(
                     "e1",
                     GraphItem {
-                        status: ItemStatus::Active,
-                        ..ticket("active", 2)
+                        status: Lifecycle::Done,
+                        ..ticket("done", 2)
                     },
                 ),
-                contained_in(
-                    "e1",
-                    GraphItem {
-                        status: ItemStatus::Done,
-                        ..ticket("done", 3)
-                    },
-                ),
-                contained_in("e1", ticket("open", 4)),
+                contained_in("e1", ticket("open", 3)),
             ],
         ));
 
@@ -1056,20 +1052,12 @@ mod tests {
             .collect();
         assert_eq!(
             statuses,
-            vec![
-                (
-                    "active",
-                    MutationPayload::ItemStatus(StatusChange {
-                        status: "active".to_owned()
-                    })
-                ),
-                (
-                    "done",
-                    MutationPayload::ItemStatus(StatusChange {
-                        status: "done".to_owned()
-                    })
-                ),
-            ]
+            vec![(
+                "done",
+                MutationPayload::ItemStatus(StatusChange {
+                    status: "done".to_owned()
+                })
+            )]
         );
     }
 
@@ -1085,7 +1073,7 @@ mod tests {
                     contained_in(
                         "e1",
                         GraphItem {
-                            status: ItemStatus::Done,
+                            status: Lifecycle::Done,
                             ..ticket("c2", 3)
                         },
                     ),

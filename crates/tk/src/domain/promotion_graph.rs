@@ -10,8 +10,8 @@
 
 use crate::domain::backend_binding::BackendBinding;
 use crate::domain::item_class::ItemClass;
+use crate::domain::lifecycle::Lifecycle;
 use crate::domain::selection_state::SelectionState;
-use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
 
 /// One Ticket or Epic in the snapshot.
@@ -28,7 +28,9 @@ pub struct GraphItem {
     /// `Some` for Tickets, `None` for Epics — Selection State is Ticket-only
     /// (ADR-0027). Promotion refuses a `triage` Ticket.
     pub selection_state: Option<SelectionState>,
-    pub status: ItemStatus,
+    /// Backend-shared Lifecycle (ADR-0043). Work State is local, so it is
+    /// no part of what Promotion drafts.
+    pub status: Lifecycle,
     /// Title and body as they stand now; the Promotion payload freezes this
     /// snapshot at commit.
     pub title: String,
