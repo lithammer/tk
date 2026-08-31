@@ -2,12 +2,11 @@
 //!
 //! [`open_configured`] reads the singleton Remote's kind via
 //! `configured_remote_kind` and returns the concrete Adapter for it:
-//! [`GithubAdapter`](super::github::GithubAdapter) for `github`,
-//! [`OpenError::NotImplemented`] for `jira` (tk-35). The repository is resolved
-//! by `gh` from the command cwd (ADR-0033), so the adapter is built from the
-//! injected runner and cwd rather than from stored config. The engine's tests
-//! bypass the factory and substitute [`crate::remote::fake::FakeAdapter`]
-//! directly.
+//! [`GithubAdapter`] for `github`, [`OpenError::NotImplemented`] for `jira`
+//! (tk-35). The repository is resolved by `gh` from the command cwd (ADR-0033),
+//! so the adapter is built from the injected runner and cwd rather than from
+//! stored config. The engine's tests bypass the factory and substitute
+//! `crate::remote::fake::FakeAdapter` directly.
 
 use std::path::Path;
 

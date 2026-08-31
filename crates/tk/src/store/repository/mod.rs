@@ -178,8 +178,8 @@ pub enum OpenError {
     FromFutureVersion,
     /// A forward migration applied at open failed; the inner SQLite error is
     /// rendered after this line (see `resolver::open_error`) so the
-    /// underlying cause is not lost. Kept distinct from [`Sqlite`] because the
-    /// fault is an upgrade failure, not a plain read.
+    /// underlying cause is not lost. Kept distinct from [`OpenError::Sqlite`]
+    /// because the fault is an upgrade failure, not a plain read.
     #[error("failed to apply pending migrations to the Repository Store")]
     MigrationFailed(rusqlite::Error),
     /// A forward migration that rebuilds a table (ADR-0028) left a dangling

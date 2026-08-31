@@ -24,7 +24,7 @@ use crate::commands::staging;
 use crate::platform;
 use crate::proc::ProcError;
 
-/// Sentinel for non-release builds. The dev refusal in [`run_with`]
+/// Sentinel for non-release builds. The dev refusal in `run_with`
 /// compares against this constant; `build.rs` injects the real release
 /// triple via `TK_EMBEDDED_TRIPLE` when the release pipeline sets
 /// `TK_TRIPLE` at build time.
@@ -678,7 +678,7 @@ fn commit_install(
 ///
 /// Safety: only delete the `.old` sidecar when the canonical binary
 /// exists at the exe path. Otherwise we may be removing the user's only
-/// recoverable copy after a [`CommitError::RollbackFailed`] outcome.
+/// recoverable copy after a `CommitError::RollbackFailed` outcome.
 pub fn cleanup_stale_exe() {
     let Ok(exe_path) = std::env::current_exe() else {
         return;

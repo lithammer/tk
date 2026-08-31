@@ -1,7 +1,7 @@
 //! Backend Adapter trait.
 //!
 //! Commands and the sync engine consume this trait so tests can substitute a
-//! [`crate::remote::fake::FakeAdapter`] without spawning real backend CLIs.
+//! `crate::remote::fake::FakeAdapter` without spawning real backend CLIs.
 //! The contract data types it exchanges are pure domain data under
 //! [`crate::domain`]. Edits and creation are separate calls because creation
 //! has a stronger result-certainty contract.

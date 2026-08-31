@@ -5,7 +5,7 @@
 //! substitute fakes without touching the global environment.
 //!
 //! Dispatch + help/version/usage rendering are owned by `clap`'s derive API.
-//! Adding a new command is a matter of appending a variant to [`Command`] and
+//! Adding a new command is a matter of appending a variant to `Command` and
 //! a handler in [`commands`]; clap takes care of `--help`, `-h`, `--version`,
 //! `-V`, and suggestion-style errors on typos.
 

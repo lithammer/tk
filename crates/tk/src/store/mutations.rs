@@ -7,9 +7,9 @@
 //! or commits a transaction.
 //!
 //! All Mutations are queued first, drained later (tk-97). State is
-//! `pending` on insert. [`transition`] is the only writer of `mutations.state`
+//! `pending` on insert. `transition` is the only writer of `mutations.state`
 //! thereafter; the workflow that determines an outcome keeps its own domain
-//! preconditions and hands the seam the edge. [`mark_applied`] wraps it with
+//! preconditions and hands the seam the edge. `mark_applied` wraps it with
 //! the Store invariant that an `applied` transition advances the Sync Cursor in
 //! the same transaction.
 //!
@@ -109,7 +109,7 @@ pub enum IllegalTransition {
     MissingEvidence { sequence: i64, to: MutationState },
 }
 
-/// Errors returned by [`transition`].
+/// Errors returned by `transition`.
 #[derive(Debug, Error)]
 pub enum TransitionError {
     /// Underlying SQLite error from the state update.
@@ -119,7 +119,7 @@ pub enum TransitionError {
     Illegal(#[from] IllegalTransition),
 }
 
-/// Input for [`transition`].
+/// Input for `transition`.
 #[derive(Debug, Clone, Copy)]
 pub struct TransitionRequest<'a> {
     pub sequence: i64,
