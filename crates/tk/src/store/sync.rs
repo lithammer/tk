@@ -23,6 +23,7 @@ use crate::domain::backend_outcome::{
     BackendCreateOutcome, BackendEditOutcome, Failure, FailureClass,
 };
 use crate::domain::item_class::ItemClass;
+use crate::domain::lifecycle::Lifecycle;
 use crate::domain::mutation_payload::{
     DependencyRef, EpicRef, MutationPayload, Promotion, StatusChange, TitleBody,
 };
@@ -33,6 +34,7 @@ use crate::domain::priority::Priority;
 use crate::domain::selection_state::SelectionState;
 use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
+use crate::domain::work_state::WorkState;
 use crate::store::mutations;
 use crate::store::repository::RemoteWorkflowGuard;
 use crate::store::repository::create::generate_internal_id;
@@ -962,9 +964,9 @@ pub fn pending_or_failed_mutation_count(conn: &Connection) -> rusqlite::Result<i
     )
 }
 
-/// Backend keys the next Backend Pull should refresh, validated against the
-/// Adapter kind before the engine performs any Backend call.
-pub fn active_backend_keys(
+/// Return the Adopted working set's Backend keys after checking that the
+/// Store's Backend kind matches the Adapter.
+pub fn working_set_keys(
     conn: &Connection,
     expected_kind: BackendKind,
 ) -> Result<Vec<String>, RefreshStoreError> {
@@ -975,7 +977,7 @@ pub fn active_backend_keys(
     let mut stmt = conn.prepare(
         "select backend_key from items \
           where backend_kind = ?1 and backend_key is not null \
-            and status in ('open', 'active') \
+            and status = 'open' \
           order by created_seq asc",
     )?;
     let mut rows = stmt.query([expected_kind.text()])?;
@@ -1026,32 +1028,21 @@ pub fn merge_backend_refreshes(
         if in_flight.is_some() {
             continue;
         }
-        // Both `status` CASE arms are dead: `?4` binds a two-valued `Lifecycle`,
-        // so nothing binds `'active'` to it, and the narrowed column CHECK
-        // holds no `'active'` row either. ADR-0043 records collapsing them as a
-        // follow-on rather than part of the split, so they stand for now — and
-        // they cannot announce their own deadness, since SQL inside a Rust
-        // string literal is invisible to rustc and clippy. This comment is the
-        // only notice they get.
-        //
-        // The `work_state` clause is the one write Pull makes to a Local Field
-        // (ADR-0043): not an import, since a Backend has no Work State to
-        // report, but the local consequence of landing a closed Lifecycle,
-        // because a closed issue means the work is over. Leaving the column
-        // alone otherwise is what upholds ADR-0021's guarantee that an incoming
-        // `open` must not stop started work. `tk done` clears it the
-        // same way.
+        let work_state_write: Option<WorkState> = match refresh.status {
+            Lifecycle::Open => None,
+            Lifecycle::Done => Some(WorkState::Idle),
+        };
+        // Pull never imports Work State. A Backend close still clears it as a
+        // local consequence, while an open refresh must not undo `tk start`
+        // (ADR-0043, ADR-0021).
         tx.execute(
             "update items set title = ?2, body = ?3, updated_at = ?5, \
               ticket_kind = case when item_class = 'ticket' then coalesce(?6, ticket_kind) else ticket_kind end, \
-              status = case \
-                when ?4 = 'active' and selection_state <> 'accepted' then 'open' \
-                when ?4 = 'open' and status = 'active' then 'active' \
-                else ?4 end, \
-              work_state = case when ?4 = 'done' then 'idle' else work_state end \
+              status = ?4, \
+              work_state = coalesce(?7, work_state) \
               where id = ?1",
             params![item_id, refresh.title, refresh.body, refresh.status.text(), now,
-                refresh.ticket_kind.map(TicketKind::text)],
+                refresh.ticket_kind.map(TicketKind::text), work_state_write],
         )?;
     }
     tx.commit()?;
