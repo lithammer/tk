@@ -172,7 +172,12 @@ A component that maps between **tk** domain concepts and a specific **Backend**.
 _Avoid_: Facade, Provider, Connector
 
 **Backend Pull**:
-An all-or-nothing **Backend Adapter** operation that refreshes the exact set of **Adopted** **Backend** items not yet `done`, importing only backend-owned title, body, **Lifecycle**, and optional **Ticket Kind** fields. It never mirrors, discovers, or changes item identity, **Origin**, **Display ID**, or **Item Class**. It never writes a Backend value to **Work State**; importing a `done` **Lifecycle** clears **Work State** to `idle` as a local consequence.
+An all-or-nothing **Backend Adapter** operation that refreshes the exact set of **Adopted** **Backend** items not yet `done`, returning title, body, **Lifecycle**, and optional **Ticket Kind** values for the Repository Store to merge. It never mirrors, discovers, or changes item identity, **Origin**, **Display ID**, or **Item Class**. It never writes a Backend value to **Work State**; importing a `done` **Lifecycle** clears **Work State** to `idle` as a local consequence.
+When an Item has a `pending` or `failed` `UpdateTicket` or `UpdateEpic`
+**Mutation**, the Repository Store preserves its title and body. Pull still
+imports **Lifecycle** and a present **Ticket Kind**; `None` keeps the stored
+Kind. The merge keeps `updated_at` at the later of the stored value and refresh
+time. The Repository Store, not the **Backend Adapter**, owns these field rules.
 _Avoid_: Fetch, Import, Mirror
 
 **Mutation Apply**:
