@@ -3,6 +3,10 @@
 > **Amended by ADR-0043.** The working set below still contains every Adopted
 > Item not yet `done`, but its stored predicate is now `status = 'open'`.
 > `status` stores Lifecycle, and Work State does not affect Pull eligibility.
+>
+> **Amended by ADR-0046.** `tk done` plus Sync Skip is no longer the escape for
+> a deleted Backend object: skipping a failed close restores local `open`.
+> Explicit Detach removes the Backend Binding while retaining a Local Item.
 
 tk is a local-first work tracker. A configured Remote does not mirror its
 Backend into the Repository Store; instead the user **Adopts** specific Backend
@@ -85,10 +89,9 @@ no list to bound.
 - A new ticket owns the `tk adopt` command; it depends on tk-34 (the adapter)
   and tk-106 (the configured Remote), mirroring how tk-106 was carved out ahead
   of tk-34.
-- A permanently-deleted Adopted issue makes its per-key fetch fail; v1 Backend
-  Pull is all-or-nothing, so the escape is `tk done` (a `done` item leaves the
-  refresh set) plus `tk sync --skip` for the resulting close Mutation. A
-  dedicated un-adopt is a likely follow-up.
+- A permanently deleted or inaccessible Backend object makes its per-key fetch
+  fail. Pull remains all-or-nothing; explicit Detach removes that key from the
+  working set without asking tk to infer deletion from the read failure.
 - Amends ADR-0021: its relationship-deferral decision and its issueType →
   TicketKind mapping stand, but its Pull mechanism (`gh issue list --state all`
   → full snapshot) is replaced by fetch-by-key refresh.

@@ -217,7 +217,11 @@ does not emit Mutations.
 through `tk done` and Backend Pull; a Backend-bound `tk done` appends
 `set_item_status`. `items.work_state` changes through `tk start`, `tk stop`,
 and the clear-on-close in `tk done` or Backend Pull. The schema trigger
-backstops the terminal Lifecycle rule for future writers.
+backstops the terminal Lifecycle rule for future writers. Sync Skip of a
+failed `set_item_status` close is the only exception: the Store restores the
+Item to open before marking that exact Mutation skipped in the same
+transaction, and the trigger permits the write only while the failed close is
+present ([ADR 0046](./docs/adr/0046-sync-skip-relinquishes-a-failed-close.md)).
 
 ## IDs
 

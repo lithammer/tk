@@ -317,7 +317,8 @@ _Avoid_: Unknown Outcome, Ambiguous Creation, In Doubt
 
 **Skipped Mutation**:
 A **Mutation** explicitly bypassed during sync without being applied to a
-**Backend**, produced only by **Sync Skip**.
+**Backend**, produced only by **Sync Skip**. Skipping relinquishes its Backend
+intent; it does not mean the Backend applied it.
 _Avoid_: Ignored Mutation, Cancelled Mutation
 
 **Cancelled Mutation**:
@@ -335,7 +336,10 @@ address and will never refresh. Usually the outcome was **Indeterminate**; a
 _Avoid_: Cancelled Mutation, Orphaned Mutation, Stranded Promotion
 
 **Sync Skip**:
-The **`tk sync`** mode that marks one failed **Mutation** as skipped and continues sync.
+The **`tk sync`** mode that marks one failed **Mutation** as skipped and
+continues sync. Skipping a failed closing Mutation restores that Item's
+**Lifecycle** to `open`, leaves **Work State** `idle`, and clears its **Closing
+Reason** in the same Repository Store transaction.
 _Avoid_: Skip Command
 
 **Sync Log**:
@@ -422,7 +426,11 @@ _Avoid_: ticket, tickets
 - **Aliases** are globally unique across **Tickets** and **Epics**.
 - **Start** sets a **Ticket** or **Epic** to `active`.
 - **Stop** moves an active **Ticket** or **Epic** back to `open`.
-- **`done`** is terminal in v1: once a **Ticket** or **Epic** is `done`, **Start** and **Stop** refuse to transition it back to `active` or `open`. The **Repository Store** enforces this with a schema trigger; resurrection through a dedicated `tk reopen` command is deferred from v1.
+- **`done`** is terminal for local Lifecycle commands in v1: once a **Ticket**
+  or **Epic** is `done`, **Start** and **Stop** refuse to transition it back to
+  `active` or `open`. **Sync Skip** of that Item's failed closing **Mutation**
+  is the only v1 exception: relinquishing the close intent permits the shared
+  **Lifecycle** to return to `open`. v1 has no dedicated `tk reopen` command.
 - The **`done`** terminal rule constrains **Item Status** transitions only; title, body, **Priority**, and **Epic** membership remain editable on a `done` item.
 - **`tk`** does not manage git worktrees; checkout creation is the harness's or the user's responsibility via `git worktree`.
 - **`tk show`**, **`tk update`**, **`tk start`**, **`tk stop`**, **`tk done`**, and **`tk promote`** require an explicit **Display ID** in v1.
