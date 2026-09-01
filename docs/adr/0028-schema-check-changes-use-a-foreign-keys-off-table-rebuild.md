@@ -79,6 +79,8 @@ must be set before `BEGIN`, but `apply_one` runs every migration inside
   rejects it, and the test is rewritten to assert rejection.
 - The rebuild must recreate the `items_no_escape_from_done` trigger
   (ADR-0006 / migration 002), the `display_source` generated column, the
-  `items_next_idx` / `items_backend_unique` / `items_container_idx` /
-  `items_id_class_unique` indexes, and the composite foreign key to
-  `item_ids`, or those contracts silently vanish.
+  `items_backend_unique` / `items_container_idx` / `items_id_class_unique`
+  indexes, and the composite foreign key to `item_ids`, or those contracts
+  silently vanish. `items_next_idx` is deliberately absent from that list:
+  migration 012 dropped it because no query plan reached it, and a rebuild
+  must not restore it (ADR-0045).

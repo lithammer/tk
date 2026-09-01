@@ -55,6 +55,7 @@ const MIGRATION_8_SQL: &str = include_str!("migrations/008_mutation_applying.sql
 const MIGRATION_9_SQL: &str = include_str!("migrations/009_mutation_cancelled.sql");
 const MIGRATION_10_SQL: &str = include_str!("migrations/010_mutation_abandoned.sql");
 const MIGRATION_11_SQL: &str = include_str!("migrations/011_split_work_state.sql");
+const MIGRATION_12_SQL: &str = include_str!("migrations/012_drop_dead_next_index.sql");
 
 /// V1 Repository Store schema skeleton.
 pub const MIGRATION_1: Migration = Migration {
@@ -169,6 +170,16 @@ pub const MIGRATION_11: Migration = Migration {
     foreign_keys: ForeignKeys::Off,
 };
 
+/// Drops the dead `items_next_idx` (ADR-0045). No query plan in the crate
+/// reaches it, and its `(priority, created_seq)` key cannot serve the
+/// Effective-Priority-led ordering ADR-0015 gave `tk next`. `ForeignKeys::On`
+/// because dropping an index is not a table rebuild.
+pub const MIGRATION_12: Migration = Migration {
+    version: 12,
+    sql: MIGRATION_12_SQL,
+    foreign_keys: ForeignKeys::On,
+};
+
 /// Ordered migration list applied by [`apply_all`].
 pub const ALL_MIGRATIONS: &[Migration] = &[
     MIGRATION_1,
@@ -182,13 +193,14 @@ pub const ALL_MIGRATIONS: &[Migration] = &[
     MIGRATION_9,
     MIGRATION_10,
     MIGRATION_11,
+    MIGRATION_12,
 ];
 
 /// Highest schema version this binary can apply. Named so future migrations
 /// surface the threshold to `grep` instead of hiding it behind `.last()`.
 /// Adding a migration is a two-line patch: append to `ALL_MIGRATIONS`, bump
 /// this constant, with a debug_assert below catching the drift.
-pub const MAX_KNOWN_VERSION: u32 = MIGRATION_11.version;
+pub const MAX_KNOWN_VERSION: u32 = MIGRATION_12.version;
 
 /// Errors returned while applying migrations.
 ///
@@ -1784,19 +1796,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn split_rebuild_preserves_every_items_object() {
-        // An ADR-0028 rebuild recreates the table from scratch, so every index
-        // and trigger has to be written out again. A forgotten one fails
-        // silently — the store keeps working until some later insert loses its
-        // uniqueness guard or escapes `done`. Assert the whole set by name.
-        let mut conn = open_memory();
-        apply_through(&mut conn, 10, "2026-05-09T00:00:00.000Z").unwrap();
-        insert_v10_item(&conn, "t1", "tk-1", "active", 1);
-
-        apply_all(&mut conn, "2026-05-09T00:00:01.000Z").unwrap();
-
-        let mut objects: Vec<String> = conn
+    /// The `items` indexes and trigger ADR-0028's rebuild recipe covers, as the
+    /// store holds them, sorted. A name missing from the `in` list is invisible
+    /// to every caller, so a new `items` object belongs here too.
+    fn items_objects(conn: &Connection) -> Vec<String> {
+        let mut names: Vec<String> = conn
             .prepare(
                 "select name from sqlite_master \
                   where name in ('items_backend_unique', 'items_container_idx', \
@@ -1808,9 +1812,28 @@ mod tests {
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
-        objects.sort();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn split_rebuild_preserves_every_items_object() {
+        // An ADR-0028 rebuild recreates the table from scratch, so every index
+        // and trigger has to be written out again. A forgotten one fails
+        // silently — the store keeps working until some later insert loses its
+        // uniqueness guard or escapes `done`. Assert the whole set by name.
+        let mut conn = open_memory();
+        apply_through(&mut conn, 10, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_v10_item(&conn, "t1", "tk-1", "active", 1);
+
+        // Stops at 11: this test checks what migration 011's rebuild recreates.
+        // Running to `apply_all` would fold in migration 012's drop of
+        // `items_next_idx` (ADR-0045), so a forgotten index and a dropped one
+        // would fail the same assertion.
+        apply_through(&mut conn, 11, "2026-05-09T00:00:01.000Z").unwrap();
+
         assert_eq!(
-            objects,
+            items_objects(&conn),
             vec![
                 "items_backend_unique",
                 "items_container_idx",
@@ -1837,6 +1860,27 @@ mod tests {
         assert!(
             dangling.is_err(),
             "the rebuilt table must retain its container foreign key"
+        );
+    }
+
+    #[test]
+    fn next_index_drop_keeps_every_other_items_object() {
+        // ADR-0045 took `items_next_idx` off the set an ADR-0028 rebuild
+        // recreates, so its absence is a contract now: a rebuild that copies an
+        // older recreate list restores it and fails here. Naming the four
+        // survivors too catches a rebuild that loses one of them on the way.
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+
+        assert_eq!(
+            items_objects(&conn),
+            vec![
+                "items_backend_unique",
+                "items_container_idx",
+                "items_id_class_unique",
+                "items_no_escape_from_done",
+            ],
+            "migration 012 drops items_next_idx and nothing else (ADR-0045)"
         );
     }
 
