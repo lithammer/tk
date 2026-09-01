@@ -7,6 +7,10 @@
 > **Amended by ADR-0046.** `tk done` plus Sync Skip is no longer the escape for
 > a deleted Backend object: skipping a failed close restores local `open`.
 > Explicit Detach removes the Backend Binding while retaining a Local Item.
+>
+> **Amended by ADR-0047.** Detach removes an Item from the working set without
+> deleting it. Exact Re-Adopt restores the same Item; unknown Backend objects
+> still enter only as Tickets.
 
 tk is a local-first work tracker. A configured Remote does not mirror its
 Backend into the Repository Store; instead the user **Adopts** specific Backend

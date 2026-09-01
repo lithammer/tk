@@ -11,6 +11,10 @@
 > the default Sync Log includes cancelled rows, the first `tk sync log` after
 > upgrade may show withdrawals the operator did not request, stamped with their
 > original append times.
+>
+> **Amended by ADR-0047.** Detach may also cancel pending or failed Mutations
+> whose target or counterpart needs the removed Backend identity. It preserves
+> failure evidence and refuses to split an unresolved Promotion Operation.
 
 A Promotion the Backend will never accept has no exit. `tk sync --skip` refuses
 a Promotion, `tk remote clear` refuses while one is pending and recommends the

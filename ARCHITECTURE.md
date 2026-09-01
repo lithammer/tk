@@ -69,7 +69,10 @@ small boundary module after the second caller proves the shape.
   `tk show` renders — belongs beside that item read in `store/repository/`;
   the log-oriented views belong to `store/sync.rs`, which owns Remote
   configuration, retained Backend cohort validation, canonical Adopt
-  insertion, Pull refresh, and Mutation Log replay and inspection helpers.
+  insertion, Re-Adopt, Pull refresh, and Mutation Log replay and inspection
+  helpers. The Store also owns atomic Detach, Former Backend Identity
+  provenance, and the uniqueness invariant spanning active and former Backend
+  ownership ([ADR 0047](./docs/adr/0047-detach-retains-reversible-backend-history.md)).
   `store/promotion.rs` exposes the SQL half of `tk promote` — the preflight
   graph read, the one-transaction outbox commit, receipt application, and the
   post-sync Mutation Log reads. Promotion recovery also lives here:
@@ -195,9 +198,10 @@ Important stable contracts:
   process check-then-act race, while the durable `applying` state remains the
   crash-recovery barrier. Lock contention fails immediately with retry
   guidance instead of blocking indefinitely. Sync Skip and Promotion
-  Cancellation share the guard but reach no Adapter — they rewrite Mutation Log
-  state a concurrent sync could be draining, and each commits in one
-  transaction. Sync Log and local commands stay unlocked.
+  Cancellation and Detach share the guard but reach no Adapter — they rewrite
+  Backend identity or Mutation Log state a concurrent sync could be draining,
+  and each commits in one transaction. Sync Log and other local commands stay
+  unlocked.
 - `remotes` and `sync_cursors` hold the v1 singleton Remote model.
 - `store_config.display_prefix` controls newly generated local Display IDs.
   Custom prefix configuration is tracked by `tk-22`.
@@ -227,6 +231,9 @@ present ([ADR 0046](./docs/adr/0046-sync-skip-relinquishes-a-failed-close.md)).
 
 Items have random opaque internal stable IDs. Display IDs and Aliases are the
 user-facing lookup keys and are globally unique across Tickets and Epics.
+Former Backend Identities are canonical historical keys, not resolver entries;
+they remain globally reserved to their stable Item. Each Backend Binding also
+records the local Display ID it displaced so Detach can restore it exactly.
 
 Local Display IDs use the stored Repository Store prefix plus one shared
 sequence for Tickets and Epics: `<store-prefix>-<n>`. The prefix identifies the
