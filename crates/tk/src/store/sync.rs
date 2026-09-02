@@ -87,8 +87,8 @@ pub enum AdoptStoreError {
     #[error("{0} is a Backend Epic, not a Ticket")]
     BackendItemIsEpic(String),
     /// The canonical identity is a Former Backend Identity of an Epic.
-    /// ADR-0047 permits exact Re-Adopt of a Backend Epic; this slice restores
-    /// Tickets only, and falling through would bind a Ticket snapshot to an
+    /// ADR-0047 permits exact Re-Adopt of a Backend Epic; Adopt restores only
+    /// Tickets here, and falling through would bind a Ticket snapshot to an
     /// Epic row.
     #[error("{0} is a former Backend Epic")]
     FormerIdentityIsEpic(String),

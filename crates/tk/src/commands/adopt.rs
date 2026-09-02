@@ -727,18 +727,21 @@ mod tests {
             },
         )
         .unwrap();
+        // A Local Blocked Item behind this one: the Dependency shape the
+        // resulting graph keeps local whichever way the Binding moves
+        // (ADR-0035).
         insert_fixture_item(
             &conn,
             FixtureItem {
-                id: "blocker",
+                id: "waiter",
                 display: "tk-8",
-                title: "Blocking work",
+                title: "Dependent work",
                 created_seq: 3,
                 ..FixtureItem::default()
             },
         )
         .unwrap();
-        insert_dependency(&conn, "blocker", "stable").unwrap();
+        insert_dependency(&conn, "stable", "waiter").unwrap();
         let cwd_path = cwd();
         detach(&store, &cwd_path, "gh-42");
 
@@ -821,14 +824,14 @@ mod tests {
                 Some("parent".to_owned()),
             )
         );
-        let blocking_id: String = conn
+        let blocked_id: String = conn
             .query_row(
-                "select blocking_id from dependencies where blocked_id = 'stable'",
+                "select blocked_id from dependencies where blocking_id = 'stable'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(blocking_id, "blocker");
+        assert_eq!(blocked_id, "waiter");
 
         // The Backend Display ID is current and the displaced local one is an
         // Alias whose provenance a later Detach reads back.
