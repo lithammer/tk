@@ -209,8 +209,9 @@ The **`tk`** command intent for bringing an existing **Backend** issue into the 
 Re-Adopting an exact **Former Backend Identity** restores the **Backend
 Binding** to the same Item instead of creating another Item. This is the only
 way Adopt restores a **Backend Epic**; an unknown Backend object still enters
-as a Ticket. The Backend's current Display ID becomes display again and the
-current local Display ID becomes an **Alias**. The Backend snapshot replaces
+as a Ticket. The Backend's current Display ID becomes the Item's Display ID
+again, and the current local Display ID becomes an **Alias**. The Backend
+snapshot replaces
 title, body, **Lifecycle**, and **Ticket Kind** for a Ticket; **Local Fields**,
 **Item Class**, and relationships stay local. An imported `done` Lifecycle
 clears **Work State**, while `open` preserves it and clears an incompatible
@@ -225,8 +226,8 @@ _Avoid_: Track, Link, Import, Watch
 The explicit `tk detach <id>` operation that removes the **Backend Binding**
 from a concrete **Backend Ticket** or **Backend Epic** while retaining it as a
 **Local Ticket** or **Local Epic**. It opens no **Backend Adapter** and never
-edits or deletes the Backend object;
-**Pending Promotion** is resolved through **Promotion Cancellation** instead.
+edits or deletes the Backend object. For a **Pending Promotion**, Detach points
+to **Promotion Cancellation** instead.
 Detach withdraws every pending or failed **Mutation** that would require the
 removed identity and preserves terminal Mutation history. It preserves the
 Item's fields, state, selection, and relationships. It restores the local
@@ -268,8 +269,9 @@ the configured **Remote** or its retained Backend cohort. An Item may retain
 more than one Former Backend Identity but has at most one active Binding. Each
 former identity remains globally reserved to its Item for that Item's
 lifetime. Re-Adopting an exact former identity restores the Binding to the same
-Item rather than creating a second local representation, and refuses while the
-Item is already bound elsewhere. Re-Adopt requires a configured Remote of the
+Item rather than creating a second local representation. Adopt refuses to
+restore it while the Item is already bound elsewhere. Re-Adopt requires a
+configured Remote of the
 matching Backend kind and normal Adapter verification.
 Former identities remain until the Item itself is removed; ordinary cleanup
 never prunes them.

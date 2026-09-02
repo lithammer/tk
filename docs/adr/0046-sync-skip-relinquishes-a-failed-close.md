@@ -8,9 +8,9 @@ Lifecycle to `open`.
 
 ## Decision
 
-Skipping a failed `SetItemStatus(done)` Mutation changes the Item from `done`
-to `open` in the same Repository Store transaction that changes the Mutation
-from `failed` to `skipped`. The Item keeps its local content, Priority,
+Skipping a failed `set_item_status` Mutation targeting `done` changes the Item
+to `open` and the Mutation from `failed` to `skipped` in the same Repository
+Store transaction. The Item keeps its local content, Priority,
 Selection State, and relationships. It stays idle, loses its Closing Reason,
 and receives the transaction timestamp as `updated_at`. The rule is identical
 for Tickets and Epics.
@@ -39,10 +39,10 @@ failed-close Skip remains terminal and outside Pull. There is no `tk reopen`
 command in v1.
 
 The Store migration repairs existing instances of the same divergence. A
-`done` Item with a skipped `SetItemStatus(done)` Mutation becomes open and
-idle, and its Closing Reason is cleared. The migration preserves `updated_at`
-because migrations have no `Clock`; the skipped Mutation remains historical
-evidence of the abandoned intent.
+`done` Item with a skipped `set_item_status` Mutation targeting `done` becomes
+open and idle, and its Closing Reason is cleared. The migration preserves
+`updated_at` because migrations have no `Clock`; the skipped Mutation remains
+historical evidence of the abandoned intent.
 
 Detach must ship first. Restoring `open` puts the Item back into exact-key
 Pull, where a deleted or inaccessible Backend object can block the whole sync.

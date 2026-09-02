@@ -10,9 +10,9 @@ user could not resume local-only work without deleting or rewriting the Item.
 ### Detach removes the Binding, not the Item
 
 `tk detach <id>` turns a concrete Backend Ticket or Backend Epic into the same
-Item with Local Origin. It accepts any Lifecycle and Work State. A Local Item
-is an error; a Pending Promotion still uses Promotion Cancellation because no
-Backend identity exists to detach.
+Item with Local Origin. It accepts any Lifecycle and Work State. Detach rejects
+a Local Item. For a Pending Promotion, it points to Promotion Cancellation
+because no Backend identity exists to detach.
 
 Detach opens no Backend Adapter and leaves the Backend object unchanged. It
 holds the Remote workflow lock and commits the Origin, identity, Display ID,
@@ -51,13 +51,13 @@ cohort, or Remote-clear checks. It therefore imposes no constraint on the
 configured Remote.
 
 Former identities remain globally reserved to their stable Item for that
-Item's lifetime. An Item may accumulate several through Detach and Promotion,
+Item's lifetime. An Item may retain several across Detach and Promotion cycles,
 but has at most one active Binding. `tk show` lists the identities most recently
-detached first, once per canonical identity. A reactivated identity remains in
-history but is omitted while it is the current Binding; another Detach moves it
-to the top again. List, next, and search views omit former identities. Forget
-may eventually remove them with the Item, but no separate pruning operation
-ships here.
+detached first, once per canonical identity. When Re-Adopt restores an identity,
+it remains in history but is omitted while it is the current Binding; another
+Detach moves it to the top again. List, next, and search views omit former
+identities. Forget may eventually remove them with the Item, but no separate
+pruning operation ships here.
 
 Every Binding records the local Display ID it displaced. Detach restores that
 ID, including after repeated Detach and Re-Adopt cycles. An Item created by
@@ -73,8 +73,8 @@ provenance unresolved; Detach refuses that Item rather than guessing.
 ### Exact Re-Adopt restores the same Item
 
 `tk adopt <backend-key>` still creates only Backend Tickets for unknown Backend
-objects. After normal Adapter canonicalization and verification, an exact
-Former Backend Identity instead restores its original Item, including a
+objects. After the Adapter canonicalizes and verifies the key, an exact Former
+Backend Identity instead restores its original Item, including a
 Backend Epic. It requires a configured Remote of the matching Backend kind and
 refuses while that Item is already bound elsewhere. It never creates a second
 Item for a canonical identity tk already knows.

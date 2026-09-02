@@ -197,8 +197,8 @@ Important stable contracts:
   nested Promotion sync reuses its caller's guard. The lock closes the live
   process check-then-act race, while the durable `applying` state remains the
   crash-recovery barrier. Lock contention fails immediately with retry
-  guidance instead of blocking indefinitely. Sync Skip and Promotion
-  Cancellation and Detach share the guard but reach no Adapter — they rewrite
+  guidance instead of blocking indefinitely. Sync Skip, Promotion
+  Cancellation, and Detach share the guard but reach no Adapter — they rewrite
   Backend identity or Mutation Log state a concurrent sync could be draining,
   and each commits in one transaction. Sync Log and other local commands stay
   unlocked.

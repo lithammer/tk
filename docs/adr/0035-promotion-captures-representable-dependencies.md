@@ -1,8 +1,8 @@
 # Promotion captures representable Dependencies from the resulting graph
 
-> **Amended by ADR-0047.** Detach and Re-Adopt apply the same resulting-graph
-> rules in reverse and forward. Detach preserves relationships but refuses to
-> strand a Backend-bound Blocked Item behind a Local Blocking Item. Re-Adopt
+> **Amended by ADR-0047.** Detach and Re-Adopt use Promotion's resulting-graph
+> rules. Detach preserves relationships but refuses to strand a Backend-bound
+> Blocked Item behind a Local Blocking Item. Re-Adopt
 > captures the relationships that become Backend intent.
 
 Promotion is the boundary where current local state becomes backend intent.
