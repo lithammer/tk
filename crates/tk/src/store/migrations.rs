@@ -56,6 +56,7 @@ const MIGRATION_9_SQL: &str = include_str!("migrations/009_mutation_cancelled.sq
 const MIGRATION_10_SQL: &str = include_str!("migrations/010_mutation_abandoned.sql");
 const MIGRATION_11_SQL: &str = include_str!("migrations/011_split_work_state.sql");
 const MIGRATION_12_SQL: &str = include_str!("migrations/012_drop_dead_next_index.sql");
+const MIGRATION_13_SQL: &str = include_str!("migrations/013_former_backend_identities.sql");
 
 /// V1 Repository Store schema skeleton.
 pub const MIGRATION_1: Migration = Migration {
@@ -180,6 +181,14 @@ pub const MIGRATION_12: Migration = Migration {
     foreign_keys: ForeignKeys::On,
 };
 
+/// Adds canonical Former Backend Identity history and enforces ownership
+/// across active and former identities (ADR-0047).
+pub const MIGRATION_13: Migration = Migration {
+    version: 13,
+    sql: MIGRATION_13_SQL,
+    foreign_keys: ForeignKeys::On,
+};
+
 /// Ordered migration list applied by [`apply_all`].
 pub const ALL_MIGRATIONS: &[Migration] = &[
     MIGRATION_1,
@@ -194,13 +203,14 @@ pub const ALL_MIGRATIONS: &[Migration] = &[
     MIGRATION_10,
     MIGRATION_11,
     MIGRATION_12,
+    MIGRATION_13,
 ];
 
 /// Highest schema version this binary can apply. Named so future migrations
 /// surface the threshold to `grep` instead of hiding it behind `.last()`.
 /// Adding a migration is a two-line patch: append to `ALL_MIGRATIONS`, bump
 /// this constant, with a debug_assert below catching the drift.
-pub const MAX_KNOWN_VERSION: u32 = MIGRATION_12.version;
+pub const MAX_KNOWN_VERSION: u32 = MIGRATION_13.version;
 
 /// Errors returned while applying migrations.
 ///
@@ -375,6 +385,7 @@ pub(crate) fn apply_through(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::testing::{FixtureItem, insert_fixture_item};
 
     fn open_memory() -> Connection {
         let conn = Connection::open_in_memory().expect("open :memory:");
@@ -413,6 +424,75 @@ mod tests {
             .query_row("select count(*) from schema_migrations", [], |r| r.get(0))
             .unwrap();
         assert_eq!(usize::try_from(count).unwrap(), ALL_MIGRATIONS.len());
+    }
+
+    #[test]
+    fn former_backend_identity_is_reserved_to_its_stable_item() {
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "former-owner",
+                display: "gh-1",
+                title: "Former owner",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("https://github.com/o/r/issues/1"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "other",
+                display: "gh-2",
+                title: "Other Item",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("https://github.com/o/r/issues/2"),
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "insert into former_backend_identities(backend_kind, backend_key, item_id, \
+                                                    backend_display_value, detached_seq, detached_at) \
+             values ('github', 'https://github.com/o/r/issues/1', 'former-owner', \
+                     'gh-1', 1, '2026-05-09T00:00:00.000Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "update items set origin = 'local', backend_kind = null, backend_key = null \
+              where id = 'former-owner'",
+            [],
+        )
+        .unwrap();
+
+        let claim = conn.execute(
+            "update items \
+                set backend_key = 'https://github.com/o/r/issues/1' \
+              where id = 'other'",
+            [],
+        );
+        assert!(
+            claim.is_err(),
+            "another Item must not claim a former identity"
+        );
+
+        let move_history = conn.execute(
+            "update former_backend_identities set item_id = 'other' \
+              where backend_key = 'https://github.com/o/r/issues/1'",
+            [],
+        );
+        assert!(
+            move_history.is_err(),
+            "former identity history must not move onto an actively bound Item"
+        );
     }
 
     #[test]

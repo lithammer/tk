@@ -7,7 +7,7 @@
 //! `(display_value, id, display_source) -> item_ids` holds at COMMIT.
 
 use rand::Rng;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 
 use crate::clock::Clock;
 use crate::domain::item_class::ItemClass;
@@ -20,7 +20,7 @@ use crate::domain::ticket_kind::TicketKind;
 use crate::domain::work_state::WorkState;
 use crate::store::sequences;
 
-use super::Store;
+use super::{Store, next_display_id};
 
 /// The Selection State a `tk add` can create, with its Priority where one
 /// applies (ADR-0027). The two creatable combinations — triage carries no
@@ -113,7 +113,7 @@ where
     let tx = crate::store::write_transaction(&mut store.conn)?;
 
     let id = generate_internal_id(rng);
-    let display_id = next_display_id(&tx)?;
+    let display_id = next_display_id(&tx)?.ok_or(CreateError::DisplayPrefixMissing)?;
     let created_seq = sequences::next(&tx, sequences::Counter::ItemCreated)?;
 
     // Triage carries no Priority; accepted carries one (ADR-0027). The sum
@@ -186,7 +186,7 @@ where
     let tx = crate::store::write_transaction(&mut store.conn)?;
 
     let id = generate_internal_id(rng);
-    let display_id = next_display_id(&tx)?;
+    let display_id = next_display_id(&tx)?.ok_or(CreateError::DisplayPrefixMissing)?;
     let created_seq = sequences::next(&tx, sequences::Counter::ItemCreated)?;
 
     tx.execute(
@@ -247,19 +247,6 @@ fn insert_display_resolver(
         params![display_id, item_id, now_iso],
     )?;
     Ok(())
-}
-
-fn next_display_id(conn: &rusqlite::Connection) -> Result<String, CreateError> {
-    let display_seq = sequences::next(conn, sequences::Counter::Display)?;
-    let prefix: Option<String> = conn
-        .query_row(
-            "select value from store_config where key = 'display_prefix'",
-            [],
-            |r| r.get(0),
-        )
-        .optional()?;
-    let prefix = prefix.ok_or(CreateError::DisplayPrefixMissing)?;
-    Ok(format!("{prefix}-{display_seq}"))
 }
 
 #[cfg(test)]

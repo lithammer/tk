@@ -636,8 +636,8 @@ fn tk_scope_env_filters_list_to_the_epic() {
 fn command_help_snapshots() {
     let p = Repo::new("repo");
     for command in [
-        "accept", "add", "block", "done", "grep", "list", "next", "park", "promote", "search",
-        "show", "unblock", "unpark", "update",
+        "accept", "add", "block", "detach", "done", "grep", "list", "next", "park", "promote",
+        "search", "show", "unblock", "unpark", "update",
     ] {
         insta::assert_snapshot!(
             format!("help_{command}"),
@@ -647,6 +647,69 @@ fn command_help_snapshots() {
     insta::assert_snapshot!("help_promote_reconcile", p.run("promote reconcile --help"));
     insta::assert_snapshot!("help_promote_retry", p.run("promote retry --help"));
     insta::assert_snapshot!("help_promote_cancel", p.run("promote cancel --help"));
+}
+
+#[test]
+fn detach_adopted_ticket_through_cli_dispatch() {
+    let p = Repo::new("project");
+    p.run("init");
+    let db_path = p.cwd.join(".git/tk/tk.db");
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch("pragma foreign_keys = on").unwrap();
+        let tx = conn.unchecked_transaction().unwrap();
+        tx.execute(
+            "insert into items( \
+                id, display_value, item_class, ticket_kind, priority, title, body, origin, \
+                backend_kind, backend_key, status, work_state, selection_state, created_seq, \
+                created_at, updated_at \
+             ) values ( \
+                'stable-id', 'gh-42', 'ticket', 'task', 'P2', 'Backend work', 'Details', \
+                'backend', 'github', 'https://github.com/o/r/issues/42', 'open', 'idle', \
+                'accepted', 1, '2026-05-01T00:00:00.000Z', '2026-05-01T00:00:00.000Z' \
+             )",
+            [],
+        )
+        .unwrap();
+        tx.execute(
+            "insert into item_ids(value, source, item_id, created_at) \
+             values ('gh-42', 'display', 'stable-id', '2026-05-01T00:00:00.000Z')",
+            [],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+
+    tk!(p, "detach gh-42", @r"
+    Detached: Backend Ticket gh-42 → Local Ticket project-1
+    Backend object left unchanged: https://github.com/o/r/issues/42
+    ");
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let current: (String, String, Option<String>, Option<String>) = conn
+        .query_row(
+            "select id, origin, backend_kind, backend_key from items where display_value = 'project-1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(current, ("stable-id".into(), "local".into(), None, None));
+    let former: String = conn
+        .query_row(
+            "select backend_key from former_backend_identities where item_id = 'stable-id'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(former, "https://github.com/o/r/issues/42");
+    let old_resolver_rows: i64 = conn
+        .query_row(
+            "select count(*) from item_ids where value = 'gh-42'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(old_resolver_rows, 0);
 }
 
 /// `tk search` is a flat, whole-store title lookup across every Item Status

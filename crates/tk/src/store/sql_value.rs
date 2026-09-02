@@ -14,6 +14,7 @@ use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, 
 
 use std::str::FromStr;
 
+use crate::domain::backend_kind::BackendKind;
 use crate::domain::item_class::ItemClass;
 use crate::domain::lifecycle::Lifecycle;
 use crate::domain::mutation_state::MutationState;
@@ -23,6 +24,19 @@ use crate::domain::priority::Priority;
 use crate::domain::selection_state::SelectionState;
 use crate::domain::ticket_kind::TicketKind;
 use crate::domain::work_state::WorkState;
+
+impl FromSql for BackendKind {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        let text = value.as_str()?;
+        Self::from_str(text).map_err(|_| corrupt("backend_kind", text))
+    }
+}
+
+impl ToSql for BackendKind {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        self.text().to_sql()
+    }
+}
 
 impl FromSql for ItemClass {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
@@ -195,6 +209,10 @@ mod tests {
     fn from_sql_accepts_the_check_constrained_spellings() {
         // Pins the legal spelling set at the decode boundary; a drift between
         // these and the V1 CHECK constraints is store corruption.
+        assert_eq!(
+            BackendKind::column_result(ValueRef::Text(b"github")).unwrap(),
+            BackendKind::Github
+        );
         assert_eq!(
             ItemClass::column_result(ValueRef::Text(b"epic")).unwrap(),
             ItemClass::Epic
