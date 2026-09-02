@@ -1,6 +1,6 @@
 //! Repository Store operations for Remote configuration, retained Backend
-//! cohort validation, canonical Adopt insertion, Pull refresh, and Mutation
-//! Log replay and inspection.
+//! cohort validation, canonical Adopt insertion, Re-Adopt, Pull refresh, and
+//! Mutation Log replay and inspection.
 //!
 //! Every operation here is SQL on the `items` / `mutations` / `item_ids` /
 //! `remotes` / `sync_cursors` tables, so it lives under [`crate::store`]. The
@@ -24,6 +24,7 @@ use crate::domain::backend_outcome::{
     BackendCreateOutcome, BackendEditOutcome, Failure, FailureClass,
 };
 use crate::domain::binding_display_provenance::BindingDisplayProvenance;
+use crate::domain::dependency_rule::{self, DependencyClassification, DependencyRejection};
 use crate::domain::item_class::ItemClass;
 use crate::domain::lifecycle::Lifecycle;
 use crate::domain::mutation_payload::{
@@ -106,6 +107,17 @@ pub enum AdoptStoreError {
     ReadoptPendingPromotion {
         backend_display_id: String,
         local_display_id: String,
+    },
+    /// Restoring the Binding would leave the Item waiting on a Blocking Item
+    /// the Backend cannot address (ADR-0035).
+    #[error(
+        "{backend_display_id} would be blocked by Local {} {blocking_display_id}",
+        blocking_item_class.label()
+    )]
+    ReadoptBlockedByLocal {
+        backend_display_id: String,
+        blocking_display_id: String,
+        blocking_item_class: ItemClass,
     },
     #[error(transparent)]
     BackendBinding(#[from] mutations::BackendBindingError),
@@ -320,6 +332,54 @@ fn find_former_backend_identity(
     .optional()
 }
 
+/// The first Blocking Item beneath `item_id` that the Backend could not
+/// address once the Item is bound, or `None` when the resulting graph is
+/// valid.
+///
+/// Re-Adopt makes the Item a Backend-bound Blocked Item, which reclassifies
+/// every Dependency it waits on. Detach asks this from the other side —
+/// whether the Item it makes Local is a Blocking Item beneath something still
+/// bound — and `dependency_rule::classify` owns the answer for both, so the
+/// rule stays in one place (ADR-0035).
+///
+/// The Backend-kind mismatch rejection cannot arise here: the intake
+/// transaction has already checked that the retained Backend cohort matches
+/// the Remote, so every bound Item shares this Backend.
+fn blocked_by_a_local_blocking_item(
+    conn: &Connection,
+    item_id: &str,
+    backend_kind: BackendKind,
+) -> Result<Option<(String, ItemClass)>, AdoptStoreError> {
+    let blocked = BackendBinding::Backend {
+        backend_kind: backend_kind.text().to_owned(),
+    };
+    let mut stmt = conn.prepare(
+        "select blocking.id, blocking.display_value, blocking.item_class \
+           from dependencies d \
+           join items blocking on blocking.id = d.blocking_id \
+          where d.blocked_id = ?1 \
+          order by blocking.created_seq",
+    )?;
+    let rows = stmt.query_map(params![item_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, ItemClass>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, display_id, item_class) = row?;
+        let blocking = mutations::resolve_backend_binding(conn, &id)?;
+        if matches!(
+            dependency_rule::classify(&blocked, &blocking),
+            DependencyClassification::Rejected(DependencyRejection::BackendBlockedLocalBlocking)
+        ) {
+            return Ok(Some((display_id, item_class)));
+        }
+    }
+    Ok(None)
+}
+
 /// Rebind the Item that owns `former` to that canonical identity, inside the
 /// caller's Adopt intake transaction (ADR-0047).
 ///
@@ -328,10 +388,11 @@ fn find_former_backend_identity(
 /// Fields, and relationships stay as the Item held them locally.
 ///
 /// The Mutation Log is untouched. Detach made its withdrawals terminal, and
-/// the relationship half of ADR-0047's Re-Adopt contract — preflighting the
-/// resulting graph and appending fresh intent for every relationship that
-/// becomes representable — is not in this path yet. Until it is, a Dependency
-/// the Item acquired while Local is neither refused nor delivered.
+/// the other half of ADR-0047's relationship contract — appending fresh intent
+/// for every relationship that becomes representable — is not in this path
+/// yet. So a Dependency that would make the resulting graph invalid refuses the
+/// whole command, while one that becomes Backend intent is allowed but not yet
+/// delivered.
 fn readopt_backend_ticket(
     conn: &Connection,
     backend_kind: BackendKind,
@@ -374,6 +435,15 @@ fn readopt_backend_ticket(
             });
         }
         BackendBinding::Local => {}
+    }
+    if let Some((blocking_display_id, blocking_item_class)) =
+        blocked_by_a_local_blocking_item(conn, &former.item_id, backend_kind)?
+    {
+        return Err(AdoptStoreError::ReadoptBlockedByLocal {
+            backend_display_id: former.backend_display_id.clone(),
+            blocking_display_id,
+            blocking_item_class,
+        });
     }
 
     // The imported Lifecycle decides the two local fields it can invalidate:

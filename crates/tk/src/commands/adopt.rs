@@ -198,6 +198,15 @@ fn adopt_store_error(err: AdoptStoreError) -> CommandError {
             "{backend_display_id} belongs to {local_display_id}, which has a Pending Promotion; \
              run 'tk promote cancel {local_display_id}' before re-adopting {backend_display_id}"
         )),
+        AdoptStoreError::ReadoptBlockedByLocal {
+            backend_display_id,
+            blocking_display_id,
+            blocking_item_class,
+        } => CommandError::failure(format!(
+            "cannot re-adopt {backend_display_id}: it would be blocked by Local {} \
+             '{blocking_display_id}'; remove the Dependency first",
+            blocking_item_class.label()
+        )),
         AdoptStoreError::BackendBinding(err) => resolver::backend_binding_error(&err),
         AdoptStoreError::ApplyingMutation(sequence) => CommandError::failure(format!(
             "Mutation {sequence} has an indeterminate Backend creation outcome; resolve it before adopting another Item\nUse 'tk promote reconcile <id> <backend-key>' if the Backend object exists, 'tk promote retry <id>' only when creating it again is safe, or 'tk promote cancel <id>' to withdraw the Promotion Operation, leaving any object it created untracked."
@@ -1130,6 +1139,95 @@ mod tests {
             )
             .unwrap();
         assert_eq!(closing_reason, None);
+    }
+
+    #[test]
+    fn readopt_refuses_a_dependency_the_backend_could_not_address() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
+        insert_fixture_item(
+            &conn,
+            backend_ticket("gh-42", "https://github.com/o/r/issues/42"),
+        )
+        .unwrap();
+        let cwd_path = cwd();
+        detach_item(&store, &cwd_path, "gh-42");
+        // Blocking the now-Local Item on another Local Ticket is allowed while
+        // both are Local, and Re-Adopt is what would make the edge invalid.
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "blocker",
+                display: "tk-8",
+                title: "Blocking work",
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_dependency(&conn, "blocker", "stable").unwrap();
+
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        expect_issue_view(&h, 42, "OPEN", "null");
+
+        let exit = run_rendered(&mut h, "42");
+
+        assert_eq!(exit, Exit::Failure);
+        assert_eq!(
+            h.err(),
+            "tk adopt: cannot re-adopt gh-42: it would be blocked by Local Ticket 'tk-8'; \
+             remove the Dependency first\n"
+        );
+        // The whole Re-Adopt refuses before any Store state changes, so the
+        // Dependency is still local truth and the Item is still Local.
+        assert_eq!(stored_origin(&conn), "local");
+        assert_eq!(
+            resolver_rows(&conn, "stable"),
+            vec![("tk-1".to_owned(), "display".to_owned())]
+        );
+    }
+
+    #[test]
+    fn readopt_allows_a_dependency_the_backend_can_address() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
+        insert_fixture_item(
+            &conn,
+            backend_ticket("gh-42", "https://github.com/o/r/issues/42"),
+        )
+        .unwrap();
+        let cwd_path = cwd();
+        detach_item(&store, &cwd_path, "gh-42");
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "blocker",
+                display: "gh-8",
+                title: "Backend blocking work",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("https://github.com/o/r/issues/8"),
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_dependency(&conn, "blocker", "stable").unwrap();
+
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        expect_issue_view(&h, 42, "OPEN", "null");
+
+        let exit = run_rendered(&mut h, "42");
+
+        // Both endpoints end up on one Backend, so the edge becomes
+        // representable intent rather than an invalid graph. Recording that
+        // intent as a Mutation is a separate step Re-Adopt does not take yet.
+        assert_eq!(exit, Exit::Ok, "stderr={}", h.err());
+        assert_eq!(stored_origin(&conn), "backend");
     }
 
     #[test]
