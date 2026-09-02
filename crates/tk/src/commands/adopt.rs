@@ -138,8 +138,10 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
 fn render_readopt(stdout: &mut dyn std::io::Write, report: &store_sync::ReadoptReport) {
     let _ = writeln!(
         stdout,
-        "Re-adopted Ticket: {} - {}",
-        report.backend_display_id, report.title
+        "Re-adopted {}: {} - {}",
+        report.item_class.label(),
+        report.backend_display_id,
+        report.title
     );
     let _ = writeln!(stdout, "Backend object: {}", report.backend_key);
     let _ = writeln!(
@@ -147,11 +149,18 @@ fn render_readopt(stdout: &mut dyn std::io::Write, report: &store_sync::ReadoptR
         "Local Display ID kept as an Alias: {}",
         report.local_display_id
     );
-    let _ = writeln!(
-        stdout,
-        "Imported title, body, Ticket Kind, and Lifecycle from the Backend"
-    );
-    let _ = writeln!(stdout, "Kind: {}", report.ticket_kind);
+    if let Some(ticket_kind) = report.ticket_kind {
+        let _ = writeln!(
+            stdout,
+            "Imported title, body, Ticket Kind, and Lifecycle from the Backend"
+        );
+        let _ = writeln!(stdout, "Kind: {ticket_kind}");
+    } else {
+        let _ = writeln!(
+            stdout,
+            "Imported title, body, and Lifecycle from the Backend"
+        );
+    }
     let _ = writeln!(stdout, "Status: {}", report.status);
     for mutation in &report.queued_relationships {
         let _ = writeln!(
@@ -206,9 +215,6 @@ fn adopt_store_error(err: AdoptStoreError) -> CommandError {
         AdoptStoreError::BackendCohort(other) => {
             CommandError::failure(format!("Repository Store corruption: {other}"))
         }
-        AdoptStoreError::FormerIdentityIsEpic(display_id) => CommandError::failure(format!(
-            "{display_id} is a former Backend Epic; restoring one is not implemented in this build"
-        )),
         AdoptStoreError::ReadoptBoundElsewhere {
             backend_display_id,
             bound_display_id,
@@ -311,8 +317,8 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::commands::detach;
     use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
+    use crate::commands::{detach, list, next, search, show, sync as sync_command};
     use crate::domain::backend_operation::BackendItemIdentity;
     use crate::domain::item_class::ItemClass;
     use crate::domain::lifecycle::Lifecycle;
@@ -833,6 +839,16 @@ mod tests {
         .unwrap()
     }
 
+    /// Inspect an Item through the public `tk show` command seam.
+    fn show_item(store: &TmpStore, cwd_path: &Path, id: &str) -> String {
+        let mut h = Harness::new(cwd_path);
+        expect_git(&h, store);
+        let mut deps = h.deps();
+        show::run(&mut deps, show::Args { id: id.to_owned() }).expect("show the Item");
+        h.runner.assert_all_consumed();
+        h.out()
+    }
+
     /// Every `item_ids` row for one Item, as `(value, source)` in value order.
     fn resolver_rows(conn: &Connection, item_id: &str) -> Vec<(String, String)> {
         conn.prepare("select value, source from item_ids where item_id = ?1 order by value")
@@ -1055,6 +1071,155 @@ mod tests {
         assert_eq!(
             resolver_rows(&conn, "stable"),
             vec![("tk-1".to_owned(), "display".to_owned())]
+        );
+    }
+
+    #[test]
+    fn repeated_bindings_keep_ordered_history_without_constraining_the_remote() {
+        let store = TmpStore::new("repo");
+        let mut conn = seed_store(&store);
+        insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
+        insert_fixture_item(
+            &conn,
+            backend_ticket("gh-42", "https://github.com/o/r/issues/42"),
+        )
+        .unwrap();
+        let cwd_path = cwd();
+
+        detach_item(&store, &cwd_path, "gh-42");
+        apply_promotion_receipt(
+            &mut conn,
+            "stable",
+            "github",
+            &BackendItemIdentity {
+                backend_key: "https://github.com/o/r/issues/99".into(),
+                display_id: "gh-99".into(),
+            },
+            "2026-05-10T00:00:00.000Z",
+        )
+        .unwrap();
+        detach_item(&store, &cwd_path, "gh-99");
+
+        // Former Backend Identity is history, not retained Backend state: a
+        // detached Item permits clearing and replacing the Remote kind.
+        store_sync::clear_remote(&mut conn).unwrap();
+        store_sync::set_remote(
+            &mut conn,
+            crate::domain::backend_kind::BackendKind::Jira,
+            "{}",
+            "2026-05-11T00:00:00.000Z",
+        )
+        .unwrap();
+        store_sync::clear_remote(&mut conn).unwrap();
+        store_sync::set_remote(
+            &mut conn,
+            crate::domain::backend_kind::BackendKind::Github,
+            "{}",
+            "2026-05-12T00:00:00.000Z",
+        )
+        .unwrap();
+
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        expect_issue_view(&h, 42, "OPEN", "null");
+        assert_eq!(run_rendered(&mut h, "42"), Exit::Ok, "stderr={}", h.err());
+
+        let rebound = show_item(&store, &cwd_path, "gh-42");
+        assert!(
+            rebound.contains(
+                "FORMER BACKEND IDENTITIES\n  • github https://github.com/o/r/issues/99\n"
+            ),
+            "show output={rebound:?}"
+        );
+        assert!(
+            !rebound.contains("https://github.com/o/r/issues/42"),
+            "the current Binding is omitted: show output={rebound:?}"
+        );
+
+        detach_item(&store, &cwd_path, "gh-42");
+        let detached = show_item(&store, &cwd_path, "tk-1");
+        let current = detached
+            .find("https://github.com/o/r/issues/42")
+            .expect("latest detached identity");
+        let previous = detached
+            .find("https://github.com/o/r/issues/99")
+            .expect("earlier detached identity");
+        assert!(current < previous, "show output={detached:?}");
+        assert_eq!(
+            conn.query_row(
+                "select count(*) from former_backend_identities where item_id = 'stable'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            2
+        );
+        assert_eq!(stored_origin(&conn), "local");
+        assert_eq!(mutation_count(&conn).unwrap(), 0);
+
+        let mut sync_h = Harness::new(&cwd_path);
+        expect_git(&sync_h, &store);
+        let sync_exit = sync_command::run(
+            sync_h.deps(),
+            sync_command::Args {
+                subcommand: None,
+                skip: None,
+            },
+        );
+        assert_eq!(sync_exit, Exit::Ok, "stderr={}", sync_h.err());
+        sync_h.runner.assert_all_consumed();
+        assert_eq!(sync_h.out(), "Sync complete: 0 pulled, 0 applied.\n");
+
+        let mut list_h = Harness::new(&cwd_path);
+        expect_git(&list_h, &store);
+        list::run(
+            &mut list_h.deps(),
+            list::Args {
+                ready: false,
+                blocked: false,
+                active: false,
+                triage: false,
+                parked: false,
+                local: false,
+                remote: false,
+                epic: false,
+                epic_id: None,
+            },
+        )
+        .expect("list detached Item");
+        assert!(list_h.out().contains("tk-1"), "stdout={}", list_h.out());
+        assert!(
+            !list_h.out().contains("https://github.com/"),
+            "Former Backend Identity stays out of list: stdout={}",
+            list_h.out()
+        );
+
+        let mut next_h = Harness::new(&cwd_path);
+        expect_git(&next_h, &store);
+        next::run(
+            &mut next_h.deps(),
+            next::Args {
+                epic: None,
+                quiet: false,
+            },
+        )
+        .expect("select detached Item");
+        assert_eq!(next_h.out(), "tk-1: Fix login\n");
+
+        let mut search_h = Harness::new(&cwd_path);
+        expect_git(&search_h, &store);
+        search::run(
+            &mut search_h.deps(),
+            search::Args {
+                query: "Fix login".to_owned(),
+            },
+        )
+        .expect("search detached Item");
+        assert!(search_h.out().contains("tk-1"), "stdout={}", search_h.out());
+        assert!(
+            !search_h.out().contains("https://github.com/"),
+            "Former Backend Identity stays out of search: stdout={}",
+            search_h.out()
         );
     }
 
@@ -1700,7 +1865,7 @@ mod tests {
     }
 
     #[test]
-    fn readopt_of_a_former_backend_epic_is_refused_not_adopted_as_a_ticket() {
+    fn readopt_restores_a_former_backend_epic_as_the_same_epic() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
@@ -1716,6 +1881,18 @@ mod tests {
             },
         )
         .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "child",
+                display: "tk-2",
+                title: "Child Ticket",
+                container_id: Some("stable"),
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
         let cwd_path = cwd();
         detach_item(&store, &cwd_path, "gh-5");
 
@@ -1725,16 +1902,65 @@ mod tests {
 
         let exit = run_rendered(&mut h, "5");
 
-        assert_eq!(exit, Exit::Failure);
+        assert_eq!(exit, Exit::Ok, "stderr={}", h.err());
         assert_eq!(
-            h.err(),
-            "tk adopt: gh-5 is a former Backend Epic; \
-             restoring one is not implemented in this build\n"
+            h.out(),
+            "Re-adopted Epic: gh-5 - Fix login\n\
+             Backend object: https://github.com/o/r/issues/5\n\
+             Local Display ID kept as an Alias: tk-1\n\
+             Imported title, body, and Lifecycle from the Backend\n\
+             Status: open\n"
         );
-        // Refusing beats falling through: ordinary intake would have inserted
-        // a second Item for a Backend object the Epic still owns.
-        assert_eq!(item_count(&conn).unwrap(), 1);
+        // Exact Former Backend Identity restores the stable Epic. It does not
+        // fall through to ordinary Ticket intake or import Ticket-only fields.
+        assert_eq!(item_count(&conn).unwrap(), 2);
+        assert_eq!(stored_origin(&conn), "backend");
+        let stored: (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "select display_value, item_class, ticket_kind, priority, selection_state \
+                   from items where id = 'stable'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            stored,
+            ("gh-5".to_owned(), "epic".to_owned(), None, None, None,)
+        );
+        let container_id: String = conn
+            .query_row(
+                "select container_id from items where id = 'child'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(container_id, "stable");
+
+        detach_item(&store, &cwd_path, "gh-5");
         assert_eq!(stored_origin(&conn), "local");
+        assert_eq!(
+            conn.query_row(
+                "select display_value from items where id = 'stable'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "tk-1"
+        );
     }
 
     #[test]
