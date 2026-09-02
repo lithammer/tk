@@ -12,6 +12,12 @@
 //! canonicalization. The Store checks canonical Backend identity under the
 //! insertion transaction.
 //!
+//! Canonical identity ownership spans former history too: when `<key>`
+//! canonicalizes to a Former Backend Identity, intake is Re-Adopt — the
+//! original Item is rebound to that Backend object and takes its current
+//! shared fields, instead of a second Item appearing for one Backend object
+//! (ADR-0047).
+//!
 //! Per ADR-0032, [`run`] returns `Result<Exit, CommandError>` and the dispatch
 //! seam frames failures as `tk adopt: <body>`.
 
@@ -84,6 +90,10 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
             let _ = writeln!(deps.stdout, "Already adopted: {}", row.display_id);
             return Ok(Exit::Ok);
         }
+        AdoptOutcome::Readopted(report) => {
+            render_readopt(deps.stdout, &report);
+            return Ok(Exit::Ok);
+        }
     };
 
     // The Status line carries the allow-closed signal: a closed issue is
@@ -103,6 +113,33 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     }
     let _ = writeln!(deps.stdout, "Status: {}", stored.status);
     Ok(Exit::Ok)
+}
+
+/// Report the restored identity mapping and the shared fields the Backend
+/// snapshot replaced (ADR-0047).
+///
+/// The Display ID mapping comes first because Re-Adopt moves the Item's
+/// user-facing identity, and the imported set is named in full: an Item that
+/// stayed local for a while may have a title and body the Backend is about to
+/// overwrite.
+fn render_readopt(stdout: &mut dyn std::io::Write, report: &store_sync::ReadoptReport) {
+    let _ = writeln!(
+        stdout,
+        "Re-adopted Ticket: {} - {}",
+        report.backend_display_id, report.title
+    );
+    let _ = writeln!(stdout, "Backend object: {}", report.backend_key);
+    let _ = writeln!(
+        stdout,
+        "Local Display ID kept as an Alias: {}",
+        report.local_display_id
+    );
+    let _ = writeln!(
+        stdout,
+        "Imported title, body, Ticket Kind, and Lifecycle from the Backend"
+    );
+    let _ = writeln!(stdout, "Kind: {}", report.ticket_kind);
+    let _ = writeln!(stdout, "Status: {}", report.status);
 }
 
 /// The no-Remote diagnostic returned when the Adapter factory finds none.
@@ -144,6 +181,24 @@ fn adopt_store_error(err: AdoptStoreError) -> CommandError {
         AdoptStoreError::BackendCohort(other) => {
             CommandError::failure(format!("Repository Store corruption: {other}"))
         }
+        AdoptStoreError::FormerIdentityIsEpic(display_id) => CommandError::failure(format!(
+            "{display_id} is a former Backend Epic; restoring one is not implemented in this build"
+        )),
+        AdoptStoreError::ReadoptBoundElsewhere {
+            backend_display_id,
+            bound_display_id,
+        } => CommandError::failure(format!(
+            "{backend_display_id} belongs to the Item now bound as {bound_display_id}; \
+             run 'tk detach {bound_display_id}' before re-adopting {backend_display_id}"
+        )),
+        AdoptStoreError::ReadoptPendingPromotion {
+            backend_display_id,
+            local_display_id,
+        } => CommandError::failure(format!(
+            "{backend_display_id} belongs to {local_display_id}, which has a Pending Promotion; \
+             run 'tk promote cancel {local_display_id}' before re-adopting {backend_display_id}"
+        )),
+        AdoptStoreError::BackendBinding(err) => resolver::backend_binding_error(&err),
         AdoptStoreError::ApplyingMutation(sequence) => CommandError::failure(format!(
             "Mutation {sequence} has an indeterminate Backend creation outcome; resolve it before adopting another Item\nUse 'tk promote reconcile <id> <backend-key>' if the Backend object exists, 'tk promote retry <id>' only when creating it again is safe, or 'tk promote cancel <id>' to withdraw the Promotion Operation, leaving any object it created untracked."
         )),
@@ -152,13 +207,19 @@ fn adopt_store_error(err: AdoptStoreError) -> CommandError {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
+    use crate::commands::detach;
     use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
+    use crate::domain::backend_operation::BackendItemIdentity;
     use crate::proc::{ProcError, RunOutput};
     use crate::store::testing::{
-        FixtureItem, FixtureMutation, FixtureRemote, TmpStore, insert_fixture_item,
-        insert_fixture_mutation, insert_fixture_remote,
+        FixtureItem, FixtureMutation, FixtureRemote, TmpStore, apply_promotion_receipt,
+        insert_dependency, insert_fixture_item, insert_fixture_mutation, insert_fixture_remote,
+        mutation_count,
     };
+    use rusqlite::Connection;
 
     fn ok(stdout: &str) -> RunOutput {
         RunOutput {
@@ -568,6 +629,586 @@ mod tests {
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "tk adopt: executable not found on PATH\n"
+        );
+    }
+
+    // ---- Re-Adopt (ADR-0047) --------------------------------------------
+
+    /// A Backend Ticket fixture keeping `origin` and the identity columns in
+    /// the agreement the schema requires. Its title, body, and Ticket Kind
+    /// differ from what [`issue_json`] returns, so a Re-Adopt assertion tells
+    /// an imported field from a preserved one.
+    fn backend_ticket<'a>(display: &'a str, backend_key: &'a str) -> FixtureItem<'a> {
+        FixtureItem {
+            id: "stable",
+            display,
+            title: "Local title",
+            body: "Local body",
+            origin: "backend",
+            backend_kind: Some("github"),
+            backend_key: Some(backend_key),
+            created_seq: 1,
+            ..FixtureItem::default()
+        }
+    }
+
+    /// Detach a seeded Backend Item through the real command, leaving the
+    /// Local Item plus the canonical Former Backend Identity that Re-Adopt
+    /// matches. Seeding that history by hand would let the fixture drift from
+    /// what Detach actually writes.
+    fn detach(store: &TmpStore, cwd_path: &Path, id: &str) {
+        let mut h = Harness::new(cwd_path);
+        expect_git(&h, store);
+        let mut deps = h.deps();
+        detach::run(&mut deps, detach::Args { id: id.to_owned() })
+            .expect("detach the seeded Backend Item");
+        h.runner.assert_all_consumed();
+    }
+
+    /// Queue the `gh issue view` call Adopt canonicalizes `<key>` through.
+    fn expect_issue_view(h: &Harness<'_>, key: &str, number: i64, state: &str, issue_type: &str) {
+        h.runner.expect(
+            &["gh", "issue", "view", key],
+            ok(&issue_json(
+                number,
+                state,
+                issue_type,
+                &format!("https://github.com/o/r/issues/{number}"),
+            )),
+        );
+    }
+
+    /// Every `item_ids` row for one Item, as `(value, source)` in value order.
+    fn resolver_rows(conn: &Connection, item_id: &str) -> Vec<(String, String)> {
+        conn.prepare("select value, source from item_ids where item_id = ?1 order by value")
+            .unwrap()
+            .query_map([item_id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
+    /// The Lifecycle, Work State, and Closing Reason one Item now holds.
+    fn local_axes(conn: &Connection, item_id: &str) -> (String, String, Option<String>) {
+        conn.query_row(
+            "select status, work_state, closing_reason from items where id = ?1",
+            [item_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn readopting_a_former_identity_restores_the_original_item() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "parent",
+                display: "tk-9",
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                title: "Parent Epic",
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                priority: Some("P1"),
+                selection_state: Some("parked"),
+                container_id: Some("parent"),
+                ..backend_ticket("gh-42", "https://github.com/o/r/issues/42")
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "blocker",
+                display: "tk-8",
+                title: "Blocking work",
+                created_seq: 3,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_dependency(&conn, "blocker", "stable").unwrap();
+        let cwd_path = cwd();
+        detach(&store, &cwd_path, "gh-42");
+
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        expect_issue_view(&h, "42", 42, "OPEN", "Bug");
+
+        let exit = run_rendered(&mut h, "42");
+
+        assert_eq!(exit, Exit::Ok, "stderr={}", h.err());
+        h.runner.assert_all_consumed();
+        assert_eq!(
+            h.out(),
+            "Re-adopted Ticket: gh-42 - Fix login\n\
+             Backend object: https://github.com/o/r/issues/42\n\
+             Local Display ID kept as an Alias: tk-1\n\
+             Imported title, body, Ticket Kind, and Lifecycle from the Backend\n\
+             Kind: bug\n\
+             Status: open\n"
+        );
+
+        // One Backend object keeps one representation: the same stable Item is
+        // rebound, and no fresh created_seq is spent on a duplicate.
+        let (items, created_seq): (i64, i64) = (
+            conn.query_row("select count(*) from items", [], |r| r.get(0))
+                .unwrap(),
+            conn.query_row(
+                "select value from sequences where name = 'item_created_seq'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap(),
+        );
+        assert_eq!((items, created_seq), (3, 0));
+
+        // The Backend snapshot replaces the shared fields; Item Class, Local
+        // Fields, and relationships stay as the Item held them locally.
+        let shared: (String, String, String, String, String, String) = conn
+            .query_row(
+                "select display_value, origin, backend_key, title, body, ticket_kind \
+                   from items where id = 'stable'",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            shared,
+            (
+                "gh-42".to_owned(),
+                "backend".to_owned(),
+                "https://github.com/o/r/issues/42".to_owned(),
+                "Fix login".to_owned(),
+                "B".to_owned(),
+                "bug".to_owned(),
+            )
+        );
+        let local: (String, Option<String>, String, Option<String>) = conn
+            .query_row(
+                "select item_class, priority, selection_state, container_id \
+                   from items where id = 'stable'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            local,
+            (
+                "ticket".to_owned(),
+                Some("P1".to_owned()),
+                "parked".to_owned(),
+                Some("parent".to_owned()),
+            )
+        );
+        let blocking_id: String = conn
+            .query_row(
+                "select blocking_id from dependencies where blocked_id = 'stable'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(blocking_id, "blocker");
+
+        // The Backend Display ID is current and the displaced local one is an
+        // Alias whose provenance a later Detach reads back.
+        assert_eq!(
+            resolver_rows(&conn, "stable"),
+            vec![
+                ("gh-42".to_owned(), "display".to_owned()),
+                ("tk-1".to_owned(), "alias".to_owned()),
+            ]
+        );
+        let provenance: (String, Option<String>) = conn
+            .query_row(
+                "select binding_display_provenance, binding_local_display_value \
+                   from items where id = 'stable'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(provenance, ("known".to_owned(), Some("tk-1".to_owned())));
+
+        // Re-Adopt records no Backend intent of its own, and history keeps the
+        // identity it restored.
+        assert_eq!(mutation_count(&conn).unwrap(), 0);
+        let history: i64 = conn
+            .query_row(
+                "select count(*) from former_backend_identities where item_id = 'stable'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(history, 1);
+    }
+
+    #[test]
+    fn readopt_leaves_mutations_detach_withdrew_terminal() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
+        insert_fixture_item(
+            &conn,
+            backend_ticket("gh-42", "https://github.com/o/r/issues/42"),
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 4,
+                mutation_type: "update_ticket",
+                item_id: "stable",
+                payload_json: r#"{"title":"Local title","body":"Local body"}"#,
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        let cwd_path = cwd();
+        detach(&store, &cwd_path, "gh-42");
+
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        expect_issue_view(&h, "42", 42, "OPEN", "null");
+
+        let exit = run_rendered(&mut h, "42");
+
+        assert_eq!(exit, Exit::Ok, "stderr={}", h.err());
+        // Detach made the withdrawal terminal; Re-Adopt never resurrects the
+        // intent the user withdrew, nor queues its own.
+        let states: Vec<String> = conn
+            .prepare("select state from mutations order by sequence")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(states, vec!["cancelled".to_owned()]);
+    }
+
+    #[test]
+    fn readopt_matches_the_legacy_numeric_key_history_holds() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
+        // Adopted before the Adapter canonicalized keys, so Detach copied a
+        // bare issue number into history.
+        insert_fixture_item(&conn, backend_ticket("gh-42", "42")).unwrap();
+        let cwd_path = cwd();
+        detach(&store, &cwd_path, "gh-42");
+
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        expect_issue_view(&h, "42", 42, "OPEN", "null");
+
+        let exit = run_rendered(&mut h, "42");
+
+        assert_eq!(exit, Exit::Ok, "stderr={}", h.err());
+        assert!(h.out().contains("Backend object: 42\n"), "{}", h.out());
+        // The restored Binding takes history's spelling, so one Backend object
+        // never sits in the Store as both an active and a former identity.
+        let (items, backend_key): (i64, String) = (
+            conn.query_row("select count(*) from items", [], |r| r.get(0))
+                .unwrap(),
+            conn.query_row(
+                "select backend_key from items where id = 'stable'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap(),
+        );
+        assert_eq!((items, backend_key), (1, "42".to_owned()));
+    }
+
+    #[test]
+    fn importing_a_done_lifecycle_clears_work_state() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                status: "active",
+                ..backend_ticket("gh-42", "https://github.com/o/r/issues/42")
+            },
+        )
+        .unwrap();
+        let cwd_path = cwd();
+        detach(&store, &cwd_path, "gh-42");
+
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        expect_issue_view(&h, "42", 42, "CLOSED", "null");
+
+        let exit = run_rendered(&mut h, "42");
+
+        assert_eq!(exit, Exit::Ok, "stderr={}", h.err());
+        assert!(h.out().contains("Status: done\n"), "{}", h.out());
+        assert_eq!(
+            local_axes(&conn, "stable"),
+            ("done".to_owned(), "idle".to_owned(), None)
+        );
+    }
+
+    #[test]
+    fn importing_an_open_lifecycle_preserves_work_state() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                status: "active",
+                ..backend_ticket("gh-42", "https://github.com/o/r/issues/42")
+            },
+        )
+        .unwrap();
+        let cwd_path = cwd();
+        detach(&store, &cwd_path, "gh-42");
+
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        expect_issue_view(&h, "42", 42, "OPEN", "null");
+
+        let exit = run_rendered(&mut h, "42");
+
+        assert_eq!(exit, Exit::Ok, "stderr={}", h.err());
+        // Re-Adopt is not a workflow transition: work already under way
+        // survives the shared Lifecycle it imports.
+        assert!(h.out().contains("Status: active\n"), "{}", h.out());
+        assert_eq!(
+            local_axes(&conn, "stable"),
+            ("open".to_owned(), "active".to_owned(), None)
+        );
+    }
+
+    #[test]
+    fn importing_an_open_lifecycle_clears_an_incompatible_closing_reason() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                status: "done",
+                ..backend_ticket("gh-42", "https://github.com/o/r/issues/42")
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "update items set closing_reason = 'Superseded' where id = 'stable'",
+            [],
+        )
+        .unwrap();
+        let cwd_path = cwd();
+        detach(&store, &cwd_path, "gh-42");
+
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        expect_issue_view(&h, "42", 42, "OPEN", "null");
+
+        let exit = run_rendered(&mut h, "42");
+
+        assert_eq!(exit, Exit::Ok, "stderr={}", h.err());
+        assert!(h.out().contains("Status: open\n"), "{}", h.out());
+        // The Closing Reason CHECK confines it to `done`, so importing `open`
+        // has to drop it (ADR-0006's Re-Adopt exception, ADR-0023).
+        assert_eq!(
+            local_axes(&conn, "stable"),
+            ("open".to_owned(), "idle".to_owned(), None)
+        );
+    }
+
+    #[test]
+    fn readopt_refuses_while_the_item_is_bound_to_another_backend_object() {
+        let store = TmpStore::new("repo");
+        let mut conn = seed_store(&store);
+        insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
+        insert_fixture_item(
+            &conn,
+            backend_ticket("gh-42", "https://github.com/o/r/issues/42"),
+        )
+        .unwrap();
+        let cwd_path = cwd();
+        detach(&store, &cwd_path, "gh-42");
+        apply_promotion_receipt(
+            &mut conn,
+            "stable",
+            "github",
+            &BackendItemIdentity {
+                backend_key: "https://github.com/o/r/issues/99".into(),
+                display_id: "gh-99".into(),
+            },
+            "2026-05-10T00:00:00.000Z",
+        )
+        .unwrap();
+
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        expect_issue_view(&h, "42", 42, "OPEN", "null");
+
+        let exit = run_rendered(&mut h, "42");
+
+        assert_eq!(exit, Exit::Failure);
+        assert_eq!(
+            h.err(),
+            "tk adopt: gh-42 belongs to the Item now bound as gh-99; \
+             run 'tk detach gh-99' before re-adopting gh-42\n"
+        );
+        let (items, backend_key): (i64, String) = (
+            conn.query_row("select count(*) from items", [], |r| r.get(0))
+                .unwrap(),
+            conn.query_row(
+                "select backend_key from items where id = 'stable'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            (items, backend_key),
+            (1, "https://github.com/o/r/issues/99".to_owned()),
+            "a refusal must neither rebind the Item nor create a second one"
+        );
+    }
+
+    #[test]
+    fn readopt_refuses_while_the_item_has_a_pending_promotion() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
+        insert_fixture_item(
+            &conn,
+            backend_ticket("gh-42", "https://github.com/o/r/issues/42"),
+        )
+        .unwrap();
+        let cwd_path = cwd();
+        detach(&store, &cwd_path, "gh-42");
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 4,
+                mutation_type: "promote_ticket",
+                item_id: "stable",
+                payload_json: r#"{"title":"Local title","body":"Local body","backend_kind":"github"}"#,
+                state: "pending",
+                promotion_operation_id: Some("op-1"),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        expect_issue_view(&h, "42", 42, "OPEN", "null");
+
+        let exit = run_rendered(&mut h, "42");
+
+        assert_eq!(exit, Exit::Failure);
+        // The Promotion is owed a Backend identity of its own; rebinding now
+        // would leave its receipt no Local Item to bind (ADR-0036).
+        assert_eq!(
+            h.err(),
+            "tk adopt: gh-42 belongs to tk-1, which has a Pending Promotion; \
+             run 'tk promote cancel tk-1' before re-adopting gh-42\n"
+        );
+        let origin: String = conn
+            .query_row("select origin from items where id = 'stable'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(origin, "local");
+    }
+
+    #[test]
+    fn readopt_of_a_former_backend_epic_is_refused_not_adopted_as_a_ticket() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                selection_state: None,
+                title: "Roadmap",
+                ..backend_ticket("gh-5", "https://github.com/o/r/issues/5")
+            },
+        )
+        .unwrap();
+        let cwd_path = cwd();
+        detach(&store, &cwd_path, "gh-5");
+
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        expect_issue_view(&h, "5", 5, "OPEN", "null");
+
+        let exit = run_rendered(&mut h, "5");
+
+        assert_eq!(exit, Exit::Failure);
+        assert_eq!(
+            h.err(),
+            "tk adopt: gh-5 is a former Backend Epic; \
+             restoring one is not implemented in this build\n"
+        );
+        // Refusing beats falling through: ordinary intake would have inserted
+        // a second Item for a Backend object the Epic still owns.
+        let (items, origin): (i64, String) = (
+            conn.query_row("select count(*) from items", [], |r| r.get(0))
+                .unwrap(),
+            conn.query_row("select origin from items where id = 'stable'", [], |r| {
+                r.get(0)
+            })
+            .unwrap(),
+        );
+        assert_eq!((items, origin), (1, "local".to_owned()));
+    }
+
+    #[test]
+    fn readopt_still_needs_a_configured_remote() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            backend_ticket("gh-42", "https://github.com/o/r/issues/42"),
+        )
+        .unwrap();
+        let cwd_path = cwd();
+        detach(&store, &cwd_path, "gh-42");
+
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+
+        let exit = run_rendered(&mut h, "42");
+
+        assert_eq!(exit, Exit::Failure);
+        // Former Backend Identity is history, not a dormant Binding: it does
+        // not stand in for the Remote Re-Adopt reads the snapshot through.
+        h.runner.assert_all_consumed();
+        assert_eq!(
+            h.err(),
+            "tk adopt: no Remote configured; run 'tk remote set <kind>' first\n"
         );
     }
 }

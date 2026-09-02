@@ -14,6 +14,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::{collections::HashMap, str::FromStr};
 use thiserror::Error;
 
+use crate::domain::backend_binding::BackendBinding;
 use crate::domain::backend_kind::BackendKind;
 use crate::domain::backend_operation::{
     AdoptedItem, BackendCreate, BackendEdit, BackendItemAddress, BackendItemRefresh,
@@ -22,6 +23,7 @@ use crate::domain::backend_operation::{
 use crate::domain::backend_outcome::{
     BackendCreateOutcome, BackendEditOutcome, Failure, FailureClass,
 };
+use crate::domain::binding_display_provenance::BindingDisplayProvenance;
 use crate::domain::item_class::ItemClass;
 use crate::domain::lifecycle::Lifecycle;
 use crate::domain::mutation_payload::{
@@ -84,6 +86,29 @@ pub enum AdoptStoreError {
     ApplyingMutation(i64),
     #[error("{0} is a Backend Epic, not a Ticket")]
     BackendItemIsEpic(String),
+    /// The canonical identity is a Former Backend Identity of an Epic.
+    /// ADR-0047 permits exact Re-Adopt of a Backend Epic; this slice restores
+    /// Tickets only, and falling through would bind a Ticket snapshot to an
+    /// Epic row.
+    #[error("{0} is a former Backend Epic")]
+    FormerIdentityIsEpic(String),
+    /// The Item owning the Former Backend Identity already holds a different
+    /// active Binding. An Item has at most one (ADR-0047).
+    #[error("{backend_display_id} belongs to the Item now bound as {bound_display_id}")]
+    ReadoptBoundElsewhere {
+        backend_display_id: String,
+        bound_display_id: String,
+    },
+    /// The Item owning the Former Backend Identity carries durable Promotion
+    /// intent. Rebinding it would leave that Promotion's receipt with no Local
+    /// Item to bind (ADR-0036).
+    #[error("{backend_display_id} belongs to {local_display_id}, which has a Pending Promotion")]
+    ReadoptPendingPromotion {
+        backend_display_id: String,
+        local_display_id: String,
+    },
+    #[error(transparent)]
+    BackendBinding(#[from] mutations::BackendBindingError),
 }
 
 /// Error returned by Backend Pull derivation and refresh merge.
@@ -103,19 +128,62 @@ pub enum RefreshStoreError {
     ApplyingMutation(i64),
 }
 
-/// Result of canonical Backend Ticket insertion.
+/// Result of canonical Backend Ticket intake.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdoptOutcome {
     Inserted(BackendItemRow),
     AlreadyExists(BackendItemRow),
+    /// The canonical identity was a Former Backend Identity, so intake
+    /// restored its original Item instead of creating a second one
+    /// (ADR-0047).
+    Readopted(ReadoptReport),
 }
 
-/// Insert canonical Adapter intake data as one Backend Ticket.
+/// One Item restored to the canonical Backend identity its Former Backend
+/// Identity history already reserved to it (ADR-0047).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadoptReport {
+    /// Backend Display ID made current by Re-Adopt.
+    pub backend_display_id: String,
+    /// Local Display ID demoted to an Alias, which a later Detach restores.
+    pub local_display_id: String,
+    /// Canonical identity restored, spelled as Former Backend Identity
+    /// history holds it.
+    pub backend_key: String,
+    /// Title imported from the Backend snapshot.
+    pub title: String,
+    /// Ticket Kind imported from the Backend snapshot.
+    pub ticket_kind: TicketKind,
+    /// Item Status the Item now derives from the imported Lifecycle and the
+    /// Work State that survived it (ADR-0043).
+    pub status: ItemStatus,
+}
+
+/// One canonical Backend identity an Item detached from, as
+/// `former_backend_identities` holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FormerIdentity {
+    /// Stable internal Item ID that owns the identity for its lifetime.
+    item_id: String,
+    /// Canonical key exactly as history stores it. Re-Adopt restores this
+    /// spelling rather than the Adapter's, so one Backend object never appears
+    /// as both an active and a former identity under two spellings.
+    backend_key: String,
+    /// Backend Display ID this identity carried while it was current.
+    backend_display_id: String,
+}
+
+/// Take canonical Adapter intake data into the Repository Store as one Backend
+/// Ticket: a fresh insert, an idempotent no-op, or the Re-Adopt rebind of the
+/// Item that already owns the identity (ADR-0047).
 ///
-/// The Repository Store is the serialization point for canonical identity:
-/// duplicate `(BackendKind, backend_key)` input returns the stored row without
-/// changing it. The transaction rechecks the Remote before writing, closing
-/// the Adapter-read to Store-write configuration race.
+/// The Repository Store is the serialization point for canonical identity, and
+/// that ownership spans active and former history: duplicate
+/// `(BackendKind, backend_key)` input returns the stored row without changing
+/// it, and a Former Backend Identity restores its original Item rather than
+/// creating a second representation of one Backend object. The transaction
+/// rechecks the Remote before writing, closing the Adapter-read to Store-write
+/// configuration race.
 pub fn adopt_backend_ticket(
     conn: &mut Connection,
     expected_kind: BackendKind,
@@ -135,6 +203,15 @@ pub fn adopt_backend_ticket(
         legacy_backend_key,
     )? {
         return Ok(AdoptOutcome::AlreadyExists(row));
+    }
+    // Active identity first: an Item restored by an earlier Re-Adopt keeps the
+    // matching row in history, so only a miss above makes this a former one.
+    if let Some(former) =
+        find_former_backend_identity(&tx, expected_kind, &adopted.backend_key, legacy_backend_key)?
+    {
+        let report = readopt_backend_ticket(&tx, expected_kind, &former, adopted, now)?;
+        tx.commit()?;
+        return Ok(AdoptOutcome::Readopted(report));
     }
     let id = generate_internal_id(rng);
     let created_seq = sequences::next(&tx, Counter::ItemCreated)?;
@@ -165,25 +242,8 @@ pub fn adopt_backend_ticket(
         ],
     )?;
 
-    // Display ID resolver row. A unique/PK violation means the Display ID
-    // is already claimed by another Item → DisplayIdCollision. Dropping
-    // `tx` on the early return rolls back the orphaned `items` insert.
-    match tx.execute(
-        "insert into item_ids(value, source, item_id, created_at) \
-             values (?1, 'display', ?2, ?3)",
-        params![adopted.display_id, id, now],
-    ) {
-        Ok(_) => {}
-        Err(rusqlite::Error::SqliteFailure(e, _))
-            if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
-                || e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY =>
-        {
-            return Err(AdoptStoreError::DisplayIdCollision(
-                adopted.display_id.clone(),
-            ));
-        }
-        Err(other) => return Err(other.into()),
-    }
+    // Dropping `tx` on an early return rolls back the orphaned `items` insert.
+    claim_display_id(&tx, &adopted.display_id, &id, now)?;
     tx.commit()?;
     Ok(AdoptOutcome::Inserted(
         find_adopted_ticket_by_identity(
@@ -194,6 +254,176 @@ pub fn adopt_backend_ticket(
         )?
         .expect("the adopted Backend Ticket was committed"),
     ))
+}
+
+/// Claim `display_id` as the Item's current Display ID.
+///
+/// A unique/primary-key violation means another Item already claims the value
+/// as a Display ID or Alias, which is [`AdoptStoreError::DisplayIdCollision`]
+/// rather than a storage fault. Both Adopt intake paths mint an Adapter-owned
+/// Display ID, so both need the same classification.
+fn claim_display_id(
+    conn: &Connection,
+    display_id: &str,
+    item_id: &str,
+    now: &str,
+) -> Result<(), AdoptStoreError> {
+    match conn.execute(
+        "insert into item_ids(value, source, item_id, created_at) \
+             values (?1, 'display', ?2, ?3)",
+        params![display_id, item_id, now],
+    ) {
+        Ok(_) => Ok(()),
+        Err(rusqlite::Error::SqliteFailure(e, _))
+            if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+                || e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY =>
+        {
+            Err(AdoptStoreError::DisplayIdCollision(display_id.to_owned()))
+        }
+        Err(other) => Err(other.into()),
+    }
+}
+
+/// Look up the Former Backend Identity that owns a canonical Backend key.
+///
+/// Shares Adopt's exact-key predicate, legacy spelling included: Detach copies
+/// `items.backend_key` verbatim into history, so an Item adopted before the
+/// Adapter canonicalized keys leaves a bare issue number behind. Missing it
+/// would let ordinary Adopt insert a second Item for a Backend object tk
+/// already owns.
+fn find_former_backend_identity(
+    conn: &Connection,
+    backend_kind: BackendKind,
+    backend_key: &str,
+    legacy_backend_key: Option<&str>,
+) -> rusqlite::Result<Option<FormerIdentity>> {
+    conn.query_row(
+        "select item_id, backend_key, backend_display_value \
+           from former_backend_identities \
+          where backend_kind = ?1 \
+            and (backend_key = ?2 or (?3 is not null and backend_key = ?3))",
+        params![backend_kind.text(), backend_key, legacy_backend_key],
+        |row| {
+            Ok(FormerIdentity {
+                item_id: row.get(0)?,
+                backend_key: row.get(1)?,
+                backend_display_id: row.get(2)?,
+            })
+        },
+    )
+    .optional()
+}
+
+/// Rebind the Item that owns `former` to that canonical identity, inside the
+/// caller's Adopt intake transaction (ADR-0047).
+///
+/// The Backend snapshot replaces the shared fields — title, body, Lifecycle,
+/// and Ticket Kind — while Item Class, the stable internal Item ID, Local
+/// Fields, and relationships stay as the Item held them locally. The Mutation
+/// Log is untouched: Detach made its withdrawals terminal, and relationship
+/// intent is a separate step the caller reports.
+fn readopt_backend_ticket(
+    conn: &Connection,
+    backend_kind: BackendKind,
+    former: &FormerIdentity,
+    adopted: &AdoptedItem,
+    now: &str,
+) -> Result<ReadoptReport, AdoptStoreError> {
+    let (item_class, origin, local_display_id, work_state, closing_reason): (
+        ItemClass,
+        Origin,
+        String,
+        WorkState,
+        Option<String>,
+    ) = conn.query_row(
+        "select item_class, origin, display_value, work_state, closing_reason \
+           from items where id = ?1",
+        params![&former.item_id],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        },
+    )?;
+
+    if item_class == ItemClass::Epic {
+        return Err(AdoptStoreError::FormerIdentityIsEpic(
+            former.backend_display_id.clone(),
+        ));
+    }
+    if origin == Origin::Backend {
+        return Err(AdoptStoreError::ReadoptBoundElsewhere {
+            backend_display_id: former.backend_display_id.clone(),
+            bound_display_id: local_display_id,
+        });
+    }
+    if let BackendBinding::PendingPromotion { .. } =
+        mutations::resolve_backend_binding(conn, &former.item_id)?
+    {
+        return Err(AdoptStoreError::ReadoptPendingPromotion {
+            backend_display_id: former.backend_display_id.clone(),
+            local_display_id,
+        });
+    }
+
+    // The imported Lifecycle decides the two local fields it can invalidate:
+    // `done` retires Work State, and `open` cannot carry a Closing Reason the
+    // column CHECK confines to `done` (ADR-0043, ADR-0047).
+    let (work_state, closing_reason) = match adopted.status {
+        Lifecycle::Open => (work_state, None),
+        Lifecycle::Done => (WorkState::Idle, closing_reason),
+    };
+
+    // Statement order is load-bearing for the same reason as
+    // `promotion::apply_receipt`: `item_ids_one_display_per_item` is a
+    // non-deferrable partial unique index, so the outgoing Display ID has to
+    // become an Alias before the Backend Display ID is inserted.
+    conn.execute(
+        "update item_ids set source = 'alias' where item_id = ?1 and source = 'display'",
+        params![&former.item_id],
+    )?;
+    claim_display_id(conn, &former.backend_display_id, &former.item_id, now)?;
+    // One statement, because it is also what authorizes the reopen: migration
+    // 015 admits `done` -> `open` only while a single update moves a Local
+    // Item onto a canonical identity its own history reserves (ADR-0006).
+    conn.execute(
+        "update items \
+            set origin = 'backend', backend_kind = ?2, backend_key = ?3, display_value = ?4, \
+                title = ?5, body = ?6, ticket_kind = ?7, status = ?8, work_state = ?9, \
+                closing_reason = ?10, updated_at = ?11, \
+                binding_display_provenance = ?12, binding_local_display_value = ?13 \
+          where id = ?1",
+        params![
+            &former.item_id,
+            backend_kind.text(),
+            &former.backend_key,
+            &former.backend_display_id,
+            adopted.title,
+            adopted.body,
+            adopted.ticket_kind.text(),
+            adopted.status.text(),
+            work_state.text(),
+            closing_reason,
+            now,
+            BindingDisplayProvenance::Known(local_display_id.clone())
+                .stored_values()
+                .0,
+            &local_display_id,
+        ],
+    )?;
+
+    Ok(ReadoptReport {
+        backend_display_id: former.backend_display_id.clone(),
+        local_display_id,
+        backend_key: former.backend_key.clone(),
+        title: adopted.title.clone(),
+        ticket_kind: adopted.ticket_kind,
+        status: ItemStatus::of(adopted.status, work_state),
+    })
 }
 
 /// Refuse Adopt before any Backend read while creation certainty is unresolved.
@@ -4381,6 +4611,64 @@ mod tests {
             ),
             Err(AdoptStoreError::DisplayIdCollision(id)) if id == "gh-42"
         ));
+    }
+
+    #[test]
+    fn a_former_identity_of_another_backend_does_not_capture_adopt() {
+        let mut conn = open_seeded();
+        insert_fixture_remote(
+            &conn,
+            FixtureRemote {
+                backend_kind: "jira",
+                config_json: r#"{"site":"x","project":"P"}"#,
+                ..FixtureRemote::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "detached",
+                display: "tk-1",
+                title: "Former GitHub work",
+                created_seq: 9,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "insert into former_backend_identities(backend_kind, backend_key, item_id, \
+                                                    backend_display_value, detached_seq, \
+                                                    detached_at) \
+             values ('github', '42', 'detached', 'gh-42', 1, ?1)",
+            params![NOW],
+        )
+        .unwrap();
+
+        // Canonical identity is the (Backend kind, key) pair: a key spelled
+        // the same on another Backend names a different object, so Jira intake
+        // inserts rather than rebinding the legacy GitHub history.
+        let outcome = adopt_backend_ticket(
+            &mut conn,
+            BackendKind::Jira,
+            &mut rand::rngs::StdRng::seed_from_u64(7),
+            &adopted("42", "jira-42", "Jira work", Lifecycle::Open),
+            NOW,
+        )
+        .unwrap();
+
+        assert!(matches!(outcome, AdoptOutcome::Inserted(_)));
+        let (items, origin): (i64, String) = (
+            conn.query_row("select count(*) from items", [], |row| row.get(0))
+                .unwrap(),
+            conn.query_row(
+                "select origin from items where id = 'detached'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        );
+        assert_eq!((items, origin), (2, "local".to_owned()));
     }
 
     #[test]
