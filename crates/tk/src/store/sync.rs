@@ -323,9 +323,9 @@ pub fn readopt_requirements(
 /// Rebind the Item that owns `former` to that canonical identity, inside the
 /// caller's Adopt intake transaction (ADR-0047).
 ///
-/// The Backend snapshot replaces the shared fields — title, body, Lifecycle,
-/// and Ticket Kind — while Item Class, the stable internal Item ID, Local
-/// Fields, and relationships stay as the Item held them locally.
+/// The Backend snapshot replaces title, body, and Lifecycle. It also replaces
+/// Ticket Kind for a Ticket, while Item Class, the stable internal Item ID,
+/// Local Fields, and relationships stay as the Item held them locally.
 ///
 /// Detach's withdrawals remain terminal. Dependencies and Epic Membership
 /// that become Backend intent append fresh ordered Mutations; an invalid

@@ -318,7 +318,9 @@ mod tests {
 
     use super::*;
     use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
-    use crate::commands::{detach, list, next, search, show, sync as sync_command};
+    use crate::commands::{
+        detach, list, next, promote, remote, search, show, sync as sync_command,
+    };
     use crate::domain::backend_operation::BackendItemIdentity;
     use crate::domain::item_class::ItemClass;
     use crate::domain::lifecycle::Lifecycle;
@@ -1077,7 +1079,7 @@ mod tests {
     #[test]
     fn repeated_bindings_keep_ordered_history_without_constraining_the_remote() {
         let store = TmpStore::new("repo");
-        let mut conn = seed_store(&store);
+        let conn = seed_store(&store);
         insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
         insert_fixture_item(
             &conn,
@@ -1087,37 +1089,59 @@ mod tests {
         let cwd_path = cwd();
 
         detach_item(&store, &cwd_path, "gh-42");
-        apply_promotion_receipt(
-            &mut conn,
-            "stable",
-            "github",
-            &BackendItemIdentity {
-                backend_key: "https://github.com/o/r/issues/99".into(),
-                display_id: "gh-99".into(),
+        let mut promote_h = Harness::new(&cwd_path);
+        expect_git(&promote_h, &store);
+        promote_h.runner.expect_exact(
+            &[
+                "gh",
+                "issue",
+                "create",
+                "--title",
+                "Local title",
+                "--body",
+                "Local body",
+            ],
+            ok("https://github.com/o/r/issues/99\n"),
+        );
+        promote::run(
+            &mut promote_h.deps(),
+            promote::Args {
+                subcommand: None,
+                id: Some("tk-1".to_owned()),
+                children: false,
             },
-            "2026-05-10T00:00:00.000Z",
         )
-        .unwrap();
+        .expect("promote the detached Item to another Backend object");
+        promote_h.runner.assert_all_consumed();
+        assert_eq!(promote_h.out(), "Promoted Ticket: tk-1 -> gh-99\n");
+        assert_eq!(mutation_count(&conn).unwrap(), 1);
         detach_item(&store, &cwd_path, "gh-99");
 
         // Former Backend Identity is history, not retained Backend state: a
-        // detached Item permits clearing and replacing the Remote kind.
-        store_sync::clear_remote(&mut conn).unwrap();
-        store_sync::set_remote(
-            &mut conn,
-            crate::domain::backend_kind::BackendKind::Jira,
-            "{}",
-            "2026-05-11T00:00:00.000Z",
+        // detached Item permits clearing and replacing the Remote.
+        let mut clear_h = Harness::new(&cwd_path);
+        expect_git(&clear_h, &store);
+        remote::run(
+            &mut clear_h.deps(),
+            remote::Args {
+                subcommand: Some(remote::Sub::Clear),
+            },
         )
-        .unwrap();
-        store_sync::clear_remote(&mut conn).unwrap();
-        store_sync::set_remote(
-            &mut conn,
-            crate::domain::backend_kind::BackendKind::Github,
-            "{}",
-            "2026-05-12T00:00:00.000Z",
+        .expect("clear the Remote with only former identity history");
+        assert_eq!(clear_h.out(), "Cleared the configured Remote.\n");
+
+        let mut set_h = Harness::new(&cwd_path);
+        expect_git(&set_h, &store);
+        remote::run(
+            &mut set_h.deps(),
+            remote::Args {
+                subcommand: Some(remote::Sub::Set(remote::SetArgs {
+                    kind: "github".to_owned(),
+                })),
+            },
         )
-        .unwrap();
+        .expect("replace the Remote after Detach");
+        assert_eq!(set_h.out(), "Configured Remote: github\n");
 
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
@@ -1155,7 +1179,11 @@ mod tests {
             2
         );
         assert_eq!(stored_origin(&conn), "local");
-        assert_eq!(mutation_count(&conn).unwrap(), 0);
+        assert_eq!(
+            mutation_count(&conn).unwrap(),
+            1,
+            "Former Backend Identity history creates no Mutation"
+        );
 
         let mut sync_h = Harness::new(&cwd_path);
         expect_git(&sync_h, &store);
@@ -1917,10 +1945,10 @@ mod tests {
         assert_eq!(stored_origin(&conn), "backend");
         let stored: (
             String,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
+            ItemClass,
+            Option<crate::domain::ticket_kind::TicketKind>,
+            Option<crate::domain::priority::Priority>,
+            Option<crate::domain::selection_state::SelectionState>,
         ) = conn
             .query_row(
                 "select display_value, item_class, ticket_kind, priority, selection_state \
@@ -1939,7 +1967,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             stored,
-            ("gh-5".to_owned(), "epic".to_owned(), None, None, None,)
+            ("gh-5".to_owned(), ItemClass::Epic, None, None, None,)
         );
         let container_id: String = conn
             .query_row(
