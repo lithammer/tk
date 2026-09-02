@@ -407,7 +407,10 @@ pub(crate) fn apply_through(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::testing::{FixtureItem, insert_alias, insert_fixture_item};
+    use crate::store::testing::{
+        FixtureFormerIdentity, FixtureItem, insert_alias, insert_fixture_former_identity,
+        insert_fixture_item,
+    };
     use rusqlite::params;
 
     fn open_memory() -> Connection {
@@ -465,12 +468,14 @@ mod tests {
             },
         )
         .unwrap();
-        conn.execute(
-            "insert into former_backend_identities(backend_kind, backend_key, item_id, \
-                                                    backend_display_value, detached_seq, \
-                                                    detached_at) \
-             values ('github', ?1, 't1', 'gh-7', 1, '2026-05-09T00:00:00.000Z')",
-            params![backend_key],
+        insert_fixture_former_identity(
+            conn,
+            FixtureFormerIdentity {
+                backend_key,
+                item_id: "t1",
+                backend_display_value: "gh-7",
+                ..FixtureFormerIdentity::default()
+            },
         )
         .unwrap();
     }
@@ -588,12 +593,14 @@ mod tests {
             },
         )
         .unwrap();
-        conn.execute(
-            "insert into former_backend_identities(backend_kind, backend_key, item_id, \
-                                                    backend_display_value, detached_seq, detached_at) \
-             values ('github', 'https://github.com/o/r/issues/1', 'former-owner', \
-                     'gh-1', 1, '2026-05-09T00:00:00.000Z')",
-            [],
+        insert_fixture_former_identity(
+            &conn,
+            FixtureFormerIdentity {
+                backend_key: "https://github.com/o/r/issues/1",
+                item_id: "former-owner",
+                backend_display_value: "gh-1",
+                ..FixtureFormerIdentity::default()
+            },
         )
         .unwrap();
         conn.execute(

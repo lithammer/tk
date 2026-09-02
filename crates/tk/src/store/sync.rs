@@ -38,8 +38,8 @@ use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
 use crate::domain::work_state::WorkState;
 use crate::store::mutations;
-use crate::store::repository::RemoteWorkflowGuard;
 use crate::store::repository::create::generate_internal_id;
+use crate::store::repository::{self, RemoteWorkflowGuard};
 use crate::store::sequences::{self, Counter, SequenceError};
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -258,22 +258,19 @@ pub fn adopt_backend_ticket(
 
 /// Claim `display_id` as the Item's current Display ID.
 ///
-/// A unique/primary-key violation means another Item already claims the value
-/// as a Display ID or Alias, which is [`AdoptStoreError::DisplayIdCollision`]
-/// rather than a storage fault. Both Adopt intake paths mint an Adapter-owned
-/// Display ID, so both need the same classification.
+/// The resolver row itself belongs to [`repository`]; what this adds is the
+/// classification. A unique/primary-key violation means another Item already
+/// claims the value as a Display ID or Alias, which is
+/// [`AdoptStoreError::DisplayIdCollision`] rather than a storage fault, and
+/// both Adopt intake paths mint an Adapter-owned Display ID.
 fn claim_display_id(
     conn: &Connection,
     display_id: &str,
     item_id: &str,
     now: &str,
 ) -> Result<(), AdoptStoreError> {
-    match conn.execute(
-        "insert into item_ids(value, source, item_id, created_at) \
-             values (?1, 'display', ?2, ?3)",
-        params![display_id, item_id, now],
-    ) {
-        Ok(_) => Ok(()),
+    match repository::insert_display_resolver(conn, display_id, item_id, now) {
+        Ok(()) => Ok(()),
         Err(rusqlite::Error::SqliteFailure(e, _))
             if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
                 || e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY =>
@@ -342,25 +339,16 @@ fn readopt_backend_ticket(
     adopted: &AdoptedItem,
     now: &str,
 ) -> Result<ReadoptReport, AdoptStoreError> {
-    let (item_class, origin, local_display_id, work_state, closing_reason): (
+    let (item_class, display_id, work_state, closing_reason): (
         ItemClass,
-        Origin,
         String,
         WorkState,
         Option<String>,
     ) = conn.query_row(
-        "select item_class, origin, display_value, work_state, closing_reason \
+        "select item_class, display_value, work_state, closing_reason \
            from items where id = ?1",
         params![&former.item_id],
-        |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-            ))
-        },
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     )?;
 
     if item_class == ItemClass::Epic {
@@ -368,19 +356,24 @@ fn readopt_backend_ticket(
             former.backend_display_id.clone(),
         ));
     }
-    if origin == Origin::Backend {
-        return Err(AdoptStoreError::ReadoptBoundElsewhere {
-            backend_display_id: former.backend_display_id.clone(),
-            bound_display_id: local_display_id,
-        });
-    }
-    if let BackendBinding::PendingPromotion { .. } =
-        mutations::resolve_backend_binding(conn, &former.item_id)?
-    {
-        return Err(AdoptStoreError::ReadoptPendingPromotion {
-            backend_display_id: former.backend_display_id.clone(),
-            local_display_id,
-        });
+    // Backend Binding is the one question both remaining refusals ask, so it is
+    // asked once and exhaustively: an Item holds at most one active Binding,
+    // and a Pending Promotion is still owed a Backend identity of its own that
+    // this rebind would leave no Local Item to bind (ADR-0036).
+    match mutations::resolve_backend_binding(conn, &former.item_id)? {
+        BackendBinding::Backend { .. } => {
+            return Err(AdoptStoreError::ReadoptBoundElsewhere {
+                backend_display_id: former.backend_display_id.clone(),
+                bound_display_id: display_id,
+            });
+        }
+        BackendBinding::PendingPromotion { .. } => {
+            return Err(AdoptStoreError::ReadoptPendingPromotion {
+                backend_display_id: former.backend_display_id.clone(),
+                local_display_id: display_id,
+            });
+        }
+        BackendBinding::Local => {}
     }
 
     // The imported Lifecycle decides the two local fields it can invalidate:
@@ -390,6 +383,12 @@ fn readopt_backend_ticket(
         Lifecycle::Open => (work_state, None),
         Lifecycle::Done => (WorkState::Idle, closing_reason),
     };
+
+    // The Binding records the local Display ID it displaced, which is what a
+    // later Detach restores. The two CHECK-constrained columns come from one
+    // domain value so they cannot be written out of agreement.
+    let provenance = BindingDisplayProvenance::Known(display_id.clone());
+    let (stored_provenance, displaced_display_id) = provenance.stored_values();
 
     // Statement order is load-bearing for the same reason as
     // `promotion::apply_receipt`: `item_ids_one_display_per_item` is a
@@ -422,16 +421,14 @@ fn readopt_backend_ticket(
             work_state.text(),
             closing_reason,
             now,
-            BindingDisplayProvenance::Known(local_display_id.clone())
-                .stored_values()
-                .0,
-            &local_display_id,
+            stored_provenance,
+            displaced_display_id,
         ],
     )?;
 
     Ok(ReadoptReport {
         backend_display_id: former.backend_display_id.clone(),
-        local_display_id,
+        local_display_id: display_id,
         backend_key: former.backend_key.clone(),
         title: adopted.title.clone(),
         ticket_kind: adopted.ticket_kind,
@@ -1785,8 +1782,9 @@ mod tests {
     use crate::domain::work_state::WorkState;
     use crate::store::migrations;
     use crate::store::testing::{
-        FixtureItem, FixtureMutation, FixtureRemote, insert_fixture_item, insert_fixture_mutation,
-        insert_fixture_remote, item_axes,
+        FixtureFormerIdentity, FixtureItem, FixtureMutation, FixtureRemote,
+        insert_fixture_former_identity, insert_fixture_item, insert_fixture_mutation,
+        insert_fixture_remote, item_axes, item_count,
     };
     use rand::SeedableRng;
     use rand::rngs::StdRng;
@@ -4651,12 +4649,15 @@ mod tests {
             },
         )
         .unwrap();
-        conn.execute(
-            "insert into former_backend_identities(backend_kind, backend_key, item_id, \
-                                                    backend_display_value, detached_seq, \
-                                                    detached_at) \
-             values ('github', '42', 'detached', 'gh-42', 1, ?1)",
-            params![NOW],
+        insert_fixture_former_identity(
+            &conn,
+            FixtureFormerIdentity {
+                backend_key: "42",
+                item_id: "detached",
+                backend_display_value: "gh-42",
+                detached_at: NOW,
+                ..FixtureFormerIdentity::default()
+            },
         )
         .unwrap();
 
@@ -4673,17 +4674,15 @@ mod tests {
         .unwrap();
 
         assert!(matches!(outcome, AdoptOutcome::Inserted(_)));
-        let (items, origin): (i64, String) = (
-            conn.query_row("select count(*) from items", [], |row| row.get(0))
-                .unwrap(),
-            conn.query_row(
+        assert_eq!(item_count(&conn).unwrap(), 2);
+        let origin: String = conn
+            .query_row(
                 "select origin from items where id = 'detached'",
                 [],
                 |row| row.get(0),
             )
-            .unwrap(),
-        );
-        assert_eq!((items, origin), (2, "local".to_owned()));
+            .unwrap();
+        assert_eq!(origin, "local");
     }
 
     #[test]
@@ -4705,16 +4704,21 @@ mod tests {
         }
         // Both rows name issue 42. The ownership invariant compares key
         // strings, so the two spellings coexist and Re-Adopt has to choose.
-        // Today's MULTI-INDEX OR plan happens to reach the canonical branch
-        // first; this pins that as the contract, so a rewritten predicate
-        // cannot hand the identity to the other Item on an optimizer whim.
-        for (key, item_id, detached_seq) in [("42", "legacy", 1), (URL_42, "canonical", 2)] {
-            conn.execute(
-                "insert into former_backend_identities(backend_kind, backend_key, item_id, \
-                                                        backend_display_value, detached_seq, \
-                                                        detached_at) \
-                 values ('github', ?1, ?2, 'gh-42', ?3, ?4)",
-                params![key, item_id, detached_seq, NOW],
+        // The lookup's `order by` makes the canonical spelling win; this pins
+        // that as the contract, so a rewritten predicate cannot hand the
+        // identity to the other Item.
+        for (backend_key, item_id, detached_seq) in [("42", "legacy", 1), (URL_42, "canonical", 2)]
+        {
+            insert_fixture_former_identity(
+                &conn,
+                FixtureFormerIdentity {
+                    backend_key,
+                    item_id,
+                    backend_display_value: "gh-42",
+                    detached_seq,
+                    detached_at: NOW,
+                    ..FixtureFormerIdentity::default()
+                },
             )
             .unwrap();
         }

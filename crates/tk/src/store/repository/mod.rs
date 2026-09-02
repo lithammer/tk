@@ -367,7 +367,11 @@ pub(crate) fn current_display_id(conn: &Connection, item_id: &str) -> rusqlite::
 }
 
 /// Insert the current Display ID resolver row paired with an Item write.
-fn insert_display_resolver(
+///
+/// The unique/primary-key violation a claimed value raises is left to the
+/// caller: Adopt intake classifies it as a Display ID collision, while the
+/// Promotion and Detach transitions let it roll their transaction back.
+pub(crate) fn insert_display_resolver(
     conn: &Connection,
     display_id: &str,
     item_id: &str,

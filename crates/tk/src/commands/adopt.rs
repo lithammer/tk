@@ -213,11 +213,13 @@ mod tests {
     use crate::commands::detach;
     use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
     use crate::domain::backend_operation::BackendItemIdentity;
+    use crate::domain::lifecycle::Lifecycle;
+    use crate::domain::work_state::WorkState;
     use crate::proc::{ProcError, RunOutput};
     use crate::store::testing::{
         FixtureItem, FixtureMutation, FixtureRemote, TmpStore, apply_promotion_receipt,
         insert_dependency, insert_fixture_item, insert_fixture_mutation, insert_fixture_remote,
-        mutation_count,
+        item_axes, item_count, mutation_count,
     };
     use rusqlite::Connection;
 
@@ -656,7 +658,7 @@ mod tests {
     /// Local Item plus the canonical Former Backend Identity that Re-Adopt
     /// matches. Seeding that history by hand would let the fixture drift from
     /// what Detach actually writes.
-    fn detach(store: &TmpStore, cwd_path: &Path, id: &str) {
+    fn detach_item(store: &TmpStore, cwd_path: &Path, id: &str) {
         let mut h = Harness::new(cwd_path);
         expect_git(&h, store);
         let mut deps = h.deps();
@@ -666,9 +668,9 @@ mod tests {
     }
 
     /// Queue the `gh issue view` call Adopt canonicalizes `<key>` through.
-    fn expect_issue_view(h: &Harness<'_>, key: &str, number: i64, state: &str, issue_type: &str) {
+    fn expect_issue_view(h: &Harness<'_>, number: i64, state: &str, issue_type: &str) {
         h.runner.expect(
-            &["gh", "issue", "view", key],
+            &["gh", "issue", "view", &number.to_string()],
             ok(&issue_json(
                 number,
                 state,
@@ -676,6 +678,25 @@ mod tests {
                 &format!("https://github.com/o/r/issues/{number}"),
             )),
         );
+    }
+
+    /// The canonical identity the fixture Item is bound to, or `""` when it is
+    /// Local.
+    fn stored_backend_key(conn: &Connection) -> String {
+        conn.query_row(
+            "select coalesce(backend_key, '') from items where id = 'stable'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    /// The fixture Item's Origin.
+    fn stored_origin(conn: &Connection) -> String {
+        conn.query_row("select origin from items where id = 'stable'", [], |row| {
+            row.get(0)
+        })
+        .unwrap()
     }
 
     /// Every `item_ids` row for one Item, as `(value, source)` in value order.
@@ -686,16 +707,6 @@ mod tests {
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap()
-    }
-
-    /// The Lifecycle, Work State, and Closing Reason one Item now holds.
-    fn local_axes(conn: &Connection, item_id: &str) -> (String, String, Option<String>) {
-        conn.query_row(
-            "select status, work_state, closing_reason from items where id = ?1",
-            [item_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .unwrap()
     }
 
     #[test]
@@ -743,11 +754,11 @@ mod tests {
         .unwrap();
         insert_dependency(&conn, "stable", "waiter").unwrap();
         let cwd_path = cwd();
-        detach(&store, &cwd_path, "gh-42");
+        detach_item(&store, &cwd_path, "gh-42");
 
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        expect_issue_view(&h, "42", 42, "OPEN", "Bug");
+        expect_issue_view(&h, 42, "OPEN", "Bug");
 
         let exit = run_rendered(&mut h, "42");
 
@@ -765,17 +776,15 @@ mod tests {
 
         // One Backend object keeps one representation: the same stable Item is
         // rebound, and no fresh created_seq is spent on a duplicate.
-        let (items, created_seq): (i64, i64) = (
-            conn.query_row("select count(*) from items", [], |r| r.get(0))
-                .unwrap(),
-            conn.query_row(
+        assert_eq!(item_count(&conn).unwrap(), 3);
+        let created_seq: i64 = conn
+            .query_row(
                 "select value from sequences where name = 'item_created_seq'",
                 [],
                 |r| r.get(0),
             )
-            .unwrap(),
-        );
-        assert_eq!((items, created_seq), (3, 0));
+            .unwrap();
+        assert_eq!(created_seq, 0);
 
         // The Backend snapshot replaces the shared fields; Item Class, Local
         // Fields, and relationships stay as the Item held them locally.
@@ -876,14 +885,14 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        detach(&store, &cwd_path, "gh-42");
+        detach_item(&store, &cwd_path, "gh-42");
 
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        expect_issue_view(&h, "42", 42, "OPEN", "null");
+        expect_issue_view(&h, 42, "OPEN", "null");
         assert_eq!(run_rendered(&mut h, "42"), Exit::Ok, "stderr={}", h.err());
 
-        detach(&store, &cwd_path, "gh-42");
+        detach_item(&store, &cwd_path, "gh-42");
 
         // The cycle mints no identity and no Display ID: one canonical Backend
         // object keeps one history row, and the Item returns to the exact
@@ -937,11 +946,11 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        detach(&store, &cwd_path, "gh-42");
+        detach_item(&store, &cwd_path, "gh-42");
 
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        expect_issue_view(&h, "42", 42, "OPEN", "null");
+        expect_issue_view(&h, 42, "OPEN", "null");
 
         let exit = run_rendered(&mut h, "42");
 
@@ -967,11 +976,11 @@ mod tests {
         // bare issue number into history.
         insert_fixture_item(&conn, backend_ticket("gh-42", "42")).unwrap();
         let cwd_path = cwd();
-        detach(&store, &cwd_path, "gh-42");
+        detach_item(&store, &cwd_path, "gh-42");
 
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        expect_issue_view(&h, "42", 42, "OPEN", "null");
+        expect_issue_view(&h, 42, "OPEN", "null");
 
         let exit = run_rendered(&mut h, "42");
 
@@ -979,17 +988,8 @@ mod tests {
         assert!(h.out().contains("Backend object: 42\n"), "{}", h.out());
         // The restored Binding takes history's spelling, so one Backend object
         // never sits in the Store as both an active and a former identity.
-        let (items, backend_key): (i64, String) = (
-            conn.query_row("select count(*) from items", [], |r| r.get(0))
-                .unwrap(),
-            conn.query_row(
-                "select backend_key from items where id = 'stable'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap(),
-        );
-        assert_eq!((items, backend_key), (1, "42".to_owned()));
+        assert_eq!(item_count(&conn).unwrap(), 1);
+        assert_eq!(stored_backend_key(&conn), "42");
     }
 
     #[test]
@@ -1006,11 +1006,11 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        detach(&store, &cwd_path, "gh-42");
+        detach_item(&store, &cwd_path, "gh-42");
 
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        expect_issue_view(&h, "42", 42, "OPEN", "null");
+        expect_issue_view(&h, 42, "OPEN", "null");
 
         let exit = run_rendered(&mut h, "42");
 
@@ -1020,8 +1020,8 @@ mod tests {
         // exception unmatched and abort a Re-Adopt of a legacy-keyed done Item.
         assert_eq!(exit, Exit::Ok, "stderr={}", h.err());
         assert_eq!(
-            local_axes(&conn, "stable"),
-            ("open".to_owned(), "idle".to_owned(), None)
+            item_axes(&conn, "stable").unwrap(),
+            (Lifecycle::Open, WorkState::Idle)
         );
     }
 
@@ -1039,19 +1039,19 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        detach(&store, &cwd_path, "gh-42");
+        detach_item(&store, &cwd_path, "gh-42");
 
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        expect_issue_view(&h, "42", 42, "CLOSED", "null");
+        expect_issue_view(&h, 42, "CLOSED", "null");
 
         let exit = run_rendered(&mut h, "42");
 
         assert_eq!(exit, Exit::Ok, "stderr={}", h.err());
         assert!(h.out().contains("Status: done\n"), "{}", h.out());
         assert_eq!(
-            local_axes(&conn, "stable"),
-            ("done".to_owned(), "idle".to_owned(), None)
+            item_axes(&conn, "stable").unwrap(),
+            (Lifecycle::Done, WorkState::Idle)
         );
     }
 
@@ -1069,11 +1069,11 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        detach(&store, &cwd_path, "gh-42");
+        detach_item(&store, &cwd_path, "gh-42");
 
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        expect_issue_view(&h, "42", 42, "OPEN", "null");
+        expect_issue_view(&h, 42, "OPEN", "null");
 
         let exit = run_rendered(&mut h, "42");
 
@@ -1082,8 +1082,8 @@ mod tests {
         // survives the shared Lifecycle it imports.
         assert!(h.out().contains("Status: active\n"), "{}", h.out());
         assert_eq!(
-            local_axes(&conn, "stable"),
-            ("open".to_owned(), "active".to_owned(), None)
+            item_axes(&conn, "stable").unwrap(),
+            (Lifecycle::Open, WorkState::Active)
         );
     }
 
@@ -1106,11 +1106,11 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        detach(&store, &cwd_path, "gh-42");
+        detach_item(&store, &cwd_path, "gh-42");
 
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        expect_issue_view(&h, "42", 42, "OPEN", "null");
+        expect_issue_view(&h, 42, "OPEN", "null");
 
         let exit = run_rendered(&mut h, "42");
 
@@ -1119,9 +1119,17 @@ mod tests {
         // The Closing Reason CHECK confines it to `done`, so importing `open`
         // has to drop it (ADR-0006's Re-Adopt exception, ADR-0023).
         assert_eq!(
-            local_axes(&conn, "stable"),
-            ("open".to_owned(), "idle".to_owned(), None)
+            item_axes(&conn, "stable").unwrap(),
+            (Lifecycle::Open, WorkState::Idle)
         );
+        let closing_reason: Option<String> = conn
+            .query_row(
+                "select closing_reason from items where id = 'stable'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(closing_reason, None);
     }
 
     #[test]
@@ -1135,7 +1143,7 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        detach(&store, &cwd_path, "gh-42");
+        detach_item(&store, &cwd_path, "gh-42");
         apply_promotion_receipt(
             &mut conn,
             "stable",
@@ -1150,7 +1158,7 @@ mod tests {
 
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        expect_issue_view(&h, "42", 42, "OPEN", "null");
+        expect_issue_view(&h, 42, "OPEN", "null");
 
         let exit = run_rendered(&mut h, "42");
 
@@ -1160,20 +1168,11 @@ mod tests {
             "tk adopt: gh-42 belongs to the Item now bound as gh-99; \
              run 'tk detach gh-99' before re-adopting gh-42\n"
         );
-        let (items, backend_key): (i64, String) = (
-            conn.query_row("select count(*) from items", [], |r| r.get(0))
-                .unwrap(),
-            conn.query_row(
-                "select backend_key from items where id = 'stable'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap(),
-        );
+        // A refusal must neither rebind the Item nor create a second one.
+        assert_eq!(item_count(&conn).unwrap(), 1);
         assert_eq!(
-            (items, backend_key),
-            (1, "https://github.com/o/r/issues/99".to_owned()),
-            "a refusal must neither rebind the Item nor create a second one"
+            stored_backend_key(&conn),
+            "https://github.com/o/r/issues/99"
         );
     }
 
@@ -1188,7 +1187,7 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        detach(&store, &cwd_path, "gh-42");
+        detach_item(&store, &cwd_path, "gh-42");
         insert_fixture_mutation(
             &conn,
             FixtureMutation {
@@ -1205,7 +1204,7 @@ mod tests {
 
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        expect_issue_view(&h, "42", 42, "OPEN", "null");
+        expect_issue_view(&h, 42, "OPEN", "null");
 
         let exit = run_rendered(&mut h, "42");
 
@@ -1217,12 +1216,7 @@ mod tests {
             "tk adopt: gh-42 belongs to tk-1, which has a Pending Promotion; \
              run 'tk promote cancel tk-1' before re-adopting gh-42\n"
         );
-        let origin: String = conn
-            .query_row("select origin from items where id = 'stable'", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(origin, "local");
+        assert_eq!(stored_origin(&conn), "local");
     }
 
     #[test]
@@ -1243,11 +1237,11 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        detach(&store, &cwd_path, "gh-5");
+        detach_item(&store, &cwd_path, "gh-5");
 
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        expect_issue_view(&h, "5", 5, "OPEN", "null");
+        expect_issue_view(&h, 5, "OPEN", "null");
 
         let exit = run_rendered(&mut h, "5");
 
@@ -1259,15 +1253,8 @@ mod tests {
         );
         // Refusing beats falling through: ordinary intake would have inserted
         // a second Item for a Backend object the Epic still owns.
-        let (items, origin): (i64, String) = (
-            conn.query_row("select count(*) from items", [], |r| r.get(0))
-                .unwrap(),
-            conn.query_row("select origin from items where id = 'stable'", [], |r| {
-                r.get(0)
-            })
-            .unwrap(),
-        );
-        assert_eq!((items, origin), (1, "local".to_owned()));
+        assert_eq!(item_count(&conn).unwrap(), 1);
+        assert_eq!(stored_origin(&conn), "local");
     }
 
     #[test]
@@ -1280,7 +1267,7 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        detach(&store, &cwd_path, "gh-42");
+        detach_item(&store, &cwd_path, "gh-42");
 
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
