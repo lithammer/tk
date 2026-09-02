@@ -1,8 +1,10 @@
 # Done is terminal in v1
 
-> **Amended by ADR-0046.** Sync Skip of an Item's failed closing Mutation is
-> the only v1 exception: it relinquishes the close and restores Lifecycle to
-> `open`. General local and remote reopen remain deferred.
+> **Amended by ADR-0046 and ADR-0047.** Two narrow v1 exceptions restore
+> Lifecycle to `open`: Sync Skip of an Item's failed closing Mutation
+> relinquishes that close, and exact Re-Adopt imports the Backend snapshot's
+> Lifecycle onto the Item its own Former Backend Identity reserves. General
+> local and remote reopen remain deferred.
 
 Once a Ticket or Epic is `done`, v1 refuses to transition it back to
 `active` or `open`; the Repository Store enforces this with a schema

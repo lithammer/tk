@@ -153,4 +153,8 @@ incomplete.
   retaining Mutation Failure evidence.
 - Re-Adopt extends Adopt's Store path to existing Tickets and Epics but does not
   add general Backend Epic intake.
+- An imported `open` Lifecycle is a second narrow exception to the
+  done-terminal trigger beside ADR-0046's. It is authorized only while one
+  `items` update moves a Local Item onto a canonical identity its own Former
+  Backend Identity reserves, so the authorization cannot outlive the rebind.
 - Forget remains a separately tracked destructive operation.
