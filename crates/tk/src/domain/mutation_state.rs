@@ -29,7 +29,7 @@ use std::fmt;
 /// | `applying` | `pending` | cleared | Promotion Retry |
 /// | `pending`, `failed`, `applying` | `failed` | recorded | a certified Backend rejection |
 /// | `failed` | `skipped` | preserved | Sync Skip |
-/// | `pending`, `failed` | `cancelled` | preserved | Promotion Cancellation; migration 011 |
+/// | `pending`, `failed` | `cancelled` | preserved | Promotion Cancellation; Detach; migration 011 |
 /// | `applying` | `abandoned` | preserved | Promotion Cancellation |
 /// | `pending`, `failed`, `applying` | `applied` | cleared | a persisted Backend effect |
 ///
@@ -48,8 +48,10 @@ pub enum MutationState {
     Applying,
     /// Human-curated terminal omission after sync failed on the Mutation.
     Skipped,
-    /// Terminally withdrawn by Promotion Cancellation, never attempted, so
-    /// nothing it would have created exists on the Backend.
+    /// Unapplied Backend intent terminally withdrawn by Promotion
+    /// Cancellation, Detach, or a Store migration. Only `pending` and `failed`
+    /// reach it, so the Mutation never took effect on the Backend — a `failed`
+    /// row was attempted and certifiably rejected.
     Cancelled,
     /// Terminally withdrawn by Promotion Cancellation before any Backend
     /// identity was recorded, so a Backend object may exist that tk cannot

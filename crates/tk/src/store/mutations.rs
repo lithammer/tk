@@ -90,8 +90,10 @@ pub fn append(conn: &Connection, req: AppendRequest<'_>) -> Result<i64, AppendEr
 ///
 /// The Mutation Type owns whether its payload addresses an Epic, a Blocking
 /// Item, or no counterpart. Keeping that rule with its decoder stops Store
-/// workflows from duplicating the Mutation Log payload contract.
-pub fn addressed_counterpart_id(
+/// workflows from duplicating the Mutation Log payload contract; they reach it
+/// through [`WithdrawalCandidate::addressed_counterpart_id`], which owns the
+/// row the payload belongs to.
+fn addressed_counterpart_id(
     mutation_type: MutationType,
     payload_json: &str,
 ) -> Result<Option<String>, serde_json::Error> {

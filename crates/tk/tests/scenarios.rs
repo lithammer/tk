@@ -682,7 +682,8 @@ fn detach_adopted_ticket_through_cli_dispatch() {
                 sequence, mutation_type, item_id, item_class, payload_json, state, \
                 created_at, state_changed_at \
              ) values ( \
-                1, 'update_ticket', 'stable-id', 'ticket', '{}', 'pending', \
+                1, 'update_ticket', 'stable-id', 'ticket', \
+                '{\"title\":\"Backend work\",\"body\":\"Details\"}', 'pending', \
                 '2026-05-01T00:00:00.000Z', '2026-05-01T00:00:00.000Z' \
              )",
             [],

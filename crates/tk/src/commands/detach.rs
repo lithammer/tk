@@ -64,19 +64,19 @@ fn promotion_remedy(promotion: &promotion::MutationSummary) -> String {
              'tk promote retry {target}' only when creating it again is safe, or 'tk promote cancel {target}' to withdraw the Promotion Operation, \
              leaving any object it created untracked. Then detach again."
         ),
-        // A terminal Promotion never reaches here: only nonterminal rows are
-        // unresolved. Exhaustive so a Mutation state added later has to say
-        // which remedy it offers.
-        MutationState::Pending
-        | MutationState::Failed
-        | MutationState::Applied
-        | MutationState::Skipped
-        | MutationState::Cancelled
-        | MutationState::Abandoned => format!(
+        MutationState::Pending | MutationState::Failed => format!(
             "Run 'tk sync' to let Mutation {} resolve, 'tk promote reconcile {target} <backend-key>' if the Backend object already exists, \
              or 'tk promote cancel {target}' to withdraw the Promotion Operation. Then detach again.",
             promotion.sequence
         ),
+        // Exhaustive so a Mutation state added later has to say which remedy it
+        // offers rather than inheriting one that its state may refuse.
+        MutationState::Applied
+        | MutationState::Skipped
+        | MutationState::Cancelled
+        | MutationState::Abandoned => {
+            unreachable!("promotion::unresolved_promotion returns only nonterminal Promotions")
+        }
     }
 }
 
@@ -710,11 +710,8 @@ mod tests {
         state_changed_at: String,
     }
 
-    fn mutation_states(conn: &rusqlite::Connection) -> Vec<String> {
-        mutation_rows(conn)
-            .into_iter()
-            .map(|row| row.state)
-            .collect()
+    fn states(rows: &[MutationRow]) -> Vec<&str> {
+        rows.iter().map(|row| row.state.as_str()).collect()
     }
 
     fn mutation_rows(conn: &rusqlite::Connection) -> Vec<MutationRow> {
@@ -870,7 +867,7 @@ mod tests {
         );
         let after = mutation_rows(&conn);
         assert_eq!(
-            mutation_states(&conn),
+            states(&after),
             [
                 "applied",
                 "cancelled",
@@ -978,10 +975,7 @@ mod tests {
              Withdrew add_ticket_to_epic for gh-10 (Mutation 3)\n"
         );
         let rows = mutation_rows(&conn);
-        assert_eq!(
-            mutation_states(&conn),
-            ["applied", "cancelled", "cancelled"]
-        );
+        assert_eq!(states(&rows), ["applied", "cancelled", "cancelled"]);
         assert_eq!(
             rows[2].failure_json.as_deref(),
             Some(r#"{"detail":"sub-issues unavailable"}"#)
@@ -1083,7 +1077,7 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(origin, "backend");
-            assert_eq!(mutation_states(&conn), [state, "pending"]);
+            assert_eq!(states(&mutation_rows(&conn)), [state, "pending"]);
         }
     }
 
@@ -1148,7 +1142,7 @@ mod tests {
              Backend object left unchanged: https://github.com/o/r/issues/42\n\
              Withdrew update_ticket for tk-1 (Mutation 2)\n"
         );
-        assert_eq!(mutation_states(&conn), ["applying", "cancelled"]);
+        assert_eq!(states(&mutation_rows(&conn)), ["applying", "cancelled"]);
     }
 
     #[test]
