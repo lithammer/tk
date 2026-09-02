@@ -220,6 +220,7 @@ can only refuse one already produced.
 - gh-52 closes only its expressibility half: pushing Work State to a Backend
   becomes structurally impossible rather than discouraged. ADR-0044 narrows
   the **Backend Pull** shield to title/body, so a pending content Mutation no
-  longer hides a Backend close from Pull. tk-126 and gh-53 still own broader
-  done-Item reconciliation. gh-68 becomes a cleaner question once Work State
-  could carry its own Mutation Type.
+  longer hides a Backend close from Pull. ADR-0046 owns a skipped failed close;
+  tk-198 owns skipped content on a done Item. General remote reopen remains
+  deferred. gh-68 becomes a cleaner question once Work State could carry its
+  own Mutation Type.

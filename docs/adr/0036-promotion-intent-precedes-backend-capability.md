@@ -11,6 +11,10 @@
 > seam, but a requested repository-specific facet may require a Backend read
 > before Promotion intent commits. Repository-invariant facets resolve without
 > I/O.
+>
+> **Amended by ADR-0047.** A Former Backend Identity is retained history, not
+> Backend Binding. Detach holds the Remote workflow lock, but an unrelated
+> `applying` Promotion does not block it because Detach opens no Adapter.
 
 tk-136 builds the whole local half of Promotion — preflight, the ordered
 outbox, and receipt application — before a Backend in the same build may act

@@ -48,5 +48,4 @@ existing all-or-nothing merge transaction.
 
 If Backend close lands while content intent is unresolved, and that Mutation
 later fails and is explicitly skipped, the done Item leaves Pull and its local
-content does not self-heal. tk-126 and gh-53 own broader done-Item
-reconciliation.
+content does not self-heal. tk-198 owns that targeted reconciliation.

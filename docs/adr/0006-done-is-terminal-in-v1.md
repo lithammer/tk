@@ -1,5 +1,9 @@
 # Done is terminal in v1
 
+> **Amended by ADR-0046.** Sync Skip of an Item's failed closing Mutation is
+> the only v1 exception: it relinquishes the close and restores Lifecycle to
+> `open`. General local and remote reopen remain deferred.
+
 Once a Ticket or Epic is `done`, v1 refuses to transition it back to
 `active` or `open`; the Repository Store enforces this with a schema
 trigger so any future write path inherits the protection. The
@@ -15,7 +19,6 @@ has no recorded need for it.
 
 ## Consequences
 
-Backend Pull's handling of remote reopens for items already imported as
-`done` is deferred to the Backend Pull slice; it may require relaxing
-the trigger, adding an `origin = 'local'` guard, or shaping Backend
-Pull around a delete-and-reinsert pattern.
+Backend Pull does not observe general remote reopens for Items already imported
+as `done`. ADR-0046's Sync Skip exception is narrower and does not add done
+Items to the Pull working set.

@@ -206,7 +206,38 @@ _Avoid_: Remote Epic, Synced Epic
 
 **Adopt**:
 The **`tk`** command intent for bringing an existing **Backend** issue into the **Repository Store** as a **Backend Ticket** to be worked locally and synced, without creating a new backend issue. The inverse intake direction to **Promotion**, which instead pushes a **Local** item up to a **Backend**.
+Re-Adopting an exact **Former Backend Identity** restores the **Backend
+Binding** to the same Item instead of creating another Item. This is the only
+way Adopt restores a **Backend Epic**; an unknown Backend object still enters
+as a Ticket. The Backend's current Display ID becomes the Item's Display ID
+again, and the current local Display ID becomes an **Alias**. The Backend
+snapshot replaces
+title, body, **Lifecycle**, and **Ticket Kind** for a Ticket; **Local Fields**,
+**Item Class**, and relationships stay local. An imported `done` Lifecycle
+clears **Work State**, while `open` preserves it and clears an incompatible
+**Closing Reason**. Re-Adopt preflights the resulting relationship graph like
+**Promotion** and appends fresh Mutations for relationships that become
+Backend intent. It never revives Mutations withdrawn by **Detach**.
+The rebind and those Mutations commit atomically; Re-Adopt reports each queued
+Mutation and leaves ordered application to **`tk sync`**.
 _Avoid_: Track, Link, Import, Watch
+
+**Detach**:
+The explicit `tk detach <id>` operation that removes the **Backend Binding**
+from a concrete **Backend Ticket** or **Backend Epic** while retaining it as a
+**Local Ticket** or **Local Epic**. It opens no **Backend Adapter** and never
+edits or deletes the Backend object. For a **Pending Promotion**, Detach points
+to **Promotion Cancellation** instead.
+Detach withdraws every pending or failed **Mutation** that would require the
+removed identity and preserves terminal Mutation history. It preserves the
+Item's fields, state, selection, and relationships. It restores the local
+Display ID displaced by the current Binding; only an Item that has never had a
+local Display ID receives a fresh one. The Backend Display ID leaves the
+resolver; the canonical **Former Backend Identity** remains the exact re-Adopt
+proof. Detach refuses when an affected Mutation belongs to an unresolved
+**Promotion Operation**; resolving or cancelling that operation is an explicit
+prerequisite.
+_Avoid_: Un-adopt, Unlink, Delete
 
 **Promotion**:
 The act of converting a **Local Ticket** or **Local Epic** into a backend-backed object through the **Primary Backend**.
@@ -229,6 +260,22 @@ will carry one once its **Promotion** applies, and a **Local Ticket** or
 **Local Epic** with no **Promotion** intent is not bound at all. Derived from
 **Origin** and the **Mutation Log** together; never stored as a field.
 _Avoid_: Backend Intent, Backend State, Promotion State
+
+**Former Backend Identity**:
+The canonical identity of a Backend object retained after **Detach**. It is
+history, not a **Backend Binding**: the Local Item is outside Backend Pull and
+new local changes create no Mutations for that object. It does not constrain
+the configured **Remote** or its retained Backend cohort. An Item may retain
+more than one Former Backend Identity but has at most one active Binding. Each
+former identity remains globally reserved to its Item for that Item's
+lifetime. Re-Adopting an exact former identity restores the Binding to the same
+Item rather than creating a second local representation. Adopt refuses to
+restore it while the Item is already bound elsewhere. Re-Adopt requires a
+configured Remote of the
+matching Backend kind and normal Adapter verification.
+Former identities remain until the Item itself is removed; ordinary cleanup
+never prunes them.
+_Avoid_: Dormant Binding, Detach ID, Stale Binding
 
 **Promotion Operation**:
 The durable identity of one `tk promote` invocation, shared by every
@@ -317,14 +364,16 @@ _Avoid_: Unknown Outcome, Ambiguous Creation, In Doubt
 
 **Skipped Mutation**:
 A **Mutation** explicitly bypassed during sync without being applied to a
-**Backend**, produced only by **Sync Skip**.
+**Backend**, produced only by **Sync Skip**. Skipping relinquishes its Backend
+intent; it does not mean the Backend applied it.
 _Avoid_: Ignored Mutation, Cancelled Mutation
 
 **Cancelled Mutation**:
-A **Mutation** terminally withdrawn by **Promotion Cancellation**, never applied
-and never attempted, so nothing it would have created exists on the **Backend**.
-Distinct from a **Skipped Mutation**, which sync failed on before a human
-bypassed it.
+A **Mutation** whose unapplied Backend intent was terminally withdrawn by
+**Promotion Cancellation**, **Detach**, or a Store migration. It may have been
+pending or failed, but it never took effect on the **Backend**. Distinct from a
+**Skipped Mutation**, whose Backend intent was relinquished while the Backend
+Binding remained.
 _Avoid_: Skipped Mutation, Abandoned Mutation, Deleted Mutation, Aborted Mutation
 
 **Abandoned Mutation**:
@@ -335,7 +384,10 @@ address and will never refresh. Usually the outcome was **Indeterminate**; a
 _Avoid_: Cancelled Mutation, Orphaned Mutation, Stranded Promotion
 
 **Sync Skip**:
-The **`tk sync`** mode that marks one failed **Mutation** as skipped and continues sync.
+The **`tk sync`** mode that marks one failed **Mutation** as skipped and
+continues sync. Skipping a failed closing Mutation restores that Item's
+**Lifecycle** to `open`, leaves **Work State** `idle`, and clears its **Closing
+Reason** in the same Repository Store transaction.
 _Avoid_: Skip Command
 
 **Sync Log**:
@@ -422,10 +474,18 @@ _Avoid_: ticket, tickets
 - **Aliases** are globally unique across **Tickets** and **Epics**.
 - **Start** sets a **Ticket** or **Epic** to `active`.
 - **Stop** moves an active **Ticket** or **Epic** back to `open`.
-- **`done`** is terminal in v1: once a **Ticket** or **Epic** is `done`, **Start** and **Stop** refuse to transition it back to `active` or `open`. The **Repository Store** enforces this with a schema trigger; resurrection through a dedicated `tk reopen` command is deferred from v1.
+- **`done`** is terminal for local Lifecycle commands in v1: once a **Ticket**
+  or **Epic** is `done`, **Start** and **Stop** refuse to transition it back to
+  `active` or `open`. **Sync Skip** of that Item's failed closing **Mutation**
+  is the only v1 exception: relinquishing the close intent permits the shared
+  **Lifecycle** to return to `open`. v1 has no dedicated `tk reopen` command.
 - The **`done`** terminal rule constrains **Item Status** transitions only; title, body, **Priority**, and **Epic** membership remain editable on a `done` item.
 - **`tk`** does not manage git worktrees; checkout creation is the harness's or the user's responsibility via `git worktree`.
 - **`tk show`**, **`tk update`**, **`tk start`**, **`tk stop`**, **`tk done`**, and **`tk promote`** require an explicit **Display ID** in v1.
+- **`tk show`** renders an Item's **Former Backend Identities**, most recently
+  detached first. It lists each canonical identity once by its latest Detach
+  and omits the current Backend Binding. List, next, and search views do not
+  surface that history.
 - **Prime** provides agent workflow guidance, essential commands, and close-out reminders.
 - v1 **Prime** prints static command-owned Markdown embedded from `crates/tk/src/commands/prime.md` via Rust `include_str!`.
 - **Prime** prints its briefing only when a **Repository Store** is initialized and openable in the current directory; in every other case — no store, outside a git repository, or any store-open failure — it exits 0 with empty stdout and empty stderr so a global agent hook can run it in any directory without noise.
@@ -446,7 +506,10 @@ _Avoid_: ticket, tickets
   complete Backend Ticket identity; Pull receives only fields for an
   already-tracked Item.
 - Sync runs **Backend Pull** before applying pending **Mutations** in v1.
-- **Adopt** and **Promotion** are the two intake directions across the local/**Backend** boundary; both yield a **Backend Ticket**, and tk syncs only items that entered through one of them.
+- **Adopt** and **Promotion** are the two intake directions across the
+  local/**Backend** boundary. Ordinary Adopt yields a **Backend Ticket**;
+  Re-Adopt of an exact **Former Backend Identity** may instead restore its
+  **Backend Epic**. tk syncs only items that entered through one of them.
 - tk does not mirror or auto-discover a **Backend**; **Backend Pull** refreshes only the **Adopted** **Backend** items that are not `done`.
 - Retained **Backend** Items and non-terminal **Promotions** use one Backend kind. A Backend read or Promotion commit rechecks the configured **Remote** before writing; if it changed, retry the command.
 - An edit Apply returns acknowledgement or rejection; an environment failure
@@ -549,9 +612,12 @@ _Avoid_: ticket, tickets
 - A **Sync Conflict** is a kind of **Mutation Failure**.
 - v1 has no automatic merge or local conflict resolution model.
 - A failed **Mutation** may become a **Skipped Mutation** only through **Sync Skip**.
-- A **Mutation** may become a **Cancelled Mutation** only through **Promotion
-  Cancellation**, from `pending` as readily as from `failed`. A **Promotion**
-  itself can only ever be cancelled or abandoned, never skipped.
+- **Sync Skip** never removes a **Backend Binding**. When the Backend object can
+  no longer be refreshed, **Detach** is the explicit non-destructive recovery.
+- A **Mutation** may become a **Cancelled Mutation** through **Promotion
+  Cancellation**, **Detach**, or a Store migration, from `pending` as readily
+  as from `failed`. A **Promotion** itself can only ever be cancelled or
+  abandoned, never skipped.
 - Only a **Promotion** may become an **Abandoned Mutation**, and only from
   `applying`. The **Mutations** withdrawn alongside it were never attempted, so
   they are cancelled.
@@ -579,8 +645,13 @@ _Avoid_: ticket, tickets
   changing its **Origin**.
 - Adding a **Local Ticket** to an **Epic** does not imply **Promotion**.
 - **Promotion** changes a **Local Ticket** or **Local Epic** into a backend-backed object in place.
+- **Promotion** preserves **Former Backend Identities**; a detached Local Item
+  may be promoted to a new Backend object without forgetting old Bindings.
 - **Promotion** replaces a local **Display ID** with the backend **Display ID**.
 - The replaced local **Display ID** remains an **Alias**.
+- Every Binding records the local **Display ID** it displaced. A later
+  **Detach** restores that ID, including after repeated Detach and Re-Adopt
+  cycles.
 - **Promotion** does not include contained **Tickets** unless `--children` is used.
 - v1 **Promotion Children** are directly contained **Local Tickets** only.
 - **Promotion Children** do not follow **Dependencies**.
@@ -623,6 +694,17 @@ _Avoid_: ticket, tickets
   operation. A half-represented **Dependency** would leave a backend-backed
   item exposing an incomplete blocking constraint; half-represented membership
   costs only grouping.
+- **Detach** preserves **Dependencies**, **Epic Membership**, and **External
+  Blockers**. It refuses to turn a **Blocking Item** local while its **Blocked
+  Item** remains backend-bound; that **Dependency** must be removed first.
+  Mixed-**Origin** membership stays local, and a detached **Blocked Item** may
+  keep its Dependencies.
+- Re-Adopt preflights preserved relationships under the same resulting-graph
+  rules as **Promotion**. It appends new Mutations for every relationship that
+  becomes representable Backend intent, rejects an invalid **Dependency**, and
+  leaves mixed-**Origin** Epic Membership local.
+- Re-Adopt records its restored Binding and relationship Mutations in one
+  transaction but does not run sync. Its report names each queued Mutation.
 - **Dependency** and **Epic Membership** sync are push-only. **Backend Pull**
   refreshes fields alone and reconciles neither relationship, so the
   **Repository Store** stays authoritative for both.
