@@ -154,8 +154,6 @@ pub enum AdoptOutcome {
 /// Identity history already reserved to it (ADR-0047).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadoptReport {
-    /// Item Class preserved across the restored Binding.
-    pub item_class: ItemClass,
     /// Backend Display ID made current by Re-Adopt.
     pub backend_display_id: String,
     /// Local Display ID demoted to an Alias, which a later Detach restores.
@@ -173,6 +171,18 @@ pub struct ReadoptReport {
     /// Fresh relationship intent appended by the Re-Adopt transaction, in
     /// Mutation Sequence order (ADR-0047).
     pub queued_relationships: Vec<QueuedRelationshipMutation>,
+}
+
+impl ReadoptReport {
+    /// Derive the preserved Item Class from the Ticket-only Kind enforced by
+    /// the Repository Store schema.
+    #[must_use]
+    pub fn item_class(&self) -> ItemClass {
+        match self.ticket_kind {
+            Some(_) => ItemClass::Ticket,
+            None => ItemClass::Epic,
+        }
+    }
 }
 
 /// One relationship Mutation queued while restoring a Former Backend
@@ -471,7 +481,6 @@ fn readopt_backend_item(
     }
 
     Ok(ReadoptReport {
-        item_class,
         backend_display_id: former.backend_display_id.clone(),
         local_display_id: display_id,
         backend_key: former.backend_key.clone(),

@@ -139,7 +139,7 @@ fn render_readopt(stdout: &mut dyn std::io::Write, report: &store_sync::ReadoptR
     let _ = writeln!(
         stdout,
         "Re-adopted {}: {} - {}",
-        report.item_class.label(),
+        report.item_class().label(),
         report.backend_display_id,
         report.title
     );
@@ -1215,11 +1215,11 @@ mod tests {
             },
         )
         .expect("list detached Item");
-        assert!(list_h.out().contains("tk-1"), "stdout={}", list_h.out());
+        let list_output = list_h.out();
+        assert!(list_output.contains("tk-1"), "stdout={list_output}");
         assert!(
-            !list_h.out().contains("https://github.com/"),
-            "Former Backend Identity stays out of list: stdout={}",
-            list_h.out()
+            !list_output.contains("https://github.com/"),
+            "Former Backend Identity stays out of list: stdout={list_output}"
         );
 
         let mut next_h = Harness::new(&cwd_path);
@@ -1243,11 +1243,11 @@ mod tests {
             },
         )
         .expect("search detached Item");
-        assert!(search_h.out().contains("tk-1"), "stdout={}", search_h.out());
+        let search_output = search_h.out();
+        assert!(search_output.contains("tk-1"), "stdout={search_output}");
         assert!(
-            !search_h.out().contains("https://github.com/"),
-            "Former Backend Identity stays out of search: stdout={}",
-            search_h.out()
+            !search_output.contains("https://github.com/"),
+            "Former Backend Identity stays out of search: stdout={search_output}"
         );
     }
 
