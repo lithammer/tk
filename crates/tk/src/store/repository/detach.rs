@@ -63,7 +63,7 @@ pub enum DetachError {
     UnresolvedPromotionOperation {
         sequence: i64,
         mutation_type: MutationType,
-        promotion: promotion::UnresolvedPromotion,
+        promotion: promotion::MutationSummary,
     },
     #[error("a Backend-bound Blocked Item would wait on the detached Local Item")]
     BackendBlockedByDetached {
@@ -263,62 +263,25 @@ fn backend_item_blocked_by_local(
     Ok(None)
 }
 
-/// One Mutation Detach withdraws, with the state its transition starts from.
-struct AffectedMutation {
-    sequence: i64,
-    state: MutationState,
-    mutation_type: MutationType,
-    item_id: String,
-    promotion_operation_id: Option<String>,
-}
-
-/// Every pending or failed Mutation that needs `item_id`'s Backend address to
-/// be delivered, in Mutation Sequence order.
+/// Every candidate Mutation that needs `item_id`'s Backend address to be
+/// delivered: the Mutation's own target, or the counterpart its Mutation Type
+/// addresses (ADR-0038).
 ///
-/// Two roles qualify: the Mutation's own target, and the counterpart its
-/// Mutation Type addresses (ADR-0038). A Promotion is excluded in both roles —
-/// it creates a Backend identity rather than needing one, and only Promotion
-/// Cancellation withdraws it. That also keeps `applying` out of the set: the
-/// `mutations` CHECK admits that state for a Promotion alone, so an unrelated
-/// indeterminate creation leaves this Store-only operation alone (ADR-0047).
+/// A payload that does not decode cannot prove that it addresses this Item, and
+/// Sync cannot deliver it either — it decodes the same payload to find the
+/// counterpart's Backend address. Leaving it for Sync to diagnose keeps Detach
+/// available as local recovery (ADR-0047).
 fn affected_mutations(
     conn: &rusqlite::Connection,
     item_id: &str,
-) -> Result<Vec<AffectedMutation>, DetachError> {
-    let mut stmt = conn.prepare(
-        "select sequence, state, mutation_type, item_id, payload_json, promotion_operation_id \
-           from mutations \
-          where state in ('pending','failed') \
-            and mutation_type not in ('promote_ticket', 'promote_epic') \
-          order by sequence asc",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok((
-            AffectedMutation {
-                sequence: row.get(0)?,
-                state: row.get(1)?,
-                mutation_type: row.get(2)?,
-                item_id: row.get(3)?,
-                promotion_operation_id: row.get(5)?,
-            },
-            row.get::<_, String>(4)?,
-        ))
-    })?;
-    let mut affected = Vec::new();
-    for row in rows {
-        let (mutation, payload_json) = row?;
-        // A payload that does not decode cannot prove that it addresses this
-        // Item, and Sync cannot deliver it either: it decodes the same payload
-        // to find the counterpart's Backend address. Promotion Cancellation
-        // treats the same row as corruption and refuses, because it is
-        // withdrawing intent the operator asked about; Detach is local
-        // recovery and stays available, leaving the row for Sync to diagnose.
-        let addresses_item = mutation.item_id == item_id
-            || mutations::addressed_counterpart_id(mutation.mutation_type, &payload_json)
-                .is_ok_and(|counterpart| counterpart.as_deref() == Some(item_id));
-        if addresses_item {
-            affected.push(mutation);
-        }
-    }
-    Ok(affected)
+) -> Result<Vec<mutations::WithdrawalCandidate>, DetachError> {
+    Ok(mutations::withdrawal_candidates(conn)?
+        .into_iter()
+        .filter(|candidate| {
+            candidate.item_id == item_id
+                || candidate
+                    .addressed_counterpart_id()
+                    .is_ok_and(|counterpart| counterpart.as_deref() == Some(item_id))
+        })
+        .collect())
 }

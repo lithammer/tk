@@ -56,13 +56,13 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
 /// Only an indeterminate creation may be retried, and ordinary sync still
 /// carries a pending or failed Promotion, so naming all three recovery verbs
 /// everywhere would recommend a command that refuses (ADR-0037).
-fn promotion_remedy(promotion: &promotion::UnresolvedPromotion) -> String {
-    let target = &promotion.display_id;
+fn promotion_remedy(promotion: &promotion::MutationSummary) -> String {
+    let target = &promotion.target_display_id;
     match promotion.state {
         MutationState::Applying => format!(
-            "Its Backend creation outcome was never observed: use 'tk promote reconcile {target} <backend-key>' if the object exists, \
-             'tk promote retry {target}' only when creating it again is safe, or 'tk promote cancel {target}' to withdraw the Promotion Operation. \
-             Then detach again."
+            "Its Backend creation outcome was never observed: use 'tk promote reconcile {target} <backend-key>' if the Backend object exists, \
+             'tk promote retry {target}' only when creating it again is safe, or 'tk promote cancel {target}' to withdraw the Promotion Operation, \
+             leaving any object it created untracked. Then detach again."
         ),
         // A terminal Promotion never reaches here: only nonterminal rows are
         // unresolved. Exhaustive so a Mutation state added later has to say
@@ -94,9 +94,6 @@ fn detach_error(err: detach::DetachError, id: &str) -> CommandError {
         detach::DetachError::AmbiguousDisplayProvenance => CommandError::failure(format!(
             "'{id}' has ambiguous local Display ID provenance from multiple legacy Aliases; Detach cannot choose one"
         )),
-        detach::DetachError::InvalidDisplayProvenance(err) => {
-            CommandError::failure(format!("Repository Store corruption: {err}"))
-        }
         detach::DetachError::UnresolvedPromotionOperation {
             sequence,
             mutation_type,
@@ -104,7 +101,7 @@ fn detach_error(err: detach::DetachError, id: &str) -> CommandError {
         } => CommandError::failure(format!(
             "cannot detach '{id}': Mutation {sequence} ({mutation_type}) belongs to the Promotion Operation of {}, \
              whose Promotion is unresolved.\n{}",
-            promotion.display_id,
+            promotion.target_display_id,
             promotion_remedy(&promotion)
         )),
         detach::DetachError::BackendBlockedByDetached {
@@ -120,10 +117,9 @@ fn detach_error(err: detach::DetachError, id: &str) -> CommandError {
             "Repository Store is missing the display_prefix seed (run 'tk init')",
         ),
         detach::DetachError::BackendBinding(err) => resolver::backend_binding_error(&err),
-        detach::DetachError::Transition(err) => {
-            CommandError::failure(format!("Repository Store corruption: {err}"))
-        }
-        detach::DetachError::Sequence(err) => {
+        err @ (detach::DetachError::InvalidDisplayProvenance(_)
+        | detach::DetachError::Transition(_)
+        | detach::DetachError::Sequence(_)) => {
             CommandError::failure(format!("Repository Store corruption: {err}"))
         }
         detach::DetachError::Storage(err) => resolver::storage_error(&err),
@@ -190,37 +186,23 @@ mod tests {
     fn detaches_a_clean_adopted_ticket_without_a_remote_or_backend_call() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
+        insert_fixture_item(&conn, local_epic("parent", "repo-9", "Parent Epic", 1)).unwrap();
         insert_fixture_item(
             &conn,
             FixtureItem {
-                id: "parent",
-                display: "repo-9",
-                item_class: "epic",
-                ticket_kind: None,
-                priority: None,
-                title: "Parent Epic",
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "target",
-                display: "gh-42",
-                title: "Keep this work",
                 body: "Details",
                 status: "active",
-                origin: "backend",
-                backend_kind: Some("github"),
-                backend_key: Some("https://github.com/o/r/issues/42"),
                 selection_state: Some("accepted"),
                 container_id: Some("parent"),
-                created_seq: 2,
                 created_at: "2026-05-01T00:00:00.000Z",
                 updated_at: "2026-05-02T00:00:00.000Z",
-                ..FixtureItem::default()
+                ..backend_ticket(
+                    "target",
+                    "gh-42",
+                    "Keep this work",
+                    "https://github.com/o/r/issues/42",
+                    2,
+                )
             },
         )
         .unwrap();
@@ -388,15 +370,14 @@ mod tests {
         insert_fixture_item(
             &conn,
             FixtureItem {
-                id: "target",
-                display: "gh-7",
-                title: "Finished work",
                 status: "done",
-                origin: "backend",
-                backend_kind: Some("github"),
-                backend_key: Some("https://github.com/o/r/issues/7"),
-                created_seq: 1,
-                ..FixtureItem::default()
+                ..backend_ticket(
+                    "target",
+                    "gh-7",
+                    "Finished work",
+                    "https://github.com/o/r/issues/7",
+                    1,
+                )
             },
         )
         .unwrap();
@@ -478,16 +459,9 @@ mod tests {
         insert_fixture_item(
             &conn,
             FixtureItem {
-                id: "target",
-                display: "tk-4",
-                item_class: "epic",
-                ticket_kind: None,
-                priority: None,
-                title: "Promoted Epic",
                 body: "Epic details",
                 status: "active",
-                created_seq: 1,
-                ..FixtureItem::default()
+                ..local_epic("target", "tk-4", "Promoted Epic", 1)
             },
         )
         .unwrap();
@@ -598,16 +572,13 @@ mod tests {
         let conn = seed_store(&store);
         insert_fixture_item(
             &conn,
-            FixtureItem {
-                id: "target",
-                display: "gh-42",
-                title: "Legacy promoted work",
-                origin: "backend",
-                backend_kind: Some("github"),
-                backend_key: Some("https://github.com/o/r/issues/42"),
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
+            backend_ticket(
+                "target",
+                "gh-42",
+                "Legacy promoted work",
+                "https://github.com/o/r/issues/42",
+                1,
+            ),
         )
         .unwrap();
         crate::store::testing::insert_alias(&conn, "tk-1", "target").unwrap();
@@ -697,16 +668,13 @@ mod tests {
         let conn = seed_store(&store);
         insert_fixture_item(
             &conn,
-            FixtureItem {
-                id: "target",
-                display: "gh-42",
-                title: "Still backend-bound",
-                origin: "backend",
-                backend_kind: Some("github"),
-                backend_key: Some("https://github.com/o/r/issues/42"),
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
+            backend_ticket(
+                "target",
+                "gh-42",
+                "Still backend-bound",
+                "https://github.com/o/r/issues/42",
+                1,
+            ),
         )
         .unwrap();
         let lock_file = std::fs::OpenOptions::new()
@@ -742,6 +710,13 @@ mod tests {
         state_changed_at: String,
     }
 
+    fn mutation_states(conn: &rusqlite::Connection) -> Vec<String> {
+        mutation_rows(conn)
+            .into_iter()
+            .map(|row| row.state)
+            .collect()
+    }
+
     fn mutation_rows(conn: &rusqlite::Connection) -> Vec<MutationRow> {
         conn.prepare(
             "select sequence, state, failure_json, state_changed_at \
@@ -761,16 +736,39 @@ mod tests {
         .unwrap()
     }
 
+    /// A Local Epic fixture, leaving the Ticket-only columns null as the
+    /// schema requires.
+    fn local_epic<'a>(
+        id: &'a str,
+        display: &'a str,
+        title: &'a str,
+        created_seq: i64,
+    ) -> FixtureItem<'a> {
+        FixtureItem {
+            id,
+            display,
+            item_class: "epic",
+            ticket_kind: None,
+            priority: None,
+            title,
+            created_seq,
+            ..FixtureItem::default()
+        }
+    }
+
+    /// A Backend Ticket fixture, keeping `origin` and the identity columns in
+    /// the agreement the schema requires.
     fn backend_ticket<'a>(
         id: &'a str,
         display: &'a str,
+        title: &'a str,
         backend_key: &'a str,
         created_seq: i64,
     ) -> FixtureItem<'a> {
         FixtureItem {
             id,
             display,
-            title: "Backend work",
+            title,
             origin: "backend",
             backend_kind: Some("github"),
             backend_key: Some(backend_key),
@@ -785,12 +783,24 @@ mod tests {
         let conn = seed_store(&store);
         insert_fixture_item(
             &conn,
-            backend_ticket("target", "gh-42", "https://github.com/o/r/issues/42", 1),
+            backend_ticket(
+                "target",
+                "gh-42",
+                "Backend work",
+                "https://github.com/o/r/issues/42",
+                1,
+            ),
         )
         .unwrap();
         insert_fixture_item(
             &conn,
-            backend_ticket("blocked", "gh-43", "https://github.com/o/r/issues/43", 2),
+            backend_ticket(
+                "blocked",
+                "gh-43",
+                "Backend work",
+                "https://github.com/o/r/issues/43",
+                2,
+            ),
         )
         .unwrap();
         for mutation in [
@@ -860,17 +870,14 @@ mod tests {
         );
         let after = mutation_rows(&conn);
         assert_eq!(
-            after
-                .iter()
-                .map(|row| (row.sequence, row.state.as_str()))
-                .collect::<Vec<_>>(),
-            vec![
-                (1, "applied"),
-                (2, "cancelled"),
-                (3, "cancelled"),
-                (4, "cancelled"),
-                (5, "skipped"),
-                (6, "cancelled"),
+            mutation_states(&conn),
+            [
+                "applied",
+                "cancelled",
+                "cancelled",
+                "cancelled",
+                "skipped",
+                "cancelled"
             ]
         );
         // Withdrawal keeps the Mutation Failure that explains the rejection.
@@ -891,26 +898,19 @@ mod tests {
     fn detach_withdraws_membership_intent_once_its_promotion_operation_resolved() {
         let store = TmpStore::new("repo");
         let mut conn = seed_store(&store);
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "target",
-                display: "tk-4",
-                item_class: "epic",
-                ticket_kind: None,
-                priority: None,
-                title: "Promoted Epic",
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
+        insert_fixture_item(&conn, local_epic("target", "tk-4", "Promoted Epic", 1)).unwrap();
         insert_fixture_item(
             &conn,
             FixtureItem {
                 id: "member",
                 container_id: Some("target"),
-                ..backend_ticket("member", "gh-10", "https://github.com/o/r/issues/10", 2)
+                ..backend_ticket(
+                    "member",
+                    "gh-10",
+                    "Backend work",
+                    "https://github.com/o/r/issues/10",
+                    2,
+                )
             },
         )
         .unwrap();
@@ -979,10 +979,8 @@ mod tests {
         );
         let rows = mutation_rows(&conn);
         assert_eq!(
-            rows.iter()
-                .map(|row| row.state.as_str())
-                .collect::<Vec<_>>(),
-            vec!["applied", "cancelled", "cancelled"]
+            mutation_states(&conn),
+            ["applied", "cancelled", "cancelled"]
         );
         assert_eq!(
             rows[2].failure_json.as_deref(),
@@ -1012,9 +1010,9 @@ mod tests {
             ),
             (
                 "applying",
-                "Its Backend creation outcome was never observed: use 'tk promote reconcile repo-1 <backend-key>' if the object exists, \
-                 'tk promote retry repo-1' only when creating it again is safe, or 'tk promote cancel repo-1' to withdraw the Promotion Operation. \
-                 Then detach again.",
+                "Its Backend creation outcome was never observed: use 'tk promote reconcile repo-1 <backend-key>' if the Backend object exists, \
+                 'tk promote retry repo-1' only when creating it again is safe, or 'tk promote cancel repo-1' to withdraw the Promotion Operation, \
+                 leaving any object it created untracked. Then detach again.",
             ),
         ] {
             let store = TmpStore::new("repo");
@@ -1022,17 +1020,10 @@ mod tests {
             insert_fixture_item(
                 &conn,
                 FixtureItem {
-                    id: "target",
-                    display: "gh-9",
-                    item_class: "epic",
-                    ticket_kind: None,
-                    priority: None,
-                    title: "Backend Epic",
                     origin: "backend",
                     backend_kind: Some("github"),
                     backend_key: Some("https://github.com/o/r/issues/9"),
-                    created_seq: 1,
-                    ..FixtureItem::default()
+                    ..local_epic("target", "gh-9", "Backend Epic", 1)
                 },
             )
             .unwrap();
@@ -1092,13 +1083,7 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(origin, "backend");
-            assert_eq!(
-                mutation_rows(&conn)
-                    .iter()
-                    .map(|row| row.state.clone())
-                    .collect::<Vec<_>>(),
-                vec![state.to_string(), "pending".to_string()]
-            );
+            assert_eq!(mutation_states(&conn), [state, "pending"]);
         }
     }
 
@@ -1108,7 +1093,13 @@ mod tests {
         let conn = seed_store(&store);
         insert_fixture_item(
             &conn,
-            backend_ticket("target", "gh-42", "https://github.com/o/r/issues/42", 1),
+            backend_ticket(
+                "target",
+                "gh-42",
+                "Backend work",
+                "https://github.com/o/r/issues/42",
+                1,
+            ),
         )
         .unwrap();
         insert_fixture_item(
@@ -1157,13 +1148,7 @@ mod tests {
              Backend object left unchanged: https://github.com/o/r/issues/42\n\
              Withdrew update_ticket for tk-1 (Mutation 2)\n"
         );
-        assert_eq!(
-            mutation_rows(&conn)
-                .iter()
-                .map(|row| row.state.as_str())
-                .collect::<Vec<_>>(),
-            vec!["applying", "cancelled"]
-        );
+        assert_eq!(mutation_states(&conn), ["applying", "cancelled"]);
     }
 
     #[test]
@@ -1176,16 +1161,7 @@ mod tests {
         ] {
             insert_fixture_item(
                 &conn,
-                FixtureItem {
-                    id,
-                    display,
-                    title: "Backend work",
-                    origin: "backend",
-                    backend_kind: Some("github"),
-                    backend_key: Some(key),
-                    created_seq,
-                    ..FixtureItem::default()
-                },
+                backend_ticket(id, display, "Backend work", key, created_seq),
             )
             .unwrap();
         }
