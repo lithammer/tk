@@ -21,10 +21,14 @@
 //! Per ADR-0032, [`run`] returns `Result<Exit, CommandError>` and the dispatch
 //! seam frames failures as `tk adopt: <body>`.
 
+use std::fmt::Write as _;
+
 use clap::Args as ClapArgs;
 
 use crate::cli::{CommandError, Deps, Exit};
 use crate::commands::resolver;
+use crate::domain::dependency_rule::DependencyRejection;
+use crate::domain::relationship_plan::{RelationshipFinding, RelationshipItem};
 use crate::remote::adapter::AdapterReadError;
 use crate::remote::factory::{self, OpenError as FactoryOpenError};
 use crate::store::sync::{self as store_sync, AdoptOutcome, AdoptStoreError, BackendCohortError};
@@ -219,37 +223,86 @@ fn adopt_store_error(err: AdoptStoreError) -> CommandError {
             "{backend_display_id} belongs to {local_display_id}, which has a Pending Promotion; \
              run 'tk promote cancel {local_display_id}' before re-adopting {backend_display_id}"
         )),
-        AdoptStoreError::ReadoptBlockedByLocal {
+        AdoptStoreError::ReadoptRelationships {
+            item_id,
             backend_display_id,
-            blocking_display_id,
-            blocking_item_class,
-        } => CommandError::failure(format!(
-            "cannot re-adopt {backend_display_id}: it would be blocked by Local {} \
-             '{blocking_display_id}'; remove the Dependency first",
-            blocking_item_class.label()
-        )),
-        AdoptStoreError::ReadoptDependencyNotRepresentable {
-            backend_display_id,
-            blocked_display_id,
-            blocking_display_id,
             backend_kind,
-        } => CommandError::failure(format!(
-            "cannot re-adopt {backend_display_id}: {blocked_display_id} depends on \
-             {blocking_display_id}, and the {backend_kind} Backend cannot represent a Dependency"
-        )),
-        AdoptStoreError::ReadoptMembershipNotRepresentable {
-            backend_display_id,
-            ticket_display_id,
-            epic_display_id,
-            backend_kind,
-        } => CommandError::failure(format!(
-            "cannot re-adopt {backend_display_id}: {ticket_display_id} belongs to Epic \
-             {epic_display_id}, and the {backend_kind} Backend cannot represent Epic membership"
-        )),
+            findings,
+        } => readopt_refusal(&item_id, &backend_display_id, backend_kind, &findings),
         AdoptStoreError::BackendBinding(err) => resolver::backend_binding_error(&err),
         AdoptStoreError::ApplyingMutation(sequence) => CommandError::failure(format!(
             "Mutation {sequence} has an indeterminate Backend creation outcome; resolve it before adopting another Item\nUse 'tk promote reconcile <id> <backend-key>' if the Backend object exists, 'tk promote retry <id>' only when creating it again is safe, or 'tk promote cancel <id>' to withdraw the Promotion Operation, leaving any object it created untracked."
         )),
+    }
+}
+
+/// Render every ordered relationship finding from one Re-Adopt preflight.
+fn readopt_refusal(
+    item_id: &str,
+    backend_display_id: &str,
+    backend_kind: crate::domain::backend_kind::BackendKind,
+    findings: &[RelationshipFinding],
+) -> CommandError {
+    let mut body = format!("cannot re-adopt {backend_display_id}:");
+    for finding in findings {
+        body.push_str("\n  ");
+        match finding {
+            RelationshipFinding::DependencyRejected {
+                blocked,
+                blocking,
+                reason: DependencyRejection::BackendBlockedLocalBlocking,
+            } => {
+                let _ = write!(
+                    body,
+                    "{} would be blocked by Local {} '{}'; remove the Dependency first",
+                    readopt_display_id(blocked, item_id, backend_display_id),
+                    blocking.item_class.label(),
+                    readopt_display_id(blocking, item_id, backend_display_id)
+                );
+            }
+            RelationshipFinding::DependencyRejected {
+                blocked,
+                blocking,
+                reason: DependencyRejection::BackendKindMismatch,
+            } => {
+                let _ = write!(
+                    body,
+                    "{} and {} would be backed by different Backends; remove the Dependency first",
+                    readopt_display_id(blocked, item_id, backend_display_id),
+                    readopt_display_id(blocking, item_id, backend_display_id)
+                );
+            }
+            RelationshipFinding::DependencyNotRepresentable { blocked, blocking } => {
+                let _ = write!(
+                    body,
+                    "{} depends on {}, and the {backend_kind} Backend cannot represent a Dependency",
+                    readopt_display_id(blocked, item_id, backend_display_id),
+                    readopt_display_id(blocking, item_id, backend_display_id)
+                );
+            }
+            RelationshipFinding::EpicMembershipNotRepresentable { ticket, epic } => {
+                let _ = write!(
+                    body,
+                    "{} belongs to Epic {}, and the {backend_kind} Backend cannot represent Epic membership",
+                    readopt_display_id(ticket, item_id, backend_display_id),
+                    readopt_display_id(epic, item_id, backend_display_id)
+                );
+            }
+        }
+    }
+    CommandError::failure(body)
+}
+
+/// Show the restored Backend Display ID for the Item Re-Adopt binds.
+fn readopt_display_id<'a>(
+    item: &'a RelationshipItem,
+    item_id: &str,
+    backend_display_id: &'a str,
+) -> &'a str {
+    if item.id == item_id {
+        backend_display_id
+    } else {
+        &item.display_id
     }
 }
 
@@ -261,6 +314,7 @@ mod tests {
     use crate::commands::detach;
     use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
     use crate::domain::backend_operation::BackendItemIdentity;
+    use crate::domain::item_class::ItemClass;
     use crate::domain::lifecycle::Lifecycle;
     use crate::domain::work_state::WorkState;
     use crate::proc::{ProcError, RunOutput};
@@ -683,34 +737,35 @@ mod tests {
     }
 
     #[test]
-    fn unrepresentable_relationships_name_both_endpoints() {
-        let cases = [
-            (
-                AdoptStoreError::ReadoptDependencyNotRepresentable {
-                    backend_display_id: "gh-42".into(),
-                    blocked_display_id: "gh-42".into(),
-                    blocking_display_id: "gh-8".into(),
-                    backend_kind: crate::domain::backend_kind::BackendKind::Github,
+    fn relationship_refusal_reports_every_finding() {
+        let item = |id: &str, display_id: &str, item_class| RelationshipItem {
+            id: id.into(),
+            display_id: display_id.into(),
+            item_class,
+        };
+        let error = adopt_store_error(AdoptStoreError::ReadoptRelationships {
+            item_id: "stable".into(),
+            backend_display_id: "gh-42".into(),
+            backend_kind: crate::domain::backend_kind::BackendKind::Github,
+            findings: vec![
+                RelationshipFinding::DependencyNotRepresentable {
+                    blocked: item("stable", "gh-42", ItemClass::Ticket),
+                    blocking: item("blocker", "gh-8", ItemClass::Ticket),
                 },
-                "tk adopt: cannot re-adopt gh-42: gh-42 depends on gh-8, and the github Backend cannot represent a Dependency\n",
-            ),
-            (
-                AdoptStoreError::ReadoptMembershipNotRepresentable {
-                    backend_display_id: "gh-42".into(),
-                    ticket_display_id: "gh-42".into(),
-                    epic_display_id: "gh-9".into(),
-                    backend_kind: crate::domain::backend_kind::BackendKind::Github,
+                RelationshipFinding::EpicMembershipNotRepresentable {
+                    ticket: item("stable", "gh-42", ItemClass::Ticket),
+                    epic: item("parent", "gh-9", ItemClass::Epic),
                 },
-                "tk adopt: cannot re-adopt gh-42: gh-42 belongs to Epic gh-9, and the github Backend cannot represent Epic membership\n",
-            ),
-        ];
-
-        for (error, expected) in cases {
-            let error = adopt_store_error(error);
-            let mut out = Vec::new();
-            error.render(&mut out, "adopt");
-            assert_eq!(String::from_utf8(out).unwrap(), expected);
-        }
+            ],
+        });
+        let mut out = Vec::new();
+        error.render(&mut out, "adopt");
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "tk adopt: cannot re-adopt gh-42:\n  \
+             gh-42 depends on gh-8, and the github Backend cannot represent a Dependency\n  \
+             gh-42 belongs to Epic gh-9, and the github Backend cannot represent Epic membership\n"
+        );
     }
 
     // ---- Re-Adopt (ADR-0047) --------------------------------------------
@@ -1293,8 +1348,8 @@ mod tests {
         assert_eq!(exit, Exit::Failure);
         assert_eq!(
             h.err(),
-            "tk adopt: cannot re-adopt gh-42: it would be blocked by Local Ticket 'tk-8'; \
-             remove the Dependency first\n"
+            "tk adopt: cannot re-adopt gh-42:\n  \
+             gh-42 would be blocked by Local Ticket 'tk-8'; remove the Dependency first\n"
         );
         // The whole Re-Adopt refuses before any Store state changes, so the
         // Dependency is still local truth and the Item is still Local.
@@ -1382,7 +1437,7 @@ mod tests {
     }
 
     #[test]
-    fn readopt_queues_membership_when_the_epic_is_backend_bound() {
+    fn readopt_reports_ordered_membership_and_dependency_mutations() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
@@ -1413,8 +1468,23 @@ mod tests {
             },
         )
         .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "blocked",
+                display: "gh-8",
+                title: "Backend blocked work",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("https://github.com/o/r/issues/8"),
+                created_seq: 3,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
         let cwd_path = cwd();
         detach_item(&store, &cwd_path, "gh-42");
+        insert_dependency(&conn, "stable", "blocked").unwrap();
 
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
@@ -1424,27 +1494,55 @@ mod tests {
 
         assert_eq!(exit, Exit::Ok, "stderr={}", h.err());
         h.runner.assert_all_consumed();
-        assert!(
-            h.out()
-                .contains("Queued add_ticket_to_epic for gh-42 (Mutation 1)\n"),
-            "{}",
-            h.out()
+        assert_eq!(
+            h.out(),
+            "Re-adopted Ticket: gh-42 - Fix login\n\
+             Backend object: https://github.com/o/r/issues/42\n\
+             Local Display ID kept as an Alias: tk-1\n\
+             Imported title, body, Ticket Kind, and Lifecycle from the Backend\n\
+             Kind: task\n\
+             Status: open\n\
+             Queued add_ticket_to_epic for gh-42 (Mutation 1)\n\
+             Queued add_dependency for gh-8 (Mutation 2)\n\
+             Run 'tk sync' to apply the queued relationships.\n"
         );
-        let mutation: (String, String, String, String) = conn
-            .query_row(
-                "select mutation_type, item_id, payload_json, state from mutations",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        let mut stmt = conn
+            .prepare(
+                "select sequence, mutation_type, item_id, payload_json, state \
+                   from mutations order by sequence",
             )
             .unwrap();
+        let mutations = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
         assert_eq!(
-            mutation,
-            (
-                "add_ticket_to_epic".to_owned(),
-                "stable".to_owned(),
-                r#"{"epic_id":"parent"}"#.to_owned(),
-                "pending".to_owned(),
-            )
+            mutations,
+            vec![
+                (
+                    1,
+                    "add_ticket_to_epic".to_owned(),
+                    "stable".to_owned(),
+                    r#"{"epic_id":"parent"}"#.to_owned(),
+                    "pending".to_owned(),
+                ),
+                (
+                    2,
+                    "add_dependency".to_owned(),
+                    "blocked".to_owned(),
+                    r#"{"blocking_id":"stable"}"#.to_owned(),
+                    "pending".to_owned(),
+                ),
+            ]
         );
     }
 

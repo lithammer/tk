@@ -57,7 +57,8 @@ small boundary module after the second caller proves the shape.
 - `domain/` stays pure: no SQLite, filesystem paths, Git, subprocesses, or
   command rendering. Houses the tk vocabulary types and the
   infrastructure-free sync contract types shared by `store/`, `remote/`,
-  and `sync`.
+  and `sync`. Its relationship planner classifies the resulting graph and
+  builds ordered Mutation drafts for both Promotion and Re-Adopt.
 - `proc.rs` captures subprocess output for callers to classify. Commands should
   not stream Git or Backend Adapter subprocess output directly to user writers.
 - `git/` classifies Git discovery outcomes and keeps shared Git diagnostic
@@ -87,8 +88,9 @@ small boundary module after the second caller proves the shape.
   store's sync helpers. Single entry point `sync::run_sync`; the engine
   reaches the database only through `store/sync.rs` helpers, never via raw
   SQL.
-- `promotion/` owns pure analysis of the `tk promote` preflight graph: first it
-  derives the required Backend capability facets, then
+- `promotion/` owns Promotion-specific analysis of the `tk promote` preflight
+  graph and composes the shared domain relationship planner: first it derives
+  the required Backend capability facets, then
   `promotion::plan::plan_promotion` consumes the resolved capabilities. Neither
   step reaches a database, subprocess, or Backend Adapter. The command always
   asks the Adapter to resolve the typed requirements between those steps; the

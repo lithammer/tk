@@ -37,11 +37,11 @@ use crate::domain::mutation_type::MutationType;
 use crate::domain::origin::Origin;
 use crate::domain::priority::Priority;
 use crate::domain::promotion_capability::{PromotionCapabilities, PromotionRequirements};
+use crate::domain::relationship_plan::{self, RelationshipFinding};
 use crate::domain::selection_state::SelectionState;
 use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
 use crate::domain::work_state::WorkState;
-use crate::promotion::plan::{PromotionFinding, plan_relationships, relationship_requirements};
 use crate::store::mutations;
 use crate::store::promotion::ReadGraphError;
 use crate::store::repository::create::generate_internal_id;
@@ -115,36 +115,14 @@ pub enum AdoptStoreError {
         backend_display_id: String,
         local_display_id: String,
     },
-    /// Restoring the Binding would leave the Item waiting on a Blocking Item
-    /// the Backend cannot address (ADR-0035).
-    #[error(
-        "{backend_display_id} would be blocked by Local {} {blocking_display_id}",
-        blocking_item_class.label()
-    )]
-    ReadoptBlockedByLocal {
+    /// Every ordered relationship finding that stops Re-Adopt before it writes
+    /// the restored Binding (ADR-0035, ADR-0047).
+    #[error("relationship preflight refused Re-Adopt of {backend_display_id}")]
+    ReadoptRelationships {
+        item_id: String,
         backend_display_id: String,
-        blocking_display_id: String,
-        blocking_item_class: ItemClass,
-    },
-    /// The resulting graph creates relationship intent the configured Backend
-    /// Adapter cannot represent under Promotion's rules (ADR-0035).
-    #[error(
-        "{blocked_display_id} depends on {blocking_display_id}, which the Backend cannot represent"
-    )]
-    ReadoptDependencyNotRepresentable {
-        backend_display_id: String,
-        blocked_display_id: String,
-        blocking_display_id: String,
         backend_kind: BackendKind,
-    },
-    /// The resulting graph creates Epic Membership the configured Backend
-    /// Adapter cannot represent under Promotion's rules (ADR-0035).
-    #[error("{ticket_display_id} belongs to {epic_display_id}, which the Backend cannot represent")]
-    ReadoptMembershipNotRepresentable {
-        backend_display_id: String,
-        ticket_display_id: String,
-        epic_display_id: String,
-        backend_kind: BackendKind,
+        findings: Vec<RelationshipFinding>,
     },
     #[error(transparent)]
     BackendBinding(#[from] mutations::BackendBindingError),
@@ -339,8 +317,9 @@ pub fn readopt_requirements(
     ensure_backend_cohort(conn, backend_kind)?;
     let graph = readopt_graph(conn, &former.item_id)?;
     let bound_ids = HashSet::from([former.item_id.as_str()]);
-    Ok(Some(relationship_requirements(
-        &graph,
+    Ok(Some(relationship_plan::requirements(
+        &graph.items,
+        &graph.dependencies,
         &bound_ids,
         backend_kind,
     )))
@@ -403,15 +382,19 @@ fn readopt_backend_ticket(
     }
     let graph = readopt_graph(conn, &former.item_id)?;
     let bound_ids = HashSet::from([former.item_id.as_str()]);
-    let relationship_drafts = plan_relationships(&graph, &bound_ids, capabilities, backend_kind)
-        .map_err(|findings| {
-            readopt_error(
-                &graph,
-                &former.backend_display_id,
-                backend_kind,
-                &findings[0],
-            )
-        })?;
+    let relationship_drafts = relationship_plan::plan(
+        &graph.items,
+        &graph.dependencies,
+        &bound_ids,
+        capabilities,
+        backend_kind,
+    )
+    .map_err(|findings| AdoptStoreError::ReadoptRelationships {
+        item_id: former.item_id.clone(),
+        backend_display_id: former.backend_display_id.clone(),
+        backend_kind,
+        findings,
+    })?;
 
     // The imported Lifecycle decides the two local fields it can invalidate:
     // `done` retires Work State, and `open` cannot carry a Closing Reason the
@@ -463,6 +446,11 @@ fn readopt_backend_ticket(
         ],
     )?;
 
+    let display_ids: HashMap<&str, &str> = graph
+        .items
+        .iter()
+        .map(|item| (item.id.as_str(), item.display_id.as_str()))
+        .collect();
     let mut queued_relationships = Vec::with_capacity(relationship_drafts.len());
     for draft in relationship_drafts {
         let sequence = mutations::append(
@@ -479,13 +467,10 @@ fn readopt_backend_ticket(
         let target_display_id = if draft.item_id == former.item_id {
             former.backend_display_id.clone()
         } else {
-            graph
-                .items
-                .iter()
-                .find(|item| item.id == draft.item_id)
+            display_ids
+                .get(draft.item_id.as_str())
                 .expect("relationship target belongs to the closed graph")
-                .display_id
-                .clone()
+                .to_string()
         };
         queued_relationships.push(QueuedRelationshipMutation {
             sequence,
@@ -522,58 +507,6 @@ fn readopt_graph(
         }
         Err(ReadGraphError::Storage(error)) => Err(error.into()),
         Err(ReadGraphError::BackendBinding(error)) => Err(error.into()),
-    }
-}
-
-/// Translate the first relationship finding because Adopt reports one failure.
-fn readopt_error(
-    graph: &crate::domain::promotion_graph::PromotionGraph,
-    backend_display_id: &str,
-    backend_kind: BackendKind,
-    finding: &PromotionFinding,
-) -> AdoptStoreError {
-    match finding {
-        PromotionFinding::DependencyRejected {
-            blocking, reason, ..
-        } => match reason {
-            crate::domain::dependency_rule::DependencyRejection::BackendBlockedLocalBlocking => {
-                let blocking_item_class = graph
-                    .items
-                    .iter()
-                    .find(|item| item.id == blocking.id)
-                    .expect("Dependency finding belongs to the closed graph")
-                    .item_class;
-                AdoptStoreError::ReadoptBlockedByLocal {
-                    backend_display_id: backend_display_id.to_owned(),
-                    blocking_display_id: blocking.display_id.clone(),
-                    blocking_item_class,
-                }
-            }
-            crate::domain::dependency_rule::DependencyRejection::BackendKindMismatch => {
-                unreachable!("the retained Backend cohort shares the Re-Adopt Remote")
-            }
-        },
-        PromotionFinding::DependencyNotRepresentable { blocked, blocking } => {
-            AdoptStoreError::ReadoptDependencyNotRepresentable {
-                backend_display_id: backend_display_id.to_owned(),
-                blocked_display_id: blocked.display_id.clone(),
-                blocking_display_id: blocking.display_id.clone(),
-                backend_kind,
-            }
-        }
-        PromotionFinding::EpicMembershipNotRepresentable { ticket, epic } => {
-            AdoptStoreError::ReadoptMembershipNotRepresentable {
-                backend_display_id: backend_display_id.to_owned(),
-                ticket_display_id: ticket.display_id.clone(),
-                epic_display_id: epic.display_id.clone(),
-                backend_kind,
-            }
-        }
-        PromotionFinding::TriageTicket { .. }
-        | PromotionFinding::ItemClassNotRepresentable { .. }
-        | PromotionFinding::TicketKindNotRepresentable { .. } => {
-            unreachable!("relationship planning returns relationship findings only")
-        }
     }
 }
 
@@ -4823,11 +4756,86 @@ mod tests {
 
         assert!(matches!(
             error,
-            AdoptStoreError::ReadoptDependencyNotRepresentable {
-                ref blocked_display_id,
-                ref blocking_display_id,
-                ..
-            } if blocked_display_id == "tk-1" && blocking_display_id == "gh-8"
+            AdoptStoreError::ReadoptRelationships { ref findings, .. }
+                if matches!(
+                    findings.as_slice(),
+                    [RelationshipFinding::DependencyNotRepresentable { blocked, blocking }]
+                        if blocked.display_id == "tk-1" && blocking.display_id == "gh-8"
+                )
+        ));
+        let origin: String = conn
+            .query_row("select origin from items where id = 'stable'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(origin, "local");
+        assert_eq!(pending_or_failed_mutation_count(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn readopt_refuses_membership_the_backend_cannot_represent() {
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "parent",
+                display: "gh-9",
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                selection_state: None,
+                title: "Backend Epic",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("9"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "stable",
+                display: "tk-1",
+                title: "Local work",
+                container_id: Some("parent"),
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_former_identity(
+            &conn,
+            FixtureFormerIdentity {
+                item_id: "stable",
+                backend_key: URL_42,
+                backend_display_value: "gh-42",
+                ..FixtureFormerIdentity::default()
+            },
+        )
+        .unwrap();
+        let snapshot = adopted(URL_42, "gh-42", "Backend work", Lifecycle::Open);
+
+        let error = adopt_backend_ticket(
+            &mut conn,
+            BackendKind::Github,
+            &mut StdRng::seed_from_u64(7),
+            &snapshot,
+            PromotionCapabilities::none(),
+            NOW,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            AdoptStoreError::ReadoptRelationships { ref findings, .. }
+                if matches!(
+                    findings.as_slice(),
+                    [RelationshipFinding::EpicMembershipNotRepresentable { ticket, epic }]
+                        if ticket.display_id == "tk-1" && epic.display_id == "gh-9"
+                )
         ));
         let origin: String = conn
             .query_row("select origin from items where id = 'stable'", [], |row| {

@@ -36,6 +36,8 @@
 //! `tk block`, Promotion, and Re-Adopt decide it over different graphs.
 //! [`epic_membership_rule`] likewise keeps Promotion and Re-Adopt's
 //! mixed-Origin rule in agreement.
+//! [`relationship_plan`] owns their shared resulting-graph classification,
+//! capability checks, ordering, and Mutation drafts.
 //!
 //! `display_prefix` already lives under [`crate::store`] alongside its only
 //! current consumer (`tk init`); revisit the placement when real cross-module
@@ -58,6 +60,7 @@ pub mod priority;
 pub mod promotion_capability;
 pub mod promotion_graph;
 pub mod promotion_plan;
+pub mod relationship_plan;
 pub mod selection_state;
 pub mod status;
 pub mod ticket_kind;
