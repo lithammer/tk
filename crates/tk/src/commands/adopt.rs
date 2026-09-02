@@ -1002,7 +1002,7 @@ mod tests {
     }
 
     #[test]
-    fn a_legacy_key_authorizes_the_reopen_it_restores_under() {
+    fn readopt_reopens_a_legacy_keyed_done_item() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();

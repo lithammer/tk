@@ -166,8 +166,8 @@ pub struct ReadoptReport {
     pub title: String,
     /// Ticket Kind imported from the Backend snapshot.
     pub ticket_kind: TicketKind,
-    /// Item Status the Item now derives from the imported Lifecycle and the
-    /// Work State that survived it (ADR-0043).
+    /// Item Status derived from the imported Lifecycle and the Work State
+    /// that survived it (ADR-0043).
     pub status: ItemStatus,
 }
 
@@ -268,118 +268,6 @@ pub fn adopt_backend_ticket(
     ))
 }
 
-/// Claim `display_id` as the Item's current Display ID.
-///
-/// The resolver row itself belongs to [`repository`]; what this adds is the
-/// classification. A unique/primary-key violation means another Item already
-/// claims the value as a Display ID or Alias, which is
-/// [`AdoptStoreError::DisplayIdCollision`] rather than a storage fault, and
-/// both Adopt intake paths mint an Adapter-owned Display ID.
-fn claim_display_id(
-    conn: &Connection,
-    display_id: &str,
-    item_id: &str,
-    now: &str,
-) -> Result<(), AdoptStoreError> {
-    match repository::insert_display_resolver(conn, display_id, item_id, now) {
-        Ok(()) => Ok(()),
-        Err(rusqlite::Error::SqliteFailure(e, _))
-            if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
-                || e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY =>
-        {
-            Err(AdoptStoreError::DisplayIdCollision(display_id.to_owned()))
-        }
-        Err(other) => Err(other.into()),
-    }
-}
-
-/// Look up the Former Backend Identity that owns a canonical Backend key.
-///
-/// Shares Adopt's exact-key predicate, legacy spelling included: Detach copies
-/// `items.backend_key` verbatim into history, so an Item adopted before the
-/// Adapter canonicalized keys leaves a bare issue number behind. Missing it
-/// would let ordinary Adopt insert a second Item for a Backend object tk
-/// already owns.
-///
-/// Two rows can satisfy that predicate, because the ownership invariant
-/// compares key strings and the two spellings are not equal: history may hold
-/// a legacy number for one Item and the canonical URL for another. The
-/// canonical spelling is the stronger evidence — a bare number is only
-/// exact-matchable within one repository — so it wins, and the other Item
-/// keeps its reservation rather than being displaced by scan order.
-fn find_former_backend_identity(
-    conn: &Connection,
-    backend_kind: BackendKind,
-    backend_key: &str,
-    legacy_backend_key: Option<&str>,
-) -> rusqlite::Result<Option<FormerIdentity>> {
-    conn.query_row(
-        "select item_id, backend_key, backend_display_value \
-           from former_backend_identities \
-          where backend_kind = ?1 \
-            and (backend_key = ?2 or (?3 is not null and backend_key = ?3)) \
-          order by backend_key = ?2 desc \
-          limit 1",
-        params![backend_kind.text(), backend_key, legacy_backend_key],
-        |row| {
-            Ok(FormerIdentity {
-                item_id: row.get(0)?,
-                backend_key: row.get(1)?,
-                backend_display_id: row.get(2)?,
-            })
-        },
-    )
-    .optional()
-}
-
-/// The first Blocking Item beneath `item_id` that the Backend could not
-/// address once the Item is bound, or `None` when the resulting graph is
-/// valid.
-///
-/// Re-Adopt makes the Item a Backend-bound Blocked Item, which reclassifies
-/// every Dependency it waits on. Detach asks this from the other side —
-/// whether the Item it makes Local is a Blocking Item beneath something still
-/// bound — and `dependency_rule::classify` owns the answer for both, so the
-/// rule stays in one place (ADR-0035).
-///
-/// The Backend-kind mismatch rejection cannot arise here: the intake
-/// transaction has already checked that the retained Backend cohort matches
-/// the Remote, so every bound Item shares this Backend.
-fn blocked_by_a_local_blocking_item(
-    conn: &Connection,
-    item_id: &str,
-    backend_kind: BackendKind,
-) -> Result<Option<(String, ItemClass)>, AdoptStoreError> {
-    let blocked = BackendBinding::Backend {
-        backend_kind: backend_kind.text().to_owned(),
-    };
-    let mut stmt = conn.prepare(
-        "select blocking.id, blocking.display_value, blocking.item_class \
-           from dependencies d \
-           join items blocking on blocking.id = d.blocking_id \
-          where d.blocked_id = ?1 \
-          order by blocking.created_seq",
-    )?;
-    let rows = stmt.query_map(params![item_id], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, ItemClass>(2)?,
-        ))
-    })?;
-    for row in rows {
-        let (id, display_id, item_class) = row?;
-        let blocking = mutations::resolve_backend_binding(conn, &id)?;
-        if matches!(
-            dependency_rule::classify(&blocked, &blocking),
-            DependencyClassification::Rejected(DependencyRejection::BackendBlockedLocalBlocking)
-        ) {
-            return Ok(Some((display_id, item_class)));
-        }
-    }
-    Ok(None)
-}
-
 /// Rebind the Item that owns `former` to that canonical identity, inside the
 /// caller's Adopt intake transaction (ADR-0047).
 ///
@@ -417,10 +305,10 @@ fn readopt_backend_ticket(
             former.backend_display_id.clone(),
         ));
     }
-    // Backend Binding is the one question both remaining refusals ask, so it is
-    // asked once and exhaustively: an Item holds at most one active Binding,
-    // and a Pending Promotion is still owed a Backend identity of its own that
-    // this rebind would leave no Local Item to bind (ADR-0036).
+    // One question decides both remaining refusals, so the match asks it once
+    // and covers every answer: an Item holds at most one active Binding, and a
+    // Pending Promotion is still owed a Backend identity of its own that this
+    // rebind would leave no Local Item to bind (ADR-0036).
     match mutations::resolve_backend_binding(conn, &former.item_id)? {
         BackendBinding::Backend { .. } => {
             return Err(AdoptStoreError::ReadoptBoundElsewhere {
@@ -437,7 +325,7 @@ fn readopt_backend_ticket(
         BackendBinding::Local => {}
     }
     if let Some((blocking_display_id, blocking_item_class)) =
-        blocked_by_a_local_blocking_item(conn, &former.item_id, backend_kind)?
+        local_blocking_item(conn, &former.item_id, backend_kind)?
     {
         return Err(AdoptStoreError::ReadoptBlockedByLocal {
             backend_display_id: former.backend_display_id.clone(),
@@ -504,6 +392,117 @@ fn readopt_backend_ticket(
         ticket_kind: adopted.ticket_kind,
         status: ItemStatus::of(adopted.status, work_state),
     })
+}
+
+/// Look up the Former Backend Identity that owns a canonical Backend key.
+///
+/// Shares Adopt's exact-key predicate, legacy spelling included: Detach copies
+/// `items.backend_key` verbatim into history, so an Item adopted before the
+/// Adapter canonicalized keys leaves a bare issue number behind. Missing it
+/// would let ordinary Adopt insert a second Item for a Backend object tk
+/// already owns.
+///
+/// Two rows can satisfy that predicate, because the ownership invariant
+/// compares key strings and the two spellings are not equal: history may hold
+/// a legacy number for one Item and the canonical URL for another. The
+/// canonical spelling is the stronger evidence — a bare number is only
+/// exact-matchable within one repository — so it wins, and the other Item
+/// keeps its reservation rather than being displaced by scan order.
+fn find_former_backend_identity(
+    conn: &Connection,
+    backend_kind: BackendKind,
+    backend_key: &str,
+    legacy_backend_key: Option<&str>,
+) -> rusqlite::Result<Option<FormerIdentity>> {
+    conn.query_row(
+        "select item_id, backend_key, backend_display_value \
+           from former_backend_identities \
+          where backend_kind = ?1 \
+            and (backend_key = ?2 or (?3 is not null and backend_key = ?3)) \
+          order by backend_key = ?2 desc \
+          limit 1",
+        params![backend_kind.text(), backend_key, legacy_backend_key],
+        |row| {
+            Ok(FormerIdentity {
+                item_id: row.get(0)?,
+                backend_key: row.get(1)?,
+                backend_display_id: row.get(2)?,
+            })
+        },
+    )
+    .optional()
+}
+
+/// The first Local Blocking Item beneath `item_id`, or `None` when the
+/// resulting graph is valid.
+///
+/// Re-Adopt makes the Item a Backend-bound Blocked Item, which reclassifies
+/// every Dependency it waits on. Detach asks this from the other side —
+/// whether the Item it makes Local is a Blocking Item beneath something still
+/// bound — and `dependency_rule::classify` owns the answer for both, so the
+/// rule stays in one place (ADR-0035).
+///
+/// The Backend-kind mismatch rejection cannot arise here: the intake
+/// transaction has already checked that the retained Backend cohort matches
+/// the Remote, so every bound Item shares this Backend.
+fn local_blocking_item(
+    conn: &Connection,
+    item_id: &str,
+    backend_kind: BackendKind,
+) -> Result<Option<(String, ItemClass)>, AdoptStoreError> {
+    let blocked = BackendBinding::Backend {
+        backend_kind: backend_kind.text().to_owned(),
+    };
+    let mut stmt = conn.prepare(
+        "select blocking.id, blocking.display_value, blocking.item_class \
+           from dependencies d \
+           join items blocking on blocking.id = d.blocking_id \
+          where d.blocked_id = ?1 \
+          order by blocking.created_seq",
+    )?;
+    let rows = stmt.query_map(params![item_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, ItemClass>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, display_id, item_class) = row?;
+        let blocking = mutations::resolve_backend_binding(conn, &id)?;
+        if matches!(
+            dependency_rule::classify(&blocked, &blocking),
+            DependencyClassification::Rejected(DependencyRejection::BackendBlockedLocalBlocking)
+        ) {
+            return Ok(Some((display_id, item_class)));
+        }
+    }
+    Ok(None)
+}
+
+/// Claim `display_id` as the Item's current Display ID.
+///
+/// The resolver row itself belongs to [`repository`]; what this adds is the
+/// classification. A unique/primary-key violation means another Item already
+/// claims the value as a Display ID or Alias, which is
+/// [`AdoptStoreError::DisplayIdCollision`] rather than a storage fault, and
+/// both Adopt intake paths mint an Adapter-owned Display ID.
+fn claim_display_id(
+    conn: &Connection,
+    display_id: &str,
+    item_id: &str,
+    now: &str,
+) -> Result<(), AdoptStoreError> {
+    match repository::insert_display_resolver(conn, display_id, item_id, now) {
+        Ok(()) => Ok(()),
+        Err(rusqlite::Error::SqliteFailure(e, _))
+            if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+                || e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY =>
+        {
+            Err(AdoptStoreError::DisplayIdCollision(display_id.to_owned()))
+        }
+        Err(other) => Err(other.into()),
+    }
 }
 
 /// Refuse Adopt before any Backend read while creation certainty is unresolved.

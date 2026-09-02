@@ -285,12 +285,12 @@ pub enum ApplyReceiptError {
 /// keeps the `items_no_escape_from_done` trigger (which fires `before update of
 /// status`) out of this path.
 ///
-/// Keeping `status` out is load-bearing, and migration 015 raised the stakes.
-/// That trigger admits `done` -> `open` for a Local-to-Backend update onto the
-/// Item's own Former Backend Identity, which `tk promote reconcile` can supply
-/// as its `<backend-key>`. Adding `status` here would therefore reopen such an
-/// Item silently rather than abort, because the exception matches on statement
-/// shape and cannot tell Promotion from Re-Adopt.
+/// Keeping `status` out is load-bearing rather than tidy. The trigger admits
+/// `done` -> `open` for a Local-to-Backend update onto the Item's own Former
+/// Backend Identity, which `tk promote reconcile` can supply as its
+/// `<backend-key>`. It matches on statement shape and cannot tell Promotion
+/// from Re-Adopt, so a `status` write here would reopen such an Item silently
+/// instead of failing loudly.
 ///
 /// A Display ID the receipt names but another Item already claims fails the
 /// `item_ids` insert; the error propagates so the caller's transaction rolls
