@@ -1,8 +1,10 @@
 -- Re-Adopt imports the Backend snapshot's Lifecycle (ADR-0047), and an
 -- imported `open` has to clear a Closing Reason the `closing_reason` CHECK
 -- confines to `done`. That is a `done` -> `open` write, which the
--- done-terminal trigger (ADR-0006) otherwise aborts, so the trigger gains a
--- second narrow exception beside ADR-0046's.
+-- done-terminal trigger (ADR-0006) otherwise aborts, so the trigger gains its
+-- first exception. ADR-0046 decided a second one for Sync Skip's relinquished
+-- close; it is not in this schema, and the two are independent conjuncts
+-- whenever it arrives.
 --
 -- The exception recognises the exact Re-Adopt rebind and nothing else: one
 -- `items` UPDATE moving a Local Item onto a canonical Backend identity its own

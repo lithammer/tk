@@ -291,6 +291,13 @@ fn claim_display_id(
 /// Adapter canonicalized keys leaves a bare issue number behind. Missing it
 /// would let ordinary Adopt insert a second Item for a Backend object tk
 /// already owns.
+///
+/// Two rows can satisfy that predicate, because the ownership invariant
+/// compares key strings and the two spellings are not equal: history may hold
+/// a legacy number for one Item and the canonical URL for another. The
+/// canonical spelling is the stronger evidence — a bare number is only
+/// exact-matchable within one repository — so it wins, and the other Item
+/// keeps its reservation rather than being displaced by scan order.
 fn find_former_backend_identity(
     conn: &Connection,
     backend_kind: BackendKind,
@@ -301,7 +308,9 @@ fn find_former_backend_identity(
         "select item_id, backend_key, backend_display_value \
            from former_backend_identities \
           where backend_kind = ?1 \
-            and (backend_key = ?2 or (?3 is not null and backend_key = ?3))",
+            and (backend_key = ?2 or (?3 is not null and backend_key = ?3)) \
+          order by backend_key = ?2 desc \
+          limit 1",
         params![backend_kind.text(), backend_key, legacy_backend_key],
         |row| {
             Ok(FormerIdentity {
@@ -319,9 +328,13 @@ fn find_former_backend_identity(
 ///
 /// The Backend snapshot replaces the shared fields — title, body, Lifecycle,
 /// and Ticket Kind — while Item Class, the stable internal Item ID, Local
-/// Fields, and relationships stay as the Item held them locally. The Mutation
-/// Log is untouched: Detach made its withdrawals terminal, and relationship
-/// intent is a separate step the caller reports.
+/// Fields, and relationships stay as the Item held them locally.
+///
+/// The Mutation Log is untouched. Detach made its withdrawals terminal, and
+/// the relationship half of ADR-0047's Re-Adopt contract — preflighting the
+/// resulting graph and appending fresh intent for every relationship that
+/// becomes representable — is not in this path yet. Until it is, a Dependency
+/// the Item acquired while Local is neither refused nor delivered.
 fn readopt_backend_ticket(
     conn: &Connection,
     backend_kind: BackendKind,
@@ -1781,6 +1794,8 @@ mod tests {
     use std::time::Duration;
 
     const NOW: &str = "2026-08-09T00:00:00Z";
+    /// Canonical GitHub key for issue 42, whose legacy spelling is `42`.
+    const URL_42: &str = "https://github.com/o/r/issues/42";
 
     fn open_seeded() -> Connection {
         let mut conn = Connection::open_in_memory().unwrap();
@@ -4669,6 +4684,63 @@ mod tests {
             .unwrap(),
         );
         assert_eq!((items, origin), (2, "local".to_owned()));
+    }
+
+    #[test]
+    fn the_canonical_spelling_wins_two_matching_history_rows() {
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        for (id, display, created_seq) in [("legacy", "tk-1", 9), ("canonical", "tk-2", 10)] {
+            insert_fixture_item(
+                &conn,
+                FixtureItem {
+                    id,
+                    display,
+                    title: "Detached work",
+                    created_seq,
+                    ..FixtureItem::default()
+                },
+            )
+            .unwrap();
+        }
+        // Both rows name issue 42. The ownership invariant compares key
+        // strings, so the two spellings coexist and Re-Adopt has to choose.
+        // Today's MULTI-INDEX OR plan happens to reach the canonical branch
+        // first; this pins that as the contract, so a rewritten predicate
+        // cannot hand the identity to the other Item on an optimizer whim.
+        for (key, item_id, detached_seq) in [("42", "legacy", 1), (URL_42, "canonical", 2)] {
+            conn.execute(
+                "insert into former_backend_identities(backend_kind, backend_key, item_id, \
+                                                        backend_display_value, detached_seq, \
+                                                        detached_at) \
+                 values ('github', ?1, ?2, 'gh-42', ?3, ?4)",
+                params![key, item_id, detached_seq, NOW],
+            )
+            .unwrap();
+        }
+
+        let outcome = adopt_backend_ticket(
+            &mut conn,
+            BackendKind::Github,
+            &mut rand::rngs::StdRng::seed_from_u64(7),
+            &adopted(URL_42, "gh-42", "Fresh title", Lifecycle::Open),
+            NOW,
+        )
+        .unwrap();
+
+        let AdoptOutcome::Readopted(report) = outcome else {
+            panic!("expected Re-Adopt, got {outcome:?}");
+        };
+        assert_eq!(report.local_display_id, "tk-2");
+        assert_eq!(report.backend_key, URL_42);
+        // The Item holding the weaker spelling keeps its reservation instead of
+        // being displaced.
+        let legacy_origin: String = conn
+            .query_row("select origin from items where id = 'legacy'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(legacy_origin, "local");
     }
 
     #[test]
