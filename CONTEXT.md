@@ -476,9 +476,11 @@ _Avoid_: ticket, tickets
 - **Stop** moves an active **Ticket** or **Epic** back to `open`.
 - **`done`** is terminal for local Lifecycle commands in v1: once a **Ticket**
   or **Epic** is `done`, **Start** and **Stop** refuse to transition it back to
-  `active` or `open`. **Sync Skip** of that Item's failed closing **Mutation**
-  is the only v1 exception: relinquishing the close intent permits the shared
-  **Lifecycle** to return to `open`. v1 has no dedicated `tk reopen` command.
+  `active` or `open`. Two v1 exceptions let the shared **Lifecycle** return to
+  `open`: exact **Re-Adopt** of a **Former Backend Identity** imports the
+  Backend's current Lifecycle, and **Sync Skip** of that Item's failed closing
+  **Mutation** relinquishes the close intent. v1 has no dedicated `tk reopen`
+  command.
 - The **`done`** terminal rule constrains **Item Status** transitions only; title, body, **Priority**, and **Epic** membership remain editable on a `done` item.
 - **`tk`** does not manage git worktrees; checkout creation is the harness's or the user's responsibility via `git worktree`.
 - **`tk show`**, **`tk update`**, **`tk start`**, **`tk stop`**, **`tk done`**, and **`tk promote`** require an explicit **Display ID** in v1.

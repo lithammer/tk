@@ -167,10 +167,20 @@ pub fn detach(
         [],
         |row| row.get(0),
     )?;
+    // A repeated Detach of the same canonical identity records fresh ordering
+    // on the row history already holds rather than a second one: an Item
+    // retains every *distinct* former identity, and Re-Adopt leaves this one in
+    // place while it is the current Binding (ADR-0047). `item_id` stays out of
+    // the update — the identity is already reserved to this Item, and its
+    // ownership is immutable.
     tx.execute(
         "insert into former_backend_identities(backend_kind, backend_key, item_id, \
                                                 backend_display_value, detached_seq, detached_at) \
-         values (?1, ?2, ?3, ?4, ?5, ?6)",
+         values (?1, ?2, ?3, ?4, ?5, ?6) \
+         on conflict(backend_kind, backend_key) do update \
+            set backend_display_value = excluded.backend_display_value, \
+                detached_seq = excluded.detached_seq, \
+                detached_at = excluded.detached_at",
         params![
             backend_kind.text(),
             backend_key,

@@ -308,6 +308,12 @@ pub fn insert_external_blocker(
     Ok(())
 }
 
+/// Return the current count of rows in `items`, for tests asserting that a
+/// path rebound an existing Item rather than inserting another one.
+pub fn item_count(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.query_row("select count(*) from items", [], |row| row.get(0))
+}
+
 /// Return the current count of rows in the `mutations` outbox.
 pub fn mutation_count(conn: &Connection) -> rusqlite::Result<i64> {
     conn.query_row("select count(*) from mutations", [], |r| r.get(0))
@@ -458,6 +464,59 @@ impl Default for FixtureRemote<'_> {
             updated_at: "2026-05-09T00:00:00.000Z",
         }
     }
+}
+
+/// Raw Former Backend Identity fixture: one canonical Backend identity an Item
+/// detached from (ADR-0047).
+///
+/// Seeds history directly for tests that need an Item to arrive already
+/// detached. A test that also cares what Detach *writes* should run Detach
+/// instead.
+#[derive(Debug, Clone, Copy)]
+pub struct FixtureFormerIdentity<'a> {
+    pub backend_kind: &'a str,
+    /// Canonical key exactly as history stores it — a bare issue number for an
+    /// Item adopted before the Adapter canonicalized keys.
+    pub backend_key: &'a str,
+    pub item_id: &'a str,
+    pub backend_display_value: &'a str,
+    /// Detach ordering, which `tk show` lists by, most recent first.
+    pub detached_seq: i64,
+    pub detached_at: &'a str,
+}
+
+impl Default for FixtureFormerIdentity<'_> {
+    fn default() -> Self {
+        Self {
+            backend_kind: "github",
+            backend_key: "",
+            item_id: "",
+            backend_display_value: "",
+            detached_seq: 1,
+            detached_at: "2026-05-09T00:00:00.000Z",
+        }
+    }
+}
+
+/// Insert one Former Backend Identity history row.
+pub fn insert_fixture_former_identity(
+    conn: &Connection,
+    identity: FixtureFormerIdentity<'_>,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "insert into former_backend_identities(backend_kind, backend_key, item_id, \
+                                                backend_display_value, detached_seq, detached_at) \
+         values (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            identity.backend_kind,
+            identity.backend_key,
+            identity.item_id,
+            identity.backend_display_value,
+            identity.detached_seq,
+            identity.detached_at,
+        ],
+    )?;
+    Ok(())
 }
 
 /// Insert the v1 single-Remote configuration plus its Sync Cursor.

@@ -58,6 +58,7 @@ const MIGRATION_11_SQL: &str = include_str!("migrations/011_split_work_state.sql
 const MIGRATION_12_SQL: &str = include_str!("migrations/012_drop_dead_next_index.sql");
 const MIGRATION_13_SQL: &str = include_str!("migrations/013_former_backend_identities.sql");
 const MIGRATION_14_SQL: &str = include_str!("migrations/014_binding_display_provenance.sql");
+const MIGRATION_15_SQL: &str = include_str!("migrations/015_readopt_reopens_a_former_identity.sql");
 
 /// V1 Repository Store schema skeleton.
 pub const MIGRATION_1: Migration = Migration {
@@ -199,6 +200,15 @@ pub const MIGRATION_14: Migration = Migration {
     foreign_keys: ForeignKeys::On,
 };
 
+/// Recreates `items_no_escape_from_done` with a narrow exception for the exact
+/// Re-Adopt rebind, so an imported `open` Lifecycle can clear a Closing Reason
+/// the CHECK confines to `done` (ADR-0006 as amended, ADR-0047).
+pub const MIGRATION_15: Migration = Migration {
+    version: 15,
+    sql: MIGRATION_15_SQL,
+    foreign_keys: ForeignKeys::On,
+};
+
 /// Ordered migration list applied by [`apply_all`].
 pub const ALL_MIGRATIONS: &[Migration] = &[
     MIGRATION_1,
@@ -215,13 +225,14 @@ pub const ALL_MIGRATIONS: &[Migration] = &[
     MIGRATION_12,
     MIGRATION_13,
     MIGRATION_14,
+    MIGRATION_15,
 ];
 
 /// Highest schema version this binary can apply. Named so future migrations
 /// surface the threshold to `grep` instead of hiding it behind `.last()`.
 /// Adding a migration is a two-line patch: append to `ALL_MIGRATIONS`, bump
 /// this constant, with a debug_assert below catching the drift.
-pub const MAX_KNOWN_VERSION: u32 = MIGRATION_14.version;
+pub const MAX_KNOWN_VERSION: u32 = MIGRATION_15.version;
 
 /// Errors returned while applying migrations.
 ///
@@ -396,7 +407,11 @@ pub(crate) fn apply_through(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::testing::{FixtureItem, insert_alias, insert_fixture_item};
+    use crate::store::testing::{
+        FixtureFormerIdentity, FixtureItem, insert_alias, insert_fixture_former_identity,
+        insert_fixture_item,
+    };
+    use rusqlite::params;
 
     fn open_memory() -> Connection {
         let conn = Connection::open_in_memory().expect("open :memory:");
@@ -437,6 +452,115 @@ mod tests {
         assert_eq!(usize::try_from(count).unwrap(), ALL_MIGRATIONS.len());
     }
 
+    /// Seed one detached Backend Ticket: a `done` Local Item whose Former
+    /// Backend Identity still reserves the canonical Backend object to it,
+    /// which is the state Re-Adopt rebinds from (ADR-0047).
+    fn insert_detached_done_ticket(conn: &Connection, backend_key: &str) {
+        insert_fixture_item(
+            conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Closed locally",
+                status: "done",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_former_identity(
+            conn,
+            FixtureFormerIdentity {
+                backend_key,
+                item_id: "t1",
+                backend_display_value: "gh-7",
+                ..FixtureFormerIdentity::default()
+            },
+        )
+        .unwrap();
+    }
+
+    /// Re-Adopt's rebind: the local Display ID becomes an Alias, the Backend
+    /// Display ID becomes current, and one `items` UPDATE moves the Item onto
+    /// the canonical identity while importing an `open` Lifecycle — which
+    /// clears the Closing Reason the CHECK confines to `done`.
+    ///
+    /// The Display ID moves ride along because `items.display_value` carries a
+    /// deferred composite foreign key into `item_ids`; the rebind is only ever
+    /// committed as a whole.
+    fn readopt_rebind(conn: &mut Connection, backend_key: &str) -> rusqlite::Result<()> {
+        let tx = crate::store::write_transaction(conn)?;
+        tx.execute(
+            "update item_ids set source = 'alias' where item_id = 't1' and source = 'display'",
+            [],
+        )?;
+        tx.execute(
+            "insert into item_ids(value, source, item_id, created_at) \
+             values ('gh-7', 'display', 't1', '2026-05-09T00:00:00.000Z')",
+            [],
+        )?;
+        tx.execute(
+            "update items \
+                set origin = 'backend', backend_kind = 'github', backend_key = ?1, \
+                    display_value = 'gh-7', status = 'open', closing_reason = null, \
+                    binding_display_provenance = 'known', \
+                    binding_local_display_value = 'tk-1' \
+              where id = 't1'",
+            params![backend_key],
+        )?;
+        tx.commit()
+    }
+
+    #[test]
+    fn readopt_may_import_an_open_lifecycle_onto_a_done_item() {
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_detached_done_ticket(&conn, "https://github.com/o/r/issues/7");
+        conn.execute(
+            "update items set closing_reason = 'Superseded' where id = 't1'",
+            [],
+        )
+        .unwrap();
+
+        readopt_rebind(&mut conn, "https://github.com/o/r/issues/7")
+            .expect("Re-Adopt imports the Backend Lifecycle (ADR-0047)");
+
+        let (status, closing_reason): (String, Option<String>) = conn
+            .query_row(
+                "select status, closing_reason from items where id = 't1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((status.as_str(), closing_reason), ("open", None));
+    }
+
+    #[test]
+    fn the_readopt_exception_needs_the_items_own_former_identity() {
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_detached_done_ticket(&conn, "https://github.com/o/r/issues/7");
+
+        // A Backend object this Item never held is ordinary intake, not a
+        // rebind, so it stays under the done-terminal rule (ADR-0006).
+        let unknown_identity = readopt_rebind(&mut conn, "https://github.com/o/r/issues/8");
+        assert!(
+            unknown_identity.is_err(),
+            "only the Item's own Former Backend Identity authorizes the reopen"
+        );
+
+        // And the authorization does not outlive the rebind: once the Item is
+        // Backend-bound again, every done -> open write is forbidden.
+        readopt_rebind(&mut conn, "https://github.com/o/r/issues/7").unwrap();
+        conn.execute("update items set status = 'done' where id = 't1'", [])
+            .unwrap();
+        let later_reopen = conn.execute("update items set status = 'open' where id = 't1'", []);
+        assert!(
+            later_reopen.is_err(),
+            "a restored Backend Item must not escape done again"
+        );
+    }
+
     #[test]
     fn former_backend_identity_is_reserved_to_its_stable_item() {
         let mut conn = open_memory();
@@ -469,12 +593,14 @@ mod tests {
             },
         )
         .unwrap();
-        conn.execute(
-            "insert into former_backend_identities(backend_kind, backend_key, item_id, \
-                                                    backend_display_value, detached_seq, detached_at) \
-             values ('github', 'https://github.com/o/r/issues/1', 'former-owner', \
-                     'gh-1', 1, '2026-05-09T00:00:00.000Z')",
-            [],
+        insert_fixture_former_identity(
+            &conn,
+            FixtureFormerIdentity {
+                backend_key: "https://github.com/o/r/issues/1",
+                item_id: "former-owner",
+                backend_display_value: "gh-1",
+                ..FixtureFormerIdentity::default()
+            },
         )
         .unwrap();
         conn.execute(
