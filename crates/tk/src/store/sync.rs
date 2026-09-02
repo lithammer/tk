@@ -11,7 +11,10 @@
 //! helpers take `&Connection`.
 
 use rusqlite::{Connection, OptionalExtension, params};
-use std::{collections::HashMap, str::FromStr};
+use std::{
+    collections::{HashMap, HashSet},
+    str::FromStr,
+};
 use thiserror::Error;
 
 use crate::domain::backend_binding::BackendBinding;
@@ -24,8 +27,6 @@ use crate::domain::backend_outcome::{
     BackendCreateOutcome, BackendEditOutcome, Failure, FailureClass,
 };
 use crate::domain::binding_display_provenance::BindingDisplayProvenance;
-use crate::domain::dependency_rule::{self, DependencyClassification, DependencyRejection};
-use crate::domain::epic_membership_rule::{self, EpicMembershipClassification};
 use crate::domain::item_class::ItemClass;
 use crate::domain::lifecycle::Lifecycle;
 use crate::domain::mutation_payload::{
@@ -36,12 +37,13 @@ use crate::domain::mutation_type::MutationType;
 use crate::domain::origin::Origin;
 use crate::domain::priority::Priority;
 use crate::domain::promotion_capability::{PromotionCapabilities, PromotionRequirements};
-use crate::domain::promotion_plan::MutationDraft;
 use crate::domain::selection_state::SelectionState;
 use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
 use crate::domain::work_state::WorkState;
+use crate::promotion::plan::{PromotionFinding, plan_relationships, relationship_requirements};
 use crate::store::mutations;
+use crate::store::promotion::ReadGraphError;
 use crate::store::repository::create::generate_internal_id;
 use crate::store::repository::{self, RemoteWorkflowGuard};
 use crate::store::sequences::{self, Counter, SequenceError};
@@ -353,22 +355,13 @@ pub fn readopt_requirements(
         return Ok(None);
     };
     ensure_backend_cohort(conn, backend_kind)?;
-    let drafts = readopt_relationship_drafts(
-        conn,
-        &former.item_id,
-        &former.backend_display_id,
+    let graph = readopt_graph(conn, &former.item_id)?;
+    let changed = HashSet::from([former.item_id.as_str()]);
+    Ok(Some(relationship_requirements(
+        &graph,
+        &changed,
         backend_kind,
-        PromotionCapabilities::all(),
-    )?;
-    let mut requirements = PromotionRequirements::none();
-    for draft in drafts {
-        requirements = match draft.mutation.mutation_type {
-            MutationType::AddDependency => requirements.with_dependencies(),
-            MutationType::AddTicketToEpic => requirements.with_epic_membership(),
-            _ => unreachable!("Re-Adopt drafts relationship additions only"),
-        };
-    }
-    Ok(Some(requirements))
+    )))
 }
 
 /// Rebind the Item that owns `former` to that canonical identity, inside the
@@ -426,13 +419,17 @@ fn readopt_backend_ticket(
         }
         BackendBinding::Local => {}
     }
-    let relationship_drafts = readopt_relationship_drafts(
-        conn,
-        &former.item_id,
-        &former.backend_display_id,
-        backend_kind,
-        capabilities,
-    )?;
+    let graph = readopt_graph(conn, &former.item_id)?;
+    let changed = HashSet::from([former.item_id.as_str()]);
+    let relationship_drafts = plan_relationships(&graph, &changed, capabilities, backend_kind)
+        .map_err(|findings| {
+            readopt_finding_error(
+                &graph,
+                &former.backend_display_id,
+                backend_kind,
+                &findings[0],
+            )
+        })?;
 
     // The imported Lifecycle decides the two local fields it can invalidate:
     // `done` retires Work State, and `open` cannot carry a Closing Reason the
@@ -486,22 +483,32 @@ fn readopt_backend_ticket(
 
     let mut queued_relationships = Vec::with_capacity(relationship_drafts.len());
     for draft in relationship_drafts {
-        let mutation = draft.mutation;
         let sequence = mutations::append(
             conn,
             mutations::AppendRequest {
-                mutation_type: mutation.mutation_type,
-                item_id: &mutation.item_id,
-                item_class: mutation.item_class,
-                payload: &mutation.payload,
+                mutation_type: draft.mutation_type,
+                item_id: &draft.item_id,
+                item_class: draft.item_class,
+                payload: &draft.payload,
                 promotion_operation_id: None,
                 now_iso: now,
             },
         )?;
+        let target_display_id = if draft.item_id == former.item_id {
+            former.backend_display_id.clone()
+        } else {
+            graph
+                .items
+                .iter()
+                .find(|item| item.id == draft.item_id)
+                .expect("relationship target belongs to the closed graph")
+                .display_id
+                .clone()
+        };
         queued_relationships.push(QueuedRelationshipMutation {
             sequence,
-            mutation_type: mutation.mutation_type,
-            target_display_id: repository::current_display_id(conn, &mutation.item_id)?,
+            mutation_type: draft.mutation_type,
+            target_display_id,
         });
     }
 
@@ -516,169 +523,79 @@ fn readopt_backend_ticket(
     })
 }
 
-/// One relationship Mutation and the endpoint order ADR-0035 applies before
-/// Re-Adopt appends it to the shared outbox.
-struct OrderedRelationshipDraft {
-    order: (i64, i64),
-    mutation: MutationDraft,
-}
-
-/// Resolve an endpoint's Binding in the graph Re-Adopt would leave, without
-/// changing the stored Binding before preflight succeeds.
-fn binding_after_readopt(
-    conn: &Connection,
-    candidate_id: &str,
-    readopted_id: &str,
-    restored: &BackendBinding,
-) -> Result<BackendBinding, AdoptStoreError> {
-    if candidate_id == readopted_id {
-        Ok(restored.clone())
-    } else {
-        Ok(mutations::resolve_backend_binding(conn, candidate_id)?)
-    }
-}
-
-/// Collect relationships whose Backend intent is created by restoring
-/// `item_id`, ordered by their endpoint creation sequence as Promotion orders
-/// them (ADR-0035). The target's resulting Binding is used before the Store
-/// row is changed, so every decision precedes the atomic write.
-fn readopt_relationship_drafts(
+/// Read the relationship graph Re-Adopt preflights, preserving Store error
+/// classification at the Adopt boundary.
+fn readopt_graph(
     conn: &Connection,
     item_id: &str,
+) -> Result<crate::domain::promotion_graph::PromotionGraph, AdoptStoreError> {
+    match crate::store::promotion::read_graph(conn, item_id, false) {
+        Ok(mut graph) => {
+            // Promotion's read also gathers edges that touch the target's
+            // parent or children. Re-Adopt changes only its target, so those
+            // wider edges are outside this operation's resulting graph.
+            graph
+                .dependencies
+                .retain(|edge| edge.blocked_id == item_id || edge.blocking_id == item_id);
+            Ok(graph)
+        }
+        Err(ReadGraphError::Storage(error)) => Err(error.into()),
+        Err(ReadGraphError::BackendBinding(error)) => Err(error.into()),
+    }
+}
+
+/// Map the first shared relationship-planner finding to Re-Adopt's command
+/// vocabulary. Promotion accumulates all findings; Re-Adopt retains its
+/// existing first-refusal behavior.
+fn readopt_finding_error(
+    graph: &crate::domain::promotion_graph::PromotionGraph,
     backend_display_id: &str,
     backend_kind: BackendKind,
-    capabilities: PromotionCapabilities,
-) -> Result<Vec<OrderedRelationshipDraft>, AdoptStoreError> {
-    let restored = BackendBinding::Backend {
-        backend_kind: backend_kind.text().to_owned(),
-    };
-    let mut stmt = conn.prepare(
-        "select blocked.id, blocked.display_value, blocked.item_class, blocked.created_seq, \
-                blocking.id, blocking.display_value, blocking.item_class, \
-                blocking.created_seq \
-           from dependencies d \
-           join items blocked on blocked.id = d.blocked_id \
-           join items blocking on blocking.id = d.blocking_id \
-          where d.blocked_id = ?1 or d.blocking_id = ?1 \
-          order by blocked.created_seq, blocking.created_seq",
-    )?;
-    let rows = stmt.query_map(params![item_id], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, ItemClass>(2)?,
-            row.get::<_, i64>(3)?,
-            row.get::<_, String>(4)?,
-            row.get::<_, String>(5)?,
-            row.get::<_, ItemClass>(6)?,
-            row.get::<_, i64>(7)?,
-        ))
-    })?;
-    let mut drafts = Vec::new();
-    for row in rows {
-        let (
-            blocked_id,
-            blocked_display_id,
-            blocked_item_class,
-            blocked_created_seq,
-            blocking_id,
-            blocking_display_id,
-            blocking_item_class,
-            blocking_created_seq,
-        ) = row?;
-        let blocked = binding_after_readopt(conn, &blocked_id, item_id, &restored)?;
-        let blocking = binding_after_readopt(conn, &blocking_id, item_id, &restored)?;
-        match dependency_rule::classify(&blocked, &blocking) {
-            DependencyClassification::BecomesBackendIntent => {
-                if !capabilities.can_represent_dependencies() {
-                    return Err(AdoptStoreError::ReadoptDependencyNotRepresentable {
-                        backend_display_id: backend_display_id.to_owned(),
-                        blocked_display_id,
-                        blocking_display_id,
-                        backend_kind,
-                    });
-                }
-                drafts.push(OrderedRelationshipDraft {
-                    order: (blocked_created_seq, blocking_created_seq),
-                    mutation: MutationDraft {
-                        mutation_type: MutationType::AddDependency,
-                        item_id: blocked_id,
-                        item_class: blocked_item_class,
-                        payload: MutationPayload::DependencyRef(DependencyRef { blocking_id }),
-                    },
-                });
-            }
-            DependencyClassification::Rejected(
-                DependencyRejection::BackendBlockedLocalBlocking,
-            ) => {
-                return Err(AdoptStoreError::ReadoptBlockedByLocal {
+    finding: &PromotionFinding,
+) -> AdoptStoreError {
+    match finding {
+        PromotionFinding::DependencyRejected {
+            blocking, reason, ..
+        } => match reason {
+            crate::domain::dependency_rule::DependencyRejection::BackendBlockedLocalBlocking => {
+                let blocking_item_class = graph
+                    .items
+                    .iter()
+                    .find(|item| item.id == blocking.id)
+                    .expect("Dependency finding belongs to the closed graph")
+                    .item_class;
+                AdoptStoreError::ReadoptBlockedByLocal {
                     backend_display_id: backend_display_id.to_owned(),
-                    blocking_display_id,
+                    blocking_display_id: blocking.display_id.clone(),
                     blocking_item_class,
-                });
+                }
             }
-            DependencyClassification::Rejected(DependencyRejection::BackendKindMismatch) => {
+            crate::domain::dependency_rule::DependencyRejection::BackendKindMismatch => {
                 unreachable!("the retained Backend cohort shares the Re-Adopt Remote")
             }
-            DependencyClassification::StaysLocal => {}
-        }
-    }
-
-    let mut stmt = conn.prepare(
-        "select ticket.id, ticket.display_value, ticket.item_class, ticket.created_seq, \
-                epic.id, epic.display_value, epic.created_seq \
-           from items ticket \
-           join items epic on epic.id = ticket.container_id \
-          where ticket.id = ?1 or epic.id = ?1 \
-          order by ticket.created_seq, epic.created_seq",
-    )?;
-    let rows = stmt.query_map(params![item_id], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, ItemClass>(2)?,
-            row.get::<_, i64>(3)?,
-            row.get::<_, String>(4)?,
-            row.get::<_, String>(5)?,
-            row.get::<_, i64>(6)?,
-        ))
-    })?;
-    for row in rows {
-        let (
-            ticket_id,
-            ticket_display_id,
-            ticket_class,
-            ticket_created_seq,
-            epic_id,
-            epic_display_id,
-            epic_created_seq,
-        ) = row?;
-        let ticket = binding_after_readopt(conn, &ticket_id, item_id, &restored)?;
-        let epic = binding_after_readopt(conn, &epic_id, item_id, &restored)?;
-        if epic_membership_rule::classify(&ticket, &epic)
-            == EpicMembershipClassification::BecomesBackendIntent
-        {
-            if !capabilities.can_represent_epic_membership() {
-                return Err(AdoptStoreError::ReadoptMembershipNotRepresentable {
-                    backend_display_id: backend_display_id.to_owned(),
-                    ticket_display_id,
-                    epic_display_id,
-                    backend_kind,
-                });
+        },
+        PromotionFinding::DependencyNotRepresentable { blocked, blocking } => {
+            AdoptStoreError::ReadoptDependencyNotRepresentable {
+                backend_display_id: backend_display_id.to_owned(),
+                blocked_display_id: blocked.display_id.clone(),
+                blocking_display_id: blocking.display_id.clone(),
+                backend_kind,
             }
-            drafts.push(OrderedRelationshipDraft {
-                order: (ticket_created_seq, epic_created_seq),
-                mutation: MutationDraft {
-                    mutation_type: MutationType::AddTicketToEpic,
-                    item_id: ticket_id,
-                    item_class: ticket_class,
-                    payload: MutationPayload::EpicRef(EpicRef { epic_id }),
-                },
-            });
+        }
+        PromotionFinding::EpicMembershipNotRepresentable { ticket, epic } => {
+            AdoptStoreError::ReadoptMembershipNotRepresentable {
+                backend_display_id: backend_display_id.to_owned(),
+                ticket_display_id: ticket.display_id.clone(),
+                epic_display_id: epic.display_id.clone(),
+                backend_kind,
+            }
+        }
+        PromotionFinding::TriageTicket { .. }
+        | PromotionFinding::ItemClassNotRepresentable { .. }
+        | PromotionFinding::TicketKindNotRepresentable { .. } => {
+            unreachable!("relationship planning returns relationship findings only")
         }
     }
-    drafts.sort_by_key(|draft| draft.order);
-    Ok(drafts)
 }
 
 /// Look up the Former Backend Identity that owns a canonical Backend key.

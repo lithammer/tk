@@ -1,7 +1,7 @@
-//! Pure preflight analysis for one `tk promote` invocation. It derives the
-//! required Backend capabilities from a Repository Store snapshot, then builds
-//! either the ordered Mutations the operation commits or every problem it
-//! would hit (ADR-0035, ADR-0036).
+//! Pure preflight analysis for Binding changes. It derives the required
+//! Backend capabilities from a Repository Store snapshot, then builds either
+//! the ordered Mutations the operation commits or every problem it would hit
+//! (ADR-0035, ADR-0036, ADR-0047).
 //!
 //! Nothing here touches SQLite, Git, or a Backend. Every input is pure domain
 //! data, so the whole operation is judged before a byte is written and a
@@ -53,7 +53,6 @@ pub fn promotion_requirements(
     graph: &PromotionGraph,
     backend: BackendKind,
 ) -> PromotionRequirements {
-    let by_id: HashMap<&str, &GraphItem> = graph.items.iter().map(|i| (i.id.as_str(), i)).collect();
     let promoted: HashSet<&str> = graph
         .items
         .iter()
@@ -73,18 +72,110 @@ pub fn promotion_requirements(
         }
     }
 
-    if classify_dependencies(graph, &by_id, &promoted, backend)
+    let relationship_facets = relationship_requirements(graph, &promoted, backend);
+    if relationship_facets.requires_dependencies() {
+        requirements = requirements.with_dependencies();
+    }
+    if relationship_facets.requires_epic_membership() {
+        requirements = requirements.with_epic_membership();
+    }
+
+    requirements
+}
+
+/// Derive only the relationship facets an operation's changed Items need.
+///
+/// `changed` names Items the operation will bind to `backend`. Keeping this
+/// pass draft-free lets callers resolve Backend capabilities before the
+/// transactional planner builds payloads.
+#[must_use]
+pub(crate) fn relationship_requirements(
+    graph: &PromotionGraph,
+    changed: &HashSet<&str>,
+    backend: BackendKind,
+) -> PromotionRequirements {
+    let by_id: HashMap<&str, &GraphItem> = graph.items.iter().map(|i| (i.id.as_str(), i)).collect();
+    let mut requirements = PromotionRequirements::none();
+    if classify_dependencies(graph, &by_id, changed, backend)
         .iter()
         .any(|edge| matches!(edge.verdict, EdgeVerdict::BecomesBackendIntent))
     {
         requirements = requirements.with_dependencies();
     }
-
-    if !bound_memberships(graph, &by_id, &promoted, backend).is_empty() {
+    if !bound_memberships(graph, &by_id, changed, backend).is_empty() {
         requirements = requirements.with_epic_membership();
     }
-
     requirements
+}
+
+/// Plan the relationship Mutations an operation's changed Items create.
+///
+/// The function owns ADR-0035's resulting-graph classification, capability
+/// checks, endpoint ordering, and payload construction for both Promotion and
+/// Re-Adopt.
+pub(crate) fn plan_relationships(
+    graph: &PromotionGraph,
+    changed: &HashSet<&str>,
+    capabilities: PromotionCapabilities,
+    backend: BackendKind,
+) -> Result<Vec<MutationDraft>, Vec<PromotionFinding>> {
+    let by_id: HashMap<&str, &GraphItem> = graph.items.iter().map(|i| (i.id.as_str(), i)).collect();
+    let mut findings: Vec<(EndpointOrder, PromotionFinding)> = Vec::new();
+    let mut mutations: Vec<(EndpointOrder, MutationDraft)> = Vec::new();
+
+    for edge in classify_dependencies(graph, &by_id, changed, backend) {
+        match edge.verdict {
+            EdgeVerdict::Rejected(reason) => findings.push((
+                edge.order,
+                PromotionFinding::DependencyRejected {
+                    blocked: ItemRef::of(edge.blocked),
+                    blocking: ItemRef::of(edge.blocking),
+                    reason,
+                },
+            )),
+            EdgeVerdict::BecomesBackendIntent => {
+                if capabilities.can_represent_dependencies() {
+                    mutations.push((edge.order, dependency_draft(edge.blocked, edge.blocking)));
+                } else {
+                    findings.push((
+                        edge.order,
+                        PromotionFinding::DependencyNotRepresentable {
+                            blocked: ItemRef::of(edge.blocked),
+                            blocking: ItemRef::of(edge.blocking),
+                        },
+                    ));
+                }
+            }
+            EdgeVerdict::Untouched => {}
+        }
+    }
+
+    for membership in bound_memberships(graph, &by_id, changed, backend) {
+        if capabilities.can_represent_epic_membership() {
+            mutations.push((
+                membership.order,
+                membership_draft(membership.ticket, membership.epic),
+            ));
+        } else {
+            findings.push((
+                membership.order,
+                PromotionFinding::EpicMembershipNotRepresentable {
+                    ticket: ItemRef::of(membership.ticket),
+                    epic: ItemRef::of(membership.epic),
+                },
+            ));
+        }
+    }
+
+    findings.sort_by_key(|(order, _)| *order);
+    if !findings.is_empty() {
+        return Err(findings.into_iter().map(|(_, finding)| finding).collect());
+    }
+    mutations.sort_by_key(|(order, _)| *order);
+    Ok(mutations
+        .into_iter()
+        .map(|(_, mutation)| mutation)
+        .collect())
 }
 
 /// One reason the operation cannot proceed, as data the command renders.
@@ -135,14 +226,14 @@ type EndpointOrder = (i64, i64);
 /// `read_graph` fault, not user input.
 const GRAPH_IS_CLOSED: &str = "PromotionGraph carries both endpoints of every edge it names";
 
-/// The Backend binding an Item has after every Promotion in the operation
-/// lands. ADR-0035 judges relationships against this future graph.
+/// The Backend Binding an Item has after the operation lands. ADR-0035 and
+/// ADR-0047 judge relationships against this future graph.
 fn binding_after(
     item: &GraphItem,
-    promoted: &HashSet<&str>,
+    changed: &HashSet<&str>,
     backend: BackendKind,
 ) -> BackendBinding {
-    if promoted.contains(item.id.as_str()) {
+    if changed.contains(item.id.as_str()) {
         BackendBinding::PendingPromotion {
             backend_kind: backend.text().to_owned(),
         }
@@ -187,7 +278,7 @@ struct BoundMembership<'a> {
 fn classify_dependencies<'a>(
     graph: &'a PromotionGraph,
     by_id: &HashMap<&'a str, &'a GraphItem>,
-    promoted: &HashSet<&str>,
+    changed: &HashSet<&str>,
     backend: BackendKind,
 ) -> Vec<JudgedEdge<'a>> {
     graph
@@ -197,8 +288,8 @@ fn classify_dependencies<'a>(
             let blocked = *by_id.get(edge.blocked_id.as_str()).expect(GRAPH_IS_CLOSED);
             let blocking = *by_id.get(edge.blocking_id.as_str()).expect(GRAPH_IS_CLOSED);
             let verdict = match dependency_rule::classify(
-                &binding_after(blocked, promoted, backend),
-                &binding_after(blocking, promoted, backend),
+                &binding_after(blocked, changed, backend),
+                &binding_after(blocking, changed, backend),
             ) {
                 DependencyClassification::Rejected(reason) => EdgeVerdict::Rejected(reason),
                 // An edge whose endpoints were both backend-bound before the
@@ -207,8 +298,8 @@ fn classify_dependencies<'a>(
                 // itself binds are captured, which is also what makes a
                 // re-invoked `tk promote` append nothing.
                 DependencyClassification::BecomesBackendIntent
-                    if promoted.contains(blocked.id.as_str())
-                        || promoted.contains(blocking.id.as_str()) =>
+                    if changed.contains(blocked.id.as_str())
+                        || changed.contains(blocking.id.as_str()) =>
                 {
                     EdgeVerdict::BecomesBackendIntent
                 }
@@ -230,7 +321,7 @@ fn classify_dependencies<'a>(
 fn bound_memberships<'a>(
     graph: &'a PromotionGraph,
     by_id: &HashMap<&'a str, &'a GraphItem>,
-    promoted: &HashSet<&str>,
+    changed: &HashSet<&str>,
     backend: BackendKind,
 ) -> Vec<BoundMembership<'a>> {
     let mut bound = Vec::new();
@@ -243,7 +334,7 @@ fn bound_memberships<'a>(
         // the Tickets it already contains. A pair the operation does not move
         // is either already backend intent or still local, and neither is this
         // Promotion's business — the same bound the Dependency rule uses.
-        if !promoted.contains(ticket.id.as_str()) && !promoted.contains(container_id) {
+        if !changed.contains(ticket.id.as_str()) && !changed.contains(container_id) {
             continue;
         }
         // A container absent from the snapshot is a torn concurrent edit, not a
@@ -259,8 +350,8 @@ fn bound_memberships<'a>(
         // backed by the same Backend after the operation. Mixed-Origin
         // membership stays local and is not a problem.
         if epic_membership_rule::classify(
-            &binding_after(ticket, promoted, backend),
-            &binding_after(epic, promoted, backend),
+            &binding_after(ticket, changed, backend),
+            &binding_after(epic, changed, backend),
         ) == EpicMembershipClassification::StaysLocal
         {
             continue;
@@ -290,8 +381,6 @@ pub fn plan_promotion(
     capabilities: PromotionCapabilities,
     backend: BackendKind,
 ) -> Result<PromotionPlan, Vec<PromotionFinding>> {
-    let by_id: HashMap<&str, &GraphItem> = graph.items.iter().map(|i| (i.id.as_str(), i)).collect();
-
     // `graph.items` is in creation order, so every list derived from this one
     // is too.
     let operation: Vec<&GraphItem> = graph
@@ -316,65 +405,19 @@ pub fn plan_promotion(
         }
     }
 
-    let mut relationship_findings: Vec<(EndpointOrder, PromotionFinding)> = Vec::new();
-    let mut relationship_mutations: Vec<(EndpointOrder, MutationDraft)> = Vec::new();
-
-    for edge in classify_dependencies(graph, &by_id, &promoted, backend) {
-        match edge.verdict {
-            EdgeVerdict::Rejected(reason) => {
-                relationship_findings.push((
-                    edge.order,
-                    PromotionFinding::DependencyRejected {
-                        blocked: ItemRef::of(edge.blocked),
-                        blocking: ItemRef::of(edge.blocking),
-                        reason,
-                    },
-                ));
-            }
-            EdgeVerdict::BecomesBackendIntent => {
-                if capabilities.can_represent_dependencies() {
-                    relationship_mutations
-                        .push((edge.order, dependency_draft(edge.blocked, edge.blocking)));
-                } else {
-                    relationship_findings.push((
-                        edge.order,
-                        PromotionFinding::DependencyNotRepresentable {
-                            blocked: ItemRef::of(edge.blocked),
-                            blocking: ItemRef::of(edge.blocking),
-                        },
-                    ));
-                }
-            }
-            EdgeVerdict::Untouched => {}
+    let relationship_mutations = match plan_relationships(graph, &promoted, capabilities, backend) {
+        Ok(mutations) => mutations,
+        Err(relationship_findings) => {
+            findings.extend(relationship_findings);
+            Vec::new()
         }
-    }
-
-    for membership in bound_memberships(graph, &by_id, &promoted, backend) {
-        if capabilities.can_represent_epic_membership() {
-            relationship_mutations.push((
-                membership.order,
-                membership_draft(membership.ticket, membership.epic),
-            ));
-        } else {
-            relationship_findings.push((
-                membership.order,
-                PromotionFinding::EpicMembershipNotRepresentable {
-                    ticket: ItemRef::of(membership.ticket),
-                    epic: ItemRef::of(membership.epic),
-                },
-            ));
-        }
-    }
-
-    relationship_findings.sort_by_key(|(order, _)| *order);
-    findings.extend(relationship_findings.into_iter().map(|(_, f)| f));
+    };
     if !findings.is_empty() {
         return Err(findings);
     }
 
-    relationship_mutations.sort_by_key(|(order, _)| *order);
     let mut mutations = promotions;
-    mutations.extend(relationship_mutations.into_iter().map(|(_, m)| m));
+    mutations.extend(relationship_mutations);
     // A Promotion creates an open backend object, so a locally active or
     // closed Item needs its status pushed after creation. The Closing Reason
     // is a Local Field and never travels.
