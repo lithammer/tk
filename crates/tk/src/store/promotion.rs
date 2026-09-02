@@ -40,6 +40,7 @@ use thiserror::Error;
 use crate::domain::backend_binding::BackendBinding;
 use crate::domain::backend_kind::BackendKind;
 use crate::domain::backend_operation::BackendItemIdentity;
+use crate::domain::binding_display_provenance::BindingDisplayProvenance;
 use crate::domain::dependency_rule::{self, DependencyClassification, DependencyRejection};
 use crate::domain::item_class::ItemClass;
 use crate::domain::mutation_payload::{MutationPayload, Promotion, TitleBody};
@@ -293,18 +294,20 @@ pub fn apply_receipt(
     receipt: &BackendItemIdentity,
     now: &str,
 ) -> Result<(), ApplyReceiptError> {
-    let origin: Option<Origin> = conn
+    let current: Option<(Origin, String)> = conn
         .query_row(
-            "select origin from items where id = ?1",
+            "select origin, display_value from items where id = ?1",
             params![item_id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    match origin {
-        Some(Origin::Local) => {}
-        Some(Origin::Backend) => return Err(ApplyReceiptError::TargetNotLocal(item_id.into())),
+    let outgoing_display_id = match current {
+        Some((Origin::Local, display_id)) => display_id,
+        Some((Origin::Backend, _)) => {
+            return Err(ApplyReceiptError::TargetNotLocal(item_id.into()));
+        }
         None => return Err(ApplyReceiptError::ItemNotFound(item_id.into())),
-    }
+    };
     // Statement order is load-bearing. `item_ids_one_display_per_item` is a
     // plain partial unique index on (item_id) where source = 'display' and is
     // not deferrable, so the outgoing row must be demoted to an Alias *before*
@@ -313,6 +316,8 @@ pub fn apply_receipt(
     // from `items.display_value` into `item_ids` is deferred, which is what
     // tolerates the window where `items` still points at a row that has just
     // become an Alias.
+    let provenance = BindingDisplayProvenance::Known(outgoing_display_id);
+    let (stored_provenance, displaced_display_id) = provenance.stored_values();
     conn.execute(
         "update item_ids set source = 'alias' where item_id = ?1 and source = 'display'",
         params![item_id],
@@ -327,7 +332,8 @@ pub fn apply_receipt(
     conn.execute(
         "update items \
             set origin = ?2, backend_kind = ?3, backend_key = ?4, \
-                display_value = ?5, updated_at = ?6 \
+                display_value = ?5, updated_at = ?6, \
+                binding_display_provenance = ?7, binding_local_display_value = ?8 \
           where id = ?1",
         params![
             item_id,
@@ -336,6 +342,8 @@ pub fn apply_receipt(
             receipt.backend_key,
             receipt.display_id,
             now,
+            stored_provenance,
+            displaced_display_id,
         ],
     )?;
     Ok(())
@@ -1343,8 +1351,8 @@ mod tests {
     use crate::store::migrations;
     use crate::store::repository::resolve_item_ref;
     use crate::store::testing::{
-        FixtureItem, FixtureMutation, insert_dependency, insert_fixture_item,
-        insert_fixture_mutation, mutation_count,
+        FixtureItem, FixtureMutation, apply_promotion_receipt, insert_dependency,
+        insert_fixture_item, insert_fixture_mutation, mutation_count,
     };
     use rand::SeedableRng;
     use rand::rngs::StdRng;
@@ -1382,33 +1390,38 @@ mod tests {
         }
     }
 
-    /// Drive the receipt through a caller-owned transaction, the shape
-    /// [`apply_receipt`] contracts for: the deferred `items` →
-    /// `item_ids` foreign key is only tolerated mid-transaction, and a failure
-    /// rolls the whole conversion back.
-    fn promote(
-        conn: &mut Connection,
-        item_id: &str,
-        receipt: &BackendItemIdentity,
-    ) -> Result<(), ApplyReceiptError> {
-        let tx = crate::store::write_transaction(conn)?;
-        apply_receipt(&tx, item_id, "github", receipt, NOW)?;
-        Ok(tx.commit()?)
-    }
-
     #[test]
     fn receipt_makes_the_item_a_backend_item_and_replaces_the_display_id() {
         let mut conn = open_seeded();
         local_ticket(&conn, "t1", "tk-1");
 
-        promote(&mut conn, "t1", &receipt("42", "gh-42")).unwrap();
+        apply_promotion_receipt(&mut conn, "t1", "github", &receipt("42", "gh-42"), NOW).unwrap();
 
-        let (display, origin, kind, key, updated): (String, String, String, String, String) = conn
+        let (display, origin, kind, key, updated, provenance, local_display): (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+        ) = conn
             .query_row(
-                "select display_value, origin, backend_kind, backend_key, updated_at \
+                "select display_value, origin, backend_kind, backend_key, updated_at, \
+                        binding_display_provenance, binding_local_display_value \
                    from items where id = 't1'",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                    ))
+                },
             )
             .unwrap();
         assert_eq!(display, "gh-42");
@@ -1416,6 +1429,8 @@ mod tests {
         assert_eq!(kind, "github");
         assert_eq!(key, "42");
         assert_eq!(updated, NOW);
+        assert_eq!(provenance, "known");
+        assert_eq!(local_display.as_deref(), Some("tk-1"));
     }
 
     #[test]
@@ -1423,7 +1438,7 @@ mod tests {
         let mut conn = open_seeded();
         local_ticket(&conn, "t1", "tk-1");
 
-        promote(&mut conn, "t1", &receipt("42", "gh-42")).unwrap();
+        apply_promotion_receipt(&mut conn, "t1", "github", &receipt("42", "gh-42"), NOW).unwrap();
 
         // Both identifiers reach the same Item; the local one is the Alias.
         assert_eq!(resolve_item_ref(&conn, "tk-1").unwrap().unwrap().id, "t1");
@@ -1454,7 +1469,7 @@ mod tests {
         let mut conn = open_seeded();
         local_ticket(&conn, "t1", "tk-1");
 
-        promote(&mut conn, "t1", &receipt("42", "gh-42")).unwrap();
+        apply_promotion_receipt(&mut conn, "t1", "github", &receipt("42", "gh-42"), NOW).unwrap();
 
         let (selection, priority, status, title): (String, String, String, String) = conn
             .query_row(
@@ -1489,7 +1504,7 @@ mod tests {
         )
         .unwrap();
 
-        promote(&mut conn, "t1", &receipt("42", "gh-42")).unwrap();
+        apply_promotion_receipt(&mut conn, "t1", "github", &receipt("42", "gh-42"), NOW).unwrap();
 
         let (selection, priority): (String, String) = conn
             .query_row(
@@ -1518,7 +1533,8 @@ mod tests {
         )
         .unwrap();
 
-        let err = promote(&mut conn, "t1", &receipt("42", "gh-42")).unwrap_err();
+        let err = apply_promotion_receipt(&mut conn, "t1", "github", &receipt("42", "gh-42"), NOW)
+            .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -1567,7 +1583,7 @@ mod tests {
         )
         .unwrap();
 
-        promote(&mut conn, "e1", &receipt("7", "gh-7")).unwrap();
+        apply_promotion_receipt(&mut conn, "e1", "github", &receipt("7", "gh-7"), NOW).unwrap();
 
         let (display, origin, selection): (String, String, Option<String>) = conn
             .query_row(
