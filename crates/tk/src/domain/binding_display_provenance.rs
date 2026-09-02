@@ -19,22 +19,13 @@ pub enum BindingDisplayProvenance {
 }
 
 impl BindingDisplayProvenance {
-    /// SQLite storage spelling accepted by the `items` CHECK constraint.
+    /// Paired SQLite values accepted by the `items` CHECK constraint.
     #[must_use]
-    pub fn text(&self) -> &'static str {
+    pub fn stored_values(&self) -> (&'static str, Option<&str>) {
         match self {
-            Self::None => "none",
-            Self::Known(_) => "known",
-            Self::Ambiguous => "ambiguous",
-        }
-    }
-
-    /// Local Display ID stored beside `known`, or `NULL` for the other states.
-    #[must_use]
-    pub fn local_display_value(&self) -> Option<&str> {
-        match self {
-            Self::Known(display_id) => Some(display_id),
-            Self::None | Self::Ambiguous => None,
+            Self::None => ("none", None),
+            Self::Known(display_id) => ("known", Some(display_id)),
+            Self::Ambiguous => ("ambiguous", None),
         }
     }
 
@@ -62,13 +53,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn text_matches_the_check_constrained_spellings() {
-        assert_eq!(BindingDisplayProvenance::None.text(), "none");
+    fn stored_values_match_the_check_constrained_pairs() {
         assert_eq!(
-            BindingDisplayProvenance::Known("tk-1".into()).text(),
-            "known"
+            BindingDisplayProvenance::None.stored_values(),
+            ("none", None)
         );
-        assert_eq!(BindingDisplayProvenance::Ambiguous.text(), "ambiguous");
+        assert_eq!(
+            BindingDisplayProvenance::Known("tk-1".into()).stored_values(),
+            ("known", Some("tk-1"))
+        );
+        assert_eq!(
+            BindingDisplayProvenance::Ambiguous.stored_values(),
+            ("ambiguous", None)
+        );
     }
 
     #[test]

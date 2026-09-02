@@ -88,9 +88,9 @@ mod tests {
     use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
     use crate::domain::backend_operation::BackendItemIdentity;
     use crate::store::testing::{
-        FixtureItem, FixtureMutation, FixtureRemote, TmpStore, commit_promotion, insert_dependency,
-        insert_external_blocker, insert_fixture_item, insert_fixture_mutation,
-        insert_fixture_remote,
+        FixtureItem, FixtureMutation, FixtureRemote, TmpStore, apply_promotion_receipt,
+        commit_promotion, insert_dependency, insert_external_blocker, insert_fixture_item,
+        insert_fixture_mutation, insert_fixture_remote,
     };
 
     #[derive(Debug, PartialEq, Eq)]
@@ -134,22 +134,6 @@ mod tests {
                 exit
             }
         }
-    }
-
-    fn promote_fixture(conn: &mut rusqlite::Connection, item_id: &str, key: &str, display: &str) {
-        let tx = crate::store::write_transaction(conn).unwrap();
-        crate::store::promotion::apply_receipt(
-            &tx,
-            item_id,
-            "github",
-            &BackendItemIdentity {
-                backend_key: key.into(),
-                display_id: display.into(),
-            },
-            "2026-05-08T00:00:00.000Z",
-        )
-        .unwrap();
-        tx.commit().unwrap();
     }
 
     #[test]
@@ -404,12 +388,17 @@ mod tests {
             },
         )
         .unwrap();
-        promote_fixture(
+        apply_promotion_receipt(
             &mut conn,
             "target",
-            "https://github.com/o/r/issues/53",
-            "gh-53",
-        );
+            "github",
+            &BackendItemIdentity {
+                backend_key: "https://github.com/o/r/issues/53".into(),
+                display_id: "gh-53".into(),
+            },
+            "2026-05-08T00:00:00.000Z",
+        )
+        .unwrap();
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
@@ -477,12 +466,17 @@ mod tests {
         .unwrap();
         insert_dependency(&conn, "blocker", "target").unwrap();
         insert_external_blocker(&conn, "external", "target", None).unwrap();
-        promote_fixture(
+        apply_promotion_receipt(
             &mut conn,
             "target",
-            "https://github.com/o/r/issues/9",
-            "gh-9",
-        );
+            "github",
+            &BackendItemIdentity {
+                backend_key: "https://github.com/o/r/issues/9".into(),
+                display_id: "gh-9".into(),
+            },
+            "2026-05-08T00:00:00.000Z",
+        )
+        .unwrap();
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);

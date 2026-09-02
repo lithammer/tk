@@ -317,6 +317,7 @@ pub fn apply_receipt(
     // tolerates the window where `items` still points at a row that has just
     // become an Alias.
     let provenance = BindingDisplayProvenance::Known(outgoing_display_id);
+    let (stored_provenance, displaced_display_id) = provenance.stored_values();
     conn.execute(
         "update item_ids set source = 'alias' where item_id = ?1 and source = 'display'",
         params![item_id],
@@ -341,8 +342,8 @@ pub fn apply_receipt(
             receipt.backend_key,
             receipt.display_id,
             now,
-            provenance.text(),
-            provenance.local_display_value(),
+            stored_provenance,
+            displaced_display_id,
         ],
     )?;
     Ok(())
@@ -1350,8 +1351,8 @@ mod tests {
     use crate::store::migrations;
     use crate::store::repository::resolve_item_ref;
     use crate::store::testing::{
-        FixtureItem, FixtureMutation, insert_dependency, insert_fixture_item,
-        insert_fixture_mutation, mutation_count,
+        FixtureItem, FixtureMutation, apply_promotion_receipt, insert_dependency,
+        insert_fixture_item, insert_fixture_mutation, mutation_count,
     };
     use rand::SeedableRng;
     use rand::rngs::StdRng;
@@ -1389,26 +1390,12 @@ mod tests {
         }
     }
 
-    /// Drive the receipt through a caller-owned transaction, the shape
-    /// [`apply_receipt`] contracts for: the deferred `items` →
-    /// `item_ids` foreign key is only tolerated mid-transaction, and a failure
-    /// rolls the whole conversion back.
-    fn promote(
-        conn: &mut Connection,
-        item_id: &str,
-        receipt: &BackendItemIdentity,
-    ) -> Result<(), ApplyReceiptError> {
-        let tx = crate::store::write_transaction(conn)?;
-        apply_receipt(&tx, item_id, "github", receipt, NOW)?;
-        Ok(tx.commit()?)
-    }
-
     #[test]
     fn receipt_makes_the_item_a_backend_item_and_replaces_the_display_id() {
         let mut conn = open_seeded();
         local_ticket(&conn, "t1", "tk-1");
 
-        promote(&mut conn, "t1", &receipt("42", "gh-42")).unwrap();
+        apply_promotion_receipt(&mut conn, "t1", "github", &receipt("42", "gh-42"), NOW).unwrap();
 
         let (display, origin, kind, key, updated, provenance, local_display): (
             String,
@@ -1451,7 +1438,7 @@ mod tests {
         let mut conn = open_seeded();
         local_ticket(&conn, "t1", "tk-1");
 
-        promote(&mut conn, "t1", &receipt("42", "gh-42")).unwrap();
+        apply_promotion_receipt(&mut conn, "t1", "github", &receipt("42", "gh-42"), NOW).unwrap();
 
         // Both identifiers reach the same Item; the local one is the Alias.
         assert_eq!(resolve_item_ref(&conn, "tk-1").unwrap().unwrap().id, "t1");
@@ -1482,7 +1469,7 @@ mod tests {
         let mut conn = open_seeded();
         local_ticket(&conn, "t1", "tk-1");
 
-        promote(&mut conn, "t1", &receipt("42", "gh-42")).unwrap();
+        apply_promotion_receipt(&mut conn, "t1", "github", &receipt("42", "gh-42"), NOW).unwrap();
 
         let (selection, priority, status, title): (String, String, String, String) = conn
             .query_row(
@@ -1517,7 +1504,7 @@ mod tests {
         )
         .unwrap();
 
-        promote(&mut conn, "t1", &receipt("42", "gh-42")).unwrap();
+        apply_promotion_receipt(&mut conn, "t1", "github", &receipt("42", "gh-42"), NOW).unwrap();
 
         let (selection, priority): (String, String) = conn
             .query_row(
@@ -1546,7 +1533,8 @@ mod tests {
         )
         .unwrap();
 
-        let err = promote(&mut conn, "t1", &receipt("42", "gh-42")).unwrap_err();
+        let err = apply_promotion_receipt(&mut conn, "t1", "github", &receipt("42", "gh-42"), NOW)
+            .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -1595,7 +1583,7 @@ mod tests {
         )
         .unwrap();
 
-        promote(&mut conn, "e1", &receipt("7", "gh-7")).unwrap();
+        apply_promotion_receipt(&mut conn, "e1", "github", &receipt("7", "gh-7"), NOW).unwrap();
 
         let (display, origin, selection): (String, String, Option<String>) = conn
             .query_row(

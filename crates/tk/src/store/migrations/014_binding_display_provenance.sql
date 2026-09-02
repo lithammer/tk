@@ -25,17 +25,21 @@ alter table items add column binding_display_provenance text not null default 'n
         ))
     );
 
+with aliases(item_id, alias_count, alias_value) as materialized (
+    select item_id, count(*), min(value)
+      from item_ids
+     where source = 'alias'
+     group by item_id
+)
 update items
-   set binding_local_display_value = (
-           select value
-             from item_ids
-            where item_id = items.id and source = 'alias'
-       ),
-       binding_display_provenance = 'known'
- where origin = 'backend'
-   and (select count(*) from item_ids where item_id = items.id and source = 'alias') = 1;
-
-update items
-   set binding_display_provenance = 'ambiguous'
- where origin = 'backend'
-   and (select count(*) from item_ids where item_id = items.id and source = 'alias') > 1;
+   set binding_local_display_value = case
+           when aliases.alias_count = 1 then aliases.alias_value
+           else null
+       end,
+       binding_display_provenance = case
+           when aliases.alias_count = 1 then 'known'
+           else 'ambiguous'
+       end
+  from aliases
+ where items.id = aliases.item_id
+   and items.origin = 'backend';

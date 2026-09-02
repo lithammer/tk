@@ -19,8 +19,23 @@ use rand::SeedableRng;
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
 
+use crate::domain::backend_operation::BackendItemIdentity;
 use crate::domain::lifecycle::Lifecycle;
 use crate::domain::work_state::WorkState;
+
+/// Apply a Promotion receipt inside the write transaction its deferred Display
+/// ID foreign key requires.
+pub fn apply_promotion_receipt(
+    conn: &mut Connection,
+    item_id: &str,
+    backend_kind: &str,
+    receipt: &BackendItemIdentity,
+    now: &str,
+) -> Result<(), crate::store::promotion::ApplyReceiptError> {
+    let tx = crate::store::write_transaction(conn)?;
+    crate::store::promotion::apply_receipt(&tx, item_id, backend_kind, receipt, now)?;
+    Ok(tx.commit()?)
+}
 
 /// On-disk scaffolding for a fake Git repository plus its `git rev-parse`
 /// stdout payload. The `tk init` discovery layer expects two newline-
