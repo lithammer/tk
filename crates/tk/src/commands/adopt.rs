@@ -84,7 +84,7 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         None => crate::domain::promotion_capability::PromotionCapabilities::none(),
     };
 
-    let outcome = store_sync::adopt_backend_ticket_with_capabilities(
+    let outcome = store_sync::adopt_backend_ticket(
         store.conn_mut(),
         expected,
         &mut *deps.rng,

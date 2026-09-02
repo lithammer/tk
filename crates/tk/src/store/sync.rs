@@ -238,7 +238,7 @@ struct FormerIdentity {
 /// creating a second representation of one Backend object. The transaction
 /// rechecks the Remote before writing, closing the Adapter-read to Store-write
 /// configuration race.
-pub fn adopt_backend_ticket_with_capabilities(
+pub fn adopt_backend_ticket(
     conn: &mut Connection,
     expected_kind: BackendKind,
     rng: &mut dyn rand::Rng,
@@ -312,27 +312,9 @@ pub fn adopt_backend_ticket_with_capabilities(
     ))
 }
 
-#[cfg(test)]
-fn adopt_backend_ticket(
-    conn: &mut Connection,
-    expected_kind: BackendKind,
-    rng: &mut dyn rand::Rng,
-    adopted: &AdoptedItem,
-    now: &str,
-) -> Result<AdoptOutcome, AdoptStoreError> {
-    adopt_backend_ticket_with_capabilities(
-        conn,
-        expected_kind,
-        rng,
-        adopted,
-        PromotionCapabilities::all(),
-        now,
-    )
-}
-
 /// Derive the Backend facets an exact Re-Adopt needs after Adapter
-/// canonicalization. Ordinary Adopt returns `None` and performs no unrelated
-/// capability lookup.
+/// canonicalization. Ordinary Adopt returns `None` because it restores no
+/// relationship intent.
 pub fn readopt_requirements(
     conn: &Connection,
     backend_kind: BackendKind,
@@ -356,10 +338,10 @@ pub fn readopt_requirements(
     };
     ensure_backend_cohort(conn, backend_kind)?;
     let graph = readopt_graph(conn, &former.item_id)?;
-    let changed = HashSet::from([former.item_id.as_str()]);
+    let bound_ids = HashSet::from([former.item_id.as_str()]);
     Ok(Some(relationship_requirements(
         &graph,
-        &changed,
+        &bound_ids,
         backend_kind,
     )))
 }
@@ -420,10 +402,10 @@ fn readopt_backend_ticket(
         BackendBinding::Local => {}
     }
     let graph = readopt_graph(conn, &former.item_id)?;
-    let changed = HashSet::from([former.item_id.as_str()]);
-    let relationship_drafts = plan_relationships(&graph, &changed, capabilities, backend_kind)
+    let bound_ids = HashSet::from([former.item_id.as_str()]);
+    let relationship_drafts = plan_relationships(&graph, &bound_ids, capabilities, backend_kind)
         .map_err(|findings| {
-            readopt_finding_error(
+            readopt_error(
                 &graph,
                 &former.backend_display_id,
                 backend_kind,
@@ -523,8 +505,7 @@ fn readopt_backend_ticket(
     })
 }
 
-/// Read the relationship graph Re-Adopt preflights, preserving Store error
-/// classification at the Adopt boundary.
+/// Read only the relationship graph that Re-Adopt can change.
 fn readopt_graph(
     conn: &Connection,
     item_id: &str,
@@ -533,7 +514,7 @@ fn readopt_graph(
         Ok(mut graph) => {
             // Promotion's read also gathers edges that touch the target's
             // parent or children. Re-Adopt changes only its target, so those
-            // wider edges are outside this operation's resulting graph.
+            // wider edges are outside Re-Adopt's relationship check.
             graph
                 .dependencies
                 .retain(|edge| edge.blocked_id == item_id || edge.blocking_id == item_id);
@@ -544,10 +525,8 @@ fn readopt_graph(
     }
 }
 
-/// Map the first shared relationship-planner finding to Re-Adopt's command
-/// vocabulary. Promotion accumulates all findings; Re-Adopt retains its
-/// existing first-refusal behavior.
-fn readopt_finding_error(
+/// Translate the first relationship finding because Adopt reports one failure.
+fn readopt_error(
     graph: &crate::domain::promotion_graph::PromotionGraph,
     backend_display_id: &str,
     backend_kind: BackendKind,
@@ -2039,6 +2018,23 @@ mod tests {
         }
     }
 
+    fn adopt_with_all_capabilities(
+        conn: &mut Connection,
+        backend_kind: BackendKind,
+        rng: &mut dyn rand::Rng,
+        item: &AdoptedItem,
+        now: &str,
+    ) -> Result<AdoptOutcome, AdoptStoreError> {
+        adopt_backend_ticket(
+            conn,
+            backend_kind,
+            rng,
+            item,
+            PromotionCapabilities::all(),
+            now,
+        )
+    }
+
     fn refresh(title: &str, status: Lifecycle) -> BackendItemRefresh {
         BackendItemRefresh {
             title: title.into(),
@@ -2072,7 +2068,7 @@ mod tests {
         let mut conn = open_seeded();
         seed_remote(&conn);
         let mut rng = StdRng::seed_from_u64(0);
-        let outcome = adopt_backend_ticket(
+        let outcome = adopt_with_all_capabilities(
             &mut conn,
             BackendKind::Github,
             &mut rng,
@@ -2867,7 +2863,7 @@ mod tests {
 
         let mut rng = StdRng::seed_from_u64(0);
         // A *different* backend item claims the same Display ID.
-        let err = adopt_backend_ticket(
+        let err = adopt_with_all_capabilities(
             &mut conn,
             BackendKind::Github,
             &mut rng,
@@ -4815,7 +4811,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(requirements.requires_dependencies());
-        let error = adopt_backend_ticket_with_capabilities(
+        let error = adopt_backend_ticket(
             &mut conn,
             BackendKind::Github,
             &mut StdRng::seed_from_u64(7),
@@ -4902,7 +4898,7 @@ mod tests {
         let mut conn = open_seeded();
         seed_remote(&conn);
         let mut rng = rand::rngs::StdRng::seed_from_u64(7);
-        let first = adopt_backend_ticket(
+        let first = adopt_with_all_capabilities(
             &mut conn,
             BackendKind::Github,
             &mut rng,
@@ -4915,7 +4911,7 @@ mod tests {
         let mut canonical = adopted("42", "gh-42", "Original", Lifecycle::Open);
         canonical.title = "Changed remotely".into();
         let second =
-            adopt_backend_ticket(&mut conn, BackendKind::Github, &mut rng, &canonical, NOW)
+            adopt_with_all_capabilities(&mut conn, BackendKind::Github, &mut rng, &canonical, NOW)
                 .unwrap();
         assert!(matches!(second, AdoptOutcome::AlreadyExists(_)));
         assert_eq!(
@@ -4932,7 +4928,7 @@ mod tests {
         let mut conn = open_seeded();
         seed_remote(&conn);
         let mut rng = rand::rngs::StdRng::seed_from_u64(7);
-        adopt_backend_ticket(
+        adopt_with_all_capabilities(
             &mut conn,
             BackendKind::Github,
             &mut rng,
@@ -4956,7 +4952,7 @@ mod tests {
             .is_none()
         );
         assert!(matches!(
-            adopt_backend_ticket(
+            adopt_with_all_capabilities(
                 &mut conn,
                 BackendKind::Github,
                 &mut rng,
@@ -5005,7 +5001,7 @@ mod tests {
         // Canonical identity is the (Backend kind, key) pair: a key spelled
         // the same on another Backend names a different object, so Jira intake
         // inserts rather than rebinding the legacy GitHub history.
-        let outcome = adopt_backend_ticket(
+        let outcome = adopt_with_all_capabilities(
             &mut conn,
             BackendKind::Jira,
             &mut rand::rngs::StdRng::seed_from_u64(7),
@@ -5064,7 +5060,7 @@ mod tests {
             .unwrap();
         }
 
-        let outcome = adopt_backend_ticket(
+        let outcome = adopt_with_all_capabilities(
             &mut conn,
             BackendKind::Github,
             &mut rand::rngs::StdRng::seed_from_u64(7),
@@ -5110,7 +5106,7 @@ mod tests {
                 conn.execute_batch("pragma foreign_keys = on").unwrap();
                 let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
                 barrier.wait();
-                adopt_backend_ticket(
+                adopt_with_all_capabilities(
                     &mut conn,
                     BackendKind::Github,
                     &mut rng,
@@ -5153,7 +5149,7 @@ mod tests {
         clear_remote(&mut conn).unwrap();
         let mut rng = rand::rngs::StdRng::seed_from_u64(7);
 
-        let error = adopt_backend_ticket(
+        let error = adopt_with_all_capabilities(
             &mut conn,
             BackendKind::Github,
             &mut rng,
@@ -5190,7 +5186,7 @@ mod tests {
         set_remote(&mut conn, BackendKind::Jira, "{}", NOW).unwrap();
         let mut rng = rand::rngs::StdRng::seed_from_u64(7);
 
-        let error = adopt_backend_ticket(
+        let error = adopt_with_all_capabilities(
             &mut conn,
             BackendKind::Github,
             &mut rng,
@@ -5224,7 +5220,7 @@ mod tests {
         let mut conn = open_seeded();
         seed_remote(&conn);
         let mut rng = rand::rngs::StdRng::seed_from_u64(7);
-        adopt_backend_ticket(
+        adopt_with_all_capabilities(
             &mut conn,
             BackendKind::Github,
             &mut rng,
@@ -5238,7 +5234,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = adopt_backend_ticket(
+        let error = adopt_with_all_capabilities(
             &mut conn,
             BackendKind::Jira,
             &mut rng,
@@ -5265,7 +5261,7 @@ mod tests {
         let mut conn = open_seeded();
         seed_remote(&conn);
         let mut rng = rand::rngs::StdRng::seed_from_u64(7);
-        adopt_backend_ticket(
+        adopt_with_all_capabilities(
             &mut conn,
             BackendKind::Github,
             &mut rng,

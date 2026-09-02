@@ -1,7 +1,7 @@
-//! Pure preflight analysis for Binding changes. It derives the required
-//! Backend capabilities from a Repository Store snapshot, then builds either
-//! the ordered Mutations the operation commits or every problem it would hit
-//! (ADR-0035, ADR-0036, ADR-0047).
+//! Pure relationship preflight for Promotion and Re-Adopt. It derives the
+//! required Backend capabilities from a Repository Store snapshot, then builds
+//! either the ordered Mutations the operation commits or every problem it
+//! would hit (ADR-0035, ADR-0036, ADR-0047).
 //!
 //! Nothing here touches SQLite, Git, or a Backend. Every input is pure domain
 //! data, so the whole operation is judged before a byte is written and a
@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use crate::domain::backend_binding::BackendBinding;
 use crate::domain::backend_kind::BackendKind;
 use crate::domain::dependency_rule::{self, DependencyClassification, DependencyRejection};
-use crate::domain::epic_membership_rule::{self, EpicMembershipClassification};
+use crate::domain::epic_membership_rule;
 use crate::domain::item_class::ItemClass;
 use crate::domain::lifecycle::Lifecycle;
 use crate::domain::mutation_payload::{
@@ -83,39 +83,39 @@ pub fn promotion_requirements(
     requirements
 }
 
-/// Derive only the relationship facets an operation's changed Items need.
+/// Derive the relationship facets needed for the Items an operation binds.
 ///
-/// `changed` names Items the operation will bind to `backend`. Keeping this
+/// `bound_ids` names Items the operation will bind to `backend`. Keeping this
 /// pass draft-free lets callers resolve Backend capabilities before the
 /// transactional planner builds payloads.
 #[must_use]
 pub(crate) fn relationship_requirements(
     graph: &PromotionGraph,
-    changed: &HashSet<&str>,
+    bound_ids: &HashSet<&str>,
     backend: BackendKind,
 ) -> PromotionRequirements {
     let by_id: HashMap<&str, &GraphItem> = graph.items.iter().map(|i| (i.id.as_str(), i)).collect();
     let mut requirements = PromotionRequirements::none();
-    if classify_dependencies(graph, &by_id, changed, backend)
+    if classify_dependencies(graph, &by_id, bound_ids, backend)
         .iter()
         .any(|edge| matches!(edge.verdict, EdgeVerdict::BecomesBackendIntent))
     {
         requirements = requirements.with_dependencies();
     }
-    if !bound_memberships(graph, &by_id, changed, backend).is_empty() {
+    if !bound_memberships(graph, &by_id, bound_ids, backend).is_empty() {
         requirements = requirements.with_epic_membership();
     }
     requirements
 }
 
-/// Plan the relationship Mutations an operation's changed Items create.
+/// Plan the relationship Mutations created when an operation binds Items.
 ///
 /// The function owns ADR-0035's resulting-graph classification, capability
 /// checks, endpoint ordering, and payload construction for both Promotion and
 /// Re-Adopt.
 pub(crate) fn plan_relationships(
     graph: &PromotionGraph,
-    changed: &HashSet<&str>,
+    bound_ids: &HashSet<&str>,
     capabilities: PromotionCapabilities,
     backend: BackendKind,
 ) -> Result<Vec<MutationDraft>, Vec<PromotionFinding>> {
@@ -123,7 +123,7 @@ pub(crate) fn plan_relationships(
     let mut findings: Vec<(EndpointOrder, PromotionFinding)> = Vec::new();
     let mut mutations: Vec<(EndpointOrder, MutationDraft)> = Vec::new();
 
-    for edge in classify_dependencies(graph, &by_id, changed, backend) {
+    for edge in classify_dependencies(graph, &by_id, bound_ids, backend) {
         match edge.verdict {
             EdgeVerdict::Rejected(reason) => findings.push((
                 edge.order,
@@ -150,7 +150,7 @@ pub(crate) fn plan_relationships(
         }
     }
 
-    for membership in bound_memberships(graph, &by_id, changed, backend) {
+    for membership in bound_memberships(graph, &by_id, bound_ids, backend) {
         if capabilities.can_represent_epic_membership() {
             mutations.push((
                 membership.order,
@@ -230,10 +230,10 @@ const GRAPH_IS_CLOSED: &str = "PromotionGraph carries both endpoints of every ed
 /// ADR-0047 judge relationships against this future graph.
 fn binding_after(
     item: &GraphItem,
-    changed: &HashSet<&str>,
+    bound_ids: &HashSet<&str>,
     backend: BackendKind,
 ) -> BackendBinding {
-    if changed.contains(item.id.as_str()) {
+    if bound_ids.contains(item.id.as_str()) {
         BackendBinding::PendingPromotion {
             backend_kind: backend.text().to_owned(),
         }
@@ -253,7 +253,7 @@ enum EdgeVerdict {
     /// This operation is what makes the Dependency backend intent, so the
     /// Backend has to be able to represent it.
     BecomesBackendIntent,
-    /// Nothing for this Promotion to create or answer for.
+    /// Nothing for this operation to create or answer for.
     Untouched,
 }
 
@@ -278,7 +278,7 @@ struct BoundMembership<'a> {
 fn classify_dependencies<'a>(
     graph: &'a PromotionGraph,
     by_id: &HashMap<&'a str, &'a GraphItem>,
-    changed: &HashSet<&str>,
+    bound_ids: &HashSet<&str>,
     backend: BackendKind,
 ) -> Vec<JudgedEdge<'a>> {
     graph
@@ -288,18 +288,18 @@ fn classify_dependencies<'a>(
             let blocked = *by_id.get(edge.blocked_id.as_str()).expect(GRAPH_IS_CLOSED);
             let blocking = *by_id.get(edge.blocking_id.as_str()).expect(GRAPH_IS_CLOSED);
             let verdict = match dependency_rule::classify(
-                &binding_after(blocked, changed, backend),
-                &binding_after(blocking, changed, backend),
+                &binding_after(blocked, bound_ids, backend),
+                &binding_after(blocking, bound_ids, backend),
             ) {
                 DependencyClassification::Rejected(reason) => EdgeVerdict::Rejected(reason),
                 // An edge whose endpoints were both backend-bound before the
-                // operation is already backend intent; this Promotion neither
+                // operation is already backend intent; this operation neither
                 // creates it nor is judged on it. Only edges the operation
                 // itself binds are captured, which is also what makes a
                 // re-invoked `tk promote` append nothing.
                 DependencyClassification::BecomesBackendIntent
-                    if changed.contains(blocked.id.as_str())
-                        || changed.contains(blocking.id.as_str()) =>
+                    if bound_ids.contains(blocked.id.as_str())
+                        || bound_ids.contains(blocking.id.as_str()) =>
                 {
                     EdgeVerdict::BecomesBackendIntent
                 }
@@ -321,7 +321,7 @@ fn classify_dependencies<'a>(
 fn bound_memberships<'a>(
     graph: &'a PromotionGraph,
     by_id: &HashMap<&'a str, &'a GraphItem>,
-    changed: &HashSet<&str>,
+    bound_ids: &HashSet<&str>,
     backend: BackendKind,
 ) -> Vec<BoundMembership<'a>> {
     let mut bound = Vec::new();
@@ -329,12 +329,12 @@ fn bound_memberships<'a>(
         let Some(container_id) = ticket.container_id.as_deref() else {
             continue;
         };
-        // Either endpoint may be the promoted one: `--children` promotes
+        // Either endpoint may be bound by the operation: `--children` promotes
         // Tickets into an Epic, and promoting an Epic snapshots membership for
         // the Tickets it already contains. A pair the operation does not move
         // is either already backend intent or still local, and neither is this
-        // Promotion's business — the same bound the Dependency rule uses.
-        if !changed.contains(ticket.id.as_str()) && !changed.contains(container_id) {
+        // operation's business — the same bound the Dependency rule uses.
+        if !bound_ids.contains(ticket.id.as_str()) && !bound_ids.contains(container_id) {
             continue;
         }
         // A container absent from the snapshot is a torn concurrent edit, not a
@@ -350,9 +350,9 @@ fn bound_memberships<'a>(
         // backed by the same Backend after the operation. Mixed-Origin
         // membership stays local and is not a problem.
         if epic_membership_rule::classify(
-            &binding_after(ticket, changed, backend),
-            &binding_after(epic, changed, backend),
-        ) == EpicMembershipClassification::StaysLocal
+            &binding_after(ticket, bound_ids, backend),
+            &binding_after(epic, bound_ids, backend),
+        ) == epic_membership_rule::Classification::StaysLocal
         {
             continue;
         }

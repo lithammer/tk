@@ -7,25 +7,25 @@
 
 use super::backend_binding::BackendBinding;
 
-/// What an Epic Membership means for the Mutation Log.
+/// What Epic Membership means for the Mutation Log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EpicMembershipClassification {
+pub enum Classification {
     /// Both Items share one Backend, so membership carries an
     /// `add_ticket_to_epic` Mutation.
     BecomesBackendIntent,
-    /// The Items do not share one Backend, so membership remains local current
-    /// state.
+    /// The Items do not share one Backend, so membership stays in the
+    /// Repository Store only.
     StaysLocal,
 }
 
 /// Classify Epic Membership from the Ticket and Epic's resulting Bindings.
 #[must_use]
-pub fn classify(ticket: &BackendBinding, epic: &BackendBinding) -> EpicMembershipClassification {
+pub fn classify(ticket: &BackendBinding, epic: &BackendBinding) -> Classification {
     match (ticket.backend_kind(), epic.backend_kind()) {
         (Some(ticket_kind), Some(epic_kind)) if ticket_kind == epic_kind => {
-            EpicMembershipClassification::BecomesBackendIntent
+            Classification::BecomesBackendIntent
         }
-        _ => EpicMembershipClassification::StaysLocal,
+        _ => Classification::StaysLocal,
     }
 }
 
@@ -40,22 +40,22 @@ mod tests {
     }
 
     #[test]
-    fn only_one_backend_on_both_items_becomes_intent() {
+    fn matching_backend_bindings_become_intent() {
         assert_eq!(
             classify(&backend("github"), &backend("github")),
-            EpicMembershipClassification::BecomesBackendIntent
+            Classification::BecomesBackendIntent
         );
         assert_eq!(
             classify(&BackendBinding::Local, &backend("github")),
-            EpicMembershipClassification::StaysLocal
+            Classification::StaysLocal
         );
         assert_eq!(
             classify(&backend("github"), &BackendBinding::Local),
-            EpicMembershipClassification::StaysLocal
+            Classification::StaysLocal
         );
         assert_eq!(
             classify(&backend("github"), &backend("jira")),
-            EpicMembershipClassification::StaysLocal
+            Classification::StaysLocal
         );
     }
 }

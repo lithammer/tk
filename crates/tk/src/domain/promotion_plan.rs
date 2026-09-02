@@ -1,5 +1,5 @@
-//! Infrastructure-free Mutation drafts and the ordered plan one `tk promote`
-//! invocation commits (ADR-0035, ADR-0036).
+//! Mutation drafts and the ordered plan one `tk promote` invocation commits
+//! (ADR-0035, ADR-0036).
 //!
 //! The other half of the Promotion contract [`super::promotion_graph`] opens:
 //! `store/` produces the snapshot the planner reasons over and commits the plan
@@ -22,14 +22,14 @@ use super::mutation_type::MutationType;
 /// (ADR-0036).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MutationDraft {
-    /// Mutation Log operation to append.
+    /// Operation stored in the Mutation Log.
     pub mutation_type: MutationType,
     /// Internal stable `items.id` the Mutation targets: the Blocked Item for
     /// a Dependency, the Ticket for Epic membership.
     pub item_id: String,
-    /// Item Class stored beside the target for operation-shape validation.
+    /// Item Class stored beside the target to check the operation shape.
     pub item_class: ItemClass,
-    /// Typed payload serialized into the Mutation Log row.
+    /// Payload stored in the Mutation Log row.
     pub payload: MutationPayload,
 }
 
