@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 use crate::domain::backend_binding::BackendBinding;
 use crate::domain::backend_kind::BackendKind;
 use crate::domain::dependency_rule::{self, DependencyClassification, DependencyRejection};
+use crate::domain::epic_membership_rule::{self, EpicMembershipClassification};
 use crate::domain::item_class::ItemClass;
 use crate::domain::lifecycle::Lifecycle;
 use crate::domain::mutation_payload::{
@@ -257,8 +258,10 @@ fn bound_memberships<'a>(
         // Membership becomes backend intent only when Ticket and Epic are
         // backed by the same Backend after the operation. Mixed-Origin
         // membership stays local and is not a problem.
-        if binding_after(ticket, promoted, backend).backend_kind() != Some(backend.text())
-            || binding_after(epic, promoted, backend).backend_kind() != Some(backend.text())
+        if epic_membership_rule::classify(
+            &binding_after(ticket, promoted, backend),
+            &binding_after(epic, promoted, backend),
+        ) == EpicMembershipClassification::StaysLocal
         {
             continue;
         }

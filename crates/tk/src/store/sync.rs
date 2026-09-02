@@ -25,6 +25,7 @@ use crate::domain::backend_outcome::{
 };
 use crate::domain::binding_display_provenance::BindingDisplayProvenance;
 use crate::domain::dependency_rule::{self, DependencyClassification, DependencyRejection};
+use crate::domain::epic_membership_rule::{self, EpicMembershipClassification};
 use crate::domain::item_class::ItemClass;
 use crate::domain::lifecycle::Lifecycle;
 use crate::domain::mutation_payload::{
@@ -34,6 +35,8 @@ use crate::domain::mutation_state::MutationState;
 use crate::domain::mutation_type::MutationType;
 use crate::domain::origin::Origin;
 use crate::domain::priority::Priority;
+use crate::domain::promotion_capability::{PromotionCapabilities, PromotionRequirements};
+use crate::domain::promotion_plan::MutationDraft;
 use crate::domain::selection_state::SelectionState;
 use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
@@ -70,6 +73,8 @@ pub enum AdoptStoreError {
     Storage(#[from] rusqlite::Error),
     #[error(transparent)]
     Sequence(#[from] SequenceError),
+    #[error(transparent)]
+    Append(#[from] mutations::AppendError),
     /// An adopted Ticket's `display_id` collided with an existing `item_ids.value`
     /// (a Display ID or Alias already claimed by another Item). Carries the
     /// colliding Display ID for the command's verbatim diagnostic.
@@ -118,6 +123,26 @@ pub enum AdoptStoreError {
         backend_display_id: String,
         blocking_display_id: String,
         blocking_item_class: ItemClass,
+    },
+    /// The resulting graph creates relationship intent the configured Backend
+    /// Adapter cannot represent under Promotion's rules (ADR-0035).
+    #[error(
+        "{blocked_display_id} depends on {blocking_display_id}, which the Backend cannot represent"
+    )]
+    ReadoptDependencyNotRepresentable {
+        backend_display_id: String,
+        blocked_display_id: String,
+        blocking_display_id: String,
+        backend_kind: BackendKind,
+    },
+    /// The resulting graph creates Epic Membership the configured Backend
+    /// Adapter cannot represent under Promotion's rules (ADR-0035).
+    #[error("{ticket_display_id} belongs to {epic_display_id}, which the Backend cannot represent")]
+    ReadoptMembershipNotRepresentable {
+        backend_display_id: String,
+        ticket_display_id: String,
+        epic_display_id: String,
+        backend_kind: BackendKind,
     },
     #[error(transparent)]
     BackendBinding(#[from] mutations::BackendBindingError),
@@ -169,6 +194,21 @@ pub struct ReadoptReport {
     /// Item Status derived from the imported Lifecycle and the Work State
     /// that survived it (ADR-0043).
     pub status: ItemStatus,
+    /// Fresh relationship intent appended by the Re-Adopt transaction, in
+    /// Mutation Sequence order (ADR-0047).
+    pub queued_relationships: Vec<QueuedRelationshipMutation>,
+}
+
+/// One relationship Mutation queued while restoring a Former Backend
+/// Identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedRelationshipMutation {
+    /// Fresh Mutation Sequence allocated by the Re-Adopt transaction.
+    pub sequence: i64,
+    /// Relationship operation the Mutation Log will apply.
+    pub mutation_type: MutationType,
+    /// Current Display ID of the Item the Mutation targets.
+    pub target_display_id: String,
 }
 
 /// One canonical Backend identity an Item detached from, as
@@ -196,11 +236,12 @@ struct FormerIdentity {
 /// creating a second representation of one Backend object. The transaction
 /// rechecks the Remote before writing, closing the Adapter-read to Store-write
 /// configuration race.
-pub fn adopt_backend_ticket(
+pub fn adopt_backend_ticket_with_capabilities(
     conn: &mut Connection,
     expected_kind: BackendKind,
     rng: &mut dyn rand::Rng,
     adopted: &AdoptedItem,
+    capabilities: PromotionCapabilities,
     now: &str,
 ) -> Result<AdoptOutcome, AdoptStoreError> {
     let tx = crate::store::write_transaction(conn)?;
@@ -221,7 +262,8 @@ pub fn adopt_backend_ticket(
     if let Some(former) =
         find_former_backend_identity(&tx, expected_kind, &adopted.backend_key, legacy_backend_key)?
     {
-        let report = readopt_backend_ticket(&tx, expected_kind, &former, adopted, now)?;
+        let report =
+            readopt_backend_ticket(&tx, expected_kind, &former, adopted, capabilities, now)?;
         tx.commit()?;
         return Ok(AdoptOutcome::Readopted(report));
     }
@@ -268,6 +310,67 @@ pub fn adopt_backend_ticket(
     ))
 }
 
+#[cfg(test)]
+fn adopt_backend_ticket(
+    conn: &mut Connection,
+    expected_kind: BackendKind,
+    rng: &mut dyn rand::Rng,
+    adopted: &AdoptedItem,
+    now: &str,
+) -> Result<AdoptOutcome, AdoptStoreError> {
+    adopt_backend_ticket_with_capabilities(
+        conn,
+        expected_kind,
+        rng,
+        adopted,
+        PromotionCapabilities::all(),
+        now,
+    )
+}
+
+/// Derive the Backend facets an exact Re-Adopt needs after Adapter
+/// canonicalization. Ordinary Adopt returns `None` and performs no unrelated
+/// capability lookup.
+pub fn readopt_requirements(
+    conn: &Connection,
+    backend_kind: BackendKind,
+    adopted: &AdoptedItem,
+) -> Result<Option<PromotionRequirements>, AdoptStoreError> {
+    let legacy_backend_key = legacy_adopt_backend_key(backend_kind, adopted);
+    if find_adopted_ticket_by_identity(
+        conn,
+        backend_kind,
+        &adopted.backend_key,
+        legacy_backend_key,
+    )?
+    .is_some()
+    {
+        return Ok(None);
+    }
+    let Some(former) =
+        find_former_backend_identity(conn, backend_kind, &adopted.backend_key, legacy_backend_key)?
+    else {
+        return Ok(None);
+    };
+    ensure_backend_cohort(conn, backend_kind)?;
+    let drafts = readopt_relationship_drafts(
+        conn,
+        &former.item_id,
+        &former.backend_display_id,
+        backend_kind,
+        PromotionCapabilities::all(),
+    )?;
+    let mut requirements = PromotionRequirements::none();
+    for draft in drafts {
+        requirements = match draft.mutation.mutation_type {
+            MutationType::AddDependency => requirements.with_dependencies(),
+            MutationType::AddTicketToEpic => requirements.with_epic_membership(),
+            _ => unreachable!("Re-Adopt drafts relationship additions only"),
+        };
+    }
+    Ok(Some(requirements))
+}
+
 /// Rebind the Item that owns `former` to that canonical identity, inside the
 /// caller's Adopt intake transaction (ADR-0047).
 ///
@@ -275,17 +378,16 @@ pub fn adopt_backend_ticket(
 /// and Ticket Kind — while Item Class, the stable internal Item ID, Local
 /// Fields, and relationships stay as the Item held them locally.
 ///
-/// The Mutation Log is untouched. Detach made its withdrawals terminal, and
-/// the other half of ADR-0047's relationship contract — appending fresh intent
-/// for every relationship that becomes representable — is not in this path
-/// yet. So a Dependency that would make the resulting graph invalid refuses the
-/// whole command, while one that becomes Backend intent is allowed but not yet
-/// delivered.
+/// Detach's withdrawals remain terminal. Dependencies and Epic Membership
+/// that become Backend intent append fresh ordered Mutations; an invalid
+/// Dependency refuses before any Store write, and mixed-Origin membership
+/// stays local. The caller commits the rebind and outbox together.
 fn readopt_backend_ticket(
     conn: &Connection,
     backend_kind: BackendKind,
     former: &FormerIdentity,
     adopted: &AdoptedItem,
+    capabilities: PromotionCapabilities,
     now: &str,
 ) -> Result<ReadoptReport, AdoptStoreError> {
     let (item_class, display_id, work_state, closing_reason): (
@@ -324,15 +426,13 @@ fn readopt_backend_ticket(
         }
         BackendBinding::Local => {}
     }
-    if let Some((blocking_display_id, blocking_item_class)) =
-        local_blocking_item(conn, &former.item_id, backend_kind)?
-    {
-        return Err(AdoptStoreError::ReadoptBlockedByLocal {
-            backend_display_id: former.backend_display_id.clone(),
-            blocking_display_id,
-            blocking_item_class,
-        });
-    }
+    let relationship_drafts = readopt_relationship_drafts(
+        conn,
+        &former.item_id,
+        &former.backend_display_id,
+        backend_kind,
+        capabilities,
+    )?;
 
     // The imported Lifecycle decides the two local fields it can invalidate:
     // `done` retires Work State, and `open` cannot carry a Closing Reason the
@@ -384,6 +484,27 @@ fn readopt_backend_ticket(
         ],
     )?;
 
+    let mut queued_relationships = Vec::with_capacity(relationship_drafts.len());
+    for draft in relationship_drafts {
+        let mutation = draft.mutation;
+        let sequence = mutations::append(
+            conn,
+            mutations::AppendRequest {
+                mutation_type: mutation.mutation_type,
+                item_id: &mutation.item_id,
+                item_class: mutation.item_class,
+                payload: &mutation.payload,
+                promotion_operation_id: None,
+                now_iso: now,
+            },
+        )?;
+        queued_relationships.push(QueuedRelationshipMutation {
+            sequence,
+            mutation_type: mutation.mutation_type,
+            target_display_id: repository::current_display_id(conn, &mutation.item_id)?,
+        });
+    }
+
     Ok(ReadoptReport {
         backend_display_id: former.backend_display_id.clone(),
         local_display_id: display_id,
@@ -391,7 +512,173 @@ fn readopt_backend_ticket(
         title: adopted.title.clone(),
         ticket_kind: adopted.ticket_kind,
         status: ItemStatus::of(adopted.status, work_state),
+        queued_relationships,
     })
+}
+
+/// One relationship Mutation and the endpoint order ADR-0035 applies before
+/// Re-Adopt appends it to the shared outbox.
+struct OrderedRelationshipDraft {
+    order: (i64, i64),
+    mutation: MutationDraft,
+}
+
+/// Resolve an endpoint's Binding in the graph Re-Adopt would leave, without
+/// changing the stored Binding before preflight succeeds.
+fn binding_after_readopt(
+    conn: &Connection,
+    candidate_id: &str,
+    readopted_id: &str,
+    restored: &BackendBinding,
+) -> Result<BackendBinding, AdoptStoreError> {
+    if candidate_id == readopted_id {
+        Ok(restored.clone())
+    } else {
+        Ok(mutations::resolve_backend_binding(conn, candidate_id)?)
+    }
+}
+
+/// Collect relationships whose Backend intent is created by restoring
+/// `item_id`, ordered by their endpoint creation sequence as Promotion orders
+/// them (ADR-0035). The target's resulting Binding is used before the Store
+/// row is changed, so every decision precedes the atomic write.
+fn readopt_relationship_drafts(
+    conn: &Connection,
+    item_id: &str,
+    backend_display_id: &str,
+    backend_kind: BackendKind,
+    capabilities: PromotionCapabilities,
+) -> Result<Vec<OrderedRelationshipDraft>, AdoptStoreError> {
+    let restored = BackendBinding::Backend {
+        backend_kind: backend_kind.text().to_owned(),
+    };
+    let mut stmt = conn.prepare(
+        "select blocked.id, blocked.display_value, blocked.item_class, blocked.created_seq, \
+                blocking.id, blocking.display_value, blocking.item_class, \
+                blocking.created_seq \
+           from dependencies d \
+           join items blocked on blocked.id = d.blocked_id \
+           join items blocking on blocking.id = d.blocking_id \
+          where d.blocked_id = ?1 or d.blocking_id = ?1 \
+          order by blocked.created_seq, blocking.created_seq",
+    )?;
+    let rows = stmt.query_map(params![item_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, ItemClass>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, ItemClass>(6)?,
+            row.get::<_, i64>(7)?,
+        ))
+    })?;
+    let mut drafts = Vec::new();
+    for row in rows {
+        let (
+            blocked_id,
+            blocked_display_id,
+            blocked_item_class,
+            blocked_created_seq,
+            blocking_id,
+            blocking_display_id,
+            blocking_item_class,
+            blocking_created_seq,
+        ) = row?;
+        let blocked = binding_after_readopt(conn, &blocked_id, item_id, &restored)?;
+        let blocking = binding_after_readopt(conn, &blocking_id, item_id, &restored)?;
+        match dependency_rule::classify(&blocked, &blocking) {
+            DependencyClassification::BecomesBackendIntent => {
+                if !capabilities.can_represent_dependencies() {
+                    return Err(AdoptStoreError::ReadoptDependencyNotRepresentable {
+                        backend_display_id: backend_display_id.to_owned(),
+                        blocked_display_id,
+                        blocking_display_id,
+                        backend_kind,
+                    });
+                }
+                drafts.push(OrderedRelationshipDraft {
+                    order: (blocked_created_seq, blocking_created_seq),
+                    mutation: MutationDraft {
+                        mutation_type: MutationType::AddDependency,
+                        item_id: blocked_id,
+                        item_class: blocked_item_class,
+                        payload: MutationPayload::DependencyRef(DependencyRef { blocking_id }),
+                    },
+                });
+            }
+            DependencyClassification::Rejected(
+                DependencyRejection::BackendBlockedLocalBlocking,
+            ) => {
+                return Err(AdoptStoreError::ReadoptBlockedByLocal {
+                    backend_display_id: backend_display_id.to_owned(),
+                    blocking_display_id,
+                    blocking_item_class,
+                });
+            }
+            DependencyClassification::Rejected(DependencyRejection::BackendKindMismatch) => {
+                unreachable!("the retained Backend cohort shares the Re-Adopt Remote")
+            }
+            DependencyClassification::StaysLocal => {}
+        }
+    }
+
+    let mut stmt = conn.prepare(
+        "select ticket.id, ticket.display_value, ticket.item_class, ticket.created_seq, \
+                epic.id, epic.display_value, epic.created_seq \
+           from items ticket \
+           join items epic on epic.id = ticket.container_id \
+          where ticket.id = ?1 or epic.id = ?1 \
+          order by ticket.created_seq, epic.created_seq",
+    )?;
+    let rows = stmt.query_map(params![item_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, ItemClass>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, i64>(6)?,
+        ))
+    })?;
+    for row in rows {
+        let (
+            ticket_id,
+            ticket_display_id,
+            ticket_class,
+            ticket_created_seq,
+            epic_id,
+            epic_display_id,
+            epic_created_seq,
+        ) = row?;
+        let ticket = binding_after_readopt(conn, &ticket_id, item_id, &restored)?;
+        let epic = binding_after_readopt(conn, &epic_id, item_id, &restored)?;
+        if epic_membership_rule::classify(&ticket, &epic)
+            == EpicMembershipClassification::BecomesBackendIntent
+        {
+            if !capabilities.can_represent_epic_membership() {
+                return Err(AdoptStoreError::ReadoptMembershipNotRepresentable {
+                    backend_display_id: backend_display_id.to_owned(),
+                    ticket_display_id,
+                    epic_display_id,
+                    backend_kind,
+                });
+            }
+            drafts.push(OrderedRelationshipDraft {
+                order: (ticket_created_seq, epic_created_seq),
+                mutation: MutationDraft {
+                    mutation_type: MutationType::AddTicketToEpic,
+                    item_id: ticket_id,
+                    item_class: ticket_class,
+                    payload: MutationPayload::EpicRef(EpicRef { epic_id }),
+                },
+            });
+        }
+    }
+    drafts.sort_by_key(|draft| draft.order);
+    Ok(drafts)
 }
 
 /// Look up the Former Backend Identity that owns a canonical Backend key.
@@ -431,53 +718,6 @@ fn find_former_backend_identity(
         },
     )
     .optional()
-}
-
-/// The first Local Blocking Item beneath `item_id`, or `None` when the
-/// resulting graph is valid.
-///
-/// Re-Adopt makes the Item a Backend-bound Blocked Item, which reclassifies
-/// every Dependency it waits on. Detach asks this from the other side —
-/// whether the Item it makes Local is a Blocking Item beneath something still
-/// bound — and `dependency_rule::classify` owns the answer for both, so the
-/// rule stays in one place (ADR-0035).
-///
-/// The Backend-kind mismatch rejection cannot arise here: the intake
-/// transaction has already checked that the retained Backend cohort matches
-/// the Remote, so every bound Item shares this Backend.
-fn local_blocking_item(
-    conn: &Connection,
-    item_id: &str,
-    backend_kind: BackendKind,
-) -> Result<Option<(String, ItemClass)>, AdoptStoreError> {
-    let blocked = BackendBinding::Backend {
-        backend_kind: backend_kind.text().to_owned(),
-    };
-    let mut stmt = conn.prepare(
-        "select blocking.id, blocking.display_value, blocking.item_class \
-           from dependencies d \
-           join items blocking on blocking.id = d.blocking_id \
-          where d.blocked_id = ?1 \
-          order by blocking.created_seq",
-    )?;
-    let rows = stmt.query_map(params![item_id], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, ItemClass>(2)?,
-        ))
-    })?;
-    for row in rows {
-        let (id, display_id, item_class) = row?;
-        let blocking = mutations::resolve_backend_binding(conn, &id)?;
-        if matches!(
-            dependency_rule::classify(&blocked, &blocking),
-            DependencyClassification::Rejected(DependencyRejection::BackendBlockedLocalBlocking)
-        ) {
-            return Ok(Some((display_id, item_class)));
-        }
-    }
-    Ok(None)
 }
 
 /// Claim `display_id` as the Item's current Display ID.
@@ -1851,7 +2091,7 @@ mod tests {
     use crate::domain::work_state::WorkState;
     use crate::store::migrations;
     use crate::store::testing::{
-        FixtureFormerIdentity, FixtureItem, FixtureMutation, FixtureRemote,
+        FixtureFormerIdentity, FixtureItem, FixtureMutation, FixtureRemote, insert_dependency,
         insert_fixture_former_identity, insert_fixture_item, insert_fixture_mutation,
         insert_fixture_remote, item_axes, item_count,
     };
@@ -4624,6 +4864,121 @@ mod tests {
     }
 
     // ---- adopt ----------------------------------------------------------
+
+    #[test]
+    fn readopt_refuses_relationship_intent_the_backend_cannot_represent() {
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "stable",
+                display: "tk-1",
+                title: "Local work",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        backend_ticket(&conn, "blocker", "gh-8", "8", 2);
+        insert_dependency(&conn, "blocker", "stable").unwrap();
+        insert_fixture_former_identity(
+            &conn,
+            FixtureFormerIdentity {
+                item_id: "stable",
+                backend_key: URL_42,
+                backend_display_value: "gh-42",
+                ..FixtureFormerIdentity::default()
+            },
+        )
+        .unwrap();
+        let snapshot = adopted(URL_42, "gh-42", "Backend work", Lifecycle::Open);
+
+        let requirements = readopt_requirements(&conn, BackendKind::Github, &snapshot)
+            .unwrap()
+            .unwrap();
+        assert!(requirements.requires_dependencies());
+        let error = adopt_backend_ticket_with_capabilities(
+            &mut conn,
+            BackendKind::Github,
+            &mut StdRng::seed_from_u64(7),
+            &snapshot,
+            PromotionCapabilities::none(),
+            NOW,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            AdoptStoreError::ReadoptDependencyNotRepresentable {
+                ref blocked_display_id,
+                ref blocking_display_id,
+                ..
+            } if blocked_display_id == "tk-1" && blocking_display_id == "gh-8"
+        ));
+        let origin: String = conn
+            .query_row("select origin from items where id = 'stable'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(origin, "local");
+        assert_eq!(pending_or_failed_mutation_count(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn former_epic_requirements_include_membership_from_its_backend_ticket() {
+        let conn = open_seeded();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "stable",
+                display: "tk-1",
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                selection_state: None,
+                title: "Local Epic",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_former_identity(
+            &conn,
+            FixtureFormerIdentity {
+                item_id: "stable",
+                backend_key: URL_42,
+                backend_display_value: "gh-42",
+                ..FixtureFormerIdentity::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "child",
+                display: "gh-8",
+                title: "Backend child",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("8"),
+                container_id: Some("stable"),
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+
+        let requirements = readopt_requirements(
+            &conn,
+            BackendKind::Github,
+            &adopted(URL_42, "gh-42", "Backend Epic", Lifecycle::Open),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(requirements.requires_epic_membership());
+    }
 
     #[test]
     fn canonical_adopt_is_idempotent_without_overwriting_stored_fields() {

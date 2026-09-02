@@ -1,5 +1,5 @@
-//! The ordered Mutations one `tk promote` invocation commits (ADR-0035,
-//! ADR-0036).
+//! Infrastructure-free Mutation drafts and the ordered plan one `tk promote`
+//! invocation commits (ADR-0035, ADR-0036).
 //!
 //! The other half of the Promotion contract [`super::promotion_graph`] opens:
 //! `store/` produces the snapshot the planner reasons over and commits the plan
@@ -7,25 +7,29 @@
 //! and the engine rather than types owned by the engine `store/` would then
 //! have to import.
 //!
-//! [`crate::promotion::plan::plan_promotion`] is the only producer;
-//! [`crate::store::promotion::commit_plan`] the only consumer.
+//! Promotion builds a [`PromotionPlan`]; Re-Adopt uses the same
+//! [`MutationDraft`] shape for relationship intent it appends in its own Store
+//! transaction (ADR-0047).
 
 use super::item_class::ItemClass;
 use super::mutation_payload::MutationPayload;
 use super::mutation_type::MutationType;
 
-/// One Mutation the plan will append.
+/// One Mutation a preflighted Store operation will append.
 ///
 /// It carries no Promotion Operation: that identity is one per `tk promote`
 /// invocation and the outbox writer stamps it across the whole batch
 /// (ADR-0036).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MutationDraft {
+    /// Mutation Log operation to append.
     pub mutation_type: MutationType,
     /// Internal stable `items.id` the Mutation targets: the Blocked Item for
     /// a Dependency, the Ticket for Epic membership.
     pub item_id: String,
+    /// Item Class stored beside the target for operation-shape validation.
     pub item_class: ItemClass,
+    /// Typed payload serialized into the Mutation Log row.
     pub payload: MutationPayload,
 }
 

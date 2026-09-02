@@ -75,12 +75,21 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     let adopted = adapter
         .adopt_ticket(&args.key)
         .map_err(adapter_read_error)?;
+    let capabilities = match store_sync::readopt_requirements(store.conn(), expected, &adopted)
+        .map_err(adopt_store_error)?
+    {
+        Some(requirements) => adapter
+            .resolve_promotion_capabilities(requirements)
+            .map_err(adapter_read_error)?,
+        None => crate::domain::promotion_capability::PromotionCapabilities::none(),
+    };
 
-    let outcome = store_sync::adopt_backend_ticket(
+    let outcome = store_sync::adopt_backend_ticket_with_capabilities(
         store.conn_mut(),
         expected,
         &mut *deps.rng,
         &adopted,
+        capabilities,
         &now,
     )
     .map_err(adopt_store_error)?;
@@ -140,6 +149,16 @@ fn render_readopt(stdout: &mut dyn std::io::Write, report: &store_sync::ReadoptR
     );
     let _ = writeln!(stdout, "Kind: {}", report.ticket_kind);
     let _ = writeln!(stdout, "Status: {}", report.status);
+    for mutation in &report.queued_relationships {
+        let _ = writeln!(
+            stdout,
+            "Queued {} for {} (Mutation {})",
+            mutation.mutation_type, mutation.target_display_id, mutation.sequence
+        );
+    }
+    if !report.queued_relationships.is_empty() {
+        let _ = writeln!(stdout, "Run 'tk sync' to apply the queued relationships.");
+    }
 }
 
 /// The no-Remote diagnostic returned when the Adapter factory finds none.
@@ -172,10 +191,12 @@ fn adopt_store_error(err: AdoptStoreError) -> CommandError {
             "the configured Remote changed while contacting the Backend; retry 'tk adopt'",
         ),
         AdoptStoreError::Storage(e)
-        | AdoptStoreError::BackendCohort(BackendCohortError::Storage(e)) => {
+        | AdoptStoreError::BackendCohort(BackendCohortError::Storage(e))
+        | AdoptStoreError::Append(crate::store::mutations::AppendError::Sqlite(e)) => {
             resolver::storage_error(&e)
         }
-        AdoptStoreError::Sequence(e) => {
+        AdoptStoreError::Sequence(e)
+        | AdoptStoreError::Append(crate::store::mutations::AppendError::Sequence(e)) => {
             CommandError::failure(format!("Repository Store corruption: {e}"))
         }
         AdoptStoreError::BackendCohort(other) => {
@@ -206,6 +227,24 @@ fn adopt_store_error(err: AdoptStoreError) -> CommandError {
             "cannot re-adopt {backend_display_id}: it would be blocked by Local {} \
              '{blocking_display_id}'; remove the Dependency first",
             blocking_item_class.label()
+        )),
+        AdoptStoreError::ReadoptDependencyNotRepresentable {
+            backend_display_id,
+            blocked_display_id,
+            blocking_display_id,
+            backend_kind,
+        } => CommandError::failure(format!(
+            "cannot re-adopt {backend_display_id}: {blocked_display_id} depends on \
+             {blocking_display_id}, and the {backend_kind} Backend cannot represent a Dependency"
+        )),
+        AdoptStoreError::ReadoptMembershipNotRepresentable {
+            backend_display_id,
+            ticket_display_id,
+            epic_display_id,
+            backend_kind,
+        } => CommandError::failure(format!(
+            "cannot re-adopt {backend_display_id}: {ticket_display_id} belongs to Epic \
+             {epic_display_id}, and the {backend_kind} Backend cannot represent Epic membership"
         )),
         AdoptStoreError::BackendBinding(err) => resolver::backend_binding_error(&err),
         AdoptStoreError::ApplyingMutation(sequence) => CommandError::failure(format!(
@@ -643,6 +682,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn unrepresentable_relationships_name_both_endpoints() {
+        let cases = [
+            (
+                AdoptStoreError::ReadoptDependencyNotRepresentable {
+                    backend_display_id: "gh-42".into(),
+                    blocked_display_id: "gh-42".into(),
+                    blocking_display_id: "gh-8".into(),
+                    backend_kind: crate::domain::backend_kind::BackendKind::Github,
+                },
+                "tk adopt: cannot re-adopt gh-42: gh-42 depends on gh-8, and the github Backend cannot represent a Dependency\n",
+            ),
+            (
+                AdoptStoreError::ReadoptMembershipNotRepresentable {
+                    backend_display_id: "gh-42".into(),
+                    ticket_display_id: "gh-42".into(),
+                    epic_display_id: "gh-9".into(),
+                    backend_kind: crate::domain::backend_kind::BackendKind::Github,
+                },
+                "tk adopt: cannot re-adopt gh-42: gh-42 belongs to Epic gh-9, and the github Backend cannot represent Epic membership\n",
+            ),
+        ];
+
+        for (error, expected) in cases {
+            let error = adopt_store_error(error);
+            let mut out = Vec::new();
+            error.render(&mut out, "adopt");
+            assert_eq!(String::from_utf8(out).unwrap(), expected);
+        }
+    }
+
     // ---- Re-Adopt (ADR-0047) --------------------------------------------
 
     /// A Backend Ticket fixture keeping `origin` and the identity columns in
@@ -719,7 +789,7 @@ mod tests {
     }
 
     #[test]
-    fn readopting_a_former_identity_restores_the_original_item() {
+    fn readopt_restores_the_item_and_keeps_mixed_origin_relationships_local() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
@@ -782,6 +852,7 @@ mod tests {
              Kind: bug\n\
              Status: open\n"
         );
+        assert!(!h.out().contains("Run 'tk sync'"), "{}", h.out());
 
         // One Backend object keeps one representation: the same stable Item is
         // rebound, and no fresh created_seq is spent on a duplicate.
@@ -942,16 +1013,48 @@ mod tests {
             backend_ticket("gh-42", "https://github.com/o/r/issues/42"),
         )
         .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "blocker",
+                display: "gh-8",
+                title: "Backend blocking work",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("https://github.com/o/r/issues/8"),
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_dependency(&conn, "blocker", "stable").unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 3,
+                mutation_type: "add_dependency",
+                item_id: "stable",
+                payload_json: r#"{"blocking_id":"blocker"}"#,
+                state: "applied",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
         insert_fixture_mutation(
             &conn,
             FixtureMutation {
                 sequence: 4,
-                mutation_type: "update_ticket",
+                mutation_type: "add_dependency",
                 item_id: "stable",
-                payload_json: r#"{"title":"Local title","body":"Local body"}"#,
+                payload_json: r#"{"blocking_id":"blocker"}"#,
                 state: "pending",
                 ..FixtureMutation::default()
             },
+        )
+        .unwrap();
+        conn.execute(
+            "update sequences set value = 4 where name = 'mutation_seq'",
+            [],
         )
         .unwrap();
         let cwd_path = cwd();
@@ -964,16 +1067,29 @@ mod tests {
         let exit = run_rendered(&mut h, "42");
 
         assert_eq!(exit, Exit::Ok, "stderr={}", h.err());
-        // Detach made the withdrawal terminal; Re-Adopt never resurrects the
-        // intent the user withdrew, nor queues its own.
-        let states: Vec<String> = conn
-            .prepare("select state from mutations order by sequence")
+        assert!(
+            h.out()
+                .contains("Queued add_dependency for gh-42 (Mutation 5)\n"),
+            "{}",
+            h.out()
+        );
+        // Detach made the old intent terminal. Re-Adopt records the current
+        // relationship as a fresh later Mutation instead of reviving it.
+        let mutations: Vec<(i64, String)> = conn
+            .prepare("select sequence, state from mutations order by sequence")
             .unwrap()
-            .query_map([], |r| r.get(0))
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
-        assert_eq!(states, vec!["cancelled".to_owned()]);
+        assert_eq!(
+            mutations,
+            vec![
+                (3, "applied".to_owned()),
+                (4, "cancelled".to_owned()),
+                (5, "pending".to_owned()),
+            ]
+        );
     }
 
     #[test]
@@ -1223,11 +1339,179 @@ mod tests {
 
         let exit = run_rendered(&mut h, "42");
 
-        // Both endpoints end up on one Backend, so the edge becomes
-        // representable intent rather than an invalid graph. Recording that
-        // intent as a Mutation is a separate step Re-Adopt does not take yet.
         assert_eq!(exit, Exit::Ok, "stderr={}", h.err());
+        h.runner.assert_all_consumed();
+        assert_eq!(
+            h.out(),
+            "Re-adopted Ticket: gh-42 - Fix login\n\
+             Backend object: https://github.com/o/r/issues/42\n\
+             Local Display ID kept as an Alias: tk-1\n\
+             Imported title, body, Ticket Kind, and Lifecycle from the Backend\n\
+             Kind: task\n\
+             Status: open\n\
+             Queued add_dependency for gh-42 (Mutation 1)\n\
+             Run 'tk sync' to apply the queued relationships.\n"
+        );
         assert_eq!(stored_origin(&conn), "backend");
+        let mutation: (i64, String, String, String, String) = conn
+            .query_row(
+                "select sequence, mutation_type, item_id, payload_json, state \
+                   from mutations",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            mutation,
+            (
+                1,
+                "add_dependency".to_owned(),
+                "stable".to_owned(),
+                r#"{"blocking_id":"blocker"}"#.to_owned(),
+                "pending".to_owned(),
+            )
+        );
+    }
+
+    #[test]
+    fn readopt_queues_membership_when_the_epic_is_backend_bound() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "parent",
+                display: "gh-9",
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                selection_state: None,
+                title: "Backend Epic",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("https://github.com/o/r/issues/9"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                container_id: Some("parent"),
+                created_seq: 2,
+                ..backend_ticket("gh-42", "https://github.com/o/r/issues/42")
+            },
+        )
+        .unwrap();
+        let cwd_path = cwd();
+        detach_item(&store, &cwd_path, "gh-42");
+
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        expect_issue_view(&h, 42, "OPEN", "null");
+
+        let exit = run_rendered(&mut h, "42");
+
+        assert_eq!(exit, Exit::Ok, "stderr={}", h.err());
+        h.runner.assert_all_consumed();
+        assert!(
+            h.out()
+                .contains("Queued add_ticket_to_epic for gh-42 (Mutation 1)\n"),
+            "{}",
+            h.out()
+        );
+        let mutation: (String, String, String, String) = conn
+            .query_row(
+                "select mutation_type, item_id, payload_json, state from mutations",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            mutation,
+            (
+                "add_ticket_to_epic".to_owned(),
+                "stable".to_owned(),
+                r#"{"epic_id":"parent"}"#.to_owned(),
+                "pending".to_owned(),
+            )
+        );
+    }
+
+    #[test]
+    fn relationship_append_failure_rolls_back_the_whole_readopt() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
+        insert_fixture_item(
+            &conn,
+            backend_ticket("gh-42", "https://github.com/o/r/issues/42"),
+        )
+        .unwrap();
+        let cwd_path = cwd();
+        detach_item(&store, &cwd_path, "gh-42");
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "blocker",
+                display: "gh-8",
+                title: "Backend blocking work",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("https://github.com/o/r/issues/8"),
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_dependency(&conn, "blocker", "stable").unwrap();
+        conn.execute("delete from sequences where name = 'mutation_seq'", [])
+            .unwrap();
+
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        expect_issue_view(&h, 42, "OPEN", "Bug");
+
+        let exit = run_rendered(&mut h, "42");
+
+        assert_eq!(exit, Exit::Failure);
+        assert_eq!(
+            h.err(),
+            "tk adopt: Repository Store corruption: sequence counter \
+             `mutation_seq` is missing from the store\n"
+        );
+        assert_eq!(stored_origin(&conn), "local");
+        assert_eq!(stored_backend_key(&conn), "");
+        assert_eq!(
+            resolver_rows(&conn, "stable"),
+            vec![("tk-1".to_owned(), "display".to_owned())]
+        );
+        let fields: (String, String, String) = conn
+            .query_row(
+                "select title, body, ticket_kind from items where id = 'stable'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            fields,
+            (
+                "Local title".to_owned(),
+                "Local body".to_owned(),
+                "task".to_owned(),
+            )
+        );
+        assert_eq!(mutation_count(&conn).unwrap(), 0);
     }
 
     #[test]
