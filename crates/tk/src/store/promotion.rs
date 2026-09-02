@@ -53,6 +53,7 @@ use crate::domain::ticket_kind::TicketKind;
 use crate::store::mutations;
 use crate::store::repository::RemoteWorkflowGuard;
 use crate::store::repository::create::generate_internal_id;
+use crate::store::repository::current_display_id;
 
 /// Error returned by [`read_graph`].
 #[derive(Debug, Error)]
@@ -1187,8 +1188,8 @@ fn ensure_dependencies_representable(
             dependency_rule::classify(&blocked, &blocking)
         {
             rejected.push(UnrepresentableDependency {
-                blocked_display_id: display_id(conn, &blocked_id)?,
-                blocking_display_id: display_id(conn, &blocking_id)?,
+                blocked_display_id: current_display_id(conn, &blocked_id)?,
+                blocking_display_id: current_display_id(conn, &blocking_id)?,
                 rejection,
             });
         }
@@ -1213,14 +1214,6 @@ fn post_cancellation_binding(
         return Ok(BackendBinding::Local);
     }
     Ok(mutations::resolve_backend_binding(conn, item_id)?)
-}
-
-fn display_id(conn: &Connection, item_id: &str) -> rusqlite::Result<String> {
-    conn.query_row(
-        "select display_value from items where id = ?1",
-        params![item_id],
-        |r| r.get(0),
-    )
 }
 
 /// A Promotion withdrawn while its Backend creation outcome was unobserved, so
@@ -1267,25 +1260,52 @@ pub fn abandoned_promotions(
     Ok(out)
 }
 
-/// Whether `operation_id` still holds a Promotion awaiting an outcome.
+/// A Promotion of `operation_id` that is still awaiting an outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnresolvedPromotion {
+    pub sequence: i64,
+    /// Display ID of the Item the Promotion would create, which is also the
+    /// argument its recovery commands take.
+    pub display_id: String,
+    /// Decides which exits exist: only an `applying` Promotion may be retried,
+    /// while ordinary sync still carries a `pending` or `failed` one
+    /// (ADR-0037).
+    pub state: MutationState,
+}
+
+/// The earliest Promotion of `operation_id` still awaiting an outcome.
 ///
-/// Detach asks this of every Mutation it would withdraw. A `pending`, `failed`,
-/// or `applying` Promotion is the state ADR-0038 protects: withdrawing one
-/// Mutation of that operation could leave an Epic upstream with its children
-/// gone, so the operator resolves the Promotion through reconcile, retry, or
-/// cancel first. Once every Promotion of the operation is terminal, no
-/// prospective identity is left to split and the operation's remaining intent
-/// withdraws like any other.
-pub fn has_unresolved_promotion(conn: &Connection, operation_id: &str) -> rusqlite::Result<bool> {
+/// Detach asks this of every Mutation it would withdraw. A nonterminal
+/// Promotion is the state ADR-0038 protects: withdrawing one Mutation of that
+/// operation could leave an Epic upstream with its children gone, so the
+/// operator resolves the Promotion first. Once every Promotion of the
+/// operation is terminal, no prospective identity is left to split and the
+/// operation's remaining intent withdraws like any other.
+///
+/// The earliest is the one that must resolve first, and it carries the
+/// identity and state a refusal needs to name a remedy the operator can
+/// actually run.
+pub fn unresolved_promotion(
+    conn: &Connection,
+    operation_id: &str,
+) -> rusqlite::Result<Option<UnresolvedPromotion>> {
     conn.query_row(
-        "select exists( \
-            select 1 from mutations \
-             where promotion_operation_id = ?1 \
-               and mutation_type in ('promote_ticket', 'promote_epic') \
-               and state in ('pending', 'failed', 'applying'))",
+        "select m.sequence, i.display_value, m.state \
+           from mutations m join items i on i.id = m.item_id \
+          where m.promotion_operation_id = ?1 \
+            and m.mutation_type in ('promote_ticket', 'promote_epic') \
+            and m.state in ('pending', 'failed', 'applying') \
+          order by m.sequence asc limit 1",
         params![operation_id],
-        |r| r.get(0),
+        |r| {
+            Ok(UnresolvedPromotion {
+                sequence: r.get(0)?,
+                display_id: r.get(1)?,
+                state: r.get(2)?,
+            })
+        },
     )
+    .optional()
 }
 
 /// Mutation Log fields needed by Promotion's post-sync report.

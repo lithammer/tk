@@ -20,9 +20,11 @@ history, and Mutation changes in one Repository Store transaction. It works
 without a configured Remote. An unrelated `applying` Promotion does not block
 this Store-only operation, but Detach refuses when any affected Mutation
 belongs to a Promotion Operation whose Promotion is still unresolved. The
-operator must first reconcile, retry, or cancel that Promotion rather than
-withdrawing part of an operation still owed a Backend identity. Once every
-Promotion of an operation is terminal, no prospective identity is left to
+operator must first resolve that Promotion rather than withdrawing part of an
+operation still owed a Backend identity, so the refusal names it and the exits
+its state allows: reconcile, retry, or cancel for an indeterminate creation,
+and sync, reconcile, or cancel while ordinary delivery can still carry it. Once
+every Promotion of an operation is terminal, no prospective identity is left to
 split, and its remaining intent withdraws like any other Mutation.
 
 The Item keeps its stable internal ID, Item Class, fields, Lifecycle, Work
@@ -120,6 +122,12 @@ identify the old object.
 **Mint a new local Display ID for every Detach.** Rejected because Promotion
 and Re-Adopt already retain an exact local identity. Replacing it on every
 cycle would make one stable Item look new.
+
+**Refuse whenever an affected Mutation carries a Promotion Operation at all.**
+Rejected because an operation whose every Promotion is terminal has no
+prospective identity left to protect, so there is nothing to split. Detach
+would refuse and recommend a cancellation that answers "already resolved",
+leaving the operator's only exit through an unrelated `tk sync --skip`.
 
 **Restore withdrawn Mutations during Re-Adopt.** Rejected because Detach made
 their cancellation terminal. Replaying them would contradict the fresh

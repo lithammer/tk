@@ -5,6 +5,8 @@ use clap::Args as ClapArgs;
 
 use crate::cli::{CommandError, Deps, Exit};
 use crate::commands::resolver;
+use crate::domain::mutation_state::MutationState;
+use crate::store::promotion;
 use crate::store::repository::detach;
 
 /// Flags for `tk detach`.
@@ -49,6 +51,35 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     Ok(Exit::Ok)
 }
 
+/// The exits an unresolved Promotion's state actually offers.
+///
+/// Only an indeterminate creation may be retried, and ordinary sync still
+/// carries a pending or failed Promotion, so naming all three recovery verbs
+/// everywhere would recommend a command that refuses (ADR-0037).
+fn promotion_remedy(promotion: &promotion::UnresolvedPromotion) -> String {
+    let target = &promotion.display_id;
+    match promotion.state {
+        MutationState::Applying => format!(
+            "Its Backend creation outcome was never observed: use 'tk promote reconcile {target} <backend-key>' if the object exists, \
+             'tk promote retry {target}' only when creating it again is safe, or 'tk promote cancel {target}' to withdraw the Promotion Operation. \
+             Then detach again."
+        ),
+        // A terminal Promotion never reaches here: only nonterminal rows are
+        // unresolved. Exhaustive so a Mutation state added later has to say
+        // which remedy it offers.
+        MutationState::Pending
+        | MutationState::Failed
+        | MutationState::Applied
+        | MutationState::Skipped
+        | MutationState::Cancelled
+        | MutationState::Abandoned => format!(
+            "Run 'tk sync' to let Mutation {} resolve, 'tk promote reconcile {target} <backend-key>' if the Backend object already exists, \
+             or 'tk promote cancel {target}' to withdraw the Promotion Operation. Then detach again.",
+            promotion.sequence
+        ),
+    }
+}
+
 fn detach_error(err: detach::DetachError, id: &str) -> CommandError {
     match err {
         detach::DetachError::NotFound => {
@@ -69,10 +100,12 @@ fn detach_error(err: detach::DetachError, id: &str) -> CommandError {
         detach::DetachError::UnresolvedPromotionOperation {
             sequence,
             mutation_type,
+            promotion,
         } => CommandError::failure(format!(
-            "cannot detach '{id}': Mutation {sequence} ({mutation_type}) belongs to a Promotion Operation whose Promotion is unresolved; \
-             use 'tk promote reconcile <id> <backend-key>' if the Backend object exists, 'tk promote retry <id>' only when creating it again is safe, \
-             or 'tk promote cancel <id>' to withdraw the Promotion Operation, then detach again"
+            "cannot detach '{id}': Mutation {sequence} ({mutation_type}) belongs to the Promotion Operation of {}, \
+             whose Promotion is unresolved.\n{}",
+            promotion.display_id,
+            promotion_remedy(&promotion)
         )),
         detach::DetachError::BackendBlockedByDetached {
             display_id,
@@ -905,10 +938,24 @@ mod tests {
             },
         )
         .unwrap();
+        // A withdrawn child Promotion resolves the operation as surely as an
+        // applied one: neither leaves a prospective identity to split.
         insert_fixture_mutation(
             &conn,
             FixtureMutation {
                 sequence: 2,
+                mutation_type: "promote_ticket",
+                item_id: "member",
+                state: "cancelled",
+                promotion_operation_id: Some("op-1"),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 3,
                 mutation_type: "add_ticket_to_epic",
                 item_id: "member",
                 payload_json: r#"{"epic_id":"target"}"#,
@@ -928,13 +975,17 @@ mod tests {
             h.out(),
             "Detached: Backend Epic gh-9 → Local Epic tk-4\n\
              Backend object left unchanged: https://github.com/o/r/issues/9\n\
-             Withdrew add_ticket_to_epic for gh-10 (Mutation 2)\n"
+             Withdrew add_ticket_to_epic for gh-10 (Mutation 3)\n"
         );
         let rows = mutation_rows(&conn);
-        assert_eq!(rows[0].state, "applied");
-        assert_eq!(rows[1].state, "cancelled");
         assert_eq!(
-            rows[1].failure_json.as_deref(),
+            rows.iter()
+                .map(|row| row.state.as_str())
+                .collect::<Vec<_>>(),
+            vec!["applied", "cancelled", "cancelled"]
+        );
+        assert_eq!(
+            rows[2].failure_json.as_deref(),
             Some(r#"{"detail":"sub-issues unavailable"}"#)
         );
         // Epic Membership stays local current state (ADR-0035).
@@ -948,88 +999,107 @@ mod tests {
         assert_eq!(container.as_deref(), Some("target"));
     }
 
+    /// A Promotion in the same operation as an affected Mutation blocks Detach,
+    /// and the remedy depends on its state: only an indeterminate creation may
+    /// be retried (ADR-0037).
     #[test]
     fn detach_refuses_to_split_an_operation_whose_promotion_is_unresolved() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "target",
-                display: "gh-9",
-                item_class: "epic",
-                ticket_kind: None,
-                priority: None,
-                title: "Backend Epic",
-                origin: "backend",
-                backend_kind: Some("github"),
-                backend_key: Some("https://github.com/o/r/issues/9"),
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "child",
-                display: "repo-1",
-                title: "Awaiting creation",
-                container_id: Some("target"),
-                created_seq: 2,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 1,
-                mutation_type: "promote_ticket",
-                item_id: "child",
-                state: "pending",
-                promotion_operation_id: Some("op-1"),
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 2,
-                mutation_type: "add_ticket_to_epic",
-                item_id: "child",
-                payload_json: r#"{"epic_id":"target"}"#,
-                state: "pending",
-                promotion_operation_id: Some("op-1"),
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
-
-        assert_eq!(run_rendered(&mut h, "gh-9"), Exit::Failure);
-        assert_eq!(
-            h.err(),
-            "tk detach: cannot detach 'gh-9': Mutation 2 (add_ticket_to_epic) belongs to a Promotion Operation whose Promotion is unresolved; \
-             use 'tk promote reconcile <id> <backend-key>' if the Backend object exists, 'tk promote retry <id>' only when creating it again is safe, \
-             or 'tk promote cancel <id>' to withdraw the Promotion Operation, then detach again\n"
-        );
-        let origin: String = conn
-            .query_row("select origin from items where id = 'target'", [], |row| {
-                row.get(0)
-            })
+        for (state, remedy) in [
+            (
+                "pending",
+                "Run 'tk sync' to let Mutation 1 resolve, 'tk promote reconcile repo-1 <backend-key>' if the Backend object already exists, \
+                 or 'tk promote cancel repo-1' to withdraw the Promotion Operation. Then detach again.",
+            ),
+            (
+                "applying",
+                "Its Backend creation outcome was never observed: use 'tk promote reconcile repo-1 <backend-key>' if the object exists, \
+                 'tk promote retry repo-1' only when creating it again is safe, or 'tk promote cancel repo-1' to withdraw the Promotion Operation. \
+                 Then detach again.",
+            ),
+        ] {
+            let store = TmpStore::new("repo");
+            let conn = seed_store(&store);
+            insert_fixture_item(
+                &conn,
+                FixtureItem {
+                    id: "target",
+                    display: "gh-9",
+                    item_class: "epic",
+                    ticket_kind: None,
+                    priority: None,
+                    title: "Backend Epic",
+                    origin: "backend",
+                    backend_kind: Some("github"),
+                    backend_key: Some("https://github.com/o/r/issues/9"),
+                    created_seq: 1,
+                    ..FixtureItem::default()
+                },
+            )
             .unwrap();
-        assert_eq!(origin, "backend");
-        assert_eq!(
-            mutation_rows(&conn)
-                .iter()
-                .map(|row| row.state.as_str())
-                .collect::<Vec<_>>(),
-            vec!["pending", "pending"]
-        );
+            insert_fixture_item(
+                &conn,
+                FixtureItem {
+                    id: "child",
+                    display: "repo-1",
+                    title: "Awaiting creation",
+                    container_id: Some("target"),
+                    created_seq: 2,
+                    ..FixtureItem::default()
+                },
+            )
+            .unwrap();
+            insert_fixture_mutation(
+                &conn,
+                FixtureMutation {
+                    sequence: 1,
+                    mutation_type: "promote_ticket",
+                    item_id: "child",
+                    state,
+                    promotion_operation_id: Some("op-1"),
+                    ..FixtureMutation::default()
+                },
+            )
+            .unwrap();
+            insert_fixture_mutation(
+                &conn,
+                FixtureMutation {
+                    sequence: 2,
+                    mutation_type: "add_ticket_to_epic",
+                    item_id: "child",
+                    payload_json: r#"{"epic_id":"target"}"#,
+                    state: "pending",
+                    promotion_operation_id: Some("op-1"),
+                    ..FixtureMutation::default()
+                },
+            )
+            .unwrap();
+            let cwd_path = cwd();
+            let mut h = Harness::new(&cwd_path);
+            expect_git(&h, &store);
+
+            assert_eq!(run_rendered(&mut h, "gh-9"), Exit::Failure);
+            assert_eq!(
+                h.err(),
+                format!(
+                    "tk detach: cannot detach 'gh-9': Mutation 2 (add_ticket_to_epic) belongs to the Promotion Operation of repo-1, \
+                     whose Promotion is unresolved.\n{remedy}\n"
+                ),
+                "Promotion state {state} must name a remedy its state allows"
+            );
+            let origin: String = conn
+                .query_row("select origin from items where id = 'target'", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(origin, "backend");
+            assert_eq!(
+                mutation_rows(&conn)
+                    .iter()
+                    .map(|row| row.state.clone())
+                    .collect::<Vec<_>>(),
+                vec![state.to_string(), "pending".to_string()]
+            );
+        }
     }
 
     #[test]

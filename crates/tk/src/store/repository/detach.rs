@@ -16,7 +16,9 @@ use crate::store::mutations::{self, BackendBindingError};
 use crate::store::promotion;
 use crate::store::sequences::SequenceError;
 
-use super::{Store, insert_display_resolver, next_display_id, resolve_item_ref};
+use super::{
+    Store, current_display_id, insert_display_resolver, next_display_id, resolve_item_ref,
+};
 
 /// Successful Backend-to-Local identity transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +63,7 @@ pub enum DetachError {
     UnresolvedPromotionOperation {
         sequence: i64,
         mutation_type: MutationType,
+        promotion: promotion::UnresolvedPromotion,
     },
     #[error("a Backend-bound Blocked Item would wait on the detached Local Item")]
     BackendBlockedByDetached {
@@ -144,11 +147,12 @@ pub fn detach(
     let affected = affected_mutations(&tx, &reference.id)?;
     for mutation in &affected {
         if let Some(operation_id) = mutation.promotion_operation_id.as_deref()
-            && promotion::has_unresolved_promotion(&tx, operation_id)?
+            && let Some(promotion) = promotion::unresolved_promotion(&tx, operation_id)?
         {
             return Err(DetachError::UnresolvedPromotionOperation {
                 sequence: mutation.sequence,
                 mutation_type: mutation.mutation_type,
+                promotion,
             });
         }
     }
@@ -214,7 +218,7 @@ pub fn detach(
         withdrawn.push(WithdrawnMutation {
             sequence: mutation.sequence,
             mutation_type: mutation.mutation_type,
-            target_display_id: display_id(&tx, &mutation.item_id)?,
+            target_display_id: current_display_id(&tx, &mutation.item_id)?,
         });
     }
     tx.commit()?;
@@ -226,14 +230,6 @@ pub fn detach(
         item_class: reference.item_class,
         withdrawn,
     })
-}
-
-fn display_id(conn: &rusqlite::Connection, item_id: &str) -> rusqlite::Result<String> {
-    conn.query_row(
-        "select display_value from items where id = ?1",
-        params![item_id],
-        |row| row.get(0),
-    )
 }
 
 fn backend_item_blocked_by_local(
@@ -280,11 +276,11 @@ struct AffectedMutation {
 /// be delivered, in Mutation Sequence order.
 ///
 /// Two roles qualify: the Mutation's own target, and the counterpart its
-/// Mutation Type addresses (ADR-0038). Only a Promotion reaches `applying`, and
-/// a Promotion targets a Local Item and addresses no counterpart, so no
-/// `applying` Mutation can need a concrete Backend Item's address — an
-/// unrelated indeterminate creation leaves this Store-only operation alone
-/// (ADR-0047).
+/// Mutation Type addresses (ADR-0038). A Promotion is excluded in both roles —
+/// it creates a Backend identity rather than needing one, and only Promotion
+/// Cancellation withdraws it. That also keeps `applying` out of the set: the
+/// `mutations` CHECK admits that state for a Promotion alone, so an unrelated
+/// indeterminate creation leaves this Store-only operation alone (ADR-0047).
 fn affected_mutations(
     conn: &rusqlite::Connection,
     item_id: &str,
@@ -293,6 +289,7 @@ fn affected_mutations(
         "select sequence, state, mutation_type, item_id, payload_json, promotion_operation_id \
            from mutations \
           where state in ('pending','failed') \
+            and mutation_type not in ('promote_ticket', 'promote_epic') \
           order by sequence asc",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -312,8 +309,10 @@ fn affected_mutations(
         let (mutation, payload_json) = row?;
         // A payload that does not decode cannot prove that it addresses this
         // Item, and Sync cannot deliver it either: it decodes the same payload
-        // to find the counterpart's Backend address. Leaving it for Sync to
-        // diagnose costs the withdrawal nothing.
+        // to find the counterpart's Backend address. Promotion Cancellation
+        // treats the same row as corruption and refuses, because it is
+        // withdrawing intent the operator asked about; Detach is local
+        // recovery and stays available, leaving the row for Sync to diagnose.
         let addresses_item = mutation.item_id == item_id
             || mutations::addressed_counterpart_id(mutation.mutation_type, &payload_json)
                 .is_ok_and(|counterpart| counterpart.as_deref() == Some(item_id));
