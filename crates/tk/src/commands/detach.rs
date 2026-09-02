@@ -54,6 +54,9 @@ fn detach_error(err: detach::DetachError, id: &str) -> CommandError {
         detach::DetachError::AmbiguousDisplayProvenance => CommandError::failure(format!(
             "'{id}' has ambiguous local Display ID provenance from multiple legacy Aliases; Detach cannot choose one"
         )),
+        detach::DetachError::InvalidDisplayProvenance(err) => {
+            CommandError::failure(format!("Repository Store corruption: {err}"))
+        }
         detach::DetachError::UnresolvedMutations => CommandError::failure(format!(
             "'{id}' has unresolved Mutations; resolve them before detaching"
         )),
@@ -568,6 +571,17 @@ mod tests {
         conn.execute(
             "update items set binding_display_provenance = 'ambiguous' where id = 'target'",
             [],
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "update_ticket",
+                item_id: "target",
+                state: "pending",
+                ..FixtureMutation::default()
+            },
         )
         .unwrap();
         let cwd_path = cwd();

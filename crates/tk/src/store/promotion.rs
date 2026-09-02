@@ -316,6 +316,7 @@ pub fn apply_receipt(
     // from `items.display_value` into `item_ids` is deferred, which is what
     // tolerates the window where `items` still points at a row that has just
     // become an Alias.
+    let provenance = BindingDisplayProvenance::Known(outgoing_display_id);
     conn.execute(
         "update item_ids set source = 'alias' where item_id = ?1 and source = 'display'",
         params![item_id],
@@ -340,8 +341,8 @@ pub fn apply_receipt(
             receipt.backend_key,
             receipt.display_id,
             now,
-            BindingDisplayProvenance::Known,
-            outgoing_display_id,
+            provenance.text(),
+            provenance.local_display_value(),
         ],
     )?;
     Ok(())

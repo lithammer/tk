@@ -5,7 +5,9 @@ use thiserror::Error;
 
 use crate::domain::backend_binding::BackendBinding;
 use crate::domain::backend_kind::BackendKind;
-use crate::domain::binding_display_provenance::BindingDisplayProvenance;
+use crate::domain::binding_display_provenance::{
+    BindingDisplayProvenance, InvalidBindingDisplayProvenance,
+};
 use crate::domain::dependency_rule::{self, DependencyClassification, DependencyRejection};
 use crate::domain::item_class::ItemClass;
 use crate::domain::mutation_type::MutationType;
@@ -38,6 +40,8 @@ pub enum DetachError {
     PendingPromotion,
     #[error("the Binding has ambiguous local Display ID provenance")]
     AmbiguousDisplayProvenance,
+    #[error(transparent)]
+    InvalidDisplayProvenance(#[from] InvalidBindingDisplayProvenance),
     #[error("the Item has unresolved Mutations")]
     UnresolvedMutations,
     #[error("a Backend-bound Blocked Item would wait on the detached Local Item")]
@@ -67,10 +71,10 @@ pub fn detach(
     let Some(reference) = resolve_item_ref(&tx, display_arg)? else {
         return Err(DetachError::NotFound);
     };
-    let (backend_kind, backend_key, provenance, displaced_display_id): (
+    let (backend_kind, backend_key, stored_provenance, displaced_display_id): (
         Option<BackendKind>,
         Option<String>,
-        BindingDisplayProvenance,
+        String,
         Option<String>,
     ) = tx.query_row(
         "select backend_kind, backend_key, binding_display_provenance, \
@@ -91,6 +95,15 @@ pub fn detach(
             }
         }
     };
+    let provenance =
+        BindingDisplayProvenance::from_stored(&stored_provenance, displaced_display_id)?;
+    let displaced_display_id = match provenance {
+        BindingDisplayProvenance::None => None,
+        BindingDisplayProvenance::Known(display_id) => Some(display_id),
+        BindingDisplayProvenance::Ambiguous => {
+            return Err(DetachError::AmbiguousDisplayProvenance);
+        }
+    };
 
     if let Some((display_id, item_class)) = backend_item_blocked_by_local(&tx, &reference.id)? {
         return Err(DetachError::BackendBlockedByDetached {
@@ -103,15 +116,10 @@ pub fn detach(
         return Err(DetachError::UnresolvedMutations);
     }
 
-    let local_display_id = match provenance {
-        BindingDisplayProvenance::None => {
-            next_display_id(&tx)?.ok_or(DetachError::DisplayPrefixMissing)?
-        }
-        BindingDisplayProvenance::Known => displaced_display_id
-            .expect("known Binding Display provenance carries a value by schema contract"),
-        BindingDisplayProvenance::Ambiguous => {
-            return Err(DetachError::AmbiguousDisplayProvenance);
-        }
+    let restores_displaced_id = displaced_display_id.is_some();
+    let local_display_id = match displaced_display_id {
+        Some(display_id) => display_id,
+        None => next_display_id(&tx)?.ok_or(DetachError::DisplayPrefixMissing)?,
     };
     let detached_seq: i64 = tx.query_row(
         "select coalesce(max(detached_seq), 0) + 1 from former_backend_identities",
@@ -135,7 +143,7 @@ pub fn detach(
         "delete from item_ids where item_id = ?1 and source = 'display'",
         params![&reference.id],
     )?;
-    if provenance == BindingDisplayProvenance::Known {
+    if restores_displaced_id {
         tx.execute(
             "update item_ids set source = 'display' \
               where item_id = ?1 and value = ?2 and source = 'alias'",

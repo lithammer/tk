@@ -15,7 +15,6 @@ use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, 
 use std::str::FromStr;
 
 use crate::domain::backend_kind::BackendKind;
-use crate::domain::binding_display_provenance::BindingDisplayProvenance;
 use crate::domain::item_class::ItemClass;
 use crate::domain::lifecycle::Lifecycle;
 use crate::domain::mutation_state::MutationState;
@@ -34,23 +33,6 @@ impl FromSql for BackendKind {
 }
 
 impl ToSql for BackendKind {
-    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
-        self.text().to_sql()
-    }
-}
-
-impl FromSql for BindingDisplayProvenance {
-    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
-        match value.as_str()? {
-            "none" => Ok(Self::None),
-            "known" => Ok(Self::Known),
-            "ambiguous" => Ok(Self::Ambiguous),
-            other => Err(corrupt("binding_display_provenance", other)),
-        }
-    }
-}
-
-impl ToSql for BindingDisplayProvenance {
     fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
         self.text().to_sql()
     }
@@ -276,17 +258,6 @@ mod tests {
         for v in [WorkState::Idle, WorkState::Active] {
             assert_eq!(
                 WorkState::column_result(ValueRef::Text(v.text().as_bytes())).unwrap(),
-                v
-            );
-        }
-        for v in [
-            BindingDisplayProvenance::None,
-            BindingDisplayProvenance::Known,
-            BindingDisplayProvenance::Ambiguous,
-        ] {
-            assert_eq!(
-                BindingDisplayProvenance::column_result(ValueRef::Text(v.text().as_bytes()))
-                    .unwrap(),
                 v
             );
         }
