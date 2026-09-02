@@ -15,6 +15,7 @@ pub mod add;
 pub mod adopt;
 pub mod block;
 pub mod dependency_edge;
+pub mod detach;
 pub mod done;
 pub mod grep;
 pub mod init;

@@ -240,6 +240,8 @@ enum Command {
     Promote(commands::promote::Args),
     /// Adopt an existing Backend issue into the local working set.
     Adopt(commands::adopt::Args),
+    /// Keep a Backend Item as local work without changing the Backend object.
+    Detach(commands::detach::Args),
 }
 
 /// Entrypoint that the binary's `main.rs` and the scenario harness share.
@@ -343,6 +345,10 @@ pub fn run_argv(mut deps: Deps<'_>, argv: &[String]) -> std::io::Result<Exit> {
         Command::Adopt(args) => {
             let result = commands::adopt::run(&mut deps, args);
             Ok(finish(&mut deps, "adopt", result))
+        }
+        Command::Detach(args) => {
+            let result = commands::detach::run(&mut deps, args);
+            Ok(finish(&mut deps, "detach", result))
         }
     }
 }

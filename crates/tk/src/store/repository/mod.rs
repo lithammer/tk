@@ -31,10 +31,11 @@ use crate::clock::Clock;
 use crate::domain::item_class::ItemClass;
 use crate::git::discovery;
 use crate::proc::ProcRunner;
-use crate::store::migrations;
+use crate::store::{migrations, sequences};
 
 pub mod create;
 pub mod dependency;
+pub mod detach;
 pub mod grep;
 pub mod list;
 pub mod next;
@@ -316,6 +317,22 @@ pub fn resolve_item_ref(
     .optional()
 }
 
+/// Allocate the next normal Local Display ID inside the caller's write
+/// transaction. `None` means the Store is missing its `display_prefix` seed.
+pub(crate) fn next_display_id(
+    conn: &Connection,
+) -> Result<Option<String>, sequences::SequenceError> {
+    let display_seq = sequences::next(conn, sequences::Counter::Display)?;
+    let prefix: Option<String> = conn
+        .query_row(
+            "select value from store_config where key = 'display_prefix'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(prefix.map(|prefix| format!("{prefix}-{display_seq}")))
+}
+
 /// Resolve a Display ID or Alias to an Epic reference, classifying the
 /// outcome so callers can render `not_found` vs `not_an_epic` differently.
 ///
@@ -334,6 +351,21 @@ pub fn resolve_as_epic(
     } else {
         Err(ResolveEpicError::NotAnEpic)
     }
+}
+
+/// Insert the current Display ID resolver row paired with an Item write.
+fn insert_display_resolver(
+    conn: &Connection,
+    display_id: &str,
+    item_id: &str,
+    now: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "insert into item_ids(value, source, item_id, created_at) \
+         values (?1, 'display', ?2, ?3)",
+        params![display_id, item_id, now],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

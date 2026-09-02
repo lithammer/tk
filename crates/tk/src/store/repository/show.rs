@@ -1,16 +1,14 @@
 //! `tk show` full-item read with parent / children / blocker sub-sections.
 //!
-//! Composed from one item row plus six narrow sub-queries — parent
-//! summary, children (when the item is an Epic), `BLOCKED BY`,
-//! `BLOCKING`, unresolved External Blockers, and every Mutation Log entry
-//! targeting the item. The Repository Store owns the SQL; the command-side
-//! renderer owns the tree-block layout and styled output. Each sub-section
-//! returns a typed [`ItemSummary`], [`ExternalBlockerSummary`], or
-//! [`ItemMutation`] so the renderer never deserializes text columns of its
-//! own.
+//! Composed from one item row plus narrow sub-queries for parent, children
+//! (when the item is an Epic), `BLOCKED BY`, `BLOCKING`, unresolved External
+//! Blockers, Former Backend Identities, and every Mutation Log entry targeting
+//! the item. The Repository Store owns the SQL; the command-side renderer owns
+//! the tree-block layout and styled output.
 
 use rusqlite::{OptionalExtension, params};
 
+use crate::domain::backend_kind::BackendKind;
 use crate::domain::item_class::ItemClass;
 use crate::domain::mutation_state::MutationState;
 use crate::domain::mutation_type::MutationType;
@@ -45,6 +43,13 @@ pub struct ItemMutation {
     pub mutation_type: MutationType,
 }
 
+/// One inactive Former Backend Identity kept after Detach (ADR-0047).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormerBackendIdentity {
+    pub backend_kind: BackendKind,
+    pub backend_key: String,
+}
+
 /// Everything `tk show` renders for one Ticket or Epic: its current state,
 /// its relationships, and the Mutation Log entries targeting it. The store
 /// keeps current state and the Mutation Log as separate concerns; this view
@@ -71,6 +76,8 @@ pub struct ItemDetail {
     pub blocked_by: Vec<ItemSummary>,
     pub blocking: Vec<ItemSummary>,
     pub external_blockers: Vec<ExternalBlockerSummary>,
+    /// Inactive canonical Backend identities, most recently detached first.
+    pub former_backend_identities: Vec<FormerBackendIdentity>,
     /// Every Mutation Log entry targeting this Item, in `sequence` order.
     ///
     /// Unlike the other sub-reads this one filters by nothing: no Origin
@@ -151,6 +158,7 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
     let blocked_by = read_blocked_by(&store.conn, &reference.id)?;
     let blocking = read_blocking(&store.conn, &reference.id)?;
     let external_blockers = read_external_blockers(&store.conn, &reference.id)?;
+    let former_backend_identities = read_former_backend_identities(&store.conn, &reference.id)?;
     let mutations = read_mutations(&store.conn, &reference.id)?;
 
     Ok(Some(ItemDetail {
@@ -170,8 +178,34 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
         blocked_by,
         blocking,
         external_blockers,
+        former_backend_identities,
         mutations,
     }))
+}
+
+fn read_former_backend_identities(
+    conn: &rusqlite::Connection,
+    item_id: &str,
+) -> Result<Vec<FormerBackendIdentity>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "select f.backend_kind, f.backend_key \
+           from former_backend_identities f \
+          where f.item_id = ?1 \
+            and not exists ( \
+                select 1 from items i \
+                 where i.id = f.item_id \
+                   and i.backend_kind = f.backend_kind \
+                   and i.backend_key = f.backend_key \
+            ) \
+          order by f.detached_seq desc",
+    )?;
+    stmt.query_map(params![item_id], |row| {
+        Ok(FormerBackendIdentity {
+            backend_kind: row.get(0)?,
+            backend_key: row.get(1)?,
+        })
+    })?
+    .collect()
 }
 
 fn read_item_summary_by_id(

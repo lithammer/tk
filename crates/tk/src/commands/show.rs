@@ -17,6 +17,9 @@
 //! PARENT / TICKETS / BLOCKED BY / BLOCKING / EXTERNAL BLOCKERS
 //!   <glyph> <status-glyph> <display-id>: [(Epic) ]<title>[ ● <priority>]
 //!
+//! FORMER BACKEND IDENTITIES
+//!   • <backend-kind> <backend-key>
+//!
 //! UNRESOLVED MUTATIONS / WITHDRAWN MUTATIONS
 //!   • <sequence> <state> <mutation-type>
 //!   Inspect with 'tk sync log <sequence>'.
@@ -195,6 +198,21 @@ fn render<W: Write + ?Sized>(
         has_section = true;
     }
 
+    if !detail.former_backend_identities.is_empty() {
+        if has_section {
+            stdout.write_all(b"\n")?;
+        }
+        write_section_header(stdout, styler, "FORMER BACKEND IDENTITIES")?;
+        for identity in &detail.former_backend_identities {
+            writeln!(
+                stdout,
+                "  \u{2022} {} {}",
+                identity.backend_kind, identity.backend_key
+            )?;
+        }
+        has_section = true;
+    }
+
     // Exhaustive over MutationState rather than a terminality predicate:
     // applied is terminal too, so such a predicate would only be correct
     // because rendering happens to drop applied elsewhere. Writing out all
@@ -323,6 +341,7 @@ mod tests {
     use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
     use crate::proc::{FakeRunner, RunOutput};
     use crate::render::Styler;
+    use crate::store::repository::show::FormerBackendIdentity;
     use crate::store::testing::{
         FixtureItem, FixtureMutation, TmpStore, insert_fixture_item, insert_fixture_mutation,
     };
@@ -352,6 +371,7 @@ mod tests {
             blocked_by: Vec::new(),
             blocking: Vec::new(),
             external_blockers: Vec::new(),
+            former_backend_identities: Vec::new(),
             mutations,
         }
     }
@@ -799,6 +819,10 @@ mod tests {
             external_blockers: vec![ExternalBlockerSummary {
                 reason: "WAITING-ON-123: upstream fix".into(),
             }],
+            former_backend_identities: vec![FormerBackendIdentity {
+                backend_kind: crate::domain::backend_kind::BackendKind::Github,
+                backend_key: "https://github.com/o/r/issues/42".into(),
+            }],
             mutations: vec![
                 ItemMutation {
                     sequence: 7,
@@ -846,6 +870,9 @@ mod tests {
 
         EXTERNAL BLOCKERS
           • WAITING-ON-123: upstream fix
+
+        FORMER BACKEND IDENTITIES
+          • github https://github.com/o/r/issues/42
 
         UNRESOLVED MUTATIONS
           • 7 failed update_ticket

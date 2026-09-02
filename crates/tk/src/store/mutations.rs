@@ -23,9 +23,9 @@ use thiserror::Error;
 use crate::domain::backend_binding::BackendBinding;
 use crate::domain::backend_outcome::Failure;
 use crate::domain::item_class::ItemClass;
-use crate::domain::mutation_payload::{MutationPayload, Promotion};
+use crate::domain::mutation_payload::{DependencyRef, EpicRef, MutationPayload, Promotion};
 use crate::domain::mutation_state::MutationState;
-use crate::domain::mutation_type::MutationType;
+use crate::domain::mutation_type::{AddressedCounterpart, MutationType};
 use crate::domain::origin::Origin;
 use crate::store::sequences;
 
@@ -84,6 +84,24 @@ pub fn append(conn: &Connection, req: AppendRequest<'_>) -> Result<i64, AppendEr
         ],
     )?;
     Ok(sequence)
+}
+
+/// Decode the internal Item ID addressed as a Mutation's counterpart.
+///
+/// The Mutation Type owns whether its payload addresses an Epic, a Blocking
+/// Item, or no counterpart. Keeping that rule with its decoder stops Store
+/// workflows from duplicating the Mutation Log payload contract.
+pub fn addressed_counterpart_id(
+    mutation_type: MutationType,
+    payload_json: &str,
+) -> Result<Option<String>, serde_json::Error> {
+    Ok(match mutation_type.addressed_counterpart() {
+        AddressedCounterpart::None => None,
+        AddressedCounterpart::Epic => Some(serde_json::from_str::<EpicRef>(payload_json)?.epic_id),
+        AddressedCounterpart::BlockingItem => {
+            Some(serde_json::from_str::<DependencyRef>(payload_json)?.blocking_id)
+        }
+    })
 }
 
 /// A `mutations.state` write that [`MutationState`]'s transition table refuses.
