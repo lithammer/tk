@@ -677,12 +677,25 @@ fn detach_adopted_ticket_through_cli_dispatch() {
             [],
         )
         .unwrap();
+        tx.execute(
+            "insert into mutations( \
+                sequence, mutation_type, item_id, item_class, payload_json, state, \
+                created_at, state_changed_at \
+             ) values ( \
+                1, 'update_ticket', 'stable-id', 'ticket', \
+                '{\"title\":\"Backend work\",\"body\":\"Details\"}', 'pending', \
+                '2026-05-01T00:00:00.000Z', '2026-05-01T00:00:00.000Z' \
+             )",
+            [],
+        )
+        .unwrap();
         tx.commit().unwrap();
     }
 
     tk!(p, "detach gh-42", @r"
     Detached: Backend Ticket gh-42 → Local Ticket project-1
     Backend object left unchanged: https://github.com/o/r/issues/42
+    Withdrew update_ticket for project-1 (Mutation 1)
     ");
 
     let conn = rusqlite::Connection::open(&db_path).unwrap();
@@ -710,6 +723,14 @@ fn detach_adopted_ticket_through_cli_dispatch() {
         )
         .unwrap();
     assert_eq!(old_resolver_rows, 0);
+    let withdrawn: String = conn
+        .query_row(
+            "select state from mutations where sequence = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(withdrawn, "cancelled");
 }
 
 /// `tk search` is a flat, whole-store title lookup across every Item Status

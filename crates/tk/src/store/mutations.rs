@@ -90,8 +90,10 @@ pub fn append(conn: &Connection, req: AppendRequest<'_>) -> Result<i64, AppendEr
 ///
 /// The Mutation Type owns whether its payload addresses an Epic, a Blocking
 /// Item, or no counterpart. Keeping that rule with its decoder stops Store
-/// workflows from duplicating the Mutation Log payload contract.
-pub fn addressed_counterpart_id(
+/// workflows from duplicating the Mutation Log payload contract; they reach it
+/// through [`WithdrawalCandidate::addressed_counterpart_id`], which owns the
+/// row the payload belongs to.
+fn addressed_counterpart_id(
     mutation_type: MutationType,
     payload_json: &str,
 ) -> Result<Option<String>, serde_json::Error> {
@@ -102,6 +104,66 @@ pub fn addressed_counterpart_id(
             Some(serde_json::from_str::<DependencyRef>(payload_json)?.blocking_id)
         }
     })
+}
+
+/// One Mutation a withdrawal may take with it, with the payload left undecoded.
+///
+/// The counterpart decode stays with the caller because the two withdrawals
+/// answer a malformed payload differently: Promotion Cancellation treats it as
+/// corruption and refuses, while Detach leaves the row for Sync to diagnose
+/// and stays available as local recovery.
+#[derive(Debug, Clone)]
+pub(crate) struct WithdrawalCandidate {
+    pub sequence: i64,
+    pub state: MutationState,
+    pub mutation_type: MutationType,
+    pub item_id: String,
+    pub promotion_operation_id: Option<String>,
+    payload_json: String,
+}
+
+impl WithdrawalCandidate {
+    /// The Item ID this Mutation addresses beyond its own target, per its
+    /// Mutation Type (ADR-0038).
+    pub(crate) fn addressed_counterpart_id(&self) -> Result<Option<String>, serde_json::Error> {
+        addressed_counterpart_id(self.mutation_type, &self.payload_json)
+    }
+}
+
+/// Every Mutation a withdrawal may take with it, in Mutation Sequence order.
+///
+/// Only `pending` and `failed` rows can qualify: global Mutation Sequence order
+/// holds every later Mutation behind a nonterminal Promotion, so collateral was
+/// never attempted. Promotions are excluded because a Promotion creates a
+/// Backend identity rather than needing one — Promotion Cancellation withdraws
+/// those itself, choosing `cancelled` or `abandoned` per Promotion (ADR-0039),
+/// and Detach never withdraws one at all. That also keeps `applying` out: the
+/// `mutations` CHECK admits that state for a Promotion alone.
+///
+/// Which rows of these a withdrawal actually takes is the caller's question —
+/// Promotion Cancellation asks about a set of Items losing a prospective
+/// identity, Detach about one Item losing a concrete one.
+pub(crate) fn withdrawal_candidates(
+    conn: &Connection,
+) -> rusqlite::Result<Vec<WithdrawalCandidate>> {
+    let mut stmt = conn.prepare(
+        "select sequence, state, mutation_type, item_id, promotion_operation_id, payload_json \
+           from mutations \
+          where state in ('pending', 'failed') \
+            and mutation_type not in ('promote_ticket', 'promote_epic') \
+          order by sequence asc",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(WithdrawalCandidate {
+            sequence: row.get(0)?,
+            state: row.get(1)?,
+            mutation_type: row.get(2)?,
+            item_id: row.get(3)?,
+            promotion_operation_id: row.get(4)?,
+            payload_json: row.get(5)?,
+        })
+    })?;
+    rows.collect()
 }
 
 /// A `mutations.state` write that [`MutationState`]'s transition table refuses.

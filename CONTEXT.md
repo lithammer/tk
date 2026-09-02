@@ -234,9 +234,9 @@ Item's fields, state, selection, and relationships. It restores the local
 Display ID displaced by the current Binding; only an Item that has never had a
 local Display ID receives a fresh one. The Backend Display ID leaves the
 resolver; the canonical **Former Backend Identity** remains the exact re-Adopt
-proof. Detach refuses when an affected Mutation belongs to an unresolved
-**Promotion Operation**; resolving or cancelling that operation is an explicit
-prerequisite.
+proof. Detach refuses when an affected Mutation belongs to a **Promotion
+Operation** whose **Promotion** is still unresolved; resolving or cancelling
+that Promotion is an explicit prerequisite.
 _Avoid_: Un-adopt, Unlink, Delete
 
 **Promotion**:

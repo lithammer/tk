@@ -10,11 +10,15 @@ use crate::domain::binding_display_provenance::{
 };
 use crate::domain::dependency_rule::{self, DependencyClassification, DependencyRejection};
 use crate::domain::item_class::ItemClass;
+use crate::domain::mutation_state::MutationState;
 use crate::domain::mutation_type::MutationType;
 use crate::store::mutations::{self, BackendBindingError};
+use crate::store::promotion;
 use crate::store::sequences::SequenceError;
 
-use super::{Store, insert_display_resolver, next_display_id, resolve_item_ref};
+use super::{
+    Store, current_display_id, insert_display_resolver, next_display_id, resolve_item_ref,
+};
 
 /// Successful Backend-to-Local identity transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +31,19 @@ pub struct DetachReport {
     pub backend_key: String,
     /// Item Class preserved across the transition.
     pub item_class: ItemClass,
+    /// Every Mutation Detach withdrew, in Mutation Sequence order.
+    pub withdrawn: Vec<WithdrawnMutation>,
+}
+
+/// One pending or failed Mutation withdrawn because it needed the removed
+/// Backend identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WithdrawnMutation {
+    pub sequence: i64,
+    pub mutation_type: MutationType,
+    /// Display ID of the Mutation's target Item as Detach leaves it, so a
+    /// withdrawal on the detached Item names its restored local identity.
+    pub target_display_id: String,
 }
 
 /// Expected refusal or Repository Store failure from Detach.
@@ -42,8 +59,12 @@ pub enum DetachError {
     AmbiguousDisplayProvenance,
     #[error(transparent)]
     InvalidDisplayProvenance(#[from] InvalidBindingDisplayProvenance),
-    #[error("the Item has unresolved Mutations")]
-    UnresolvedMutations,
+    #[error("mutation {sequence} belongs to a Promotion Operation with an unresolved Promotion")]
+    UnresolvedPromotionOperation {
+        sequence: i64,
+        mutation_type: MutationType,
+        promotion: promotion::MutationSummary,
+    },
     #[error("a Backend-bound Blocked Item would wait on the detached Local Item")]
     BackendBlockedByDetached {
         display_id: String,
@@ -55,9 +76,20 @@ pub enum DetachError {
     #[error(transparent)]
     BackendBinding(#[from] BackendBindingError),
     #[error(transparent)]
+    Transition(#[from] mutations::IllegalTransition),
+    #[error(transparent)]
     Sequence(#[from] SequenceError),
     #[error(transparent)]
     Storage(#[from] rusqlite::Error),
+}
+
+impl From<mutations::TransitionError> for DetachError {
+    fn from(error: mutations::TransitionError) -> Self {
+        match error {
+            mutations::TransitionError::Storage(error) => Self::Storage(error),
+            mutations::TransitionError::Illegal(error) => Self::Transition(error),
+        }
+    }
 }
 
 /// Apply Detach's atomic Backend-to-Local Repository Store transition
@@ -112,8 +144,17 @@ pub fn detach(
             detached_item_class: reference.item_class,
         });
     }
-    if has_unresolved_mutations(&tx, &reference.id)? {
-        return Err(DetachError::UnresolvedMutations);
+    let affected = affected_mutations(&tx, &reference.id)?;
+    for mutation in &affected {
+        if let Some(operation_id) = mutation.promotion_operation_id.as_deref()
+            && let Some(promotion) = promotion::unresolved_promotion(&tx, operation_id)?
+        {
+            return Err(DetachError::UnresolvedPromotionOperation {
+                sequence: mutation.sequence,
+                mutation_type: mutation.mutation_type,
+                promotion,
+            });
+        }
     }
 
     let restores_displaced_id = displaced_display_id.is_some();
@@ -160,6 +201,26 @@ pub fn detach(
           where id = ?1",
         params![&reference.id, &local_display_id, now],
     )?;
+    // Withdrawn after the identity change, so each report line names the Item
+    // Display ID Detach leaves behind rather than the one it removed.
+    let mut withdrawn = Vec::with_capacity(affected.len());
+    for mutation in affected {
+        mutations::transition(
+            &tx,
+            mutations::TransitionRequest {
+                sequence: mutation.sequence,
+                from: mutation.state,
+                to: MutationState::Cancelled,
+                failure: None,
+                now,
+            },
+        )?;
+        withdrawn.push(WithdrawnMutation {
+            sequence: mutation.sequence,
+            mutation_type: mutation.mutation_type,
+            target_display_id: current_display_id(&tx, &mutation.item_id)?,
+        });
+    }
     tx.commit()?;
 
     Ok(DetachReport {
@@ -167,6 +228,7 @@ pub fn detach(
         local_display_id,
         backend_key,
         item_class: reference.item_class,
+        withdrawn,
     })
 }
 
@@ -201,35 +263,25 @@ fn backend_item_blocked_by_local(
     Ok(None)
 }
 
-fn has_unresolved_mutations(
+/// Every candidate Mutation that needs `item_id`'s Backend address to be
+/// delivered: the Mutation's own target, or the counterpart its Mutation Type
+/// addresses (ADR-0038).
+///
+/// A payload that does not decode cannot prove that it addresses this Item, and
+/// Sync cannot deliver it either — it decodes the same payload to find the
+/// counterpart's Backend address. Leaving it for Sync to diagnose keeps Detach
+/// available as local recovery (ADR-0047).
+fn affected_mutations(
     conn: &rusqlite::Connection,
     item_id: &str,
-) -> Result<bool, DetachError> {
-    let mut stmt = conn.prepare(
-        "select mutation_type, item_id, payload_json \
-           from mutations \
-          where state in ('pending','failed','applying')",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, MutationType>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-        ))
-    })?;
-    for row in rows {
-        let (mutation_type, mutation_item_id, payload_json) = row?;
-        if mutation_item_id == item_id {
-            return Ok(true);
-        }
-        // Detach does not consume Mutation payloads. A payload that does not
-        // decode cannot prove that it addresses this Item; Sync diagnoses it
-        // when the row reaches the head of the Mutation Log.
-        if mutations::addressed_counterpart_id(mutation_type, &payload_json)
-            .is_ok_and(|counterpart| counterpart.as_deref() == Some(item_id))
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+) -> Result<Vec<mutations::WithdrawalCandidate>, DetachError> {
+    Ok(mutations::withdrawal_candidates(conn)?
+        .into_iter()
+        .filter(|candidate| {
+            candidate.item_id == item_id
+                || candidate
+                    .addressed_counterpart_id()
+                    .is_ok_and(|counterpart| counterpart.as_deref() == Some(item_id))
+        })
+        .collect())
 }

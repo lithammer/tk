@@ -14,7 +14,8 @@
 >
 > **Amended by ADR-0047.** Detach may also cancel pending or failed Mutations
 > whose target or counterpart needs the removed Backend identity. It preserves
-> failure evidence and refuses to split an unresolved Promotion Operation.
+> failure evidence and refuses to split an operation whose Promotion is still
+> unresolved.
 
 A Promotion the Backend will never accept has no exit. `tk sync --skip` refuses
 a Promotion, `tk remote clear` refuses while one is pending and recommends the

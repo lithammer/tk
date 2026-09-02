@@ -353,6 +353,19 @@ pub fn resolve_as_epic(
     }
 }
 
+/// The Item's current Display ID.
+///
+/// Reports name Items by the identity the Repository Store holds now, so a
+/// caller that has just rewritten one reads it back through this rather than
+/// carrying the outgoing value forward.
+pub(crate) fn current_display_id(conn: &Connection, item_id: &str) -> rusqlite::Result<String> {
+    conn.query_row(
+        "select display_value from items where id = ?1",
+        params![item_id],
+        |row| row.get(0),
+    )
+}
+
 /// Insert the current Display ID resolver row paired with an Item write.
 fn insert_display_resolver(
     conn: &Connection,

@@ -53,6 +53,7 @@ use crate::domain::ticket_kind::TicketKind;
 use crate::store::mutations;
 use crate::store::repository::RemoteWorkflowGuard;
 use crate::store::repository::create::generate_internal_id;
+use crate::store::repository::current_display_id;
 
 /// Error returned by [`read_graph`].
 #[derive(Debug, Error)]
@@ -985,6 +986,7 @@ pub fn cancel_promotion(
         )?;
     }
     let withdrawn = withdrawn_mutations(&tx, &cancelled_items)?;
+    let mut reported = Vec::with_capacity(withdrawn.len());
     for row in &withdrawn {
         mutations::transition(
             &tx,
@@ -996,6 +998,12 @@ pub fn cancel_promotion(
                 now,
             },
         )?;
+        reported.push(WithdrawnMutation {
+            target_cancelled: cancelled_items.contains(&row.item_id),
+            sequence: row.sequence,
+            mutation_type: row.mutation_type,
+            target_display_id: current_display_id(&tx, &row.item_id)?,
+        });
     }
     tx.commit()?;
 
@@ -1003,15 +1011,7 @@ pub fn cancel_promotion(
         cancelled_promotions: cancelled_promotions.into_iter().map(Into::into).collect(),
         abandoned_promotions: abandoned_promotions.into_iter().map(Into::into).collect(),
         applied_promotions: applied_promotions.into_iter().map(Into::into).collect(),
-        withdrawn: withdrawn
-            .into_iter()
-            .map(|row| WithdrawnMutation {
-                target_cancelled: cancelled_items.contains(&row.item_id),
-                sequence: row.sequence,
-                mutation_type: row.mutation_type,
-                target_display_id: row.display_id,
-            })
-            .collect(),
+        withdrawn: reported,
     })
 }
 
@@ -1088,64 +1088,31 @@ fn operation_promotions(
     .collect()
 }
 
-/// One nonterminal Mutation the withdrawal takes with it.
-#[derive(Debug, Clone)]
-struct WithdrawnRow {
-    sequence: i64,
-    state: MutationState,
-    mutation_type: MutationType,
-    item_id: String,
-    display_id: String,
-}
-
-/// The collateral of a withdrawal: every non-Promotion Mutation that cannot
+/// The collateral of a withdrawal: every candidate Mutation that cannot
 /// resolve once `cancelled_items` lose their prospective Backend identity, in
 /// Mutation Sequence order.
 ///
 /// One hop and never transitive: only the cancelled items lose an identity, so
-/// no third item's Mutations become unresolvable (ADR-0038). Only `pending` and
-/// `failed` rows can qualify — global Mutation Sequence order holds every later
-/// Mutation behind a nonterminal Promotion, so collateral was never attempted.
-/// This skips the Promotions themselves: a withdrawal reaches two states,
-/// `cancelled` and `abandoned`, and the caller picks which one per Promotion
-/// (ADR-0039).
+/// no third item's Mutations become unresolvable (ADR-0038). A payload that
+/// does not decode is Repository Store corruption here — cancellation is
+/// withdrawing intent the operator asked about, so it refuses rather than
+/// guessing whether the row addresses a cancelled item.
 fn withdrawn_mutations(
     conn: &Connection,
     cancelled_items: &BTreeSet<String>,
-) -> Result<Vec<WithdrawnRow>, CancelPromotionError> {
-    let mut stmt = conn.prepare(
-        "select m.sequence, m.state, m.mutation_type, m.item_id, i.display_value, m.payload_json \
-           from mutations m join items i on i.id = m.item_id \
-          where m.state in ('pending', 'failed') \
-            and m.mutation_type not in ('promote_ticket', 'promote_epic') \
-          order by m.sequence asc",
-    )?;
-    let rows = stmt
-        .query_map([], |r| {
-            Ok((
-                WithdrawnRow {
-                    sequence: r.get(0)?,
-                    state: r.get(1)?,
-                    mutation_type: r.get(2)?,
-                    item_id: r.get(3)?,
-                    display_id: r.get(4)?,
-                },
-                r.get::<_, String>(5)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-
+) -> Result<Vec<mutations::WithdrawalCandidate>, CancelPromotionError> {
     let mut out = Vec::new();
-    for (row, payload_json) in rows {
-        let counterpart = mutations::addressed_counterpart_id(row.mutation_type, &payload_json)
-            .map_err(|source| CancelPromotionError::MalformedPayload {
-                sequence: row.sequence,
+    for candidate in mutations::withdrawal_candidates(conn)? {
+        let counterpart = candidate.addressed_counterpart_id().map_err(|source| {
+            CancelPromotionError::MalformedPayload {
+                sequence: candidate.sequence,
                 source,
-            })?;
-        let withdrawn = cancelled_items.contains(&row.item_id)
+            }
+        })?;
+        let withdrawn = cancelled_items.contains(&candidate.item_id)
             || counterpart.is_some_and(|id| cancelled_items.contains(&id));
         if withdrawn {
-            out.push(row);
+            out.push(candidate);
         }
     }
     Ok(out)
@@ -1187,8 +1154,8 @@ fn ensure_dependencies_representable(
             dependency_rule::classify(&blocked, &blocking)
         {
             rejected.push(UnrepresentableDependency {
-                blocked_display_id: display_id(conn, &blocked_id)?,
-                blocking_display_id: display_id(conn, &blocking_id)?,
+                blocked_display_id: current_display_id(conn, &blocked_id)?,
+                blocking_display_id: current_display_id(conn, &blocking_id)?,
                 rejection,
             });
         }
@@ -1213,14 +1180,6 @@ fn post_cancellation_binding(
         return Ok(BackendBinding::Local);
     }
     Ok(mutations::resolve_backend_binding(conn, item_id)?)
-}
-
-fn display_id(conn: &Connection, item_id: &str) -> rusqlite::Result<String> {
-    conn.query_row(
-        "select display_value from items where id = ?1",
-        params![item_id],
-        |r| r.get(0),
-    )
 }
 
 /// A Promotion withdrawn while its Backend creation outcome was unobserved, so
@@ -1267,7 +1226,43 @@ pub fn abandoned_promotions(
     Ok(out)
 }
 
-/// Mutation Log fields needed by Promotion's post-sync report.
+/// The earliest Promotion of `operation_id` still awaiting an outcome.
+///
+/// Detach asks this of every Mutation it would withdraw. A nonterminal
+/// Promotion is the state ADR-0038 protects: withdrawing one Mutation of that
+/// operation could leave an Epic upstream with its children gone, so the
+/// operator resolves the Promotion first. Once every Promotion of the
+/// operation is terminal, no prospective identity is left to split and the
+/// operation's remaining intent withdraws like any other.
+///
+/// The earliest is the one that must resolve first, and its state decides
+/// which exits exist: only an `applying` Promotion may be retried, while
+/// ordinary sync still carries a `pending` or `failed` one (ADR-0037).
+pub fn unresolved_promotion(
+    conn: &Connection,
+    operation_id: &str,
+) -> rusqlite::Result<Option<MutationSummary>> {
+    conn.query_row(
+        "select m.sequence, m.state, i.display_value \
+           from mutations m join items i on i.id = m.item_id \
+          where m.promotion_operation_id = ?1 \
+            and m.mutation_type in ('promote_ticket', 'promote_epic') \
+            and m.state in ('pending', 'failed', 'applying') \
+          order by m.sequence asc limit 1",
+        params![operation_id],
+        |r| {
+            Ok(MutationSummary {
+                sequence: r.get(0)?,
+                state: r.get(1)?,
+                target_display_id: r.get(2)?,
+            })
+        },
+    )
+    .optional()
+}
+
+/// The Mutation Log fields a diagnostic names: which Mutation, what state, and
+/// the Item it targets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MutationSummary {
     pub sequence: i64,
