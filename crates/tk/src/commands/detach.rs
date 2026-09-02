@@ -26,11 +26,8 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         .map_err(|err| detach_error(err, &args.id))?;
     let _ = writeln!(
         deps.stdout,
-        "Detached: Backend {} {} → Local {} {}",
-        report.item_class.label(),
-        report.backend_display_id,
-        report.item_class.label(),
-        report.local_display_id,
+        "Detached: Backend Ticket {} → Local Ticket {}",
+        report.backend_display_id, report.local_display_id,
     );
     let _ = writeln!(
         deps.stdout,
@@ -64,6 +61,9 @@ fn detach_error(err: detach::DetachError, id: &str) -> CommandError {
             "cannot detach '{id}': Backend {} '{display_id}' would remain blocked by a Local Ticket; remove the Dependency first",
             item_class.label()
         )),
+        err @ detach::DetachError::MalformedPayload { .. } => {
+            CommandError::failure(format!("Repository Store corruption: {err}"))
+        }
         detach::DetachError::DisplayPrefixMissing => CommandError::failure(
             "Repository Store is missing the display_prefix seed (run 'tk init')",
         ),

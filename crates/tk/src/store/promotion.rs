@@ -42,11 +42,9 @@ use crate::domain::backend_kind::BackendKind;
 use crate::domain::backend_operation::BackendItemIdentity;
 use crate::domain::dependency_rule::{self, DependencyClassification, DependencyRejection};
 use crate::domain::item_class::ItemClass;
-use crate::domain::mutation_payload::{
-    DependencyRef, EpicRef, MutationPayload, Promotion, TitleBody,
-};
+use crate::domain::mutation_payload::{MutationPayload, Promotion, TitleBody};
 use crate::domain::mutation_state::MutationState;
-use crate::domain::mutation_type::{AddressedCounterpart, MutationType};
+use crate::domain::mutation_type::MutationType;
 use crate::domain::origin::Origin;
 use crate::domain::promotion_graph::{GraphDependency, GraphItem, PromotionGraph};
 use crate::domain::promotion_plan::PromotionPlan;
@@ -1131,7 +1129,11 @@ fn withdrawn_mutations(
 
     let mut out = Vec::new();
     for (row, payload_json) in rows {
-        let counterpart = addressed_counterpart_id(row.sequence, row.mutation_type, &payload_json)?;
+        let counterpart = mutations::addressed_counterpart_id(row.mutation_type, &payload_json)
+            .map_err(|source| CancelPromotionError::MalformedPayload {
+                sequence: row.sequence,
+                source,
+            })?;
         let withdrawn = cancelled_items.contains(&row.item_id)
             || counterpart.is_some_and(|id| cancelled_items.contains(&id));
         if withdrawn {
@@ -1139,29 +1141,6 @@ fn withdrawn_mutations(
         }
     }
     Ok(out)
-}
-
-/// The internal Item ID of the counterpart `mutation_type` addresses, decoded
-/// from the row's payload.
-fn addressed_counterpart_id(
-    sequence: i64,
-    mutation_type: MutationType,
-    payload_json: &str,
-) -> Result<Option<String>, CancelPromotionError> {
-    let malformed = |source| CancelPromotionError::MalformedPayload { sequence, source };
-    Ok(match mutation_type.addressed_counterpart() {
-        AddressedCounterpart::None => None,
-        AddressedCounterpart::Epic => Some(
-            serde_json::from_str::<EpicRef>(payload_json)
-                .map_err(malformed)?
-                .epic_id,
-        ),
-        AddressedCounterpart::BlockingItem => Some(
-            serde_json::from_str::<DependencyRef>(payload_json)
-                .map_err(malformed)?
-                .blocking_id,
-        ),
-    })
 }
 
 /// Refuse a withdrawal that would leave a Dependency the Backend graph cannot
@@ -1356,8 +1335,10 @@ mod tests {
     use crate::domain::backend_binding::BackendBinding;
     use crate::domain::item_class::ItemClass;
     use crate::domain::lifecycle::Lifecycle;
-    use crate::domain::mutation_payload::{MutationPayload, Promotion, TitleBody};
-    use crate::domain::mutation_type::MutationType;
+    use crate::domain::mutation_payload::{
+        DependencyRef, EpicRef, MutationPayload, Promotion, TitleBody,
+    };
+    use crate::domain::mutation_type::{AddressedCounterpart, MutationType};
     use crate::domain::promotion_plan::MutationDraft;
     use crate::store::migrations;
     use crate::store::repository::resolve_item_ref;

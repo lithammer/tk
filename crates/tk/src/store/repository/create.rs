@@ -20,7 +20,7 @@ use crate::domain::ticket_kind::TicketKind;
 use crate::domain::work_state::WorkState;
 use crate::store::sequences;
 
-use super::{Store, next_display_id};
+use super::{Store, insert_display_resolver, next_display_id};
 
 /// The Selection State a `tk add` can create, with its Priority where one
 /// applies (ADR-0027). The two creatable combinations — triage carries no
@@ -233,20 +233,6 @@ pub fn generate_internal_id<R: Rng + ?Sized>(rng: &mut R) -> String {
         let _ = write!(s, "{b:02x}");
     }
     s
-}
-
-fn insert_display_resolver(
-    conn: &rusqlite::Connection,
-    display_id: &str,
-    item_id: &str,
-    now_iso: &str,
-) -> rusqlite::Result<()> {
-    conn.execute(
-        "insert into item_ids(value, source, item_id, created_at) \
-         values (?1, 'display', ?2, ?3)",
-        params![display_id, item_id, now_iso],
-    )?;
-    Ok(())
 }
 
 #[cfg(test)]

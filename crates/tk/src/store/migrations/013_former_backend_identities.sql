@@ -3,10 +3,9 @@ create table former_backend_identities (
     backend_key text not null,
     item_id text not null references items(id) on delete restrict,
     backend_display_value text not null collate nocase,
-    detached_seq integer not null check(detached_seq > 0),
+    detached_seq integer not null unique check(detached_seq > 0),
     detached_at text not null,
     primary key (backend_kind, backend_key),
-    unique (item_id, backend_kind, backend_key),
     check (length(backend_key) > 0),
     check (
         length(backend_display_value) > 0

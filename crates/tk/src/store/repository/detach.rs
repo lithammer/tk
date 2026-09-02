@@ -5,16 +5,17 @@ use thiserror::Error;
 
 use crate::domain::backend_binding::BackendBinding;
 use crate::domain::backend_kind::BackendKind;
+use crate::domain::dependency_rule::{self, DependencyClassification, DependencyRejection};
 use crate::domain::item_class::ItemClass;
+use crate::domain::mutation_type::MutationType;
 use crate::store::mutations::{self, BackendBindingError};
 use crate::store::sequences::SequenceError;
 
-use super::{Store, next_display_id, resolve_item_ref};
+use super::{Store, insert_display_resolver, next_display_id, resolve_item_ref};
 
 /// Successful Backend-to-Local identity transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetachReport {
-    pub item_class: ItemClass,
     pub backend_display_id: String,
     pub local_display_id: String,
     pub backend_key: String,
@@ -37,6 +38,11 @@ pub enum DetachError {
     BackendBlockedByDetached {
         display_id: String,
         item_class: ItemClass,
+    },
+    #[error("malformed payload_json on mutation {sequence}: {source}")]
+    MalformedPayload {
+        sequence: i64,
+        source: serde_json::Error,
     },
     #[error("repository store is missing the display_prefix seed")]
     DisplayPrefixMissing,
@@ -77,39 +83,23 @@ pub fn detach(
         }
     };
 
-    let aliases: i64 = tx.query_row(
-        "select count(*) from item_ids where item_id = ?1 and source = 'alias'",
+    let has_alias: bool = tx.query_row(
+        "select exists(\
+             select 1 from item_ids where item_id = ?1 and source = 'alias'\
+         )",
         params![&reference.id],
         |row| row.get(0),
     )?;
-    if reference.item_class != ItemClass::Ticket || aliases != 0 {
+    if reference.item_class != ItemClass::Ticket || has_alias {
         return Err(DetachError::UnsupportedHistory);
     }
-    if let Some((display_id, item_class)) = backend_bound_blocked_item(&tx, &reference.id)? {
+    if let Some((display_id, item_class)) = backend_item_blocked_by_local(&tx, &reference.id)? {
         return Err(DetachError::BackendBlockedByDetached {
             display_id,
             item_class,
         });
     }
-    let unresolved: i64 = tx.query_row(
-        "select count(*) \
-           from mutations \
-          where state in ('pending','failed','applying') \
-            and ( \
-                item_id = ?1 \
-                or ( \
-                    mutation_type in ('add_dependency','remove_dependency') \
-                    and json_extract(payload_json, '$.blocking_id') = ?1 \
-                ) \
-                or ( \
-                    mutation_type = 'add_ticket_to_epic' \
-                    and json_extract(payload_json, '$.epic_id') = ?1 \
-                ) \
-            )",
-        params![&reference.id],
-        |row| row.get(0),
-    )?;
-    if unresolved != 0 {
+    if has_unresolved_mutations(&tx, &reference.id)? {
         return Err(DetachError::UnresolvedMutations);
     }
 
@@ -136,10 +126,7 @@ pub fn detach(
         "delete from item_ids where item_id = ?1 and source = 'display'",
         params![&reference.id],
     )?;
-    tx.execute(
-        "insert into item_ids(value, source, item_id, created_at) values (?1, 'display', ?2, ?3)",
-        params![&local_display_id, &reference.id, now],
-    )?;
+    insert_display_resolver(&tx, &local_display_id, &reference.id, now)?;
     tx.execute(
         "update items \
             set display_value = ?2, origin = 'local', backend_kind = null, backend_key = null, \
@@ -150,14 +137,13 @@ pub fn detach(
     tx.commit()?;
 
     Ok(DetachReport {
-        item_class: reference.item_class,
         backend_display_id: reference.display_id,
         local_display_id,
         backend_key,
     })
 }
 
-fn backend_bound_blocked_item(
+fn backend_item_blocked_by_local(
     conn: &rusqlite::Connection,
     blocking_id: &str,
 ) -> Result<Option<(String, ItemClass)>, DetachError> {
@@ -168,19 +154,54 @@ fn backend_bound_blocked_item(
           where d.blocking_id = ?1 \
           order by blocked.created_seq",
     )?;
-    let rows = stmt
-        .query_map(params![blocking_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, ItemClass>(2)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (id, display_id, item_class) in rows {
-        if mutations::resolve_backend_binding(conn, &id)?.is_backend_bound() {
+    let rows = stmt.query_map(params![blocking_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, ItemClass>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, display_id, item_class) = row?;
+        let blocked = mutations::resolve_backend_binding(conn, &id)?;
+        if matches!(
+            dependency_rule::classify(&blocked, &BackendBinding::Local),
+            DependencyClassification::Rejected(DependencyRejection::BackendBlockedLocalBlocking)
+        ) {
             return Ok(Some((display_id, item_class)));
         }
     }
     Ok(None)
+}
+
+fn has_unresolved_mutations(
+    conn: &rusqlite::Connection,
+    item_id: &str,
+) -> Result<bool, DetachError> {
+    let mut stmt = conn.prepare(
+        "select sequence, mutation_type, item_id, payload_json \
+           from mutations \
+          where state in ('pending','failed','applying') \
+          order by sequence",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, MutationType>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    for row in rows {
+        let (sequence, mutation_type, target_id, payload_json) = row?;
+        if target_id == item_id {
+            return Ok(true);
+        }
+        let counterpart = mutations::addressed_counterpart_id(mutation_type, &payload_json)
+            .map_err(|source| DetachError::MalformedPayload { sequence, source })?;
+        if counterpart.as_deref() == Some(item_id) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }

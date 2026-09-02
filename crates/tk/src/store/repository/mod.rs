@@ -46,6 +46,21 @@ pub mod status;
 pub mod update;
 pub mod work_state;
 
+/// Insert the current Display ID resolver row paired with an Item write.
+fn insert_display_resolver(
+    conn: &Connection,
+    display_id: &str,
+    item_id: &str,
+    now: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "insert into item_ids(value, source, item_id, created_at) \
+         values (?1, 'display', ?2, ?3)",
+        params![display_id, item_id, now],
+    )?;
+    Ok(())
+}
+
 /// Handle to an opened Repository Store.
 ///
 /// Owns the underlying SQLite [`Connection`]; dropping the `Store` closes the
