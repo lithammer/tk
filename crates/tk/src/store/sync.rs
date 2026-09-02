@@ -94,12 +94,6 @@ pub enum AdoptStoreError {
     ApplyingMutation(i64),
     #[error("{0} is a Backend Epic, not a Ticket")]
     BackendItemIsEpic(String),
-    /// The canonical identity is a Former Backend Identity of an Epic.
-    /// ADR-0047 permits exact Re-Adopt of a Backend Epic; Adopt restores only
-    /// Tickets here, and falling through would bind a Ticket snapshot to an
-    /// Epic row.
-    #[error("{0} is a former Backend Epic")]
-    FormerIdentityIsEpic(String),
     /// The Item owning the Former Backend Identity already holds a different
     /// active Binding. An Item has at most one (ADR-0047).
     #[error("{backend_display_id} belongs to the Item now bound as {bound_display_id}")]
@@ -169,14 +163,26 @@ pub struct ReadoptReport {
     pub backend_key: String,
     /// Title imported from the Backend snapshot.
     pub title: String,
-    /// Ticket Kind imported from the Backend snapshot.
-    pub ticket_kind: TicketKind,
+    /// Ticket Kind imported for a Ticket; Epics retain no Ticket-only Kind.
+    pub ticket_kind: Option<TicketKind>,
     /// Item Status derived from the imported Lifecycle and the Work State
     /// that survived it (ADR-0043).
     pub status: ItemStatus,
     /// Fresh relationship intent appended by the Re-Adopt transaction, in
     /// Mutation Sequence order (ADR-0047).
     pub queued_relationships: Vec<QueuedRelationshipMutation>,
+}
+
+impl ReadoptReport {
+    /// Derive the preserved Item Class from the Ticket-only Kind enforced by
+    /// the Repository Store schema.
+    #[must_use]
+    pub fn item_class(&self) -> ItemClass {
+        match self.ticket_kind {
+            Some(_) => ItemClass::Ticket,
+            None => ItemClass::Epic,
+        }
+    }
 }
 
 /// One relationship Mutation queued while restoring a Former Backend
@@ -205,9 +211,9 @@ struct FormerIdentity {
     backend_display_id: String,
 }
 
-/// Take canonical Adapter intake data into the Repository Store as one Backend
-/// Ticket: a fresh insert, an idempotent no-op, or the Re-Adopt rebind of the
-/// Item that already owns the identity (ADR-0047).
+/// Take canonical Adapter intake data into the Repository Store: ordinary
+/// intake inserts a Backend Ticket, while Re-Adopt restores the Ticket or Epic
+/// that already owns the identity (ADR-0047).
 ///
 /// The Repository Store is the serialization point for canonical identity, and
 /// that ownership spans active and former history: duplicate
@@ -242,8 +248,7 @@ pub fn adopt_backend_ticket(
     if let Some(former) =
         find_former_backend_identity(&tx, expected_kind, &adopted.backend_key, legacy_backend_key)?
     {
-        let report =
-            readopt_backend_ticket(&tx, expected_kind, &former, adopted, capabilities, now)?;
+        let report = readopt_backend_item(&tx, expected_kind, &former, adopted, capabilities, now)?;
         tx.commit()?;
         return Ok(AdoptOutcome::Readopted(report));
     }
@@ -328,15 +333,15 @@ pub fn readopt_requirements(
 /// Rebind the Item that owns `former` to that canonical identity, inside the
 /// caller's Adopt intake transaction (ADR-0047).
 ///
-/// The Backend snapshot replaces the shared fields — title, body, Lifecycle,
-/// and Ticket Kind — while Item Class, the stable internal Item ID, Local
-/// Fields, and relationships stay as the Item held them locally.
+/// The Backend snapshot replaces title, body, and Lifecycle. It also replaces
+/// Ticket Kind for a Ticket, while Item Class, the stable internal Item ID,
+/// Local Fields, and relationships stay as the Item held them locally.
 ///
 /// Detach's withdrawals remain terminal. Dependencies and Epic Membership
 /// that become Backend intent append fresh ordered Mutations; an invalid
 /// Dependency refuses before any Store write, and mixed-Origin membership
 /// stays local. The caller commits the rebind and outbox together.
-fn readopt_backend_ticket(
+fn readopt_backend_item(
     conn: &Connection,
     backend_kind: BackendKind,
     former: &FormerIdentity,
@@ -356,11 +361,6 @@ fn readopt_backend_ticket(
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     )?;
 
-    if item_class == ItemClass::Epic {
-        return Err(AdoptStoreError::FormerIdentityIsEpic(
-            former.backend_display_id.clone(),
-        ));
-    }
     // One question decides both remaining refusals, so the match asks it once
     // and covers every answer: an Item holds at most one active Binding, and a
     // Pending Promotion is still owed a Backend identity of its own that this
@@ -414,6 +414,7 @@ fn readopt_backend_ticket(
     // `promotion::apply_receipt`: `item_ids_one_display_per_item` is a
     // non-deferrable partial unique index, so the outgoing Display ID has to
     // become an Alias before the Backend Display ID is inserted.
+    let ticket_kind = (item_class == ItemClass::Ticket).then_some(adopted.ticket_kind);
     conn.execute(
         "update item_ids set source = 'alias' where item_id = ?1 and source = 'display'",
         params![&former.item_id],
@@ -436,7 +437,7 @@ fn readopt_backend_ticket(
             &former.backend_display_id,
             adopted.title,
             adopted.body,
-            adopted.ticket_kind.text(),
+            ticket_kind.map(TicketKind::text),
             adopted.status.text(),
             work_state.text(),
             closing_reason,
@@ -484,7 +485,7 @@ fn readopt_backend_ticket(
         local_display_id: display_id,
         backend_key: former.backend_key.clone(),
         title: adopted.title.clone(),
-        ticket_kind: adopted.ticket_kind,
+        ticket_kind,
         status: ItemStatus::of(adopted.status, work_state),
         queued_relationships,
     })
