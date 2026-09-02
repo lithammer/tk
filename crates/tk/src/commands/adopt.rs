@@ -863,6 +863,55 @@ mod tests {
     }
 
     #[test]
+    fn a_second_detach_reuses_the_identity_history_already_reserves() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
+        insert_fixture_item(
+            &conn,
+            backend_ticket("gh-42", "https://github.com/o/r/issues/42"),
+        )
+        .unwrap();
+        let cwd_path = cwd();
+        detach(&store, &cwd_path, "gh-42");
+
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        expect_issue_view(&h, "42", 42, "OPEN", "null");
+        assert_eq!(run_rendered(&mut h, "42"), Exit::Ok, "stderr={}", h.err());
+
+        detach(&store, &cwd_path, "gh-42");
+
+        // The cycle mints no identity and no Display ID: one canonical Backend
+        // object keeps one history row, and the Item returns to the exact
+        // local Display ID its Binding displaced (ADR-0047).
+        let history: Vec<(String, i64)> = conn
+            .prepare("select backend_key, detached_seq from former_backend_identities")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            history,
+            vec![("https://github.com/o/r/issues/42".to_owned(), 2)],
+            "the second Detach records fresh ordering on the same identity"
+        );
+        let display_value: String = conn
+            .query_row(
+                "select display_value from items where id = 'stable'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(display_value, "tk-1");
+        assert_eq!(
+            resolver_rows(&conn, "stable"),
+            vec![("tk-1".to_owned(), "display".to_owned())]
+        );
+    }
+
+    #[test]
     fn readopt_leaves_mutations_detach_withdrew_terminal() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
