@@ -39,11 +39,6 @@ pub enum DetachError {
         display_id: String,
         item_class: ItemClass,
     },
-    #[error("malformed payload_json on mutation {sequence}: {source}")]
-    MalformedPayload {
-        sequence: i64,
-        source: serde_json::Error,
-    },
     #[error("repository store is missing the display_prefix seed")]
     DisplayPrefixMissing,
     #[error(transparent)]
@@ -179,27 +174,28 @@ fn has_unresolved_mutations(
     item_id: &str,
 ) -> Result<bool, DetachError> {
     let mut stmt = conn.prepare(
-        "select sequence, mutation_type, item_id, payload_json \
+        "select mutation_type, item_id, payload_json \
            from mutations \
-          where state in ('pending','failed','applying') \
-          order by sequence",
+          where state in ('pending','failed','applying')",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, MutationType>(1)?,
+            row.get::<_, MutationType>(0)?,
+            row.get::<_, String>(1)?,
             row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
         ))
     })?;
     for row in rows {
-        let (sequence, mutation_type, target_id, payload_json) = row?;
-        if target_id == item_id {
+        let (mutation_type, mutation_item_id, payload_json) = row?;
+        if mutation_item_id == item_id {
             return Ok(true);
         }
-        let counterpart = mutations::addressed_counterpart_id(mutation_type, &payload_json)
-            .map_err(|source| DetachError::MalformedPayload { sequence, source })?;
-        if counterpart.as_deref() == Some(item_id) {
+        // Detach does not consume Mutation payloads. A payload that does not
+        // decode cannot prove that it addresses this Item; Sync diagnoses it
+        // when the row reaches the head of the Mutation Log.
+        if mutations::addressed_counterpart_id(mutation_type, &payload_json)
+            .is_ok_and(|counterpart| counterpart.as_deref() == Some(item_id))
+        {
             return Ok(true);
         }
     }

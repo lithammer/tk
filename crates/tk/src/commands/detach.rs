@@ -1,4 +1,4 @@
-//! `tk detach` — remove a concrete Backend Binding while retaining the same
+//! `tk detach` — remove a concrete Backend Binding while keeping the same
 //! Item as local work (ADR-0047).
 
 use clap::Args as ClapArgs;
@@ -61,9 +61,6 @@ fn detach_error(err: detach::DetachError, id: &str) -> CommandError {
             "cannot detach '{id}': Backend {} '{display_id}' would remain blocked by a Local Ticket; remove the Dependency first",
             item_class.label()
         )),
-        err @ detach::DetachError::MalformedPayload { .. } => {
-            CommandError::failure(format!("Repository Store corruption: {err}"))
-        }
         detach::DetachError::DisplayPrefixMissing => CommandError::failure(
             "Repository Store is missing the display_prefix seed (run 'tk init')",
         ),

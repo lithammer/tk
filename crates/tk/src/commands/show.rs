@@ -17,6 +17,9 @@
 //! PARENT / TICKETS / BLOCKED BY / BLOCKING / EXTERNAL BLOCKERS
 //!   <glyph> <status-glyph> <display-id>: [(Epic) ]<title>[ ● <priority>]
 //!
+//! FORMER BACKEND IDENTITIES
+//!   • <backend-kind> <backend-key>
+//!
 //! UNRESOLVED MUTATIONS / WITHDRAWN MUTATIONS
 //!   • <sequence> <state> <mutation-type>
 //!   Inspect with 'tk sync log <sequence>'.

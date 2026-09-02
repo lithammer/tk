@@ -1,13 +1,10 @@
 //! `tk show` full-item read with parent / children / blocker sub-sections.
 //!
-//! Composed from one item row plus six narrow sub-queries — parent
-//! summary, children (when the item is an Epic), `BLOCKED BY`,
-//! `BLOCKING`, unresolved External Blockers, and every Mutation Log entry
-//! targeting the item. The Repository Store owns the SQL; the command-side
-//! renderer owns the tree-block layout and styled output. Each sub-section
-//! returns a typed [`ItemSummary`], [`ExternalBlockerSummary`], or
-//! [`ItemMutation`] so the renderer never deserializes text columns of its
-//! own.
+//! Composed from one item row plus narrow sub-queries for parent, children
+//! (when the item is an Epic), `BLOCKED BY`, `BLOCKING`, unresolved External
+//! Blockers, Former Backend Identities, and every Mutation Log entry targeting
+//! the item. The Repository Store owns the SQL; the command-side renderer owns
+//! the tree-block layout and styled output.
 
 use rusqlite::{OptionalExtension, params};
 
@@ -46,7 +43,7 @@ pub struct ItemMutation {
     pub mutation_type: MutationType,
 }
 
-/// One inactive Former Backend Identity retained after Detach (ADR-0047).
+/// One inactive Former Backend Identity kept after Detach (ADR-0047).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormerBackendIdentity {
     pub backend_kind: BackendKind,
