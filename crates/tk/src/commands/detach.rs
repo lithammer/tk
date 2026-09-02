@@ -26,8 +26,11 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         .map_err(|err| detach_error(err, &args.id))?;
     let _ = writeln!(
         deps.stdout,
-        "Detached: Backend Ticket {} → Local Ticket {}",
-        report.backend_display_id, report.local_display_id,
+        "Detached: Backend {} {} → Local {} {}",
+        report.item_class.label(),
+        report.backend_display_id,
+        report.item_class.label(),
+        report.local_display_id,
     );
     let _ = writeln!(
         deps.stdout,
@@ -48,18 +51,20 @@ fn detach_error(err: detach::DetachError, id: &str) -> CommandError {
         detach::DetachError::PendingPromotion => CommandError::failure(format!(
             "'{id}' is a Pending Promotion; use 'tk promote cancel {id}' instead"
         )),
-        detach::DetachError::UnsupportedHistory => {
-            CommandError::failure(format!("'{id}' is not a clean adopted Backend Ticket"))
-        }
+        detach::DetachError::AmbiguousDisplayProvenance => CommandError::failure(format!(
+            "'{id}' has ambiguous local Display ID provenance from multiple legacy Aliases; Detach cannot choose one"
+        )),
         detach::DetachError::UnresolvedMutations => CommandError::failure(format!(
             "'{id}' has unresolved Mutations; resolve them before detaching"
         )),
         detach::DetachError::BackendBlockedByDetached {
             display_id,
             item_class,
+            detached_item_class,
         } => CommandError::failure(format!(
-            "cannot detach '{id}': Backend {} '{display_id}' would remain blocked by a Local Ticket; remove the Dependency first",
-            item_class.label()
+            "cannot detach '{id}': Backend {} '{display_id}' would remain blocked by a Local {}; remove the Dependency first",
+            item_class.label(),
+            detached_item_class.label()
         )),
         detach::DetachError::DisplayPrefixMissing => CommandError::failure(
             "Repository Store is missing the display_prefix seed (run 'tk init')",
@@ -78,6 +83,7 @@ mod tests {
     use crate::commands::show;
     use crate::commands::sync as sync_command;
     use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
+    use crate::domain::backend_operation::BackendItemIdentity;
     use crate::store::testing::{
         FixtureItem, FixtureMutation, FixtureRemote, TmpStore, commit_promotion, insert_dependency,
         insert_external_blocker, insert_fixture_item, insert_fixture_mutation,
@@ -125,6 +131,22 @@ mod tests {
                 exit
             }
         }
+    }
+
+    fn promote_fixture(conn: &mut rusqlite::Connection, item_id: &str, key: &str, display: &str) {
+        let tx = crate::store::write_transaction(conn).unwrap();
+        crate::store::promotion::apply_receipt(
+            &tx,
+            item_id,
+            "github",
+            &BackendItemIdentity {
+                backend_key: key.into(),
+                display_id: display.into(),
+            },
+            "2026-05-08T00:00:00.000Z",
+        )
+        .unwrap();
+        tx.commit().unwrap();
     }
 
     #[test]
@@ -362,6 +384,207 @@ mod tests {
             state,
             ("done".into(), "idle".into(), "Already shipped".into())
         );
+    }
+
+    #[test]
+    fn detaching_a_promoted_ticket_restores_its_exact_local_display_id() {
+        let store = TmpStore::new("repo");
+        let mut conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "target",
+                display: "tk-17",
+                title: "Promoted work",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        promote_fixture(
+            &mut conn,
+            "target",
+            "https://github.com/o/r/issues/53",
+            "gh-53",
+        );
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+
+        assert_eq!(run_rendered(&mut h, "gh-53"), Exit::Ok, "{}", h.err());
+        assert_eq!(
+            h.out(),
+            "Detached: Backend Ticket gh-53 → Local Ticket tk-17\n\
+             Backend object left unchanged: https://github.com/o/r/issues/53\n"
+        );
+        let resolvers = conn
+            .prepare("select value, source from item_ids where item_id = 'target' order by value")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(resolvers, vec![("tk-17".into(), "display".into())]);
+    }
+
+    #[test]
+    fn detaching_a_promoted_epic_preserves_class_state_and_relationships() {
+        let store = TmpStore::new("repo");
+        let mut conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "target",
+                display: "tk-4",
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                title: "Promoted Epic",
+                body: "Epic details",
+                status: "active",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "child",
+                display: "tk-5",
+                title: "Member Ticket",
+                container_id: Some("target"),
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "blocker",
+                display: "tk-6",
+                title: "Blocking Item",
+                created_seq: 3,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_dependency(&conn, "blocker", "target").unwrap();
+        insert_external_blocker(&conn, "external", "target", None).unwrap();
+        promote_fixture(
+            &mut conn,
+            "target",
+            "https://github.com/o/r/issues/9",
+            "gh-9",
+        );
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+
+        assert_eq!(run_rendered(&mut h, "gh-9"), Exit::Ok, "{}", h.err());
+        assert_eq!(
+            h.out(),
+            "Detached: Backend Epic gh-9 → Local Epic tk-4\n\
+             Backend object left unchanged: https://github.com/o/r/issues/9\n"
+        );
+        let state: (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+        ) = conn
+            .query_row(
+                "select display_value, item_class, title, body, status, work_state, \
+                        selection_state, origin \
+                   from items where id = 'target'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            state,
+            (
+                "tk-4".into(),
+                "epic".into(),
+                "Promoted Epic".into(),
+                "Epic details".into(),
+                "open".into(),
+                "active".into(),
+                None,
+                "local".into(),
+            )
+        );
+        let relationships: (i64, i64, i64) = conn
+            .query_row(
+                "select \
+                    (select count(*) from items where container_id = 'target'), \
+                    (select count(*) from dependencies where blocked_id = 'target'), \
+                    (select count(*) from external_blockers where item_id = 'target')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(relationships, (1, 1, 1));
+    }
+
+    #[test]
+    fn detach_refuses_ambiguous_legacy_alias_provenance() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "target",
+                display: "gh-42",
+                title: "Legacy promoted work",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("https://github.com/o/r/issues/42"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        crate::store::testing::insert_alias(&conn, "tk-1", "target").unwrap();
+        crate::store::testing::insert_alias(&conn, "old-1", "target").unwrap();
+        conn.execute(
+            "update items set binding_display_provenance = 'ambiguous' where id = 'target'",
+            [],
+        )
+        .unwrap();
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+
+        assert_eq!(run_rendered(&mut h, "gh-42"), Exit::Failure);
+        assert_eq!(
+            h.err(),
+            "tk detach: 'gh-42' has ambiguous local Display ID provenance from multiple legacy Aliases; Detach cannot choose one\n"
+        );
+        let origin: String = conn
+            .query_row("select origin from items where id = 'target'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(origin, "backend");
     }
 
     #[test]

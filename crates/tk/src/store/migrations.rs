@@ -57,6 +57,7 @@ const MIGRATION_10_SQL: &str = include_str!("migrations/010_mutation_abandoned.s
 const MIGRATION_11_SQL: &str = include_str!("migrations/011_split_work_state.sql");
 const MIGRATION_12_SQL: &str = include_str!("migrations/012_drop_dead_next_index.sql");
 const MIGRATION_13_SQL: &str = include_str!("migrations/013_former_backend_identities.sql");
+const MIGRATION_14_SQL: &str = include_str!("migrations/014_binding_display_provenance.sql");
 
 /// V1 Repository Store schema skeleton.
 pub const MIGRATION_1: Migration = Migration {
@@ -189,6 +190,15 @@ pub const MIGRATION_13: Migration = Migration {
     foreign_keys: ForeignKeys::On,
 };
 
+/// Records whether an active Backend Binding displaced a known local Display
+/// ID, and recovers that provenance from unambiguous legacy Alias history
+/// (ADR-0047).
+pub const MIGRATION_14: Migration = Migration {
+    version: 14,
+    sql: MIGRATION_14_SQL,
+    foreign_keys: ForeignKeys::On,
+};
+
 /// Ordered migration list applied by [`apply_all`].
 pub const ALL_MIGRATIONS: &[Migration] = &[
     MIGRATION_1,
@@ -204,13 +214,14 @@ pub const ALL_MIGRATIONS: &[Migration] = &[
     MIGRATION_11,
     MIGRATION_12,
     MIGRATION_13,
+    MIGRATION_14,
 ];
 
 /// Highest schema version this binary can apply. Named so future migrations
 /// surface the threshold to `grep` instead of hiding it behind `.last()`.
 /// Adding a migration is a two-line patch: append to `ALL_MIGRATIONS`, bump
 /// this constant, with a debug_assert below catching the drift.
-pub const MAX_KNOWN_VERSION: u32 = MIGRATION_13.version;
+pub const MAX_KNOWN_VERSION: u32 = MIGRATION_14.version;
 
 /// Errors returned while applying migrations.
 ///
@@ -385,7 +396,7 @@ pub(crate) fn apply_through(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::testing::{FixtureItem, insert_fixture_item};
+    use crate::store::testing::{FixtureItem, insert_alias, insert_fixture_item};
 
     fn open_memory() -> Connection {
         let conn = Connection::open_in_memory().expect("open :memory:");
@@ -492,6 +503,86 @@ mod tests {
         assert!(
             move_history.is_err(),
             "former identity history must not move onto an actively bound Item"
+        );
+    }
+
+    #[test]
+    fn binding_display_provenance_migration_classifies_legacy_aliases() {
+        let mut conn = open_memory();
+        apply_through(&mut conn, 13, "2026-05-09T00:00:00.000Z").unwrap();
+        for (id, display, key, item_class, status, created_seq) in [
+            ("adopted", "gh-1", "1", "ticket", "open", 1),
+            ("promoted", "gh-2", "2", "epic", "open", 2),
+            ("ambiguous", "gh-3", "3", "ticket", "done", 3),
+        ] {
+            insert_fixture_item(
+                &conn,
+                FixtureItem {
+                    id,
+                    display,
+                    title: "Backend Item",
+                    item_class,
+                    ticket_kind: (item_class == "ticket").then_some("task"),
+                    priority: (item_class == "ticket").then_some("P2"),
+                    status,
+                    origin: "backend",
+                    backend_kind: Some("github"),
+                    backend_key: Some(key),
+                    created_seq,
+                    ..FixtureItem::default()
+                },
+            )
+            .unwrap();
+        }
+        insert_alias(&conn, "tk-2", "promoted").unwrap();
+        insert_alias(&conn, "tk-3", "ambiguous").unwrap();
+        insert_alias(&conn, "old-3", "ambiguous").unwrap();
+
+        apply_all(&mut conn, "2026-05-09T00:00:01.000Z").unwrap();
+
+        let mut stmt = conn
+            .prepare(
+                "select id, binding_display_provenance, binding_local_display_value \
+                   from items order by created_seq",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("adopted".into(), "none".into(), None),
+                ("promoted".into(), "known".into(), Some("tk-2".into())),
+                ("ambiguous".into(), "ambiguous".into(), None),
+            ]
+        );
+
+        assert!(
+            conn.execute(
+                "update items set binding_display_provenance = 'known' \
+                  where id = 'adopted'",
+                [],
+            )
+            .is_err(),
+            "known provenance requires the exact displaced Display ID"
+        );
+        assert!(
+            conn.execute(
+                "update items set origin = 'local', backend_kind = null, backend_key = null \
+                  where id = 'ambiguous'",
+                [],
+            )
+            .is_err(),
+            "a Local Item cannot retain active Binding provenance"
         );
     }
 

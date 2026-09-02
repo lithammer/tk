@@ -1,13 +1,14 @@
 //! Pure domain helpers — no SQLite, filesystem, Git, or subprocess access.
 //!
 //! The schema-determined value types: Priority, ItemStatus, Lifecycle,
-//! WorkState, SelectionState, TicketKind, ItemClass, Origin, MutationType,
-//! MutationState, MutationPayload, Backend Adapter operation contracts,
-//! BackendBinding, and PromotionCapabilities. Each one is pinned by an
-//! existing SQL CHECK constraint or by an ADR — the shape exists
-//! independently of any future Backend Adapter — so the rest of the codebase
-//! uses typed values instead of raw strings at the store boundary. Lifecycle
-//! and WorkState are the two axes ADR-0043 splits `items.status` into.
+//! WorkState, SelectionState, TicketKind, ItemClass, Origin,
+//! BindingDisplayProvenance, MutationType, MutationState, MutationPayload,
+//! Backend Adapter operation contracts, BackendBinding, and
+//! PromotionCapabilities. Each one is pinned by an existing SQL CHECK
+//! constraint or by an ADR — the shape exists independently of any future
+//! Backend Adapter — so the rest of the codebase uses typed values instead of
+//! raw strings at the store boundary. Lifecycle and WorkState are the two axes
+//! ADR-0043 splits `items.status` into.
 //!
 //! [`backend_binding`] is the one derived from two sources rather than read off
 //! a column: Origin plus the Mutation Log answer whether an Item is Pending
@@ -42,6 +43,7 @@ pub mod backend_binding;
 pub mod backend_kind;
 pub mod backend_operation;
 pub mod backend_outcome;
+pub mod binding_display_provenance;
 pub mod dependency_rule;
 pub mod item_class;
 pub mod lifecycle;
