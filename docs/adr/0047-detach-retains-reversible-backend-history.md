@@ -19,9 +19,11 @@ holds the Remote workflow lock and commits the Origin, identity, Display ID,
 history, and Mutation changes in one Repository Store transaction. It works
 without a configured Remote. An unrelated `applying` Promotion does not block
 this Store-only operation, but Detach refuses when any affected Mutation
-belongs to an unresolved Promotion Operation. The operator must first
-reconcile, retry, or cancel that operation rather than partially withdrawing
-it.
+belongs to a Promotion Operation whose Promotion is still unresolved. The
+operator must first reconcile, retry, or cancel that Promotion rather than
+withdrawing part of an operation still owed a Backend identity. Once every
+Promotion of an operation is terminal, no prospective identity is left to
+split, and its remaining intent withdraws like any other Mutation.
 
 The Item keeps its stable internal ID, Item Class, fields, Lifecycle, Work
 State, Closing Reason, Selection State, and relationships. Only its Origin,

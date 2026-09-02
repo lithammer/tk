@@ -37,6 +37,15 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         "Backend object left unchanged: {}",
         report.backend_key
     );
+    // Lost Backend intent is never a count: the user chose Detach, not the
+    // withdrawal of these Mutations (ADR-0047).
+    for mutation in &report.withdrawn {
+        let _ = writeln!(
+            deps.stdout,
+            "Withdrew {} for {} (Mutation {})",
+            mutation.mutation_type, mutation.target_display_id, mutation.sequence
+        );
+    }
     Ok(Exit::Ok)
 }
 
@@ -57,8 +66,13 @@ fn detach_error(err: detach::DetachError, id: &str) -> CommandError {
         detach::DetachError::InvalidDisplayProvenance(err) => {
             CommandError::failure(format!("Repository Store corruption: {err}"))
         }
-        detach::DetachError::UnresolvedMutations => CommandError::failure(format!(
-            "'{id}' has unresolved Mutations; resolve them before detaching"
+        detach::DetachError::UnresolvedPromotionOperation {
+            sequence,
+            mutation_type,
+        } => CommandError::failure(format!(
+            "cannot detach '{id}': Mutation {sequence} ({mutation_type}) belongs to a Promotion Operation whose Promotion is unresolved; \
+             use 'tk promote reconcile <id> <backend-key>' if the Backend object exists, 'tk promote retry <id>' only when creating it again is safe, \
+             or 'tk promote cancel <id>' to withdraw the Promotion Operation, then detach again"
         )),
         detach::DetachError::BackendBlockedByDetached {
             display_id,
@@ -73,6 +87,9 @@ fn detach_error(err: detach::DetachError, id: &str) -> CommandError {
             "Repository Store is missing the display_prefix seed (run 'tk init')",
         ),
         detach::DetachError::BackendBinding(err) => resolver::backend_binding_error(&err),
+        detach::DetachError::Transition(err) => {
+            CommandError::failure(format!("Repository Store corruption: {err}"))
+        }
         detach::DetachError::Sequence(err) => {
             CommandError::failure(format!("Repository Store corruption: {err}"))
         }
@@ -684,19 +701,172 @@ mod tests {
         assert_eq!(origin, "backend");
     }
 
+    #[derive(Debug, PartialEq, Eq)]
+    struct MutationRow {
+        sequence: i64,
+        state: String,
+        failure_json: Option<String>,
+        state_changed_at: String,
+    }
+
+    fn mutation_rows(conn: &rusqlite::Connection) -> Vec<MutationRow> {
+        conn.prepare(
+            "select sequence, state, failure_json, state_changed_at \
+               from mutations order by sequence",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok(MutationRow {
+                sequence: row.get(0)?,
+                state: row.get(1)?,
+                failure_json: row.get(2)?,
+                state_changed_at: row.get(3)?,
+            })
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+    }
+
+    fn backend_ticket<'a>(
+        id: &'a str,
+        display: &'a str,
+        backend_key: &'a str,
+        created_seq: i64,
+    ) -> FixtureItem<'a> {
+        FixtureItem {
+            id,
+            display,
+            title: "Backend work",
+            origin: "backend",
+            backend_kind: Some("github"),
+            backend_key: Some(backend_key),
+            created_seq,
+            ..FixtureItem::default()
+        }
+    }
+
     #[test]
-    fn detach_refuses_a_mutation_that_addresses_the_ticket_as_counterpart() {
+    fn detach_withdraws_target_and_counterpart_mutations_and_keeps_terminal_history() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_item(
             &conn,
+            backend_ticket("target", "gh-42", "https://github.com/o/r/issues/42", 1),
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            backend_ticket("blocked", "gh-43", "https://github.com/o/r/issues/43", 2),
+        )
+        .unwrap();
+        for mutation in [
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "update_ticket",
+                item_id: "target",
+                state: "applied",
+                ..FixtureMutation::default()
+            },
+            FixtureMutation {
+                sequence: 2,
+                mutation_type: "update_ticket",
+                item_id: "target",
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+            FixtureMutation {
+                sequence: 3,
+                mutation_type: "set_item_status",
+                item_id: "target",
+                state: "failed",
+                failure_json: Some(r#"{"detail":"HTTP 422: rejected"}"#),
+                ..FixtureMutation::default()
+            },
+            // The local edge is already gone, which is why the Mutation exists:
+            // the withdrawal loses the intent to remove it upstream.
+            FixtureMutation {
+                sequence: 4,
+                mutation_type: "remove_dependency",
+                item_id: "blocked",
+                payload_json: r#"{"blocking_id":"target"}"#,
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+            FixtureMutation {
+                sequence: 5,
+                mutation_type: "set_item_status",
+                item_id: "target",
+                state: "skipped",
+                failure_json: Some(r#"{"detail":"backend said no"}"#),
+                ..FixtureMutation::default()
+            },
+            FixtureMutation {
+                sequence: 6,
+                mutation_type: "update_ticket",
+                item_id: "target",
+                state: "cancelled",
+                ..FixtureMutation::default()
+            },
+        ] {
+            insert_fixture_mutation(&conn, mutation).unwrap();
+        }
+        let before = mutation_rows(&conn);
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+
+        assert_eq!(run_rendered(&mut h, "gh-42"), Exit::Ok, "{}", h.err());
+        assert_eq!(
+            h.out(),
+            "Detached: Backend Ticket gh-42 → Local Ticket tk-1\n\
+             Backend object left unchanged: https://github.com/o/r/issues/42\n\
+             Withdrew update_ticket for tk-1 (Mutation 2)\n\
+             Withdrew set_item_status for tk-1 (Mutation 3)\n\
+             Withdrew remove_dependency for gh-43 (Mutation 4)\n"
+        );
+        let after = mutation_rows(&conn);
+        assert_eq!(
+            after
+                .iter()
+                .map(|row| (row.sequence, row.state.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, "applied"),
+                (2, "cancelled"),
+                (3, "cancelled"),
+                (4, "cancelled"),
+                (5, "skipped"),
+                (6, "cancelled"),
+            ]
+        );
+        // Withdrawal keeps the Mutation Failure that explains the rejection.
+        assert_eq!(
+            after[2].failure_json.as_deref(),
+            Some(r#"{"detail":"HTTP 422: rejected"}"#)
+        );
+        for sequence in [1, 5, 6] {
+            let index = sequence - 1;
+            assert_eq!(
+                after[index], before[index],
+                "terminal Mutation {sequence} must survive Detach untouched"
+            );
+        }
+    }
+
+    #[test]
+    fn detach_withdraws_membership_intent_once_its_promotion_operation_resolved() {
+        let store = TmpStore::new("repo");
+        let mut conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
             FixtureItem {
                 id: "target",
-                display: "gh-42",
-                title: "Blocking Ticket",
-                origin: "backend",
-                backend_kind: Some("github"),
-                backend_key: Some("https://github.com/o/r/issues/42"),
+                display: "tk-4",
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                title: "Promoted Epic",
                 created_seq: 1,
                 ..FixtureItem::default()
             },
@@ -705,12 +875,107 @@ mod tests {
         insert_fixture_item(
             &conn,
             FixtureItem {
-                id: "blocked",
-                display: "gh-43",
-                title: "Blocked Ticket",
+                id: "member",
+                container_id: Some("target"),
+                ..backend_ticket("member", "gh-10", "https://github.com/o/r/issues/10", 2)
+            },
+        )
+        .unwrap();
+        apply_promotion_receipt(
+            &mut conn,
+            "target",
+            "github",
+            &BackendItemIdentity {
+                backend_key: "https://github.com/o/r/issues/9".into(),
+                display_id: "gh-9".into(),
+            },
+            "2026-05-08T00:00:00.000Z",
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "promote_epic",
+                item_id: "target",
+                item_class: "epic",
+                state: "applied",
+                promotion_operation_id: Some("op-1"),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 2,
+                mutation_type: "add_ticket_to_epic",
+                item_id: "member",
+                payload_json: r#"{"epic_id":"target"}"#,
+                state: "failed",
+                failure_json: Some(r#"{"detail":"sub-issues unavailable"}"#),
+                promotion_operation_id: Some("op-1"),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+
+        assert_eq!(run_rendered(&mut h, "gh-9"), Exit::Ok, "{}", h.err());
+        assert_eq!(
+            h.out(),
+            "Detached: Backend Epic gh-9 → Local Epic tk-4\n\
+             Backend object left unchanged: https://github.com/o/r/issues/9\n\
+             Withdrew add_ticket_to_epic for gh-10 (Mutation 2)\n"
+        );
+        let rows = mutation_rows(&conn);
+        assert_eq!(rows[0].state, "applied");
+        assert_eq!(rows[1].state, "cancelled");
+        assert_eq!(
+            rows[1].failure_json.as_deref(),
+            Some(r#"{"detail":"sub-issues unavailable"}"#)
+        );
+        // Epic Membership stays local current state (ADR-0035).
+        let container: Option<String> = conn
+            .query_row(
+                "select container_id from items where id = 'member'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(container.as_deref(), Some("target"));
+    }
+
+    #[test]
+    fn detach_refuses_to_split_an_operation_whose_promotion_is_unresolved() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "target",
+                display: "gh-9",
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                title: "Backend Epic",
                 origin: "backend",
                 backend_kind: Some("github"),
-                backend_key: Some("https://github.com/o/r/issues/43"),
+                backend_key: Some("https://github.com/o/r/issues/9"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "child",
+                display: "repo-1",
+                title: "Awaiting creation",
+                container_id: Some("target"),
                 created_seq: 2,
                 ..FixtureItem::default()
             },
@@ -720,9 +985,92 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                mutation_type: "add_dependency",
-                item_id: "blocked",
-                payload_json: r#"{"blocking_id":"target"}"#,
+                mutation_type: "promote_ticket",
+                item_id: "child",
+                state: "pending",
+                promotion_operation_id: Some("op-1"),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 2,
+                mutation_type: "add_ticket_to_epic",
+                item_id: "child",
+                payload_json: r#"{"epic_id":"target"}"#,
+                state: "pending",
+                promotion_operation_id: Some("op-1"),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+
+        assert_eq!(run_rendered(&mut h, "gh-9"), Exit::Failure);
+        assert_eq!(
+            h.err(),
+            "tk detach: cannot detach 'gh-9': Mutation 2 (add_ticket_to_epic) belongs to a Promotion Operation whose Promotion is unresolved; \
+             use 'tk promote reconcile <id> <backend-key>' if the Backend object exists, 'tk promote retry <id>' only when creating it again is safe, \
+             or 'tk promote cancel <id>' to withdraw the Promotion Operation, then detach again\n"
+        );
+        let origin: String = conn
+            .query_row("select origin from items where id = 'target'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(origin, "backend");
+        assert_eq!(
+            mutation_rows(&conn)
+                .iter()
+                .map(|row| row.state.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pending", "pending"]
+        );
+    }
+
+    #[test]
+    fn an_unrelated_applying_promotion_does_not_block_detach() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            backend_ticket("target", "gh-42", "https://github.com/o/r/issues/42", 1),
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "other",
+                display: "repo-1",
+                title: "Creation outcome unknown",
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "promote_ticket",
+                item_id: "other",
+                state: "applying",
+                failure_json: Some(r#"{"detail":"timed out"}"#),
+                promotion_operation_id: Some("op-1"),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 2,
+                mutation_type: "update_ticket",
+                item_id: "target",
                 state: "pending",
                 ..FixtureMutation::default()
             },
@@ -732,17 +1080,20 @@ mod tests {
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
 
-        assert_eq!(run_rendered(&mut h, "gh-42"), Exit::Failure);
+        assert_eq!(run_rendered(&mut h, "gh-42"), Exit::Ok, "{}", h.err());
         assert_eq!(
-            h.err(),
-            "tk detach: 'gh-42' has unresolved Mutations; resolve them before detaching\n"
+            h.out(),
+            "Detached: Backend Ticket gh-42 → Local Ticket tk-1\n\
+             Backend object left unchanged: https://github.com/o/r/issues/42\n\
+             Withdrew update_ticket for tk-1 (Mutation 2)\n"
         );
-        let origin: String = conn
-            .query_row("select origin from items where id = 'target'", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(origin, "backend");
+        assert_eq!(
+            mutation_rows(&conn)
+                .iter()
+                .map(|row| row.state.as_str())
+                .collect::<Vec<_>>(),
+            vec!["applying", "cancelled"]
+        );
     }
 
     #[test]

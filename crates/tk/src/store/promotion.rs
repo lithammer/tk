@@ -1267,6 +1267,27 @@ pub fn abandoned_promotions(
     Ok(out)
 }
 
+/// Whether `operation_id` still holds a Promotion awaiting an outcome.
+///
+/// Detach asks this of every Mutation it would withdraw. A `pending`, `failed`,
+/// or `applying` Promotion is the state ADR-0038 protects: withdrawing one
+/// Mutation of that operation could leave an Epic upstream with its children
+/// gone, so the operator resolves the Promotion through reconcile, retry, or
+/// cancel first. Once every Promotion of the operation is terminal, no
+/// prospective identity is left to split and the operation's remaining intent
+/// withdraws like any other.
+pub fn has_unresolved_promotion(conn: &Connection, operation_id: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "select exists( \
+            select 1 from mutations \
+             where promotion_operation_id = ?1 \
+               and mutation_type in ('promote_ticket', 'promote_epic') \
+               and state in ('pending', 'failed', 'applying'))",
+        params![operation_id],
+        |r| r.get(0),
+    )
+}
+
 /// Mutation Log fields needed by Promotion's post-sync report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MutationSummary {
