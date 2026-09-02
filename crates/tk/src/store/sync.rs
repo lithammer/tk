@@ -11,7 +11,10 @@
 //! helpers take `&Connection`.
 
 use rusqlite::{Connection, OptionalExtension, params};
-use std::{collections::HashMap, str::FromStr};
+use std::{
+    collections::{HashMap, HashSet},
+    str::FromStr,
+};
 use thiserror::Error;
 
 use crate::domain::backend_binding::BackendBinding;
@@ -24,7 +27,6 @@ use crate::domain::backend_outcome::{
     BackendCreateOutcome, BackendEditOutcome, Failure, FailureClass,
 };
 use crate::domain::binding_display_provenance::BindingDisplayProvenance;
-use crate::domain::dependency_rule::{self, DependencyClassification, DependencyRejection};
 use crate::domain::item_class::ItemClass;
 use crate::domain::lifecycle::Lifecycle;
 use crate::domain::mutation_payload::{
@@ -34,11 +36,14 @@ use crate::domain::mutation_state::MutationState;
 use crate::domain::mutation_type::MutationType;
 use crate::domain::origin::Origin;
 use crate::domain::priority::Priority;
+use crate::domain::promotion_capability::{PromotionCapabilities, PromotionRequirements};
+use crate::domain::relationship_plan::{self, RelationshipFinding};
 use crate::domain::selection_state::SelectionState;
 use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
 use crate::domain::work_state::WorkState;
 use crate::store::mutations;
+use crate::store::promotion::ReadGraphError;
 use crate::store::repository::create::generate_internal_id;
 use crate::store::repository::{self, RemoteWorkflowGuard};
 use crate::store::sequences::{self, Counter, SequenceError};
@@ -70,6 +75,8 @@ pub enum AdoptStoreError {
     Storage(#[from] rusqlite::Error),
     #[error(transparent)]
     Sequence(#[from] SequenceError),
+    #[error(transparent)]
+    Append(#[from] mutations::AppendError),
     /// An adopted Ticket's `display_id` collided with an existing `item_ids.value`
     /// (a Display ID or Alias already claimed by another Item). Carries the
     /// colliding Display ID for the command's verbatim diagnostic.
@@ -108,16 +115,14 @@ pub enum AdoptStoreError {
         backend_display_id: String,
         local_display_id: String,
     },
-    /// Restoring the Binding would leave the Item waiting on a Blocking Item
-    /// the Backend cannot address (ADR-0035).
-    #[error(
-        "{backend_display_id} would be blocked by Local {} {blocking_display_id}",
-        blocking_item_class.label()
-    )]
-    ReadoptBlockedByLocal {
+    /// Every ordered relationship finding that stops Re-Adopt before it writes
+    /// the restored Binding (ADR-0035, ADR-0047).
+    #[error("relationship preflight refused Re-Adopt of {backend_display_id}")]
+    ReadoptRelationships {
+        item_id: String,
         backend_display_id: String,
-        blocking_display_id: String,
-        blocking_item_class: ItemClass,
+        backend_kind: BackendKind,
+        findings: Vec<RelationshipFinding>,
     },
     #[error(transparent)]
     BackendBinding(#[from] mutations::BackendBindingError),
@@ -169,6 +174,21 @@ pub struct ReadoptReport {
     /// Item Status derived from the imported Lifecycle and the Work State
     /// that survived it (ADR-0043).
     pub status: ItemStatus,
+    /// Fresh relationship intent appended by the Re-Adopt transaction, in
+    /// Mutation Sequence order (ADR-0047).
+    pub queued_relationships: Vec<QueuedRelationshipMutation>,
+}
+
+/// One relationship Mutation queued while restoring a Former Backend
+/// Identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedRelationshipMutation {
+    /// Fresh Mutation Sequence allocated by the Re-Adopt transaction.
+    pub sequence: i64,
+    /// Relationship operation the Mutation Log will apply.
+    pub mutation_type: MutationType,
+    /// Current Display ID of the Item the Mutation targets.
+    pub target_display_id: String,
 }
 
 /// One canonical Backend identity an Item detached from, as
@@ -201,6 +221,7 @@ pub fn adopt_backend_ticket(
     expected_kind: BackendKind,
     rng: &mut dyn rand::Rng,
     adopted: &AdoptedItem,
+    capabilities: PromotionCapabilities,
     now: &str,
 ) -> Result<AdoptOutcome, AdoptStoreError> {
     let tx = crate::store::write_transaction(conn)?;
@@ -221,7 +242,8 @@ pub fn adopt_backend_ticket(
     if let Some(former) =
         find_former_backend_identity(&tx, expected_kind, &adopted.backend_key, legacy_backend_key)?
     {
-        let report = readopt_backend_ticket(&tx, expected_kind, &former, adopted, now)?;
+        let report =
+            readopt_backend_ticket(&tx, expected_kind, &former, adopted, capabilities, now)?;
         tx.commit()?;
         return Ok(AdoptOutcome::Readopted(report));
     }
@@ -268,6 +290,41 @@ pub fn adopt_backend_ticket(
     ))
 }
 
+/// Derive the Backend facets an exact Re-Adopt needs after Adapter
+/// canonicalization. Ordinary Adopt returns `None` because it restores no
+/// relationship intent.
+pub fn readopt_requirements(
+    conn: &Connection,
+    backend_kind: BackendKind,
+    adopted: &AdoptedItem,
+) -> Result<Option<PromotionRequirements>, AdoptStoreError> {
+    let legacy_backend_key = legacy_adopt_backend_key(backend_kind, adopted);
+    if find_adopted_ticket_by_identity(
+        conn,
+        backend_kind,
+        &adopted.backend_key,
+        legacy_backend_key,
+    )?
+    .is_some()
+    {
+        return Ok(None);
+    }
+    let Some(former) =
+        find_former_backend_identity(conn, backend_kind, &adopted.backend_key, legacy_backend_key)?
+    else {
+        return Ok(None);
+    };
+    ensure_backend_cohort(conn, backend_kind)?;
+    let graph = readopt_graph(conn, &former.item_id)?;
+    let bound_ids = HashSet::from([former.item_id.as_str()]);
+    Ok(Some(relationship_plan::requirements(
+        &graph.items,
+        &graph.dependencies,
+        &bound_ids,
+        backend_kind,
+    )))
+}
+
 /// Rebind the Item that owns `former` to that canonical identity, inside the
 /// caller's Adopt intake transaction (ADR-0047).
 ///
@@ -275,17 +332,16 @@ pub fn adopt_backend_ticket(
 /// and Ticket Kind — while Item Class, the stable internal Item ID, Local
 /// Fields, and relationships stay as the Item held them locally.
 ///
-/// The Mutation Log is untouched. Detach made its withdrawals terminal, and
-/// the other half of ADR-0047's relationship contract — appending fresh intent
-/// for every relationship that becomes representable — is not in this path
-/// yet. So a Dependency that would make the resulting graph invalid refuses the
-/// whole command, while one that becomes Backend intent is allowed but not yet
-/// delivered.
+/// Detach's withdrawals remain terminal. Dependencies and Epic Membership
+/// that become Backend intent append fresh ordered Mutations; an invalid
+/// Dependency refuses before any Store write, and mixed-Origin membership
+/// stays local. The caller commits the rebind and outbox together.
 fn readopt_backend_ticket(
     conn: &Connection,
     backend_kind: BackendKind,
     former: &FormerIdentity,
     adopted: &AdoptedItem,
+    capabilities: PromotionCapabilities,
     now: &str,
 ) -> Result<ReadoptReport, AdoptStoreError> {
     let (item_class, display_id, work_state, closing_reason): (
@@ -324,15 +380,21 @@ fn readopt_backend_ticket(
         }
         BackendBinding::Local => {}
     }
-    if let Some((blocking_display_id, blocking_item_class)) =
-        local_blocking_item(conn, &former.item_id, backend_kind)?
-    {
-        return Err(AdoptStoreError::ReadoptBlockedByLocal {
-            backend_display_id: former.backend_display_id.clone(),
-            blocking_display_id,
-            blocking_item_class,
-        });
-    }
+    let graph = readopt_graph(conn, &former.item_id)?;
+    let bound_ids = HashSet::from([former.item_id.as_str()]);
+    let relationship_drafts = relationship_plan::plan(
+        &graph.items,
+        &graph.dependencies,
+        &bound_ids,
+        capabilities,
+        backend_kind,
+    )
+    .map_err(|findings| AdoptStoreError::ReadoptRelationships {
+        item_id: former.item_id.clone(),
+        backend_display_id: former.backend_display_id.clone(),
+        backend_kind,
+        findings,
+    })?;
 
     // The imported Lifecycle decides the two local fields it can invalidate:
     // `done` retires Work State, and `open` cannot carry a Closing Reason the
@@ -384,6 +446,39 @@ fn readopt_backend_ticket(
         ],
     )?;
 
+    let display_ids: HashMap<&str, &str> = graph
+        .items
+        .iter()
+        .map(|item| (item.id.as_str(), item.display_id.as_str()))
+        .collect();
+    let mut queued_relationships = Vec::with_capacity(relationship_drafts.len());
+    for draft in relationship_drafts {
+        let sequence = mutations::append(
+            conn,
+            mutations::AppendRequest {
+                mutation_type: draft.mutation_type,
+                item_id: &draft.item_id,
+                item_class: draft.item_class,
+                payload: &draft.payload,
+                promotion_operation_id: None,
+                now_iso: now,
+            },
+        )?;
+        let target_display_id = if draft.item_id == former.item_id {
+            former.backend_display_id.clone()
+        } else {
+            display_ids
+                .get(draft.item_id.as_str())
+                .expect("relationship target belongs to the closed graph")
+                .to_string()
+        };
+        queued_relationships.push(QueuedRelationshipMutation {
+            sequence,
+            mutation_type: draft.mutation_type,
+            target_display_id,
+        });
+    }
+
     Ok(ReadoptReport {
         backend_display_id: former.backend_display_id.clone(),
         local_display_id: display_id,
@@ -391,7 +486,28 @@ fn readopt_backend_ticket(
         title: adopted.title.clone(),
         ticket_kind: adopted.ticket_kind,
         status: ItemStatus::of(adopted.status, work_state),
+        queued_relationships,
     })
+}
+
+/// Read only the relationship graph that Re-Adopt can change.
+fn readopt_graph(
+    conn: &Connection,
+    item_id: &str,
+) -> Result<crate::domain::promotion_graph::PromotionGraph, AdoptStoreError> {
+    match crate::store::promotion::read_graph(conn, item_id, false) {
+        Ok(mut graph) => {
+            // Promotion's read also gathers edges that touch the target's
+            // parent or children. Re-Adopt changes only its target, so those
+            // wider edges are outside Re-Adopt's relationship check.
+            graph
+                .dependencies
+                .retain(|edge| edge.blocked_id == item_id || edge.blocking_id == item_id);
+            Ok(graph)
+        }
+        Err(ReadGraphError::Storage(error)) => Err(error.into()),
+        Err(ReadGraphError::BackendBinding(error)) => Err(error.into()),
+    }
 }
 
 /// Look up the Former Backend Identity that owns a canonical Backend key.
@@ -431,53 +547,6 @@ fn find_former_backend_identity(
         },
     )
     .optional()
-}
-
-/// The first Local Blocking Item beneath `item_id`, or `None` when the
-/// resulting graph is valid.
-///
-/// Re-Adopt makes the Item a Backend-bound Blocked Item, which reclassifies
-/// every Dependency it waits on. Detach asks this from the other side —
-/// whether the Item it makes Local is a Blocking Item beneath something still
-/// bound — and `dependency_rule::classify` owns the answer for both, so the
-/// rule stays in one place (ADR-0035).
-///
-/// The Backend-kind mismatch rejection cannot arise here: the intake
-/// transaction has already checked that the retained Backend cohort matches
-/// the Remote, so every bound Item shares this Backend.
-fn local_blocking_item(
-    conn: &Connection,
-    item_id: &str,
-    backend_kind: BackendKind,
-) -> Result<Option<(String, ItemClass)>, AdoptStoreError> {
-    let blocked = BackendBinding::Backend {
-        backend_kind: backend_kind.text().to_owned(),
-    };
-    let mut stmt = conn.prepare(
-        "select blocking.id, blocking.display_value, blocking.item_class \
-           from dependencies d \
-           join items blocking on blocking.id = d.blocking_id \
-          where d.blocked_id = ?1 \
-          order by blocking.created_seq",
-    )?;
-    let rows = stmt.query_map(params![item_id], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, ItemClass>(2)?,
-        ))
-    })?;
-    for row in rows {
-        let (id, display_id, item_class) = row?;
-        let blocking = mutations::resolve_backend_binding(conn, &id)?;
-        if matches!(
-            dependency_rule::classify(&blocked, &blocking),
-            DependencyClassification::Rejected(DependencyRejection::BackendBlockedLocalBlocking)
-        ) {
-            return Ok(Some((display_id, item_class)));
-        }
-    }
-    Ok(None)
 }
 
 /// Claim `display_id` as the Item's current Display ID.
@@ -1851,7 +1920,7 @@ mod tests {
     use crate::domain::work_state::WorkState;
     use crate::store::migrations;
     use crate::store::testing::{
-        FixtureFormerIdentity, FixtureItem, FixtureMutation, FixtureRemote,
+        FixtureFormerIdentity, FixtureItem, FixtureMutation, FixtureRemote, insert_dependency,
         insert_fixture_former_identity, insert_fixture_item, insert_fixture_mutation,
         insert_fixture_remote, item_axes, item_count,
     };
@@ -1880,6 +1949,23 @@ mod tests {
             body: "Body".into(),
             status,
         }
+    }
+
+    fn adopt_with_all_capabilities(
+        conn: &mut Connection,
+        backend_kind: BackendKind,
+        rng: &mut dyn rand::Rng,
+        item: &AdoptedItem,
+        now: &str,
+    ) -> Result<AdoptOutcome, AdoptStoreError> {
+        adopt_backend_ticket(
+            conn,
+            backend_kind,
+            rng,
+            item,
+            PromotionCapabilities::all(),
+            now,
+        )
     }
 
     fn refresh(title: &str, status: Lifecycle) -> BackendItemRefresh {
@@ -1915,7 +2001,7 @@ mod tests {
         let mut conn = open_seeded();
         seed_remote(&conn);
         let mut rng = StdRng::seed_from_u64(0);
-        let outcome = adopt_backend_ticket(
+        let outcome = adopt_with_all_capabilities(
             &mut conn,
             BackendKind::Github,
             &mut rng,
@@ -2710,7 +2796,7 @@ mod tests {
 
         let mut rng = StdRng::seed_from_u64(0);
         // A *different* backend item claims the same Display ID.
-        let err = adopt_backend_ticket(
+        let err = adopt_with_all_capabilities(
             &mut conn,
             BackendKind::Github,
             &mut rng,
@@ -4626,11 +4712,201 @@ mod tests {
     // ---- adopt ----------------------------------------------------------
 
     #[test]
+    fn readopt_refuses_relationship_intent_the_backend_cannot_represent() {
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "stable",
+                display: "tk-1",
+                title: "Local work",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        backend_ticket(&conn, "blocker", "gh-8", "8", 2);
+        insert_dependency(&conn, "blocker", "stable").unwrap();
+        insert_fixture_former_identity(
+            &conn,
+            FixtureFormerIdentity {
+                item_id: "stable",
+                backend_key: URL_42,
+                backend_display_value: "gh-42",
+                ..FixtureFormerIdentity::default()
+            },
+        )
+        .unwrap();
+        let snapshot = adopted(URL_42, "gh-42", "Backend work", Lifecycle::Open);
+
+        let requirements = readopt_requirements(&conn, BackendKind::Github, &snapshot)
+            .unwrap()
+            .unwrap();
+        assert!(requirements.requires_dependencies());
+        let error = adopt_backend_ticket(
+            &mut conn,
+            BackendKind::Github,
+            &mut StdRng::seed_from_u64(7),
+            &snapshot,
+            PromotionCapabilities::none(),
+            NOW,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            AdoptStoreError::ReadoptRelationships { ref findings, .. }
+                if matches!(
+                    findings.as_slice(),
+                    [RelationshipFinding::DependencyNotRepresentable { blocked, blocking }]
+                        if blocked.display_id == "tk-1" && blocking.display_id == "gh-8"
+                )
+        ));
+        let origin: String = conn
+            .query_row("select origin from items where id = 'stable'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(origin, "local");
+        assert_eq!(pending_or_failed_mutation_count(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn readopt_refuses_membership_the_backend_cannot_represent() {
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "parent",
+                display: "gh-9",
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                selection_state: None,
+                title: "Backend Epic",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("9"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "stable",
+                display: "tk-1",
+                title: "Local work",
+                container_id: Some("parent"),
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_former_identity(
+            &conn,
+            FixtureFormerIdentity {
+                item_id: "stable",
+                backend_key: URL_42,
+                backend_display_value: "gh-42",
+                ..FixtureFormerIdentity::default()
+            },
+        )
+        .unwrap();
+        let snapshot = adopted(URL_42, "gh-42", "Backend work", Lifecycle::Open);
+
+        let error = adopt_backend_ticket(
+            &mut conn,
+            BackendKind::Github,
+            &mut StdRng::seed_from_u64(7),
+            &snapshot,
+            PromotionCapabilities::none(),
+            NOW,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            AdoptStoreError::ReadoptRelationships { ref findings, .. }
+                if matches!(
+                    findings.as_slice(),
+                    [RelationshipFinding::EpicMembershipNotRepresentable { ticket, epic }]
+                        if ticket.display_id == "tk-1" && epic.display_id == "gh-9"
+                )
+        ));
+        let origin: String = conn
+            .query_row("select origin from items where id = 'stable'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(origin, "local");
+        assert_eq!(pending_or_failed_mutation_count(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn former_epic_requirements_include_membership_from_its_backend_ticket() {
+        let conn = open_seeded();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "stable",
+                display: "tk-1",
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                selection_state: None,
+                title: "Local Epic",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_former_identity(
+            &conn,
+            FixtureFormerIdentity {
+                item_id: "stable",
+                backend_key: URL_42,
+                backend_display_value: "gh-42",
+                ..FixtureFormerIdentity::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "child",
+                display: "gh-8",
+                title: "Backend child",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("8"),
+                container_id: Some("stable"),
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+
+        let requirements = readopt_requirements(
+            &conn,
+            BackendKind::Github,
+            &adopted(URL_42, "gh-42", "Backend Epic", Lifecycle::Open),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(requirements.requires_epic_membership());
+    }
+
+    #[test]
     fn canonical_adopt_is_idempotent_without_overwriting_stored_fields() {
         let mut conn = open_seeded();
         seed_remote(&conn);
         let mut rng = rand::rngs::StdRng::seed_from_u64(7);
-        let first = adopt_backend_ticket(
+        let first = adopt_with_all_capabilities(
             &mut conn,
             BackendKind::Github,
             &mut rng,
@@ -4643,7 +4919,7 @@ mod tests {
         let mut canonical = adopted("42", "gh-42", "Original", Lifecycle::Open);
         canonical.title = "Changed remotely".into();
         let second =
-            adopt_backend_ticket(&mut conn, BackendKind::Github, &mut rng, &canonical, NOW)
+            adopt_with_all_capabilities(&mut conn, BackendKind::Github, &mut rng, &canonical, NOW)
                 .unwrap();
         assert!(matches!(second, AdoptOutcome::AlreadyExists(_)));
         assert_eq!(
@@ -4660,7 +4936,7 @@ mod tests {
         let mut conn = open_seeded();
         seed_remote(&conn);
         let mut rng = rand::rngs::StdRng::seed_from_u64(7);
-        adopt_backend_ticket(
+        adopt_with_all_capabilities(
             &mut conn,
             BackendKind::Github,
             &mut rng,
@@ -4684,7 +4960,7 @@ mod tests {
             .is_none()
         );
         assert!(matches!(
-            adopt_backend_ticket(
+            adopt_with_all_capabilities(
                 &mut conn,
                 BackendKind::Github,
                 &mut rng,
@@ -4733,7 +5009,7 @@ mod tests {
         // Canonical identity is the (Backend kind, key) pair: a key spelled
         // the same on another Backend names a different object, so Jira intake
         // inserts rather than rebinding the legacy GitHub history.
-        let outcome = adopt_backend_ticket(
+        let outcome = adopt_with_all_capabilities(
             &mut conn,
             BackendKind::Jira,
             &mut rand::rngs::StdRng::seed_from_u64(7),
@@ -4792,7 +5068,7 @@ mod tests {
             .unwrap();
         }
 
-        let outcome = adopt_backend_ticket(
+        let outcome = adopt_with_all_capabilities(
             &mut conn,
             BackendKind::Github,
             &mut rand::rngs::StdRng::seed_from_u64(7),
@@ -4838,7 +5114,7 @@ mod tests {
                 conn.execute_batch("pragma foreign_keys = on").unwrap();
                 let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
                 barrier.wait();
-                adopt_backend_ticket(
+                adopt_with_all_capabilities(
                     &mut conn,
                     BackendKind::Github,
                     &mut rng,
@@ -4881,7 +5157,7 @@ mod tests {
         clear_remote(&mut conn).unwrap();
         let mut rng = rand::rngs::StdRng::seed_from_u64(7);
 
-        let error = adopt_backend_ticket(
+        let error = adopt_with_all_capabilities(
             &mut conn,
             BackendKind::Github,
             &mut rng,
@@ -4918,7 +5194,7 @@ mod tests {
         set_remote(&mut conn, BackendKind::Jira, "{}", NOW).unwrap();
         let mut rng = rand::rngs::StdRng::seed_from_u64(7);
 
-        let error = adopt_backend_ticket(
+        let error = adopt_with_all_capabilities(
             &mut conn,
             BackendKind::Github,
             &mut rng,
@@ -4952,7 +5228,7 @@ mod tests {
         let mut conn = open_seeded();
         seed_remote(&conn);
         let mut rng = rand::rngs::StdRng::seed_from_u64(7);
-        adopt_backend_ticket(
+        adopt_with_all_capabilities(
             &mut conn,
             BackendKind::Github,
             &mut rng,
@@ -4966,7 +5242,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = adopt_backend_ticket(
+        let error = adopt_with_all_capabilities(
             &mut conn,
             BackendKind::Jira,
             &mut rng,
@@ -4993,7 +5269,7 @@ mod tests {
         let mut conn = open_seeded();
         seed_remote(&conn);
         let mut rng = rand::rngs::StdRng::seed_from_u64(7);
-        adopt_backend_ticket(
+        adopt_with_all_capabilities(
             &mut conn,
             BackendKind::Github,
             &mut rng,

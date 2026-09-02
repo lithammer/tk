@@ -1,10 +1,9 @@
-//! The Repository Store snapshot one `tk promote` invocation preflights over.
+//! The Repository Store snapshot Promotion reads and Re-Adopt narrows to its
+//! target's relationships.
 //!
-//! Facts only: the Items the operation touches, their Dependency edges, and
-//! what the user asked for. No decision rides here — whether an Item is
-//! promotable, whether the configured Backend Adapter can represent a facet,
-//! and what order the outbox takes are the planner's, and every one of them is
-//! a pure function of this snapshot.
+//! Facts only: Items, their Dependency edges, and the Promotion child choice.
+//! The planners decide what changes, what the Backend can represent, and how
+//! the outbox is ordered.
 //!
 //! [`crate::store::promotion::read_graph`] is the only producer.
 
@@ -55,7 +54,7 @@ pub struct GraphDependency {
     pub blocking_id: String,
 }
 
-/// Everything one `tk promote` invocation preflights over.
+/// Everything one Promotion or Re-Adopt relationship preflight reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromotionGraph {
     /// Internal id of the Item named on the command line.

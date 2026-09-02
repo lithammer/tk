@@ -1,13 +1,10 @@
 //! What a Dependency edge means once both endpoints' Backend Binding is known
 //! (ADR-0035).
 //!
-//! Two callers ask the same question of different graphs: `tk block` judges an
-//! edge against the state the Repository Store holds now, and Promotion
-//! preflight judges every edge against the state the whole operation will
-//! produce. The rule lives in one place so those two answers cannot drift;
-//! each caller renders a [`DependencyRejection`] in its own words, because one
-//! interpolates the arguments the user typed and the other names both
-//! endpoints and a remedy.
+//! Three callers ask the same question of different graphs: `tk block` judges
+//! current state, while Promotion and Re-Adopt judge the state their operation
+//! would produce. The rule lives in one place so those answers cannot drift;
+//! each caller renders a [`DependencyRejection`] in its own words.
 
 use super::backend_binding::BackendBinding;
 
