@@ -2463,34 +2463,63 @@ mod tests {
         );
     }
 
-    /// The `items` indexes and trigger ADR-0028's rebuild recipe covers, as the
-    /// store holds them, sorted. A name missing from the `in` list is invisible
-    /// to every caller, so a new `items` object belongs here too.
-    fn items_objects(conn: &Connection) -> Vec<String> {
-        let mut names: Vec<String> = conn
-            .prepare(
-                "select name from sqlite_master \
-                  where name in ('items_backend_unique', 'items_container_idx', \
+    /// The `items` indexes and triggers ADR-0028's rebuild recipe covers, as
+    /// the store holds them, sorted. Both the name inventory and each trigger's
+    /// SQL are load-bearing: a rebuild can recreate an older body under the
+    /// same name, silently dropping a later invariant. Index SQL is omitted
+    /// because a rebuild can deliberately change an index definition.
+    fn items_objects(conn: &Connection) -> Vec<(String, Option<String>)> {
+        conn.prepare(
+            "select name, case when type = 'trigger' then sql end \
+                   from sqlite_master \
+                  where name in (\
+                    'active_backend_identity_not_owned_by_another_former_item_insert', \
+                    'active_backend_identity_not_owned_by_another_former_item_update', \
+                    'items_backend_unique', 'items_container_idx', \
                                  'items_id_class_unique', 'items_next_idx', \
-                                 'items_no_escape_from_done')",
-            )
-            .unwrap()
-            .query_map([], |r| r.get(0))
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-        names.sort();
-        names
+                                 'items_no_escape_from_done') \
+                  order by name",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+    }
+
+    fn items_object_names(conn: &Connection) -> Vec<String> {
+        items_objects(conn)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
+    }
+
+    #[test]
+    fn items_object_inventory_observes_trigger_body() {
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        let before = items_objects(&conn);
+
+        conn.execute_batch(
+            "drop trigger items_no_escape_from_done; \
+             create trigger items_no_escape_from_done before update of status on items \
+             begin select raise(abort, 'drifted body'); end;",
+        )
+        .unwrap();
+
+        assert_ne!(
+            items_objects(&conn),
+            before,
+            "an items trigger body is part of the rebuild inventory"
+        );
     }
 
     #[test]
     fn every_trigger_body_is_pinned() {
-        // `items_objects` compares trigger *names*, so a migration that
-        // recreates one from an older body keeps the name and passes it — and
-        // the exceptions ADR-0046 and ADR-0047 rely on live only in these
-        // bodies. Behavioural tests cover the conjuncts someone thought to
-        // cover; this pins the text, so any body change (a dropped conjunct,
-        // or a new clause that widens an exception) has to be accepted here
+        // The `items` rebuild inventory pins the triggers a rebuild could
+        // discard. This broader inventory pins triggers on the other tables
+        // too. Behavioural tests cover the conjuncts someone thought to cover;
+        // this pins the text, so any body change has to be accepted here
         // deliberately rather than slipping through as a passing suite.
         let mut conn = open_memory();
         apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
@@ -2606,15 +2635,17 @@ mod tests {
         let mut conn = open_memory();
         apply_through(&mut conn, 10, "2026-05-09T00:00:00.000Z").unwrap();
         insert_v10_item(&conn, "t1", "tk-1", "active", 1);
+        let before = items_objects(&conn);
 
         // Stops at 11: this test checks what migration 011's rebuild recreates.
         // Running to `apply_all` would fold in migration 012's drop of
         // `items_next_idx` (ADR-0045), so a forgotten index and a dropped one
-        // would fail the same assertion.
+        // would fail the same name assertion.
         apply_through(&mut conn, 11, "2026-05-09T00:00:01.000Z").unwrap();
 
+        assert_eq!(items_objects(&conn), before);
         assert_eq!(
-            items_objects(&conn),
+            items_object_names(&conn),
             vec![
                 "items_backend_unique",
                 "items_container_idx",
@@ -2649,13 +2680,16 @@ mod tests {
         // ADR-0045 took `items_next_idx` off the set an ADR-0028 rebuild
         // recreates, so its absence is a contract now: a rebuild that copies an
         // older recreate list restores it and fails here. Naming the four
-        // survivors too catches a rebuild that loses one of them on the way.
+        // survivors and later `items` triggers catches a rebuild that loses
+        // one of them on the way.
         let mut conn = open_memory();
         apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
 
         assert_eq!(
-            items_objects(&conn),
+            items_object_names(&conn),
             vec![
+                "active_backend_identity_not_owned_by_another_former_item_insert",
+                "active_backend_identity_not_owned_by_another_former_item_update",
                 "items_backend_unique",
                 "items_container_idx",
                 "items_id_class_unique",
