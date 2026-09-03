@@ -524,14 +524,14 @@ mod tests {
         tx.commit()
     }
 
-    /// Assert a refused `done` -> `open` write was refused by the
-    /// done-terminal trigger and not by some other constraint.
+    /// Assert the done-terminal trigger is what refused a `done` -> `open`
+    /// write, not some other constraint.
     ///
     /// `is_err()` alone cannot tell the two apart: these fixtures carry a
     /// Closing Reason, and an UPDATE that clears `status` without clearing it
     /// trips the `closing_reason` CHECK too. Dropping a trigger conjunct then
     /// leaves every negative test passing for the wrong reason.
-    fn assert_refused_by_the_done_terminal_trigger(result: rusqlite::Result<usize>, why: &str) {
+    fn assert_trigger_refused(result: rusqlite::Result<usize>, why: &str) {
         match result {
             Err(err) => assert!(
                 err.to_string().contains("cannot leave done state"),
@@ -708,7 +708,7 @@ mod tests {
         insert_done_ticket(&conn);
 
         let reopen = conn.execute("update items set status = 'open' where id = 't1'", []);
-        assert_refused_by_the_done_terminal_trigger(
+        assert_trigger_refused(
             reopen,
             "no failed closing Mutation exists, so the done-terminal rule still applies (ADR-0006)",
         );
@@ -744,7 +744,7 @@ mod tests {
         .unwrap();
 
         let reopen = conn.execute("update items set status = 'open' where id = 't1'", []);
-        assert_refused_by_the_done_terminal_trigger(
+        assert_trigger_refused(
             reopen,
             "a failed non-closing status Mutation must not authorize a done -> open write",
         );
@@ -774,7 +774,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_refused_by_the_done_terminal_trigger(
+        assert_trigger_refused(
             conn.execute(
                 "update items set status = 'open', closing_reason = null where id = 't1'",
                 [],
@@ -819,7 +819,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_refused_by_the_done_terminal_trigger(
+        assert_trigger_refused(
             conn.execute(
                 "update items set status = 'open', closing_reason = null where id = 't1'",
                 [],
@@ -853,7 +853,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_refused_by_the_done_terminal_trigger(
+        assert_trigger_refused(
             conn.execute(
                 "update items set status = 'open', closing_reason = null where id = 't1'",
                 [],
@@ -910,7 +910,7 @@ mod tests {
         .unwrap();
 
         let later_reopen = conn.execute("update items set status = 'open' where id = 't1'", []);
-        assert_refused_by_the_done_terminal_trigger(
+        assert_trigger_refused(
             later_reopen,
             "once the closing Mutation is no longer failed, a later done -> open write is refused again (ADR-0046)",
         );

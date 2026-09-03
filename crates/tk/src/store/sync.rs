@@ -1270,6 +1270,98 @@ impl From<mutations::TransitionError> for MarkSkippedError {
     }
 }
 
+/// Transition a `failed` Mutation Log entry into `skipped`, inside its own
+/// transaction. Refuses a Mutation that is not `failed`, or whose Mutation
+/// Type is `promote_ticket` / `promote_epic` ([`MarkSkippedError::CannotSkipPromotion`]).
+/// The edge preserves `failure_json`, so `tk sync log` can still show why the
+/// Mutation was bypassed.
+///
+/// Skipping a failed `set_item_status` Mutation whose target is `done`
+/// additionally restores the Item to `open` in this same transaction
+/// (ADR-0046): retaining local `done` after the operator relinquishes the
+/// close would leave the Backend open forever, since `done` Items sit outside
+/// Backend Pull.
+pub fn mark_mutation_skipped(
+    conn: &mut Connection,
+    _workflow: &RemoteWorkflowGuard,
+    sequence: i64,
+    now: &str,
+) -> Result<SkipOutcome, MarkSkippedError> {
+    let tx = crate::store::write_transaction(conn)?;
+
+    // The gate reads the payload's target through SQL, not a Rust decode, so
+    // it resolves a `set_item_status` payload that does not decode as
+    // `Lifecycle` (ADR-0043's amendment). That keeps Skip available for such a
+    // row once it is `failed`. A `pending` one never reaches `failed`, because
+    // `load_applicable_mutations` decodes every applicable row before Apply
+    // can fail any of them, and the state gate below admits only `failed`; its
+    // recovery is Promotion Cancellation or Detach, which withdraw a
+    // `set_item_status` row without decoding its payload.
+    let row: Option<(MutationState, MutationType, Option<String>, String)> = tx
+        .query_row(
+            "select state, mutation_type, json_extract(payload_json, '$.status'), item_id \
+               from mutations where sequence = ?1",
+            params![sequence],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    let (prior, mutation_type, target_status, item_id) =
+        row.ok_or(MarkSkippedError::MutationNotFound(sequence))?;
+    if mutation_type.is_promotion() {
+        return Err(MarkSkippedError::CannotSkipPromotion(sequence));
+    }
+    if prior != MutationState::Failed {
+        return Err(MarkSkippedError::MutationNotFailed(sequence));
+    }
+
+    // Exhaustive by name, following `MutationType::is_promotion`: a Mutation
+    // kind added later has to answer what abandoning it does to local state
+    // instead of silently reading as `Bypassed`.
+    //
+    // The target comes from the row named by `sequence`, not from an `exists`
+    // over the Item the way migration 016's trigger reads it. An Item can hold
+    // both a spared non-closing `set_item_status` failure (migration 011) and
+    // a real failed close, so an `exists` here would reopen the Item on the
+    // strength of the wrong row and report a relinquishment that never
+    // happened.
+    let outcome = match mutation_type {
+        MutationType::SetItemStatus
+            if target_status.as_deref() == Some(Lifecycle::Done.text()) =>
+        {
+            SkipOutcome::RelinquishedClose {
+                display_id: relinquish_close(&tx, &item_id, sequence, now)?,
+            }
+        }
+        MutationType::SetItemStatus
+        | MutationType::UpdateTicket
+        | MutationType::UpdateEpic
+        | MutationType::AddTicketToEpic
+        | MutationType::RemoveTicketFromEpic
+        | MutationType::AddDependency
+        | MutationType::RemoveDependency
+        | MutationType::AddExternalBlocker
+        | MutationType::ResolveExternalBlocker
+        // Unreachable past the Promotion refusal above; named so the match
+        // stays exhaustive rather than resting on that early return.
+        | MutationType::PromoteTicket
+        | MutationType::PromoteEpic => SkipOutcome::Bypassed,
+    };
+
+    mutations::transition(
+        &tx,
+        mutations::TransitionRequest {
+            sequence,
+            from: prior,
+            to: MutationState::Skipped,
+            failure: None,
+            now,
+        },
+    )?;
+
+    tx.commit()?;
+    Ok(outcome)
+}
+
 /// Restore an Item to `open` as Sync Skip relinquishes its failed close, and
 /// report the Display ID the command layer names (ADR-0046).
 ///
@@ -1308,105 +1400,13 @@ fn relinquish_close(
         })?;
     // A failed closing Mutation implies its Item is `done` (see
     // `MarkSkippedError::ReopenMatchedNothing`), so zero rows is not a race.
-    // It has to abort rather than let the caller's transition commit the very
-    // divergence gh-53 exists to close while reporting success.
+    // It has to abort: committing the caller's transition on top of it would
+    // leave local `done` against a Backend the close never reached, which the
+    // open-only Pull working set never reconciles.
     if reopened == 0 {
         return Err(MarkSkippedError::ReopenMatchedNothing(sequence));
     }
     Ok(repository::current_display_id(tx, item_id)?)
-}
-
-/// Transition a `failed` Mutation Log entry into `skipped`, inside its own
-/// transaction. Refuses a Mutation that is not `failed`, or whose Mutation
-/// Type is `promote_ticket` / `promote_epic` ([`MarkSkippedError::CannotSkipPromotion`]).
-/// The edge preserves `failure_json`, so `tk sync log` can still show why the
-/// Mutation was bypassed.
-///
-/// Skipping a failed `set_item_status` Mutation whose target is `done`
-/// additionally restores the Item to `open` in this same transaction
-/// (ADR-0046): retaining local `done` after the operator relinquishes the
-/// close would leave the Backend open forever, since `done` Items sit outside
-/// Backend Pull.
-pub fn mark_mutation_skipped(
-    conn: &mut Connection,
-    _workflow: &RemoteWorkflowGuard,
-    sequence: i64,
-    now: &str,
-) -> Result<SkipOutcome, MarkSkippedError> {
-    let tx = crate::store::write_transaction(conn)?;
-
-    // The gate reads the payload's target through SQL, not a Rust decode, so
-    // it still resolves a `set_item_status` payload that no longer decodes as
-    // `Lifecycle` (ADR-0043's amendment). That keeps Skip available for such a
-    // row once it is `failed`. A `pending` one never reaches `failed`, because
-    // `load_applicable_mutations` decodes every applicable row before Apply
-    // can fail any of them, and the state gate below admits only `failed`; its
-    // recovery is Promotion Cancellation or Detach, which withdraw a
-    // `set_item_status` row without decoding its payload.
-    let row: Option<(MutationState, MutationType, Option<String>, String)> = tx
-        .query_row(
-            "select state, mutation_type, json_extract(payload_json, '$.status'), item_id \
-               from mutations where sequence = ?1",
-            params![sequence],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )
-        .optional()?;
-    let (prior, mutation_type, target_status, item_id) =
-        row.ok_or(MarkSkippedError::MutationNotFound(sequence))?;
-    if mutation_type.is_promotion() {
-        return Err(MarkSkippedError::CannotSkipPromotion(sequence));
-    }
-    if prior != MutationState::Failed {
-        return Err(MarkSkippedError::MutationNotFailed(sequence));
-    }
-
-    // Exhaustive by name, following `MutationType::is_promotion`: a Mutation
-    // kind added later has to answer what abandoning it does to local state
-    // instead of silently reading as `Bypassed`.
-    //
-    // The target comes from the row named by `sequence`, not from an `exists`
-    // over the Item the way migration 016's trigger reads it. The trigger's
-    // clause names no particular row, so it stays open while any failed
-    // closing Mutation sits on the Item; an Item can hold both a spared
-    // non-closing `set_item_status` failure (migration 011) and a real failed
-    // close, and skipping the former must neither reopen the Item nor report
-    // a relinquishment that never happened.
-    let outcome = match mutation_type {
-        MutationType::SetItemStatus
-            if target_status.as_deref() == Some(Lifecycle::Done.text()) =>
-        {
-            SkipOutcome::RelinquishedClose {
-                display_id: relinquish_close(&tx, &item_id, sequence, now)?,
-            }
-        }
-        MutationType::SetItemStatus
-        | MutationType::UpdateTicket
-        | MutationType::UpdateEpic
-        | MutationType::AddTicketToEpic
-        | MutationType::RemoveTicketFromEpic
-        | MutationType::AddDependency
-        | MutationType::RemoveDependency
-        | MutationType::AddExternalBlocker
-        | MutationType::ResolveExternalBlocker
-        // Unreachable past the Promotion refusal above; named so the match
-        // stays exhaustive rather than resting on that early return.
-        | MutationType::PromoteTicket
-        | MutationType::PromoteEpic => SkipOutcome::Bypassed,
-    };
-
-    mutations::transition(
-        &tx,
-        mutations::TransitionRequest {
-            sequence,
-            from: prior,
-            to: MutationState::Skipped,
-            failure: None,
-            now,
-        },
-    )?;
-
-    tx.commit()?;
-    Ok(outcome)
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -3625,10 +3625,10 @@ mod tests {
     #[test]
     fn load_applicable_rejects_a_pre_split_active_status_target() {
         // Lifecycle has no `active` variant — Work State split out of Item
-        // Status in ADR-0043, and the amendment recorded there
-        // documents this: a `set_item_status` row that predates the split and
-        // still names `active` now fails to decode here, before any Backend
-        // Adapter call, rather than failing at Apply.
+        // Status in ADR-0043, and the amendment recorded there documents
+        // this: a `set_item_status` row predating the split, still naming
+        // `active`, fails to decode here — before any Backend Adapter call,
+        // rather than at Apply.
         let conn = open_seeded();
         backend_ticket(&conn, "t1", "gh-1", "1", 1);
         insert_fixture_mutation(
