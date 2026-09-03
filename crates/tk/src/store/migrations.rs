@@ -751,6 +751,84 @@ mod tests {
     }
 
     #[test]
+    fn a_pending_closing_mutation_does_not_authorize_reopen() {
+        use crate::store::testing::{FixtureMutation, insert_fixture_mutation};
+
+        // `tk done` on a Backend-bound Item leaves exactly this shape — a
+        // `done` row plus a `pending` closing Mutation — until the next
+        // `tk sync`. It is the most common live state in the Store, so the
+        // exception must not admit it.
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_done_ticket(&conn);
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "set_item_status",
+                item_id: "t1",
+                payload_json: r#"{"status":"done"}"#,
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        assert_refused_by_the_done_terminal_trigger(
+            conn.execute(
+                "update items set status = 'open', closing_reason = null where id = 't1'",
+                [],
+            ),
+            "a closing Mutation still queued must not authorize a done -> open write",
+        );
+    }
+
+    #[test]
+    fn a_failed_close_on_another_item_does_not_authorize_this_one() {
+        use crate::store::testing::{FixtureMutation, insert_fixture_mutation};
+
+        // The exception is reserved to the Item its own failed closing
+        // Mutation names. Without that, one failed close anywhere in the Store
+        // would authorize reopening every `done` Item.
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_done_ticket(&conn);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t2",
+                display: "tk-2",
+                title: "Its close failed",
+                status: "done",
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "set_item_status",
+                item_id: "t2",
+                payload_json: r#"{"status":"done"}"#,
+                state: "failed",
+                failure_json: Some(r#"{"detail":"rejected"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        assert_refused_by_the_done_terminal_trigger(
+            conn.execute(
+                "update items set status = 'open', closing_reason = null where id = 't1'",
+                [],
+            ),
+            "another Item's failed close must not authorize this one's reopen",
+        );
+    }
+
+    #[test]
     fn an_applied_closing_mutation_does_not_authorize_reopen() {
         use crate::store::testing::{FixtureMutation, insert_fixture_mutation};
 

@@ -4637,9 +4637,10 @@ mod tests {
         // from scratch, and the object inventory an ADR-0028 rebuild is checked
         // against names triggers without comparing their bodies. A future
         // rebuild that copies an older body therefore drops the ADR-0046
-        // conjunct silently. Reproduce exactly that — the trigger as migration
-        // 015 left it, with no skip exception — and confirm Sync Skip names the
-        // Store invariant instead of reporting a storage fault.
+        // conjunct silently. Stand in for that with the bare done-terminal
+        // trigger migration 002 first wrote, carrying neither later exception,
+        // and confirm Sync Skip names the Store invariant rather than
+        // reporting a storage fault.
         let mut conn = open_seeded();
         conn.execute_batch(
             "drop trigger items_no_escape_from_done; \

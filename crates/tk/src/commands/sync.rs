@@ -1281,6 +1281,30 @@ mod tests {
     }
 
     #[test]
+    fn render_skip_error_frames_a_failed_reopen_as_a_bug() {
+        // ADR-0017 keeps these lines verbatim, and the store-side tests assert
+        // the variant rather than the rendered bytes. Neither reopen failure is
+        // reachable through a Store writer, so this is the only place their
+        // wording is pinned.
+        for err in [
+            MarkSkippedError::ReopenMatchedNothing(4),
+            MarkSkippedError::ReopenRefusedByTrigger(4),
+        ] {
+            let mut out = Vec::new();
+            render_skip_error(&mut out, &err);
+            let rendered = String::from_utf8(out).unwrap();
+            assert!(
+                rendered.starts_with("tk sync --skip: mutation 4's reopen "),
+                "{rendered}"
+            );
+            assert!(
+                rendered.ends_with("; this is a Ticket bug — please report it\n"),
+                "{rendered}"
+            );
+        }
+    }
+
+    #[test]
     fn render_run_sync_error_renders_pull_failure_detail() {
         let mut err_out = Vec::new();
         render_run_sync_error(
