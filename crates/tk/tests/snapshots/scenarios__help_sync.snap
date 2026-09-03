@@ -1,0 +1,19 @@
+---
+source: crates/tk/tests/scenarios.rs
+expression: "p.run(&format!(\"{command} --help\"))"
+---
+Apply pending Mutations through the configured Remote
+
+Usage: tk sync [OPTIONS] [COMMAND]
+
+Commands:
+  log  Inspect pending, failed, applying, skipped, cancelled, and abandoned Mutations
+
+Options:
+      --skip <MUTATION-ID>
+          Mark one failed Mutation skipped before running sync.
+          
+          Skipping a failed close relinquishes it rather than bypassing it: the Item returns to open and loses its Closing Reason, Dependencies it resolved as their Blocking Item become unresolved, and an accepted Ticket becomes selectable by `tk next` again.
+
+  -h, --help
+          Print help (see a summary with '-h')

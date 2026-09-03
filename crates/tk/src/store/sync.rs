@@ -30,7 +30,7 @@ use crate::domain::binding_display_provenance::BindingDisplayProvenance;
 use crate::domain::item_class::ItemClass;
 use crate::domain::lifecycle::Lifecycle;
 use crate::domain::mutation_payload::{
-    DependencyRef, EpicRef, MutationPayload, Promotion, StatusChange, TitleBody,
+    DependencyRef, EpicRef, LifecycleChange, MutationPayload, Promotion, TitleBody,
 };
 use crate::domain::mutation_state::MutationState;
 use crate::domain::mutation_type::MutationType;
@@ -604,8 +604,17 @@ pub enum LoadApplicableError {
     PayloadVariantMissing(MutationType),
     /// `payload_json` parsed as JSON (the column's CHECK guarantees that) but
     /// did not match the variant's shape — Repository Store corruption.
-    #[error("malformed payload_json: {0}")]
-    PayloadJson(#[from] serde_json::Error),
+    ///
+    /// Names the row, because the decode is batched: one undecodable payload
+    /// fails the whole run, and the operator's next move is `tk sync log
+    /// <sequence>` on the row that caused it.
+    #[error("mutation {sequence} ({mutation_type}) has malformed payload_json: {source}")]
+    PayloadJson {
+        sequence: i64,
+        mutation_type: MutationType,
+        #[source]
+        source: serde_json::Error,
+    },
     #[error("mutation {mutation_type} cannot target Item Class {item_class}")]
     OperationShapeMismatch {
         mutation_type: MutationType,
@@ -684,7 +693,7 @@ pub fn load_applicable_mutations(
 
         let mutation_type = MutationType::from_str(&type_text)
             .map_err(|_| LoadApplicableError::UnknownMutationType(type_text))?;
-        let payload = decode_mutation_payload(mutation_type, &payload_text)?;
+        let payload = decode_mutation_payload(sequence, mutation_type, &payload_text)?;
 
         out.push(ApplicableMutationRow {
             sequence,
@@ -745,7 +754,7 @@ pub fn resolve_backend_operation(
                 snapshot,
             })
         }
-        (MutationType::SetItemStatus, MutationPayload::ItemStatus(change)) => {
+        (MutationType::SetItemStatus, MutationPayload::Lifecycle(change)) => {
             BackendOperation::Edit(BackendEdit::SetItemStatus {
                 item: target()?,
                 change,
@@ -884,26 +893,35 @@ fn backend_address_of_class(
 /// Decode a `payload_json` text column into the [`MutationPayload`] variant the
 /// [`MutationType`] selects.
 fn decode_mutation_payload(
+    sequence: i64,
     mutation_type: MutationType,
     payload_text: &str,
 ) -> Result<MutationPayload, LoadApplicableError> {
     use MutationType as Mt;
+
+    // Built here rather than through a `From` impl: the row identity is what
+    // makes the failure actionable, and only this scope holds it.
+    let malformed = |source: serde_json::Error| LoadApplicableError::PayloadJson {
+        sequence,
+        mutation_type,
+        source,
+    };
     Ok(match mutation_type {
-        Mt::UpdateTicket | Mt::UpdateEpic => {
-            MutationPayload::UpdateTitleBody(serde_json::from_str::<TitleBody>(payload_text)?)
-        }
-        Mt::AddTicketToEpic | Mt::RemoveTicketFromEpic => {
-            MutationPayload::EpicRef(serde_json::from_str::<EpicRef>(payload_text)?)
-        }
-        Mt::SetItemStatus => {
-            MutationPayload::ItemStatus(serde_json::from_str::<StatusChange>(payload_text)?)
-        }
-        Mt::AddDependency | Mt::RemoveDependency => {
-            MutationPayload::DependencyRef(serde_json::from_str::<DependencyRef>(payload_text)?)
-        }
-        Mt::PromoteTicket | Mt::PromoteEpic => {
-            MutationPayload::Promotion(serde_json::from_str::<Promotion>(payload_text)?)
-        }
+        Mt::UpdateTicket | Mt::UpdateEpic => MutationPayload::UpdateTitleBody(
+            serde_json::from_str::<TitleBody>(payload_text).map_err(malformed)?,
+        ),
+        Mt::AddTicketToEpic | Mt::RemoveTicketFromEpic => MutationPayload::EpicRef(
+            serde_json::from_str::<EpicRef>(payload_text).map_err(malformed)?,
+        ),
+        Mt::SetItemStatus => MutationPayload::Lifecycle(
+            serde_json::from_str::<LifecycleChange>(payload_text).map_err(malformed)?,
+        ),
+        Mt::AddDependency | Mt::RemoveDependency => MutationPayload::DependencyRef(
+            serde_json::from_str::<DependencyRef>(payload_text).map_err(malformed)?,
+        ),
+        Mt::PromoteTicket | Mt::PromoteEpic => MutationPayload::Promotion(
+            serde_json::from_str::<Promotion>(payload_text).map_err(malformed)?,
+        ),
         Mt::AddExternalBlocker | Mt::ResolveExternalBlocker => {
             return Err(LoadApplicableError::PayloadVariantMissing(mutation_type));
         }
@@ -940,9 +958,15 @@ pub enum PersistMutationOutcomeError {
     },
     /// A `promote_*` row's `payload_json` did not decode as a [`Promotion`]
     /// payload — Repository Store corruption, the same fault
-    /// [`LoadApplicableError::PayloadJson`] names on the load side.
-    #[error("malformed payload_json: {0}")]
-    PayloadJson(#[from] serde_json::Error),
+    /// [`LoadApplicableError::PayloadJson`] names on the load side, and named
+    /// the same way: every sibling variant here carries its sequence, and the
+    /// operator's next move is `tk sync log <sequence>`.
+    #[error("mutation {sequence} has malformed payload_json: {source}")]
+    PayloadJson {
+        sequence: i64,
+        #[source]
+        source: serde_json::Error,
+    },
     /// The Mutation state edge this outcome implies is not in the transition
     /// table. Every outcome path narrows the row to an applicable state before
     /// transitioning, so this names a Store-layer contract break.
@@ -1026,7 +1050,8 @@ pub fn persist_create_outcome(
     // the Mutation `applying` with nothing recorded against it.
     match outcome {
         BackendCreateOutcome::Created(identity) => {
-            let payload: Promotion = serde_json::from_str(&payload_json)?;
+            let payload: Promotion = serde_json::from_str(&payload_json)
+                .map_err(|source| PersistMutationOutcomeError::PayloadJson { sequence, source })?;
             crate::store::promotion::apply_receipt(
                 &tx,
                 &item_id,
@@ -1178,6 +1203,20 @@ pub fn applying_mutation_sequence(conn: &Connection) -> rusqlite::Result<Option<
     .optional()
 }
 
+/// Local consequence of skipping one failed Mutation, returned by
+/// [`mark_mutation_skipped`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkipOutcome {
+    /// Every Mutation Type but the one exception below: skipping changes
+    /// only the Mutation's own state, to `skipped`. The Item is untouched.
+    Bypassed,
+    /// The skipped Mutation was a failed `set_item_status` targeting `done`.
+    /// The Item was restored to `open` in the same transaction that moved
+    /// the Mutation to `skipped` (ADR-0046). Carries the Item's Display ID
+    /// so the command layer can name what it reopened.
+    RelinquishedClose { display_id: String },
+}
+
 /// Error returned by [`mark_mutation_skipped`].
 #[derive(Debug, Error)]
 pub enum MarkSkippedError {
@@ -1201,6 +1240,21 @@ pub enum MarkSkippedError {
     /// refusal names the command that does it.
     #[error("mutation {0} is a Promotion and cannot be skipped")]
     CannotSkipPromotion(i64),
+    /// The ADR-0046 reopen matched no row. `close_item` never appends a
+    /// closing Mutation until its own transaction has already landed `done`,
+    /// so a `failed` `set_item_status` row targeting `done` implies its Item
+    /// is `done` too; this gate does not re-read the Item to confirm it. The
+    /// `and status = 'done'` guard turns a broken instance of that invariant
+    /// into a silent zero-row update rather than an impossible state, so it
+    /// needs its own Repository Store invariant break instead of committing a
+    /// Mutation the Store never actually relinquished.
+    #[error("mutation {0}'s reopen matched no done Item")]
+    ReopenMatchedNothing(i64),
+    /// `items_no_escape_from_done` (migration 016) refused the reopen despite
+    /// the failed closing Mutation this same transaction's gate confirmed
+    /// exists — the one case its second exception (ADR-0046) exists to admit.
+    #[error("mutation {0}'s reopen was refused by the done-terminal trigger")]
+    ReopenRefusedByTrigger(i64),
     /// Sync Skip refuses any row that is not `failed`, which is the one legal
     /// `skipped` edge, so this names a Store-layer contract break.
     #[error(transparent)]
@@ -1221,28 +1275,77 @@ impl From<mutations::TransitionError> for MarkSkippedError {
 /// Type is `promote_ticket` / `promote_epic` ([`MarkSkippedError::CannotSkipPromotion`]).
 /// The edge preserves `failure_json`, so `tk sync log` can still show why the
 /// Mutation was bypassed.
+///
+/// Skipping a failed `set_item_status` Mutation whose target is `done`
+/// additionally restores the Item to `open` in this same transaction
+/// (ADR-0046): retaining local `done` after the operator relinquishes the
+/// close would leave the Backend open forever, since `done` Items sit outside
+/// Backend Pull.
 pub fn mark_mutation_skipped(
     conn: &mut Connection,
     _workflow: &RemoteWorkflowGuard,
     sequence: i64,
     now: &str,
-) -> Result<(), MarkSkippedError> {
+) -> Result<SkipOutcome, MarkSkippedError> {
     let tx = crate::store::write_transaction(conn)?;
 
-    let row: Option<(MutationState, MutationType)> = tx
+    // The gate reads the payload's target through SQL, not a Rust decode, so
+    // it resolves a `set_item_status` payload that does not decode as
+    // `Lifecycle` (ADR-0043's amendment). That keeps Skip available for such a
+    // row once it is `failed`. A `pending` one never reaches `failed`, because
+    // `load_applicable_mutations` decodes every applicable row before Apply
+    // can fail any of them, and the state gate below admits only `failed`; its
+    // recovery is Promotion Cancellation or Detach, which withdraw a
+    // `set_item_status` row without decoding its payload.
+    let row: Option<(MutationState, MutationType, Option<String>, String)> = tx
         .query_row(
-            "select state, mutation_type from mutations where sequence = ?1",
+            "select state, mutation_type, json_extract(payload_json, '$.status'), item_id \
+               from mutations where sequence = ?1",
             params![sequence],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?;
-    let (prior, mutation_type) = row.ok_or(MarkSkippedError::MutationNotFound(sequence))?;
+    let (prior, mutation_type, target_status, item_id) =
+        row.ok_or(MarkSkippedError::MutationNotFound(sequence))?;
     if mutation_type.is_promotion() {
         return Err(MarkSkippedError::CannotSkipPromotion(sequence));
     }
     if prior != MutationState::Failed {
         return Err(MarkSkippedError::MutationNotFailed(sequence));
     }
+
+    // Exhaustive by name, following `MutationType::is_promotion`: a Mutation
+    // kind added later has to answer what abandoning it does to local state
+    // instead of silently reading as `Bypassed`.
+    //
+    // The target comes from the row named by `sequence`, not from an `exists`
+    // over the Item the way migration 016's trigger reads it. An Item can hold
+    // both a spared non-closing `set_item_status` failure (migration 011) and
+    // a real failed close, so an `exists` here would reopen the Item on the
+    // strength of the wrong row and report a relinquishment that never
+    // happened.
+    let outcome = match mutation_type {
+        MutationType::SetItemStatus
+            if target_status.as_deref() == Some(Lifecycle::Done.text()) =>
+        {
+            SkipOutcome::RelinquishedClose {
+                display_id: relinquish_close(&tx, &item_id, sequence, now)?,
+            }
+        }
+        MutationType::SetItemStatus
+        | MutationType::UpdateTicket
+        | MutationType::UpdateEpic
+        | MutationType::AddTicketToEpic
+        | MutationType::RemoveTicketFromEpic
+        | MutationType::AddDependency
+        | MutationType::RemoveDependency
+        | MutationType::AddExternalBlocker
+        | MutationType::ResolveExternalBlocker
+        // Unreachable past the Promotion refusal above; named so the match
+        // stays exhaustive rather than resting on that early return.
+        | MutationType::PromoteTicket
+        | MutationType::PromoteEpic => SkipOutcome::Bypassed,
+    };
 
     mutations::transition(
         &tx,
@@ -1256,7 +1359,54 @@ pub fn mark_mutation_skipped(
     )?;
 
     tx.commit()?;
-    Ok(())
+    Ok(outcome)
+}
+
+/// Restore an Item to `open` as Sync Skip relinquishes its failed close, and
+/// report the Display ID the command layer names (ADR-0046).
+///
+/// Runs while that closing Mutation is still `failed`: the row is what
+/// authorizes migration 016's trigger exception, so moving it to `skipped`
+/// first would drop the authorization before the reopen ran. `work_state` is
+/// written rather than assumed — ADR-0046 says the Item stays idle, and
+/// ADR-0043's discipline is that the writer keeps the pair coherent instead
+/// of inheriting it from `close_item` having cleared the other axis.
+fn relinquish_close(
+    tx: &Connection,
+    item_id: &str,
+    sequence: i64,
+    now: &str,
+) -> Result<String, MarkSkippedError> {
+    let reopened = tx
+        .execute(
+            "update items \
+                set status = ?2, work_state = ?3, closing_reason = null, updated_at = ?4 \
+              where id = ?1 and status = ?5",
+            params![
+                item_id,
+                Lifecycle::Open.text(),
+                WorkState::Idle.text(),
+                now,
+                Lifecycle::Done.text(),
+            ],
+        )
+        .map_err(|err| match err {
+            rusqlite::Error::SqliteFailure(e, _)
+                if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER =>
+            {
+                MarkSkippedError::ReopenRefusedByTrigger(sequence)
+            }
+            other => other.into(),
+        })?;
+    // A failed closing Mutation implies its Item is `done` (see
+    // `MarkSkippedError::ReopenMatchedNothing`), so zero rows is not a race.
+    // It has to abort: committing the caller's transition on top of it would
+    // leave local `done` against a Backend the close never reached, which the
+    // open-only Pull working set never reconciles.
+    if reopened == 0 {
+        return Err(MarkSkippedError::ReopenMatchedNothing(sequence));
+    }
+    Ok(repository::current_display_id(tx, item_id)?)
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -3045,7 +3195,7 @@ mod tests {
         let rows = load_applicable_mutations(&conn).unwrap();
         assert_eq!(rows.len(), 1);
         match &rows[0].payload {
-            MutationPayload::ItemStatus(s) => assert_eq!(s.status, "done"),
+            MutationPayload::Lifecycle(s) => assert_eq!(s.status, Lifecycle::Done),
             other => panic!("expected ItemStatus, got {other:?}"),
         }
     }
@@ -3469,6 +3619,40 @@ mod tests {
         match load_applicable_mutations(&conn).unwrap_err() {
             LoadApplicableError::PayloadVariantMissing(MutationType::AddExternalBlocker) => {}
             other => panic!("expected PayloadVariantMissing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_applicable_rejects_a_pre_split_active_status_target() {
+        // Lifecycle has no `active` variant — Work State split out of Item
+        // Status in ADR-0043, and the amendment recorded there documents
+        // this: a `set_item_status` row predating the split, still naming
+        // `active`, fails to decode here — before any Backend Adapter call,
+        // rather than at Apply.
+        let conn = open_seeded();
+        backend_ticket(&conn, "t1", "gh-1", "1", 1);
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "set_item_status",
+                item_id: "t1",
+                payload_json: r#"{"status":"active"}"#,
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        match load_applicable_mutations(&conn).unwrap_err() {
+            err @ LoadApplicableError::PayloadJson { sequence: 1, .. } => {
+                assert_eq!(
+                    err.to_string(),
+                    "mutation 1 (set_item_status) has malformed payload_json: \
+                     unknown variant `active`, expected `open` or `done` at line 1 column 18"
+                );
+            }
+            other => panic!("expected PayloadJson, got {other:?}"),
         }
     }
 
@@ -4095,7 +4279,9 @@ mod tests {
         .unwrap();
 
         let workflow = RemoteWorkflowGuard::for_test();
-        mark_mutation_skipped(&mut conn, &workflow, 1, "2026-05-19T00:00:00Z").unwrap();
+        let outcome =
+            mark_mutation_skipped(&mut conn, &workflow, 1, "2026-05-19T00:00:00Z").unwrap();
+        assert_eq!(outcome, SkipOutcome::Bypassed);
 
         let (state, failure): (String, String) = conn
             .query_row(
@@ -4106,6 +4292,11 @@ mod tests {
             .unwrap();
         assert_eq!(state, "skipped");
         assert!(failure.contains("rejected"), "audit trail preserved");
+
+        let status: String = conn
+            .query_row("select status from items where id = 't1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "open", "Bypassed leaves the Item untouched");
     }
 
     #[test]
@@ -4186,6 +4377,412 @@ mod tests {
                 assert_eq!(stored_state, prior_state);
             }
         }
+    }
+
+    /// Seed a `done`, backend-bound Item at id `t1` with a failed closing
+    /// `set_item_status` Mutation at sequence 1 targeting `done` — the one
+    /// shape ADR-0046's reopen exception covers.
+    fn seed_closed_with_failed_close(conn: &Connection, item_class: &str, display: &str) {
+        insert_fixture_item(
+            conn,
+            FixtureItem {
+                id: "t1",
+                display,
+                item_class,
+                ticket_kind: (item_class == "ticket").then_some("task"),
+                priority: (item_class == "ticket").then_some("P2"),
+                title: "Needs its close relinquished",
+                status: "done",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("53"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        // `FixtureItem` has no Closing Reason field; set one directly so the
+        // test can assert Sync Skip clears it.
+        conn.execute(
+            "update items set closing_reason = 'Not planned' where id = 't1'",
+            [],
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "set_item_status",
+                item_id: "t1",
+                item_class,
+                payload_json: r#"{"status":"done"}"#,
+                state: "failed",
+                failure_json: Some(r#"{"detail":"rejected"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn mark_skipped_relinquishes_a_failed_close_on_a_ticket() {
+        let mut conn = open_seeded();
+        seed_closed_with_failed_close(&conn, "ticket", "gh-53");
+
+        let workflow = RemoteWorkflowGuard::for_test();
+        let outcome =
+            mark_mutation_skipped(&mut conn, &workflow, 1, "2026-05-19T00:00:00Z").unwrap();
+        assert_eq!(
+            outcome,
+            SkipOutcome::RelinquishedClose {
+                display_id: "gh-53".to_string()
+            }
+        );
+
+        let (status, work_state, closing_reason, updated_at): (
+            String,
+            String,
+            Option<String>,
+            String,
+        ) = conn
+            .query_row(
+                "select status, work_state, closing_reason, updated_at from items where id = 't1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "open");
+        assert_eq!(work_state, "idle");
+        assert_eq!(closing_reason, None, "Closing Reason cleared");
+        assert_eq!(updated_at, "2026-05-19T00:00:00Z");
+
+        let mutation_state: String = conn
+            .query_row("select state from mutations where sequence = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(mutation_state, "skipped");
+    }
+
+    #[test]
+    fn mark_skipped_relinquishes_a_failed_close_on_an_epic() {
+        // ADR-0046: "The rule is identical for Tickets and Epics."
+        let mut conn = open_seeded();
+        seed_closed_with_failed_close(&conn, "epic", "gh-53");
+
+        let workflow = RemoteWorkflowGuard::for_test();
+        let outcome =
+            mark_mutation_skipped(&mut conn, &workflow, 1, "2026-05-19T00:00:00Z").unwrap();
+        assert_eq!(
+            outcome,
+            SkipOutcome::RelinquishedClose {
+                display_id: "gh-53".to_string()
+            }
+        );
+
+        let (status, work_state, closing_reason): (String, String, Option<String>) = conn
+            .query_row(
+                "select status, work_state, closing_reason from items where id = 't1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "open");
+        assert_eq!(work_state, "idle");
+        assert_eq!(closing_reason, None);
+    }
+
+    #[test]
+    fn mark_skipped_relinquish_preserves_selection_state_and_priority() {
+        let mut conn = open_seeded();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "gh-53",
+                item_class: "ticket",
+                status: "done",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("53"),
+                title: "Parked with a Priority",
+                selection_state: Some("parked"),
+                priority: Some("P1"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "set_item_status",
+                item_id: "t1",
+                payload_json: r#"{"status":"done"}"#,
+                state: "failed",
+                failure_json: Some(r#"{"detail":"rejected"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        let workflow = RemoteWorkflowGuard::for_test();
+        let outcome =
+            mark_mutation_skipped(&mut conn, &workflow, 1, "2026-05-19T00:00:00Z").unwrap();
+        assert_eq!(
+            outcome,
+            SkipOutcome::RelinquishedClose {
+                display_id: "gh-53".to_string()
+            }
+        );
+
+        let (selection_state, priority): (String, String) = conn
+            .query_row(
+                "select selection_state, priority from items where id = 't1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(selection_state, "parked");
+        assert_eq!(priority, "P1");
+
+        // ADR-0046's first Consequence, asserted rather than composed: the
+        // reopen restores Lifecycle, so a parked Ticket must still be held out
+        // of selection. Reading it through `next_ready_ticket` means a column
+        // added to that predicate later cannot quietly falsify the claim.
+        let store = crate::store::repository::Store::for_test(conn);
+        assert!(
+            repository::next::next_ready_ticket(&store, repository::next::NextOptions::default())
+                .unwrap()
+                .is_none(),
+            "a parked Ticket stays out of tk next after its close is relinquished"
+        );
+    }
+
+    #[test]
+    fn mark_skipped_relinquish_returns_an_accepted_ticket_to_tk_next() {
+        // The other half of the same Consequence: an accepted, idle Ticket
+        // becomes eligible again. `tk next` reads exactly the three columns
+        // the reopen writes or preserves (status, work_state,
+        // selection_state), so this is the claim's only direct assertion.
+        let mut conn = open_seeded();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "gh-53",
+                item_class: "ticket",
+                status: "done",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("53"),
+                title: "Accepted, closed, close failed",
+                selection_state: Some("accepted"),
+                priority: Some("P1"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "set_item_status",
+                item_id: "t1",
+                payload_json: r#"{"status":"done"}"#,
+                state: "failed",
+                failure_json: Some(r#"{"detail":"rejected"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        let workflow = RemoteWorkflowGuard::for_test();
+        mark_mutation_skipped(&mut conn, &workflow, 1, "2026-05-19T00:00:00Z").unwrap();
+
+        let store = crate::store::repository::Store::for_test(conn);
+        let next =
+            repository::next::next_ready_ticket(&store, repository::next::NextOptions::default())
+                .unwrap()
+                .expect("the reopened accepted Ticket is selectable again (ADR-0046)");
+        assert_eq!(next.display_id, "gh-53");
+    }
+
+    #[test]
+    fn mark_skipped_gate_reads_the_named_row_not_any_row_on_the_item() {
+        // The regression an `exists`-shaped gate would cause: an Item holding
+        // both a spared non-closing `set_item_status` failure (migration 011)
+        // and a real failed close. Skipping the non-closing row must not
+        // reopen the Item or report a relinquishment that never happened —
+        // the real close stays `failed`, free to retry (ADR-0046).
+        let mut conn = open_seeded();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "gh-53",
+                item_class: "ticket",
+                status: "done",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("53"),
+                title: "Closed with a stale non-closing failure",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "set_item_status",
+                item_id: "t1",
+                payload_json: r#"{"status":"active"}"#,
+                state: "failed",
+                failure_json: Some(r#"{"detail":"stale, non-closing"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 2,
+                mutation_type: "set_item_status",
+                item_id: "t1",
+                payload_json: r#"{"status":"done"}"#,
+                state: "failed",
+                failure_json: Some(r#"{"detail":"the real close"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        let workflow = RemoteWorkflowGuard::for_test();
+        let outcome =
+            mark_mutation_skipped(&mut conn, &workflow, 1, "2026-05-19T00:00:00Z").unwrap();
+        assert_eq!(outcome, SkipOutcome::Bypassed);
+
+        let status: String = conn
+            .query_row("select status from items where id = 't1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "done", "the real close still authorizes a retry");
+
+        let (skipped_state, closing_state): (String, String) = conn
+            .query_row(
+                "select \
+                    (select state from mutations where sequence = 1), \
+                    (select state from mutations where sequence = 2)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(skipped_state, "skipped");
+        assert_eq!(closing_state, "failed");
+    }
+
+    #[test]
+    fn mark_skipped_aborts_when_the_reopen_matches_no_row() {
+        // `close_item` never appends a closing Mutation until its own
+        // transaction has already landed `done`, so a `failed`
+        // `set_item_status` row targeting `done` should imply its Item is
+        // `done` too. Seed a broken instance of that invariant — the Item is
+        // still `open` — and confirm the zero-row guard aborts rather than
+        // silently committing the Mutation to `skipped` regardless.
+        let mut conn = open_seeded();
+        backend_ticket(&conn, "t1", "gh-53", "53", 1);
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "set_item_status",
+                item_id: "t1",
+                payload_json: r#"{"status":"done"}"#,
+                state: "failed",
+                failure_json: Some(r#"{"detail":"rejected"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        let workflow = RemoteWorkflowGuard::for_test();
+        match mark_mutation_skipped(&mut conn, &workflow, 1, "2026-05-19T00:00:00Z").unwrap_err() {
+            MarkSkippedError::ReopenMatchedNothing(1) => {}
+            other => panic!("expected ReopenMatchedNothing, got {other:?}"),
+        }
+
+        // The Mutation stayed `failed`, proving the transaction rolled back
+        // rather than committing the transition without its reopen.
+        let mutation_state: String = conn
+            .query_row("select state from mutations where sequence = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(mutation_state, "failed");
+    }
+
+    #[test]
+    fn mark_skipped_reports_a_trigger_refusal_as_its_own_invariant_break() {
+        // Migrations 015 and 016 have each recreated `items_no_escape_from_done`
+        // from scratch, and the object inventory an ADR-0028 rebuild is checked
+        // against names triggers without comparing their bodies. A future
+        // rebuild that copies an older body therefore drops the ADR-0046
+        // conjunct silently. Stand in for that with the bare done-terminal
+        // trigger migration 002 first wrote, carrying neither later exception,
+        // and confirm Sync Skip names the Store invariant rather than
+        // reporting a storage fault.
+        let mut conn = open_seeded();
+        conn.execute_batch(
+            "drop trigger items_no_escape_from_done; \
+             create trigger items_no_escape_from_done before update of status on items \
+             for each row when old.status = 'done' and new.status != 'done' \
+             begin select raise(abort, 'cannot leave done state'); end;",
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "gh-53",
+                title: "Closed locally",
+                status: "done",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("53"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "set_item_status",
+                item_id: "t1",
+                payload_json: r#"{"status":"done"}"#,
+                state: "failed",
+                failure_json: Some(r#"{"detail":"rejected"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        let workflow = RemoteWorkflowGuard::for_test();
+        match mark_mutation_skipped(&mut conn, &workflow, 1, "2026-05-19T00:00:00Z").unwrap_err() {
+            MarkSkippedError::ReopenRefusedByTrigger(1) => {}
+            other => panic!("expected ReopenRefusedByTrigger, got {other:?}"),
+        }
+
+        let mutation_state: String = conn
+            .query_row("select state from mutations where sequence = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(mutation_state, "failed");
     }
 
     // ---- pending/failed count -------------------------------------------

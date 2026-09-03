@@ -59,6 +59,7 @@ const MIGRATION_12_SQL: &str = include_str!("migrations/012_drop_dead_next_index
 const MIGRATION_13_SQL: &str = include_str!("migrations/013_former_backend_identities.sql");
 const MIGRATION_14_SQL: &str = include_str!("migrations/014_binding_display_provenance.sql");
 const MIGRATION_15_SQL: &str = include_str!("migrations/015_readopt_reopens_a_former_identity.sql");
+const MIGRATION_16_SQL: &str = include_str!("migrations/016_sync_skip_relinquishes_a_close.sql");
 
 /// V1 Repository Store schema skeleton.
 pub const MIGRATION_1: Migration = Migration {
@@ -209,6 +210,17 @@ pub const MIGRATION_15: Migration = Migration {
     foreign_keys: ForeignKeys::On,
 };
 
+/// Recreates `items_no_escape_from_done` with a second, time-shaped exception:
+/// any `done` -> `open` write is admitted for as long as the Item carries a
+/// `failed` closing (`set_item_status` targeting `done`) Mutation, which is
+/// what authorizes Sync Skip's relinquished close (ADR-0046 as amended,
+/// ADR-0006).
+pub const MIGRATION_16: Migration = Migration {
+    version: 16,
+    sql: MIGRATION_16_SQL,
+    foreign_keys: ForeignKeys::On,
+};
+
 /// Ordered migration list applied by [`apply_all`].
 pub const ALL_MIGRATIONS: &[Migration] = &[
     MIGRATION_1,
@@ -226,13 +238,14 @@ pub const ALL_MIGRATIONS: &[Migration] = &[
     MIGRATION_13,
     MIGRATION_14,
     MIGRATION_15,
+    MIGRATION_16,
 ];
 
 /// Highest schema version this binary can apply. Named so future migrations
 /// surface the threshold to `grep` instead of hiding it behind `.last()`.
 /// Adding a migration is a two-line patch: append to `ALL_MIGRATIONS`, bump
 /// this constant, with a debug_assert below catching the drift.
-pub const MAX_KNOWN_VERSION: u32 = MIGRATION_15.version;
+pub const MAX_KNOWN_VERSION: u32 = MIGRATION_16.version;
 
 /// Errors returned while applying migrations.
 ///
@@ -511,6 +524,23 @@ mod tests {
         tx.commit()
     }
 
+    /// Assert the done-terminal trigger is what refused a `done` -> `open`
+    /// write, not some other constraint.
+    ///
+    /// `is_err()` alone cannot tell the two apart: these fixtures carry a
+    /// Closing Reason, and an UPDATE that clears `status` without clearing it
+    /// trips the `closing_reason` CHECK too. Dropping a trigger conjunct then
+    /// leaves every negative test passing for the wrong reason.
+    fn assert_trigger_refused(result: rusqlite::Result<usize>, why: &str) {
+        match result {
+            Err(err) => assert!(
+                err.to_string().contains("cannot leave done state"),
+                "{why}; refused, but by {err} rather than the trigger"
+            ),
+            Ok(_) => panic!("{why}"),
+        }
+    }
+
     #[test]
     fn readopt_may_import_an_open_lifecycle_onto_a_done_item() {
         let mut conn = open_memory();
@@ -558,6 +588,331 @@ mod tests {
         assert!(
             later_reopen.is_err(),
             "a restored Backend Item must not escape done again"
+        );
+    }
+
+    /// Seed a plain `done` Ticket carrying a Closing Reason: the ordinary Sync
+    /// Skip population, with no Former Backend Identity in play.
+    fn insert_done_ticket(conn: &Connection) {
+        insert_fixture_item(
+            conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Closed by tk done",
+                status: "done",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "update items set closing_reason = 'Shipped' where id = 't1'",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn sync_skip_may_reopen_a_done_item_with_its_failed_closing_mutation() {
+        use crate::store::testing::{FixtureMutation, insert_fixture_mutation};
+        const TO_DONE: &str = r#"{"status":"done"}"#;
+        const REJECTION: &str = r#"{"detail":"rejected"}"#;
+
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_done_ticket(&conn);
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "set_item_status",
+                item_id: "t1",
+                payload_json: TO_DONE,
+                state: "failed",
+                failure_json: Some(REJECTION),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        conn.execute(
+            "update items set status = 'open', closing_reason = null where id = 't1'",
+            [],
+        )
+        .expect("a failed closing Mutation authorizes Sync Skip's reopen (ADR-0046)");
+
+        let (status, closing_reason): (String, Option<String>) = conn
+            .query_row(
+                "select status, closing_reason from items where id = 't1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((status.as_str(), closing_reason), ("open", None));
+    }
+
+    #[test]
+    fn the_reopen_exception_admits_an_epic_on_the_same_terms() {
+        use crate::store::testing::{FixtureMutation, insert_fixture_mutation};
+
+        // ADR-0046: "The rule is identical for Tickets and Epics." The
+        // trigger reaches a Mutation through `(item_id, item_class)`, the pair
+        // ADR-0010 addresses Mutations by, so an Epic has to be reachable
+        // through the same conjunct a Ticket is.
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "e1",
+                display: "tk-1",
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                title: "Closed Epic",
+                status: "done",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "set_item_status",
+                item_id: "e1",
+                item_class: "epic",
+                payload_json: r#"{"status":"done"}"#,
+                state: "failed",
+                failure_json: Some(r#"{"detail":"rejected"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        conn.execute("update items set status = 'open' where id = 'e1'", [])
+            .expect("a failed closing Mutation authorizes the reopen for an Epic too (ADR-0046)");
+
+        let status: String = conn
+            .query_row("select status from items where id = 'e1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "open");
+    }
+
+    #[test]
+    fn a_done_item_with_no_failed_closing_mutation_stays_refused() {
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_done_ticket(&conn);
+
+        let reopen = conn.execute("update items set status = 'open' where id = 't1'", []);
+        assert_trigger_refused(
+            reopen,
+            "no failed closing Mutation exists, so the done-terminal rule still applies (ADR-0006)",
+        );
+    }
+
+    #[test]
+    fn a_failed_non_closing_status_mutation_does_not_authorize_reopen() {
+        use crate::store::testing::{FixtureMutation, insert_fixture_mutation};
+        const TO_ACTIVE: &str = r#"{"status":"active"}"#;
+        const REJECTION: &str = r#"{"detail":"rejected"}"#;
+
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_done_ticket(&conn);
+        // Migration 011 spares exactly this shape from its cancellation sweep —
+        // a failed, non-`done` `set_item_status` row belonging to a Promotion
+        // Operation (011_split_work_state.sql:132-135) — so it is a real
+        // population, not a hypothetical one. The payload conjunct is what
+        // keeps it from authorizing an unrelated done -> open write.
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "set_item_status",
+                item_id: "t1",
+                payload_json: TO_ACTIVE,
+                state: "failed",
+                failure_json: Some(REJECTION),
+                promotion_operation_id: Some("op-1"),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        let reopen = conn.execute("update items set status = 'open' where id = 't1'", []);
+        assert_trigger_refused(
+            reopen,
+            "a failed non-closing status Mutation must not authorize a done -> open write",
+        );
+    }
+
+    #[test]
+    fn a_pending_closing_mutation_does_not_authorize_reopen() {
+        use crate::store::testing::{FixtureMutation, insert_fixture_mutation};
+
+        // `tk done` on a Backend-bound Item leaves exactly this shape — a
+        // `done` row plus a `pending` closing Mutation — until the next
+        // `tk sync`. It is the most common live state in the Store, so the
+        // exception must not admit it.
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_done_ticket(&conn);
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "set_item_status",
+                item_id: "t1",
+                payload_json: r#"{"status":"done"}"#,
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        assert_trigger_refused(
+            conn.execute(
+                "update items set status = 'open', closing_reason = null where id = 't1'",
+                [],
+            ),
+            "a closing Mutation still queued must not authorize a done -> open write",
+        );
+    }
+
+    #[test]
+    fn a_failed_close_on_another_item_does_not_authorize_this_one() {
+        use crate::store::testing::{FixtureMutation, insert_fixture_mutation};
+
+        // The exception is reserved to the Item its own failed closing
+        // Mutation names. Without that, one failed close anywhere in the Store
+        // would authorize reopening every `done` Item.
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_done_ticket(&conn);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t2",
+                display: "tk-2",
+                title: "Its close failed",
+                status: "done",
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "set_item_status",
+                item_id: "t2",
+                payload_json: r#"{"status":"done"}"#,
+                state: "failed",
+                failure_json: Some(r#"{"detail":"rejected"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        assert_trigger_refused(
+            conn.execute(
+                "update items set status = 'open', closing_reason = null where id = 't1'",
+                [],
+            ),
+            "another Item's failed close must not authorize this one's reopen",
+        );
+    }
+
+    #[test]
+    fn an_applied_closing_mutation_does_not_authorize_reopen() {
+        use crate::store::testing::{FixtureMutation, insert_fixture_mutation};
+
+        // The ordinary state of every successfully closed Backend-bound Item
+        // is a `done` row plus an `applied` closing Mutation. If the trigger
+        // exception did not test the Mutation's state, that shape alone would
+        // authorize a reopen — which is the whole of ADR-0006's backstop, not
+        // an edge case.
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_done_ticket(&conn);
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "set_item_status",
+                item_id: "t1",
+                payload_json: r#"{"status":"done"}"#,
+                state: "applied",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        assert_trigger_refused(
+            conn.execute(
+                "update items set status = 'open', closing_reason = null where id = 't1'",
+                [],
+            ),
+            "an applied closing Mutation must not authorize a done -> open write (ADR-0006)",
+        );
+    }
+
+    #[test]
+    fn a_later_done_to_open_is_refused_once_the_mutation_moves_to_skipped() {
+        use crate::store::testing::{FixtureMutation, insert_fixture_mutation};
+        const TO_DONE: &str = r#"{"status":"done"}"#;
+        const REJECTION: &str = r#"{"detail":"rejected"}"#;
+
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_done_ticket(&conn);
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "set_item_status",
+                item_id: "t1",
+                payload_json: TO_DONE,
+                state: "failed",
+                failure_json: Some(REJECTION),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        // The exception is live while the row is `failed` — this is the same
+        // reopen as the first test above, replayed here as the setup for the
+        // cycle below.
+        conn.execute(
+            "update items set status = 'open', closing_reason = null where id = 't1'",
+            [],
+        )
+        .expect("the failed closing Mutation authorizes this reopen");
+
+        // The Item closes again (open -> done is unrestricted), and Sync
+        // Skip's real transaction would reopen it and move this same row to
+        // `skipped` together. Simulating just the state move shows the
+        // authorization does not survive past that row leaving `failed`.
+        conn.execute(
+            "update items set status = 'done', closing_reason = 'Shipped again' where id = 't1'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "update mutations set state = 'skipped' where sequence = 1",
+            [],
+        )
+        .unwrap();
+
+        let later_reopen = conn.execute("update items set status = 'open' where id = 't1'", []);
+        assert_trigger_refused(
+            later_reopen,
+            "once the closing Mutation is no longer failed, a later done -> open write is refused again (ADR-0046)",
         );
     }
 
@@ -2111,6 +2466,120 @@ mod tests {
             .unwrap();
         names.sort();
         names
+    }
+
+    #[test]
+    fn every_trigger_body_is_pinned() {
+        // `items_objects` compares trigger *names*, so a migration that
+        // recreates one from an older body keeps the name and passes it — and
+        // the exceptions ADR-0046 and ADR-0047 rely on live only in these
+        // bodies. Behavioural tests cover the conjuncts someone thought to
+        // cover; this pins the text, so any body change (a dropped conjunct,
+        // or a new clause that widens an exception) has to be accepted here
+        // deliberately rather than slipping through as a passing suite.
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        let mut stmt = conn
+            .prepare("select sql from sqlite_master where type = 'trigger' order by name")
+            .unwrap();
+        let bodies: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        insta::assert_snapshot!(bodies.join("\n\n"), @"
+        CREATE TRIGGER active_backend_identity_not_owned_by_another_former_item_insert
+        before insert on items
+        when new.backend_kind is not null
+         and exists (
+            select 1
+              from former_backend_identities
+             where backend_kind = new.backend_kind
+               and backend_key = new.backend_key
+               and item_id <> new.id
+         )
+        begin
+            select raise(abort, 'backend identity is owned by another Item');
+        end
+
+        CREATE TRIGGER active_backend_identity_not_owned_by_another_former_item_update
+        before update of backend_kind, backend_key on items
+        when new.backend_kind is not null
+         and exists (
+            select 1
+              from former_backend_identities
+             where backend_kind = new.backend_kind
+               and backend_key = new.backend_key
+               and item_id <> new.id
+         )
+        begin
+            select raise(abort, 'backend identity is owned by another Item');
+        end
+
+        CREATE TRIGGER dependencies_no_cycle before insert on dependencies
+        for each row when exists (
+            with recursive reachable(id) as (
+                select new.blocking_id
+                union
+                select dependencies.blocking_id
+                  from dependencies, reachable
+                 where dependencies.blocked_id = reachable.id
+            )
+            select 1 from reachable where id = new.blocked_id
+        ) begin
+            select raise(abort, 'dependency cycle');
+        end
+
+        CREATE TRIGGER former_backend_identity_not_owned_by_another_active_item
+        before insert on former_backend_identities
+        when exists (
+            select 1
+              from items
+             where backend_kind = new.backend_kind
+               and backend_key = new.backend_key
+               and id <> new.item_id
+        )
+        begin
+            select raise(abort, 'backend identity is owned by another Item');
+        end
+
+        CREATE TRIGGER former_backend_identity_ownership_is_immutable
+        before update of backend_kind, backend_key, item_id on former_backend_identities
+        when new.backend_kind <> old.backend_kind
+          or new.backend_key <> old.backend_key
+          or new.item_id <> old.item_id
+        begin
+            select raise(abort, 'former backend identity ownership is immutable');
+        end
+
+        CREATE TRIGGER items_no_escape_from_done before update of status on items
+        for each row when old.status = 'done' and new.status != 'done'
+          and not (
+              old.origin = 'local'
+              and new.origin = 'backend'
+              and exists (
+                  select 1
+                    from former_backend_identities f
+                   where f.item_id = new.id
+                     and f.backend_kind = new.backend_kind
+                     and f.backend_key = new.backend_key
+              )
+          )
+          and not (
+              exists (
+                  select 1
+                    from mutations m
+                   where m.item_id = new.id
+                     and m.item_class = new.item_class
+                     and m.mutation_type = 'set_item_status'
+                     and m.state = 'failed'
+                     and json_extract(m.payload_json, '$.status') = 'done'
+              )
+          )
+        begin
+            select raise(abort, 'cannot leave done state');
+        end
+        ");
     }
 
     #[test]

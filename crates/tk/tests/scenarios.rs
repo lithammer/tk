@@ -637,7 +637,7 @@ fn command_help_snapshots() {
     let p = Repo::new("repo");
     for command in [
         "accept", "add", "block", "detach", "done", "grep", "list", "next", "park", "promote",
-        "search", "show", "unblock", "unpark", "update",
+        "search", "show", "sync", "unblock", "unpark", "update",
     ] {
         insta::assert_snapshot!(
             format!("help_{command}"),

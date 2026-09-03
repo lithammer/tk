@@ -4,11 +4,22 @@
 //! counterpart is the local-only [`crate::domain::work_state`]; ADR-0043
 //! records how Item Status derives from the pair.
 
+use serde::{Deserialize, Serialize};
+
 /// The Backend-shared lifecycle of a Ticket or Epic: open or done.
 ///
 /// `Lifecycle::Open` is the default for newly-created local work; Backend
 /// intake names the imported value explicitly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+///
+/// `Serialize`/`Deserialize` use `snake_case` (matching [`FailureClass`],
+/// this codebase's other domain-enum serde precedent), with no catch-all
+/// variant: `Lifecycle` is also `FromSql`/`ToSql` for `items.status`, where a
+/// CHECK constraint pins exactly `open`/`done`, and a catch-all would let a
+/// third spelling silently decode instead of surfacing as corruption.
+///
+/// [`FailureClass`]: crate::domain::backend_outcome::FailureClass
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Lifecycle {
     #[default]
     Open,
@@ -44,5 +55,24 @@ mod tests {
         // change together in one commit, or every row fails to decode.
         assert_eq!(Lifecycle::Open.text(), "open");
         assert_eq!(Lifecycle::Done.text(), "done");
+    }
+
+    #[test]
+    fn every_variant_round_trips_through_its_storage_spelling() {
+        // The payload-side counterpart to `text_matches_the_storage_spellings`:
+        // `LifecycleChange` carries `Lifecycle` straight into `payload_json`, so a
+        // drift between the serde spelling and `text()` would decode one Backend
+        // Adapter's write as a different Lifecycle than it wrote.
+        for (variant, text) in [(Lifecycle::Open, "open"), (Lifecycle::Done, "done")] {
+            assert_eq!(variant.text(), text);
+            assert_eq!(
+                serde_json::to_string(&variant).unwrap(),
+                format!(r#""{text}""#)
+            );
+            assert_eq!(
+                serde_json::from_str::<Lifecycle>(&format!(r#""{text}""#)).unwrap(),
+                variant
+            );
+        }
     }
 }

@@ -1,5 +1,11 @@
 # Sync Skip relinquishes a failed close
 
+> **Amended below.** The Store migration repair this Decision describes is not
+> implemented: the divergence it would repair has no instances and cannot
+> acquire any. And the trigger exception is wider than "narrow, consumable"
+> suggests — it admits any `done` -> `open` write on an Item for as long as
+> that Item carries the failed closing Mutation.
+
 `tk done` changes local Lifecycle before its closing Mutation reaches the
 Backend. If that Mutation fails and the operator skips it, retaining local
 `done` leaves the Backend open forever because done Items are outside Backend
@@ -88,3 +94,61 @@ explicit operation.
 - Pull remains all-or-nothing and open-only. The stale-refresh guard continues
   to skip an Item closed while a Backend request is in flight, so one such row
   does not abort the batch.
+
+## Amendment: the Store migration repair is dropped
+
+The Decision above says "The Store migration repairs existing instances of the
+same divergence." No repair ships. tk is single-user with one Repository
+Store: it holds zero `skipped` Mutations, so there is no pre-existing
+divergence to repair. And once the schema trigger exception and the Sync Skip
+writer ship together, every new skip restores `open` inline, so no
+pre-existing divergence can accumulate for a later migration to find either. A
+repair for a population that is empty now and cannot grow is dead code.
+
+Consequences' third bullet — "Repairing an existing skipped close may clear an
+old Closing Reason and may expose a missing Backend key on the next sync" —
+describes only that migration, and is retired with it.
+
+The literal predicate this Decision described — a `done` Item with a
+`skipped` `set_item_status` Mutation targeting `done` — was not safe to ship
+as written even setting the empty population aside. A `done` Item carrying a
+Skipped Mutation of that shape is also produced by:
+
+- `tk detach`. A Skipped Mutation survives Detach: `withdrawal_candidates`
+  only selects `pending`/`failed` rows, and Detach never writes `status` or
+  `closing_reason`.
+- A later close that succeeded, leaving the earlier skip's row as history
+  alongside a Mutation that actually closed the Item.
+- A Re-Adopt that imported `done` (ADR-0047), which can rebind onto an Item
+  still carrying an old skipped close from before it was detached.
+
+Reopening any of those would be wrong: none of them is the divergence this
+Decision meant to repair.
+
+## Amendment: the sync summary drops its own skipped clause
+
+The Decision prescribes the pre-adapter line and says other Mutation Types
+report `Skipped Mutation 4.` through the same boundary. It is silent on the
+`, skipped <id>` clause `Sync complete:` carried before this, which is
+removed. The clause repeated, after the run, an outcome the new line already
+reports before the run and reports whether or not the run succeeds. Keeping
+both would have made the failure case say it twice and the broken-Remote case
+say it once, from the line that never printed.
+
+## Amendment: the authorization window is wider than the Decision states
+
+"Once the transaction commits, the durable authorization is gone" is true,
+but it describes only the window *after* Sync Skip transitions the closing
+Mutation to `skipped`. The trigger exception it authorizes is open for the
+whole period *before* that commit too: for as long as the Item carries a
+`failed` `set_item_status` Mutation targeting `done`, any `done` -> `open`
+write on that Item is admitted, not only the one Sync Skip's own transaction
+performs.
+
+This is a real widening of the terminal-Lifecycle backstop ADR-0006 keeps for
+every other write path. It is accepted because the exception still requires a
+specific `failed` closing Mutation to exist on the Item — nothing admits the
+write once that Mutation is absent, applied, cancelled, or skipped. Considered
+Options' "narrow, consumable authorization" describes the same exception and
+is superseded for the same reason: the authorization is real for as long as
+the failed Mutation exists, not spent by a single write against it.

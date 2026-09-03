@@ -476,7 +476,8 @@ mod tests {
     use super::*;
     use crate::domain::backend_kind::BackendKind;
     use crate::domain::backend_outcome::FailureClass;
-    use crate::domain::mutation_payload::{DependencyRef, EpicRef, StatusChange, TitleBody};
+    use crate::domain::lifecycle::Lifecycle;
+    use crate::domain::mutation_payload::{DependencyRef, EpicRef, LifecycleChange, TitleBody};
     use crate::store::migrations;
     use crate::store::testing::{
         FixtureItem, FixtureMutation, FixtureRemote, insert_fixture_item, insert_fixture_mutation,
@@ -633,7 +634,7 @@ mod tests {
     }
 
     #[test]
-    fn append_serializes_status_change_payload() {
+    fn append_serializes_lifecycle_change_payload() {
         let conn = open_seeded();
         seed_backend_ticket(&conn, "t1", "tk-1", 1);
 
@@ -644,8 +645,8 @@ mod tests {
                 mutation_type: MutationType::SetItemStatus,
                 item_id: "t1",
                 item_class: ItemClass::Ticket,
-                payload: &MutationPayload::ItemStatus(StatusChange {
-                    status: "done".into(),
+                payload: &MutationPayload::Lifecycle(LifecycleChange {
+                    status: Lifecycle::Done,
                 }),
                 promotion_operation_id: None,
                 now_iso: "2026-05-09T00:00:00.000Z",

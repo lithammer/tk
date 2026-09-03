@@ -6,7 +6,7 @@
 //! Repository Store identity or Item Class (ADR-0034).
 
 use super::lifecycle::Lifecycle;
-use super::mutation_payload::{StatusChange, TitleBody};
+use super::mutation_payload::{LifecycleChange, TitleBody};
 use super::ticket_kind::TicketKind;
 use thiserror::Error;
 
@@ -62,7 +62,7 @@ pub enum BackendEdit {
     },
     SetItemStatus {
         item: BackendItemAddress,
-        change: StatusChange,
+        change: LifecycleChange,
     },
     AddDependency {
         blocked: BackendItemAddress,

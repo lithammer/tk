@@ -17,7 +17,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use crate::clock::Clock;
 use crate::domain::item_class::ItemClass;
 use crate::domain::lifecycle::Lifecycle;
-use crate::domain::mutation_payload::{MutationPayload, StatusChange};
+use crate::domain::mutation_payload::{LifecycleChange, MutationPayload};
 use crate::domain::mutation_type::MutationType;
 use crate::domain::selection_state::SelectionState;
 use crate::domain::work_state::WorkState;
@@ -219,8 +219,8 @@ pub fn close_item<C: Clock + ?Sized>(
                 mutation_type: MutationType::SetItemStatus,
                 item_id: id,
                 item_class: row.item_class,
-                payload: &MutationPayload::ItemStatus(StatusChange {
-                    status: Lifecycle::Done.text().to_owned(),
+                payload: &MutationPayload::Lifecycle(LifecycleChange {
+                    status: Lifecycle::Done,
                 }),
                 promotion_operation_id: None,
                 now_iso: &now_iso,
