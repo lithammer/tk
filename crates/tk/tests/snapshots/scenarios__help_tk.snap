@@ -1,0 +1,40 @@
+---
+source: crates/tk/tests/scenarios.rs
+expression: "p.run(\"--help\")"
+---
+Repository-local work tracker
+
+Usage: tk <COMMAND>
+
+Commands:
+  add          Create a local Ticket or Epic
+  accept       Accept a triage Ticket into ranked, selectable work
+  park         Hold an accepted Ticket out of automatic selection, keeping its Priority
+  unpark       Return a parked Ticket to accepted, selectable work
+  init         Initialize the Repository Store in the current Git repository
+  list         Render the Repository Store List Tree
+  next         Select the next ready Ticket
+  show         Render one Ticket or Epic with current state
+  search       Find Tickets and Epics by a title substring
+  grep         Search title and body text for a regular expression, with match context
+  update       Update the title, body, priority, or parent of a Ticket or Epic
+  start        Mark a Ticket or Epic active
+  stop         Return a Ticket or Epic to open
+  done         Close a Ticket or Epic
+  block        Record that one item blocks another
+  unblock      Remove a blocking relationship
+  prime        Print the agent workflow briefing
+  manpage      Print or install the tk manpage
+  self-update  Replace the running tk binary with the latest release
+  remote       Configure the Primary Backend
+  sync         Apply pending Mutations through the configured Remote
+  promote      Promote a Local Ticket or Epic through the configured Remote
+  adopt        Adopt an existing Backend issue into the local working set
+  detach       Keep a Backend Item as local work without changing the Backend object
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version

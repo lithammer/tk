@@ -635,6 +635,7 @@ fn tk_scope_env_filters_list_to_the_epic() {
 #[test]
 fn command_help_snapshots() {
     let p = Repo::new("repo");
+    insta::assert_snapshot!("help_tk", p.run("--help"));
     for command in [
         "accept", "add", "block", "detach", "done", "grep", "list", "next", "park", "promote",
         "search", "show", "sync", "unblock", "unpark", "update",
