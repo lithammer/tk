@@ -247,9 +247,12 @@ the original paragraph stands.
 The exit named above survives only for a row already `failed`. Sync Skip
 admits no other state, and a `pending` row cannot reach `failed`, because
 the decode that rejects it runs over every applicable row before Apply can
-fail any of them. Such a row would leave `tk sync` with no exit through the
-CLI at all. That is accepted on the same grounds: the population is empty
-and closed.
+fail any of them. Its recovery is a different pair of commands: every
+surviving row of this shape belongs to a Promotion Operation — that is what
+migration 011 spared it for — and both **Promotion Cancellation** and
+**Detach** withdraw a `set_item_status` row on the `pending` -> `cancelled`
+edge without decoding its payload, because its Mutation Type addresses no
+counterpart.
 
 This was accepted rather than treated as a regression because the
 population it affects is empty and closed in practice: no `pending` or

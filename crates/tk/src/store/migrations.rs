@@ -751,6 +751,40 @@ mod tests {
     }
 
     #[test]
+    fn an_applied_closing_mutation_does_not_authorize_reopen() {
+        use crate::store::testing::{FixtureMutation, insert_fixture_mutation};
+
+        // The ordinary state of every successfully closed Backend-bound Item
+        // is a `done` row plus an `applied` closing Mutation. If the trigger
+        // exception did not test the Mutation's state, that shape alone would
+        // authorize a reopen — which is the whole of ADR-0006's backstop, not
+        // an edge case.
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_done_ticket(&conn);
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "set_item_status",
+                item_id: "t1",
+                payload_json: r#"{"status":"done"}"#,
+                state: "applied",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        assert_refused_by_the_done_terminal_trigger(
+            conn.execute(
+                "update items set status = 'open', closing_reason = null where id = 't1'",
+                [],
+            ),
+            "an applied closing Mutation must not authorize a done -> open write (ADR-0006)",
+        );
+    }
+
+    #[test]
     fn a_later_done_to_open_is_refused_once_the_mutation_moves_to_skipped() {
         use crate::store::testing::{FixtureMutation, insert_fixture_mutation};
         const TO_DONE: &str = r#"{"status":"done"}"#;

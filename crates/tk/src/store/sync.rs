@@ -1313,9 +1313,11 @@ pub fn mark_mutation_skipped(
     // The gate reads the payload's target through SQL, not a Rust decode, so
     // it still resolves a `set_item_status` payload that no longer decodes as
     // `Lifecycle` (ADR-0043's amendment). That keeps Skip available for such a
-    // row once it is `failed`; a `pending` one has no exit, because
+    // row once it is `failed`. A `pending` one never reaches `failed`, because
     // `load_applicable_mutations` decodes every applicable row before Apply
-    // can fail any of them, and the state gate below admits only `failed`.
+    // can fail any of them, and the state gate below admits only `failed`; its
+    // recovery is Promotion Cancellation or Detach, which withdraw a
+    // `set_item_status` row without decoding its payload.
     let row: Option<(MutationState, MutationType, Option<String>, String)> = tx
         .query_row(
             "select state, mutation_type, json_extract(payload_json, '$.status'), item_id \
