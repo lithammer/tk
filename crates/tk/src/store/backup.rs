@@ -21,9 +21,9 @@ use crate::store::migrations;
 
 /// How many Store Backups survive a prune (ADR-0048).
 ///
-/// Ten rather than three: a lossy migration is noticed late, and the migration
-/// list moves fast enough that three is a window of days for anyone building
-/// from source. Being bounded is the property that matters.
+/// A lossy migration is noticed long after the upgrade that caused it, so the
+/// window has to outlive several upgrades; the store is small enough that ten
+/// costs little. What the number must be is bounded, not exact.
 const BACKUPS_KEPT: usize = 10;
 
 /// Why a Store Backup could not be written (ADR-0048).
@@ -41,15 +41,15 @@ pub enum BackupError {
 
 /// Write one Store Backup of `conn` before its pending migrations run.
 ///
-/// A connection with no file to copy is a no-op. Callers decide *whether* a
-/// backup is owed; this decides everything about how one is made.
-pub fn write_pre_migration(conn: &Connection, now_iso: &str) -> Result<(), BackupError> {
+/// A connection with no file to copy is a no-op, so callers need not ask
+/// whether one is worth taking.
+pub fn take(conn: &Connection, now_iso: &str) -> Result<(), BackupError> {
     let Some(dir) = backup_dir(conn) else {
         return Ok(());
     };
     fs::create_dir_all(&dir)?;
-    // Always tk's own directory, so ARCHITECTURE.md's "only tighten what we
-    // created" rule holds unconditionally here. Best-effort, as in `tk init`.
+    // ARCHITECTURE.md only allows tightening a directory tk created, which
+    // this one always is.
     let _ = platform::set_dir_mode_0700(&dir);
 
     let partial = partial_path(&dir);
@@ -69,9 +69,6 @@ pub fn write_pre_migration(conn: &Connection, now_iso: &str) -> Result<(), Backu
         let _ = fs::remove_file(&partial);
     })?;
 
-    // Best-effort: the backup protecting this upgrade is already on disk, so
-    // refusing the migration because an old one could not be deleted would
-    // trade the protection away for tidiness.
     prune(&dir);
     Ok(())
 }
@@ -104,13 +101,11 @@ fn vacuum_into_place(
     dir: &Path,
     now_iso: &str,
 ) -> Result<(), BackupError> {
-    // `Connection::path` yields `None` rather than invalid UTF-8, so a store
-    // whose path is not UTF-8 never reaches here — `backup_dir` returns `None`
-    // and no backup is attempted. Everything below it is that `&str` joined
-    // with ASCII, so the borrow back cannot fail.
+    // `Connection::path` yields `None` for a non-UTF-8 store rather than the
+    // bytes, so `backup_dir` has already turned that case away.
     let target = partial
         .to_str()
-        .expect("backup path derives from Connection::path, which is UTF-8");
+        .expect("backup path is Connection::path joined with ASCII");
     // `VACUUM INTO` takes an expression, so the path binds as a parameter and
     // needs no quoting. It must run outside a transaction, which is why the
     // backup precedes the per-migration transactions rather than joining one.
@@ -292,9 +287,9 @@ mod tests {
         );
     }
 
-    /// The regression that dropping ADR-0028's `ForeignKeys::Off` gate exists
-    /// to fix: migrations 12 through 16 are all `ForeignKeys::On`, so a
-    /// rebuild-gated backup would skip this upgrade entirely.
+    /// A backup is owed to every upgrade, not only to an ADR-0028 rebuild.
+    /// Migrations 12 through 16 are all `ForeignKeys::On`, so tying the backup
+    /// to a rebuild would leave this upgrade unprotected.
     #[test]
     fn an_upgrade_with_no_rebuild_pending_is_still_backed_up() {
         let store = TmpStore::new("tk");
@@ -376,24 +371,21 @@ mod tests {
         assert_eq!(backups(&store), vec!["2026-09-03T13-45-00.123Z-v004.db"]);
     }
 
-    /// Drives the vacuum itself to failure — an open transaction is the one
-    /// refusal `VACUUM INTO` can be provoked into deterministically — and
-    /// asserts on the raw directory, not the filtered helper, because a
-    /// working file is exactly what the filter hides.
+    /// An open transaction is the one `VACUUM INTO` refusal a test can provoke
+    /// on demand. Asserts on the raw directory rather than [`backups`], since
+    /// a working file is what that helper hides.
     ///
-    /// What this pins is that the refusal reaches the caller and that the
-    /// failed path adds nothing to the directory. It does not exercise the
-    /// cleanup itself: SQLite rejects the transaction before it attaches the
-    /// output, so no working file is ever created here. The torn image that
-    /// cleanup exists for comes from a crash or an I/O fault mid-vacuum,
-    /// which no test can produce on demand.
+    /// This pins the refusal reaching the caller, and nothing being added to
+    /// the directory. It does not reach the cleanup: SQLite rejects the
+    /// transaction before attaching the output, so no working file exists to
+    /// remove. Only a crash or an I/O fault mid-vacuum leaves one.
     #[test]
     fn a_failed_vacuum_leaves_nothing_behind() {
         let store = TmpStore::new("tk");
         let conn = seed_store_at_version(&store, 4);
         conn.execute_batch("begin").unwrap();
 
-        let err = write_pre_migration(&conn, NOW).expect_err("the vacuum must fail");
+        let err = take(&conn, NOW).expect_err("the vacuum must fail");
         assert!(
             matches!(err, BackupError::Sqlite(_)),
             "expected the vacuum's own refusal, got {err:?}"

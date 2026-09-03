@@ -294,13 +294,12 @@ pub fn apply_all(conn: &mut Connection, now_iso: &str) -> Result<(), ApplyError>
         return Err(ApplyError::StoreFromFutureVersion);
     }
 
-    // One Store Backup per run, before the run (ADR-0048). `recorded > 0` is
-    // "the store already has a schema": a store being created has nothing to
-    // lose, and `tk init` reaches here for both cases. The upper bound is what
-    // the loop below would find pending, since `ALL_MIGRATIONS` ascends to
-    // `MAX_KNOWN_VERSION` (the `debug_assert` above pins that).
+    // One Store Backup per run, before the run (ADR-0048). A store at version
+    // 0 is being created and has nothing to lose, which is the case `tk init`
+    // brings here; below `MAX_KNOWN_VERSION` is what the loop finds pending,
+    // since `ALL_MIGRATIONS` ascends to it.
     if recorded > 0 && recorded < i64::from(MAX_KNOWN_VERSION) {
-        backup::write_pre_migration(conn, now_iso)?;
+        backup::take(conn, now_iso)?;
     }
 
     for mig in ALL_MIGRATIONS {
