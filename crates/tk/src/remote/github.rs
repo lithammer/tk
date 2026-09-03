@@ -1308,7 +1308,7 @@ mod tests {
     use super::*;
     use crate::domain::backend_operation::BackendItemAddress;
     use crate::domain::item_class::ItemClass;
-    use crate::domain::mutation_payload::{EpicRef, MutationPayload, StatusChange, TitleBody};
+    use crate::domain::mutation_payload::{EpicRef, LifecycleChange, MutationPayload, TitleBody};
     use crate::domain::mutation_type::MutationType;
     use crate::proc::{FakeRunner, ProcError, RunOutput};
 
@@ -1736,7 +1736,7 @@ mod tests {
                     snapshot,
                 }
             }
-            (MutationType::SetItemStatus, MutationPayload::ItemStatus(change)) => {
+            (MutationType::SetItemStatus, MutationPayload::Lifecycle(change)) => {
                 BackendEdit::SetItemStatus {
                     item: target,
                     change,
@@ -2437,7 +2437,7 @@ mod tests {
         let mut adapter = GithubAdapter::new(&runner, cwd());
         let v = edit(
             MutationType::SetItemStatus,
-            MutationPayload::ItemStatus(StatusChange {
+            MutationPayload::Lifecycle(LifecycleChange {
                 status: Lifecycle::Done,
             }),
             "42",
@@ -2455,7 +2455,7 @@ mod tests {
         let mut adapter = GithubAdapter::new(&runner, cwd());
         let v = edit(
             MutationType::SetItemStatus,
-            MutationPayload::ItemStatus(StatusChange {
+            MutationPayload::Lifecycle(LifecycleChange {
                 status: Lifecycle::Open,
             }),
             "42",
@@ -2485,7 +2485,7 @@ mod tests {
         let mut adapter = GithubAdapter::new(&runner, cwd());
         let v = edit(
             MutationType::SetItemStatus,
-            MutationPayload::ItemStatus(StatusChange {
+            MutationPayload::Lifecycle(LifecycleChange {
                 status: Lifecycle::Done,
             }),
             "42",
@@ -2531,7 +2531,7 @@ mod tests {
         let mut adapter = GithubAdapter::new(&runner, cwd());
         let v = edit(
             MutationType::SetItemStatus,
-            MutationPayload::ItemStatus(StatusChange {
+            MutationPayload::Lifecycle(LifecycleChange {
                 status: Lifecycle::Done,
             }),
             "42",

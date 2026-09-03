@@ -30,7 +30,7 @@ use crate::domain::binding_display_provenance::BindingDisplayProvenance;
 use crate::domain::item_class::ItemClass;
 use crate::domain::lifecycle::Lifecycle;
 use crate::domain::mutation_payload::{
-    DependencyRef, EpicRef, MutationPayload, Promotion, StatusChange, TitleBody,
+    DependencyRef, EpicRef, LifecycleChange, MutationPayload, Promotion, TitleBody,
 };
 use crate::domain::mutation_state::MutationState;
 use crate::domain::mutation_type::MutationType;
@@ -745,7 +745,7 @@ pub fn resolve_backend_operation(
                 snapshot,
             })
         }
-        (MutationType::SetItemStatus, MutationPayload::ItemStatus(change)) => {
+        (MutationType::SetItemStatus, MutationPayload::Lifecycle(change)) => {
             BackendOperation::Edit(BackendEdit::SetItemStatus {
                 item: target()?,
                 change,
@@ -896,7 +896,7 @@ fn decode_mutation_payload(
             MutationPayload::EpicRef(serde_json::from_str::<EpicRef>(payload_text)?)
         }
         Mt::SetItemStatus => {
-            MutationPayload::ItemStatus(serde_json::from_str::<StatusChange>(payload_text)?)
+            MutationPayload::Lifecycle(serde_json::from_str::<LifecycleChange>(payload_text)?)
         }
         Mt::AddDependency | Mt::RemoveDependency => {
             MutationPayload::DependencyRef(serde_json::from_str::<DependencyRef>(payload_text)?)
@@ -3166,7 +3166,7 @@ mod tests {
         let rows = load_applicable_mutations(&conn).unwrap();
         assert_eq!(rows.len(), 1);
         match &rows[0].payload {
-            MutationPayload::ItemStatus(s) => assert_eq!(s.status, Lifecycle::Done),
+            MutationPayload::Lifecycle(s) => assert_eq!(s.status, Lifecycle::Done),
             other => panic!("expected ItemStatus, got {other:?}"),
         }
     }

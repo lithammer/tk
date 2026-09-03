@@ -8,7 +8,7 @@
 //! constraint on the column.
 //!
 //! `Serialize`/`Deserialize` therefore live on the per-variant payload
-//! structs ([`TitleBody`], [`EpicRef`], [`StatusChange`], [`DependencyRef`],
+//! structs ([`TitleBody`], [`EpicRef`], [`LifecycleChange`], [`DependencyRef`],
 //! [`Promotion`]) rather than on the outer enum: serializing the enum
 //! directly would produce externally-tagged JSON (`{"UpdateTitleBody":{…}}`)
 //! that breaks the flat row contract.
@@ -28,7 +28,7 @@ pub enum MutationPayload {
     /// internal stable ID of the Epic being referenced.
     EpicRef(EpicRef),
     /// Payload for `set_item_status` — target Lifecycle after the change.
-    ItemStatus(StatusChange),
+    Lifecycle(LifecycleChange),
     /// Payload for `add_dependency` and `remove_dependency` — the internal
     /// stable ID of the Blocking Item referenced by the Dependency.
     DependencyRef(DependencyRef),
@@ -47,7 +47,7 @@ impl MutationPayload {
         match self {
             Self::UpdateTitleBody(v) => serde_json::to_string(v),
             Self::EpicRef(v) => serde_json::to_string(v),
-            Self::ItemStatus(v) => serde_json::to_string(v),
+            Self::Lifecycle(v) => serde_json::to_string(v),
             Self::DependencyRef(v) => serde_json::to_string(v),
             Self::Promotion(v) => serde_json::to_string(v),
         }
@@ -73,7 +73,7 @@ pub struct EpicRef {
 
 /// Lifecycle-change payload used by `set_item_status`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StatusChange {
+pub struct LifecycleChange {
     pub status: Lifecycle,
 }
 
@@ -127,8 +127,8 @@ mod tests {
     }
 
     #[test]
-    fn status_change_json_is_flat() {
-        let json = MutationPayload::ItemStatus(StatusChange {
+    fn lifecycle_change_json_is_flat() {
+        let json = MutationPayload::Lifecycle(LifecycleChange {
             status: Lifecycle::Done,
         })
         .to_json_string();

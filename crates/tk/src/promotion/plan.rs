@@ -14,7 +14,7 @@ use crate::domain::backend_kind::BackendKind;
 use crate::domain::dependency_rule::DependencyRejection;
 use crate::domain::item_class::ItemClass;
 use crate::domain::lifecycle::Lifecycle;
-use crate::domain::mutation_payload::{MutationPayload, Promotion, StatusChange};
+use crate::domain::mutation_payload::{LifecycleChange, MutationPayload, Promotion};
 use crate::domain::mutation_type::MutationType;
 use crate::domain::promotion_capability::{PromotionCapabilities, PromotionRequirements};
 use crate::domain::promotion_graph::{GraphItem, PromotionGraph};
@@ -305,7 +305,7 @@ fn status_draft(item: &GraphItem) -> Option<MutationDraft> {
             mutation_type: MutationType::SetItemStatus,
             item_id: item.id.clone(),
             item_class: item.item_class,
-            payload: MutationPayload::ItemStatus(StatusChange {
+            payload: MutationPayload::Lifecycle(LifecycleChange {
                 status: item.status,
             }),
         }),
@@ -887,7 +887,7 @@ mod tests {
             statuses,
             vec![(
                 "done",
-                MutationPayload::ItemStatus(StatusChange {
+                MutationPayload::Lifecycle(LifecycleChange {
                     status: Lifecycle::Done
                 })
             )]

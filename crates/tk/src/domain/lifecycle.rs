@@ -60,7 +60,7 @@ mod tests {
     #[test]
     fn every_variant_round_trips_through_its_storage_spelling() {
         // The payload-side counterpart to `text_matches_the_storage_spellings`:
-        // `StatusChange` carries `Lifecycle` straight into `payload_json`, so a
+        // `LifecycleChange` carries `Lifecycle` straight into `payload_json`, so a
         // drift between the serde spelling and `text()` would decode one Backend
         // Adapter's write as a different Lifecycle than it wrote.
         for (variant, text) in [(Lifecycle::Open, "open"), (Lifecycle::Done, "done")] {
