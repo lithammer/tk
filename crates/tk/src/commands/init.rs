@@ -56,7 +56,7 @@ pub fn run(deps: &mut Deps<'_>, _args: Args) -> Result<Exit, CommandError> {
         // Per ARCHITECTURE.md: only tighten permissions when we created the
         // directory ourselves. A pre-existing directory with broader perms
         // stays as-is.
-        let _ = set_dir_mode_0700(&tk_dir);
+        let _ = platform::set_dir_mode_0700(&tk_dir);
     }
 
     let db_path = tk_dir.join("tk.db");
@@ -101,6 +101,10 @@ pub fn run(deps: &mut Deps<'_>, _args: Args) -> Result<Exit, CommandError> {
             )),
             migrations::ApplyError::ForeignKeyCheck(table) => CommandError::failure(format!(
                 "migration left a dangling foreign key in table '{table}'"
+            )),
+            migrations::ApplyError::Backup(backup_err) => CommandError::failure(format!(
+                "failed to back up {} before migrating: {backup_err}",
+                db_path.display()
             )),
             migrations::ApplyError::Sqlite(sqlite_err) => {
                 CommandError::failure(format!("migration failed: {sqlite_err}"))
@@ -217,22 +221,6 @@ fn ensure_tk_dir(path: &Path) -> std::io::Result<bool> {
             }
         }
     }
-}
-
-/// Tighten a freshly-created Repository Store directory on platforms that
-/// expose Unix-style permissions.
-fn set_dir_mode_0700(path: &Path) -> std::io::Result<()> {
-    if platform::IS_WINDOWS {
-        return Ok(());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o700);
-        std::fs::set_permissions(path, perms)?;
-    }
-    let _ = path; // keep `path` used on non-unix non-windows targets.
-    Ok(())
 }
 
 // ---- Tests --------------------------------------------------------------

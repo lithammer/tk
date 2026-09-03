@@ -189,6 +189,12 @@ pub enum OpenError {
     /// state a healthy store reaches.
     #[error("a forward migration left a dangling foreign key in table `{0}`")]
     MigrationForeignKeyCheck(String),
+    /// The Store Backup that must precede a migration could not be written
+    /// (ADR-0048), so the upgrade was refused. The inner cause is rendered
+    /// after this line, as for [`OpenError::MigrationFailed`]. The store is
+    /// intact and still at its old schema version.
+    #[error("failed to back up the Repository Store before migrating")]
+    BackupFailed(migrations::BackupError),
     /// Genuine SQLite fault opening or inspecting the store.
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
@@ -259,6 +265,7 @@ impl From<migrations::ApplyError> for OpenError {
             migrations::ApplyError::ForeignKeyCheck(table) => {
                 OpenError::MigrationForeignKeyCheck(table)
             }
+            migrations::ApplyError::Backup(e) => OpenError::BackupFailed(e),
             migrations::ApplyError::Sqlite(e) => OpenError::MigrationFailed(e),
         }
     }

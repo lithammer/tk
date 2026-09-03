@@ -8,8 +8,13 @@
 //! for connection-level setup (`foreign_keys`, `busy_timeout`, `journal_mode`)
 //! before invoking [`apply_all`].
 
+use std::fs;
+use std::path::{Path, PathBuf};
+
 use rusqlite::{Connection, OptionalExtension};
 use thiserror::Error;
+
+use crate::platform;
 
 /// Application ID written to `pragma application_id` so an existing SQLite
 /// file can be identified as a tk Repository Store. Spelled `TKDB` in
@@ -262,7 +267,24 @@ pub enum ApplyError {
     /// migration transaction rolls back so the rebuild is all-or-nothing.
     #[error("migration left a dangling foreign key in table `{0}`")]
     ForeignKeyCheck(String),
+    /// The Store Backup that must precede a migration could not be written
+    /// (ADR-0048). Fail closed: the store keeps its old schema rather than
+    /// being upgraded with no copy of what it held.
+    #[error("failed to back up the Repository Store before migrating")]
+    Backup(#[from] BackupError),
     /// Underlying SQLite or driver error from the migration transaction.
+    #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
+}
+
+/// Why a Store Backup could not be written (ADR-0048).
+///
+/// Split from [`ApplyError::Sqlite`] so the command layer can say the upgrade
+/// was refused for want of a backup rather than blaming the migration SQL.
+#[derive(Debug, Error)]
+pub enum BackupError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
 }
@@ -285,6 +307,18 @@ pub fn apply_all(conn: &mut Connection, now_iso: &str) -> Result<(), ApplyError>
     let recorded = current_version(conn)?;
     if recorded > i64::from(MAX_KNOWN_VERSION) {
         return Err(ApplyError::StoreFromFutureVersion);
+    }
+
+    // One Store Backup per run, before the run (ADR-0048). `recorded > 0` is
+    // "the store already has a schema": a store being created has nothing to
+    // lose, and `tk init` reaches here for both cases.
+    let pending = ALL_MIGRATIONS
+        .iter()
+        .any(|mig| i64::from(mig.version) > recorded);
+    if pending && recorded > 0 {
+        if let Some(dir) = backup_dir(conn) {
+            back_up(conn, &dir, now_iso)?;
+        }
     }
 
     for mig in ALL_MIGRATIONS {
@@ -364,6 +398,92 @@ fn first_foreign_key_violation(conn: &Connection) -> Result<Option<String>, rusq
         Some(row) => Ok(Some(row.get::<_, String>(0)?)),
         None => Ok(None),
     }
+}
+
+/// Directory Store Backups are written to, or `None` when the connection has
+/// no file to copy.
+///
+/// Derived from the connection rather than passed in (ADR-0048).
+/// `Connection::path` yields an empty string for an in-memory database, so
+/// every unit test that opens `:memory:` writes no backup by construction.
+fn backup_dir(conn: &Connection) -> Option<PathBuf> {
+    let path = conn.path().filter(|path| !path.is_empty())?;
+    Some(Path::new(path).parent()?.join("backups"))
+}
+
+/// Write one Store Backup of `conn` into `dir` and return its path.
+///
+/// The image is written to a per-process working name first and renamed once
+/// it is complete, so an interrupted `VACUUM INTO` never leaves a partial file
+/// that later reads as a Store Backup.
+fn back_up(conn: &Connection, dir: &Path, now_iso: &str) -> Result<PathBuf, BackupError> {
+    fs::create_dir_all(dir)?;
+    // Always tk's own directory, so ARCHITECTURE.md's "only tighten what we
+    // created" rule holds unconditionally here. Best-effort, as in `tk init`.
+    let _ = platform::set_dir_mode_0700(dir);
+
+    // Unique per PID namespace, which is the scope of the concurrency
+    // ADR-0024 designs for. A clock cannot serve here: the injectable test
+    // clock is pinned, so two runs would agree on the name.
+    let partial = dir.join(format!(".partial-{}.db", std::process::id()));
+    // `VACUUM INTO` refuses a non-empty target, and a `SIGKILL` mid-vacuum
+    // never reaches the cleanup below, so clear a leftover from an earlier
+    // process that held this pid before writing.
+    if let Err(err) = fs::remove_file(&partial) {
+        if err.kind() != std::io::ErrorKind::NotFound {
+            return Err(err.into());
+        }
+    }
+
+    let written = write_backup(conn, &partial, dir, now_iso);
+    if written.is_err() {
+        // Never leave a partial image behind: it would count against
+        // retention and read as a complete Store Backup.
+        let _ = fs::remove_file(&partial);
+    }
+    written
+}
+
+/// Vacuum into `partial`, name it from what it actually holds, and move it
+/// into place.
+fn write_backup(
+    conn: &Connection,
+    partial: &Path,
+    dir: &Path,
+    now_iso: &str,
+) -> Result<PathBuf, BackupError> {
+    let target = partial
+        .to_owned()
+        .into_os_string()
+        .into_string()
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Store Backup path is not valid UTF-8",
+            )
+        })?;
+    // `VACUUM INTO` takes an expression, so the path binds as a parameter and
+    // needs no quoting. It must run outside a transaction, which is why the
+    // backup precedes the per-migration transactions rather than joining one.
+    conn.execute("vacuum into ?1", [&target])?;
+
+    // Name the file from the version it actually contains, not from the one
+    // sampled before the vacuum: a concurrent migrator can commit in between
+    // (ADR-0024), and a label read out of the file cannot be wrong.
+    // `schema_migrations` is authoritative; `pragma user_version` mirrors it.
+    let version = current_version(&Connection::open(partial)?)?;
+    let named = dir.join(format!("{}-v{version:03}.db", file_stamp(now_iso)));
+    fs::rename(partial, &named)?;
+    Ok(named)
+}
+
+/// Turn an ISO timestamp into a filename component.
+///
+/// Only `:` is illegal in a Windows filename, so the milliseconds survive and
+/// the stamp stays fixed-width — which is what lets a plain lexicographic sort
+/// of the directory run in chronological order.
+fn file_stamp(now_iso: &str) -> String {
+    now_iso.replace(':', "-")
 }
 
 /// Return the highest applied schema migration version as `i64`, or `0` when
@@ -2738,5 +2858,228 @@ mod tests {
         let err = apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("items"), "error should mention `items`: {msg}");
+    }
+}
+
+// ---- Store Backup tests (ADR-0048) --------------------------------------
+
+#[cfg(test)]
+mod backup_tests {
+    use super::*;
+    use crate::store::testing::{FixtureItem, insert_fixture_item};
+    use std::path::PathBuf;
+
+    const NOW: &str = "2026-09-03T13:45:00.123Z";
+
+    /// A file-backed store frozen at `version`, which is what gives
+    /// `apply_all` both real pending work and a real directory to write into.
+    /// `apply_through` drives `apply_one` directly, so freezing writes no
+    /// Store Backup of its own.
+    fn frozen_store(dir: &Path, version: u32) -> Connection {
+        let mut conn = Connection::open(dir.join("tk.db")).expect("open file store");
+        conn.execute_batch("pragma foreign_keys = on").unwrap();
+        apply_through(&mut conn, version, "2026-05-09T00:00:00.000Z").unwrap();
+        conn
+    }
+
+    /// Store Backups present in `dir`, sorted, excluding any working file.
+    fn backups(dir: &Path) -> Vec<String> {
+        let Ok(entries) = fs::read_dir(dir.join("backups")) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = entries
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| !name.starts_with(".partial-"))
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn seed_item(conn: &Connection, id: &str, seq: i64) {
+        insert_fixture_item(
+            conn,
+            FixtureItem {
+                id,
+                display: id,
+                title: "Seeded before the upgrade",
+                body: "body that a lossy rebuild would drop",
+                created_seq: seq,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn creating_a_store_writes_no_backup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut conn = Connection::open(tmp.path().join("tk.db")).unwrap();
+        apply_all(&mut conn, NOW).unwrap();
+
+        assert!(
+            backups(tmp.path()).is_empty(),
+            "a store being created has no earlier state to protect"
+        );
+    }
+
+    #[test]
+    fn a_current_store_writes_no_backup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut conn = frozen_store(tmp.path(), MAX_KNOWN_VERSION);
+        apply_all(&mut conn, NOW).unwrap();
+
+        assert!(
+            backups(tmp.path()).is_empty(),
+            "no migration ran, so there was nothing to back up before"
+        );
+    }
+
+    #[test]
+    fn an_in_memory_store_has_no_backup_directory() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(
+            backup_dir(&conn).is_none(),
+            "an in-memory store has no file to copy, so unit tests write nothing"
+        );
+    }
+
+    #[test]
+    fn upgrading_a_populated_store_writes_one_backup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut conn = frozen_store(tmp.path(), 4);
+        seed_item(&conn, "t1", 1);
+        apply_all(&mut conn, NOW).unwrap();
+
+        assert_eq!(
+            backups(tmp.path()),
+            vec!["2026-09-03T13-45-00.123Z-v004.db"],
+            "one backup per run, named for the version it holds"
+        );
+    }
+
+    /// The regression that dropping ADR-0028's `ForeignKeys::Off` gate exists
+    /// to fix: migrations 12 through 16 are all `ForeignKeys::On`, so a
+    /// rebuild-gated backup would skip this upgrade entirely.
+    #[test]
+    fn an_upgrade_with_no_rebuild_pending_is_still_backed_up() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut conn = frozen_store(tmp.path(), 11);
+        seed_item(&conn, "t1", 1);
+
+        assert!(
+            ALL_MIGRATIONS
+                .iter()
+                .filter(|mig| mig.version > 11)
+                .all(|mig| mig.foreign_keys == ForeignKeys::On),
+            "fixture assumption: nothing after 11 is a rebuild"
+        );
+
+        apply_all(&mut conn, NOW).unwrap();
+        assert_eq!(
+            backups(tmp.path()),
+            vec!["2026-09-03T13-45-00.123Z-v011.db"]
+        );
+    }
+
+    #[test]
+    fn a_backup_holds_the_rows_as_they_were_before_the_upgrade() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut conn = frozen_store(tmp.path(), 4);
+        seed_item(&conn, "t1", 1);
+        seed_item(&conn, "t2", 2);
+        apply_all(&mut conn, NOW).unwrap();
+
+        let path: PathBuf = tmp.path().join("backups").join(&backups(tmp.path())[0]);
+        let backup = Connection::open(path).unwrap();
+
+        assert_eq!(
+            current_version(&backup).unwrap(),
+            4,
+            "the label must match what the file actually holds"
+        );
+        let rows: i64 = backup
+            .query_row("select count(*) from items", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 2);
+        let body: String = backup
+            .query_row("select body from items where id = 't1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(body, "body that a lossy rebuild would drop");
+    }
+
+    /// Fail closed: an upgrade that cannot be backed up does not happen. The
+    /// store must be left exactly as it was, not half-migrated.
+    #[test]
+    fn a_backup_that_cannot_be_written_refuses_the_migration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut conn = frozen_store(tmp.path(), 4);
+        seed_item(&conn, "t1", 1);
+        // A plain file where the directory belongs, so `create_dir_all` fails
+        // for a reason that does not depend on running as an unprivileged user.
+        fs::write(tmp.path().join("backups"), b"not a directory").unwrap();
+
+        let err = apply_all(&mut conn, NOW).expect_err("the migration must be refused");
+        assert!(
+            matches!(err, ApplyError::Backup(_)),
+            "expected a backup failure, got {err:?}"
+        );
+        assert_eq!(
+            current_version(&conn).unwrap(),
+            4,
+            "a refused upgrade leaves the schema untouched"
+        );
+    }
+
+    /// A `SIGKILL` mid-vacuum cannot run the cleanup path, and `VACUUM INTO`
+    /// refuses a non-empty target, so a leftover working file from a dead
+    /// process holding this pid must not wedge every later upgrade.
+    #[test]
+    fn a_leftover_working_file_does_not_wedge_the_backup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut conn = frozen_store(tmp.path(), 4);
+        seed_item(&conn, "t1", 1);
+
+        let dir = tmp.path().join("backups");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(format!(".partial-{}.db", std::process::id())),
+            b"torn image from a killed process",
+        )
+        .unwrap();
+
+        apply_all(&mut conn, NOW).unwrap();
+        assert_eq!(
+            backups(tmp.path()),
+            vec!["2026-09-03T13-45-00.123Z-v004.db"]
+        );
+    }
+
+    #[test]
+    fn a_failed_backup_leaves_no_working_file_behind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut conn = frozen_store(tmp.path(), 4);
+        let dir = tmp.path().join("backups");
+        fs::create_dir_all(&dir).unwrap();
+        // Vacuuming into a directory fails, and the cleanup must still run.
+        fs::create_dir(dir.join(format!(".partial-{}.db", std::process::id()))).unwrap();
+
+        apply_all(&mut conn, NOW).expect_err("the migration must be refused");
+        assert!(
+            backups(tmp.path()).is_empty(),
+            "a partial image must never survive to read as a Store Backup"
+        );
+    }
+
+    #[test]
+    fn the_file_stamp_drops_only_the_windows_illegal_character() {
+        assert_eq!(file_stamp(NOW), "2026-09-03T13-45-00.123Z");
+        assert!(
+            !file_stamp(NOW).contains(':'),
+            "':' is illegal in a Windows filename"
+        );
+        assert!(
+            file_stamp(NOW).contains(".123"),
+            "milliseconds stay: the pinned test clock cannot uniquify a name"
+        );
     }
 }

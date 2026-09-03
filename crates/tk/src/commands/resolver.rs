@@ -73,6 +73,9 @@ pub fn open_error(err: &OpenError) -> CommandError {
         // underlying SQLite cause (matching the storage-error shape), so the
         // upgrade fault is not reduced to a bare headline.
         OpenError::MigrationFailed(e) => CommandError::failure(format!("{err}\n{e}")),
+        // Same shape: the refusal headline plus the underlying cause, so the
+        // user can tell a full disk from an unwritable directory (ADR-0048).
+        OpenError::BackupFailed(e) => CommandError::failure(format!("{err}\n{e}")),
         _ => CommandError::failure(format!("{err}")),
     }
 }
