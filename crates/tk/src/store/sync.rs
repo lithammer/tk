@@ -604,8 +604,17 @@ pub enum LoadApplicableError {
     PayloadVariantMissing(MutationType),
     /// `payload_json` parsed as JSON (the column's CHECK guarantees that) but
     /// did not match the variant's shape — Repository Store corruption.
-    #[error("malformed payload_json: {0}")]
-    PayloadJson(#[from] serde_json::Error),
+    ///
+    /// Names the row, because the decode is batched: one undecodable payload
+    /// fails the whole run, and the operator's next move is `tk sync log
+    /// <sequence>` on the row that caused it.
+    #[error("mutation {sequence} ({mutation_type}) has malformed payload_json: {source}")]
+    PayloadJson {
+        sequence: i64,
+        mutation_type: MutationType,
+        #[source]
+        source: serde_json::Error,
+    },
     #[error("mutation {mutation_type} cannot target Item Class {item_class}")]
     OperationShapeMismatch {
         mutation_type: MutationType,
@@ -684,7 +693,7 @@ pub fn load_applicable_mutations(
 
         let mutation_type = MutationType::from_str(&type_text)
             .map_err(|_| LoadApplicableError::UnknownMutationType(type_text))?;
-        let payload = decode_mutation_payload(mutation_type, &payload_text)?;
+        let payload = decode_mutation_payload(sequence, mutation_type, &payload_text)?;
 
         out.push(ApplicableMutationRow {
             sequence,
@@ -884,26 +893,35 @@ fn backend_address_of_class(
 /// Decode a `payload_json` text column into the [`MutationPayload`] variant the
 /// [`MutationType`] selects.
 fn decode_mutation_payload(
+    sequence: i64,
     mutation_type: MutationType,
     payload_text: &str,
 ) -> Result<MutationPayload, LoadApplicableError> {
     use MutationType as Mt;
+
+    // Built here rather than through a `From` impl: the row identity is what
+    // makes the failure actionable, and only this scope holds it.
+    let malformed = |source: serde_json::Error| LoadApplicableError::PayloadJson {
+        sequence,
+        mutation_type,
+        source,
+    };
     Ok(match mutation_type {
-        Mt::UpdateTicket | Mt::UpdateEpic => {
-            MutationPayload::UpdateTitleBody(serde_json::from_str::<TitleBody>(payload_text)?)
-        }
-        Mt::AddTicketToEpic | Mt::RemoveTicketFromEpic => {
-            MutationPayload::EpicRef(serde_json::from_str::<EpicRef>(payload_text)?)
-        }
-        Mt::SetItemStatus => {
-            MutationPayload::Lifecycle(serde_json::from_str::<LifecycleChange>(payload_text)?)
-        }
-        Mt::AddDependency | Mt::RemoveDependency => {
-            MutationPayload::DependencyRef(serde_json::from_str::<DependencyRef>(payload_text)?)
-        }
-        Mt::PromoteTicket | Mt::PromoteEpic => {
-            MutationPayload::Promotion(serde_json::from_str::<Promotion>(payload_text)?)
-        }
+        Mt::UpdateTicket | Mt::UpdateEpic => MutationPayload::UpdateTitleBody(
+            serde_json::from_str::<TitleBody>(payload_text).map_err(malformed)?,
+        ),
+        Mt::AddTicketToEpic | Mt::RemoveTicketFromEpic => MutationPayload::EpicRef(
+            serde_json::from_str::<EpicRef>(payload_text).map_err(malformed)?,
+        ),
+        Mt::SetItemStatus => MutationPayload::Lifecycle(
+            serde_json::from_str::<LifecycleChange>(payload_text).map_err(malformed)?,
+        ),
+        Mt::AddDependency | Mt::RemoveDependency => MutationPayload::DependencyRef(
+            serde_json::from_str::<DependencyRef>(payload_text).map_err(malformed)?,
+        ),
+        Mt::PromoteTicket | Mt::PromoteEpic => MutationPayload::Promotion(
+            serde_json::from_str::<Promotion>(payload_text).map_err(malformed)?,
+        ),
         Mt::AddExternalBlocker | Mt::ResolveExternalBlocker => {
             return Err(LoadApplicableError::PayloadVariantMissing(mutation_type));
         }
@@ -940,9 +958,15 @@ pub enum PersistMutationOutcomeError {
     },
     /// A `promote_*` row's `payload_json` did not decode as a [`Promotion`]
     /// payload — Repository Store corruption, the same fault
-    /// [`LoadApplicableError::PayloadJson`] names on the load side.
-    #[error("malformed payload_json: {0}")]
-    PayloadJson(#[from] serde_json::Error),
+    /// [`LoadApplicableError::PayloadJson`] names on the load side, and named
+    /// the same way: every sibling variant here carries its sequence, and the
+    /// operator's next move is `tk sync log <sequence>`.
+    #[error("mutation {sequence} has malformed payload_json: {source}")]
+    PayloadJson {
+        sequence: i64,
+        #[source]
+        source: serde_json::Error,
+    },
     /// The Mutation state edge this outcome implies is not in the transition
     /// table. Every outcome path narrows the row to an applicable state before
     /// transitioning, so this names a Store-layer contract break.
@@ -1026,7 +1050,8 @@ pub fn persist_create_outcome(
     // the Mutation `applying` with nothing recorded against it.
     match outcome {
         BackendCreateOutcome::Created(identity) => {
-            let payload: Promotion = serde_json::from_str(&payload_json)?;
+            let payload: Promotion = serde_json::from_str(&payload_json)
+                .map_err(|source| PersistMutationOutcomeError::PayloadJson { sequence, source })?;
             crate::store::promotion::apply_receipt(
                 &tx,
                 &item_id,
@@ -3620,7 +3645,13 @@ mod tests {
         .unwrap();
 
         match load_applicable_mutations(&conn).unwrap_err() {
-            LoadApplicableError::PayloadJson(_) => {}
+            err @ LoadApplicableError::PayloadJson { sequence: 1, .. } => {
+                assert_eq!(
+                    err.to_string(),
+                    "mutation 1 (set_item_status) has malformed payload_json: \
+                     unknown variant `active`, expected `open` or `done` at line 1 column 18"
+                );
+            }
             other => panic!("expected PayloadJson, got {other:?}"),
         }
     }

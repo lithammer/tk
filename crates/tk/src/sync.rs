@@ -129,14 +129,14 @@ impl RunSyncError {
                 | LoadApplicableError::PayloadVariantMissing(_),
             ) => RunSyncErrorCategory::MutationSchemaDrift(self),
             Self::Load(
-                LoadApplicableError::PayloadJson(_)
+                LoadApplicableError::PayloadJson { .. }
                 | LoadApplicableError::OperationShapeMismatch { .. }
                 | LoadApplicableError::MissingBackendIdentity { .. }
                 | LoadApplicableError::CounterpartClassMismatch { .. }
                 | LoadApplicableError::MissingTicketKind { .. },
             )
             | Self::Outcome(
-                PersistMutationOutcomeError::PayloadJson(_)
+                PersistMutationOutcomeError::PayloadJson { .. }
                 | PersistMutationOutcomeError::OperationShapeMismatch { .. }
                 | PersistMutationOutcomeError::TargetNotLocal { .. }
                 | PersistMutationOutcomeError::Transition(_),
@@ -163,7 +163,7 @@ impl RunSyncError {
                     | PersistMutationOutcomeError::MutationNotApplicable(_)
                     | PersistMutationOutcomeError::ApplyingMutation(_)
                     | PersistMutationOutcomeError::OperationShapeMismatch { .. }
-                    | PersistMutationOutcomeError::PayloadJson(_)
+                    | PersistMutationOutcomeError::PayloadJson { .. }
                     | PersistMutationOutcomeError::Transition(_) => {
                         CreatedIdentityNotStoredCause::Direct
                     }

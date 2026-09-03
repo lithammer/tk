@@ -1389,13 +1389,14 @@ mod tests {
         let mut err_out = Vec::new();
         render_run_sync_error(
             &mut err_out,
-            &RunSyncError::Outcome(PersistMutationOutcomeError::PayloadJson(
-                serde_json::from_str::<Promotion>("{}").unwrap_err(),
-            )),
+            &RunSyncError::Outcome(PersistMutationOutcomeError::PayloadJson {
+                sequence: 4,
+                source: serde_json::from_str::<Promotion>("{}").unwrap_err(),
+            }),
         );
         let rendered = String::from_utf8(err_out).unwrap();
         assert!(
-            rendered.starts_with("tk sync: malformed payload_json: ")
+            rendered.starts_with("tk sync: mutation 4 has malformed payload_json: ")
                 && rendered.ends_with("; this is a Ticket bug — please report it\n"),
             "{rendered}"
         );
