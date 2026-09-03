@@ -135,6 +135,13 @@ Migration SQL files are the source of truth for exact table columns and checks.
 Important stable contracts:
 
 - `schema_migrations` and `PRAGMA user_version` track migrations.
+  `schema_migrations` is authoritative and `PRAGMA user_version` mirrors it;
+  both are written in the migration's own transaction.
+- A Store Backup is written to `<git-common-dir>/tk/backups/` before any
+  pending migration runs against a store that already has a schema, and the
+  newest ten are kept ([ADR-0048](./docs/adr/0048-migrations-back-up-the-repository-store-first.md)).
+  The directory is derived from the connection's path, so an in-memory store
+  writes none. A backup that cannot be written refuses the migration.
 - `PRAGMA application_id = 0x544B4442` identifies tk stores.
 - Connections enable foreign keys and a busy timeout; `tk init` enables WAL.
 - Every write transaction begins `IMMEDIATE` (`store::write_transaction`),

@@ -155,6 +155,10 @@ _Avoid_: Search, Full-text search, Fuzzy search
 The shared SQLite-backed local state for **tk** within one version-control repository.
 _Avoid_: Workspace Store, Global Store
 
+**Store Backup**:
+A compacted copy of the **Repository Store** written before a schema migration runs, kept beside the store and pruned to the most recent few. A **Store Backup** is readable evidence of what the store held before an upgrade, not an undo: restoring one leaves it to be migrated forward again.
+_Avoid_: Snapshot (a **Promotion** retains one; the two are unrelated), Dump, Archive
+
 **Backend**:
 A system that can store or retrieve **Tickets**, **Epics**, and **Mutations**.
 _Avoid_: Provider, Connector
