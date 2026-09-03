@@ -15,6 +15,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::domain::lifecycle::Lifecycle;
+
 /// Typed payload union for a `mutations` row. Variant choice is determined by
 /// the row's `mutation_type` discriminator.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,7 +27,7 @@ pub enum MutationPayload {
     /// Payload for `add_ticket_to_epic` and `remove_ticket_from_epic` — the
     /// internal stable ID of the Epic being referenced.
     EpicRef(EpicRef),
-    /// Payload for `set_item_status` — target Item Status after the change.
+    /// Payload for `set_item_status` — target Lifecycle after the change.
     ItemStatus(StatusChange),
     /// Payload for `add_dependency` and `remove_dependency` — the internal
     /// stable ID of the Blocking Item referenced by the Dependency.
@@ -69,10 +71,10 @@ pub struct EpicRef {
     pub epic_id: String,
 }
 
-/// Status-change payload used by `set_item_status`.
+/// Lifecycle-change payload used by `set_item_status`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusChange {
-    pub status: String,
+    pub status: Lifecycle,
 }
 
 /// Blocking Item reference used by `add_dependency` / `remove_dependency`.
@@ -127,7 +129,7 @@ mod tests {
     #[test]
     fn status_change_json_is_flat() {
         let json = MutationPayload::ItemStatus(StatusChange {
-            status: "done".into(),
+            status: Lifecycle::Done,
         })
         .to_json_string();
         assert_eq!(json, r#"{"status":"done"}"#);

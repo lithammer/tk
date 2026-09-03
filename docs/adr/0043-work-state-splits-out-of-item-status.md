@@ -224,3 +224,29 @@ can only refuse one already produced.
   tk-198 owns skipped content on a done Item. General remote reopen remains
   deferred. gh-68 becomes a cleaner question once Work State could carry its
   own Mutation Type.
+
+## Amendment: a pre-split `active` target now fails at Load, not Apply
+
+The "Migration 011 rebuilds `items`..." section above says a surviving
+non-closing `set_item_status` row "fails at Apply" because "The GitHub
+Adapter rejects a non-closing `set_item_status` target outright." That is
+only still true for `open`. `MutationPayload`'s `StatusChange.status` is now
+a typed **Lifecycle** rather than the free string this decision's
+Consequences described as deliberately kept, and **Lifecycle** has no
+`active` variant — it never did; `active` only ever reached this payload
+as a free string, pre-split. A row naming the pre-split `active` no longer
+parses as a **Lifecycle** at all, so it now fails to decode inside
+`load_applicable_mutations` — before any Backend Adapter call, not during
+one — and renders through the Ticket-bug frame ("this is a Ticket bug —
+please report it") instead of the ordinary Backend rejection that sent an
+operator to `tk sync --skip`. A row naming `open` still decodes as
+`Lifecycle::Open`, still resolves to `BackendEdit::SetItemStatus`, and the
+GitHub Adapter still rejects it at Apply exactly as before — that half of
+the original paragraph stands.
+
+This was accepted rather than treated as a regression because the
+population it affects is empty and closed in practice: no `pending` or
+`failed` non-closing `set_item_status` row exists today, and nothing on
+`main` can mint a new one — `close_item` and `status_draft`, the only two
+writers of a `set_item_status` Mutation, both construct `StatusChange` with
+`Lifecycle::Done`.

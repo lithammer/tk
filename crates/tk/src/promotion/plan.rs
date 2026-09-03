@@ -306,7 +306,7 @@ fn status_draft(item: &GraphItem) -> Option<MutationDraft> {
             item_id: item.id.clone(),
             item_class: item.item_class,
             payload: MutationPayload::ItemStatus(StatusChange {
-                status: item.status.text().to_owned(),
+                status: item.status,
             }),
         }),
     }
@@ -888,7 +888,7 @@ mod tests {
             vec![(
                 "done",
                 MutationPayload::ItemStatus(StatusChange {
-                    status: "done".to_owned()
+                    status: Lifecycle::Done
                 })
             )]
         );

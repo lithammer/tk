@@ -139,11 +139,16 @@ impl Adapter for GithubAdapter<'_> {
                 "--body",
                 &snapshot.body,
             ]),
-            BackendEdit::SetItemStatus { item, change, .. } => match change.status.as_str() {
-                "done" => self.run_edit(&["gh", "issue", "close", &item.backend_key]),
-                other => Ok(BackendEditOutcome::rejected(format!(
-                    "unexpected target status '{other}'"
-                ))),
+            BackendEdit::SetItemStatus { item, change, .. } => match change.status {
+                Lifecycle::Done => self.run_edit(&["gh", "issue", "close", &item.backend_key]),
+                // v1 has no remote reopen: `done` is terminal (ADR-0006), and
+                // ADR-0046's narrow Sync Skip exception restores `open` locally
+                // without ever asking a Backend Adapter to reopen anything —
+                // "this is not general remote-reopen support". An `open` target
+                // therefore has no `gh` verb to run.
+                Lifecycle::Open => Ok(BackendEditOutcome::rejected(
+                    "cannot push a target Lifecycle of 'open': v1 has no remote reopen",
+                )),
             },
             // Relationship sync (ADR-0021, tk-107 Dependencies, tk-132 Epic
             // membership): every arm edits the Mutation's own item, and any
@@ -2433,7 +2438,7 @@ mod tests {
         let v = edit(
             MutationType::SetItemStatus,
             MutationPayload::ItemStatus(StatusChange {
-                status: "done".into(),
+                status: Lifecycle::Done,
             }),
             "42",
         );
@@ -2445,24 +2450,23 @@ mod tests {
     }
 
     #[test]
-    fn apply_set_status_non_closing_rejects_without_running_gh() {
-        for status in ["open", "active"] {
-            let runner = FakeRunner::new();
-            let mut adapter = GithubAdapter::new(&runner, cwd());
-            let v = edit(
-                MutationType::SetItemStatus,
-                MutationPayload::ItemStatus(StatusChange {
-                    status: status.into(),
-                }),
-                "42",
-            );
-            assert_eq!(
-                adapter.apply_edit(&v).unwrap(),
-                BackendEditOutcome::rejected(format!("unexpected target status '{status}'")),
-                "{status}"
-            );
-            runner.assert_all_consumed();
-        }
+    fn apply_set_status_open_rejects_without_running_gh() {
+        let runner = FakeRunner::new();
+        let mut adapter = GithubAdapter::new(&runner, cwd());
+        let v = edit(
+            MutationType::SetItemStatus,
+            MutationPayload::ItemStatus(StatusChange {
+                status: Lifecycle::Open,
+            }),
+            "42",
+        );
+        assert_eq!(
+            adapter.apply_edit(&v).unwrap(),
+            BackendEditOutcome::rejected(
+                "cannot push a target Lifecycle of 'open': v1 has no remote reopen"
+            )
+        );
+        runner.assert_all_consumed();
     }
 
     #[test]
@@ -2482,7 +2486,7 @@ mod tests {
         let v = edit(
             MutationType::SetItemStatus,
             MutationPayload::ItemStatus(StatusChange {
-                status: "done".into(),
+                status: Lifecycle::Done,
             }),
             "42",
         );
@@ -2528,7 +2532,7 @@ mod tests {
         let v = edit(
             MutationType::SetItemStatus,
             MutationPayload::ItemStatus(StatusChange {
-                status: "done".into(),
+                status: Lifecycle::Done,
             }),
             "42",
         );

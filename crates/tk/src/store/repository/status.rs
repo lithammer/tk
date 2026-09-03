@@ -220,7 +220,7 @@ pub fn close_item<C: Clock + ?Sized>(
                 item_id: id,
                 item_class: row.item_class,
                 payload: &MutationPayload::ItemStatus(StatusChange {
-                    status: Lifecycle::Done.text().to_owned(),
+                    status: Lifecycle::Done,
                 }),
                 promotion_operation_id: None,
                 now_iso: &now_iso,

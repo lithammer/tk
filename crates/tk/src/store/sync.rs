@@ -3045,7 +3045,7 @@ mod tests {
         let rows = load_applicable_mutations(&conn).unwrap();
         assert_eq!(rows.len(), 1);
         match &rows[0].payload {
-            MutationPayload::ItemStatus(s) => assert_eq!(s.status, "done"),
+            MutationPayload::ItemStatus(s) => assert_eq!(s.status, Lifecycle::Done),
             other => panic!("expected ItemStatus, got {other:?}"),
         }
     }
@@ -3469,6 +3469,34 @@ mod tests {
         match load_applicable_mutations(&conn).unwrap_err() {
             LoadApplicableError::PayloadVariantMissing(MutationType::AddExternalBlocker) => {}
             other => panic!("expected PayloadVariantMissing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_applicable_rejects_a_pre_split_active_status_target() {
+        // Lifecycle has no `active` variant — Work State split out of Item
+        // Status in ADR-0043, and the amendment recorded there
+        // documents this: a `set_item_status` row that predates the split and
+        // still names `active` now fails to decode here, before any Backend
+        // Adapter call, rather than failing at Apply.
+        let conn = open_seeded();
+        backend_ticket(&conn, "t1", "gh-1", "1", 1);
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "set_item_status",
+                item_id: "t1",
+                payload_json: r#"{"status":"active"}"#,
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        match load_applicable_mutations(&conn).unwrap_err() {
+            LoadApplicableError::PayloadJson(_) => {}
+            other => panic!("expected PayloadJson, got {other:?}"),
         }
     }
 

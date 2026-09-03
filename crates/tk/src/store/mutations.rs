@@ -476,6 +476,7 @@ mod tests {
     use super::*;
     use crate::domain::backend_kind::BackendKind;
     use crate::domain::backend_outcome::FailureClass;
+    use crate::domain::lifecycle::Lifecycle;
     use crate::domain::mutation_payload::{DependencyRef, EpicRef, StatusChange, TitleBody};
     use crate::store::migrations;
     use crate::store::testing::{
@@ -645,7 +646,7 @@ mod tests {
                 item_id: "t1",
                 item_class: ItemClass::Ticket,
                 payload: &MutationPayload::ItemStatus(StatusChange {
-                    status: "done".into(),
+                    status: Lifecycle::Done,
                 }),
                 promotion_operation_id: None,
                 now_iso: "2026-05-09T00:00:00.000Z",
