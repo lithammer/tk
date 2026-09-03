@@ -105,6 +105,10 @@ writer ship together, every new skip restores `open` inline, so no
 pre-existing divergence can accumulate for a later migration to find either. A
 repair for a population that is empty now and cannot grow is dead code.
 
+Consequences' third bullet — "Repairing an existing skipped close may clear an
+old Closing Reason and may expose a missing Backend key on the next sync" —
+describes only that migration, and is retired with it.
+
 The literal predicate this Decision described — a `done` Item with a
 `skipped` `set_item_status` Mutation targeting `done` — was not safe to ship
 as written even setting the empty population aside. A `done` Item carrying a

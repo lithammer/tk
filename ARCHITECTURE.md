@@ -227,9 +227,10 @@ backstops the terminal Lifecycle rule for future writers, and carries two
 exceptions today: exact Re-Adopt imports the Backend's Lifecycle in the single
 `items` update that rebinds a Local Item onto its own Former Backend Identity
 ([ADR 0047](./docs/adr/0047-detach-retains-reversible-backend-history.md)).
-Sync Skip of a failed `set_item_status` close is the second exception: the
-Store restores the Item to open before marking that exact Mutation skipped in
-the same transaction
+The second admits Sync Skip's relinquished close, and is the wider of the
+two: while an Item carries a `failed` `set_item_status` targeting `done`, any
+`done` -> `open` write on that Item is admitted, not only the reopen Sync Skip
+performs alongside marking that Mutation skipped
 ([ADR 0046](./docs/adr/0046-sync-skip-relinquishes-a-failed-close.md)).
 
 ## IDs

@@ -4597,6 +4597,66 @@ mod tests {
         assert_eq!(mutation_state, "failed");
     }
 
+    #[test]
+    fn mark_skipped_reports_a_trigger_refusal_as_its_own_invariant_break() {
+        // Migrations 015 and 016 have each recreated `items_no_escape_from_done`
+        // from scratch, and the object inventory an ADR-0028 rebuild is checked
+        // against names triggers without comparing their bodies. A future
+        // rebuild that copies an older body therefore drops the ADR-0046
+        // conjunct silently. Reproduce exactly that — the trigger as migration
+        // 015 left it, with no skip exception — and confirm Sync Skip names the
+        // Store invariant instead of reporting a storage fault.
+        let mut conn = open_seeded();
+        conn.execute_batch(
+            "drop trigger items_no_escape_from_done; \
+             create trigger items_no_escape_from_done before update of status on items \
+             for each row when old.status = 'done' and new.status != 'done' \
+             begin select raise(abort, 'cannot leave done state'); end;",
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "gh-53",
+                title: "Closed locally",
+                status: "done",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("53"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "set_item_status",
+                item_id: "t1",
+                payload_json: r#"{"status":"done"}"#,
+                state: "failed",
+                failure_json: Some(r#"{"detail":"rejected"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        let workflow = RemoteWorkflowGuard::for_test();
+        match mark_mutation_skipped(&mut conn, &workflow, 1, "2026-05-19T00:00:00Z").unwrap_err() {
+            MarkSkippedError::ReopenRefusedByTrigger(1) => {}
+            other => panic!("expected ReopenRefusedByTrigger, got {other:?}"),
+        }
+
+        let mutation_state: String = conn
+            .query_row("select state from mutations where sequence = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(mutation_state, "failed");
+    }
+
     // ---- pending/failed count -------------------------------------------
 
     #[test]
