@@ -28,11 +28,21 @@ const BACKUPS_KEPT: usize = 10;
 
 /// Why a Store Backup could not be written (ADR-0048).
 ///
-/// Kept distinct from the migration's own SQLite faults so the command layer
-/// can say the upgrade was refused for want of a backup rather than blaming
-/// the migration SQL.
+/// Carries the directory, which every underlying `std::io::Error` drops: it is
+/// a location this module invents and the manual alone names, so a user who
+/// has just had every command start refusing has nothing else to go on.
 #[derive(Debug, Error)]
-pub enum BackupError {
+#[error("{}: {source}", dir.display())]
+pub struct BackupError {
+    dir: PathBuf,
+    #[source]
+    source: Fault,
+}
+
+/// The fault behind a [`BackupError`], kept typed so a full disk stays
+/// distinguishable from an unwritable directory.
+#[derive(Debug, Error)]
+enum Fault {
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -47,12 +57,24 @@ pub fn take(conn: &Connection, now_iso: &str) -> Result<(), BackupError> {
     let Some(dir) = backup_dir(conn) else {
         return Ok(());
     };
-    fs::create_dir_all(&dir)?;
-    // ARCHITECTURE.md only allows tightening a directory tk created, which
-    // this one always is.
-    let _ = platform::set_dir_mode_0700(&dir);
+    write_into(conn, &dir, now_iso).map_err(|source| BackupError { dir, source })
+}
 
-    let partial = partial_path(&dir);
+/// The whole backup sequence, reporting the bare fault. [`take`] attaches the
+/// directory once here rather than at each of the six fallible steps.
+fn write_into(conn: &Connection, dir: &Path, now_iso: &str) -> Result<(), Fault> {
+    // Tighten only a directory tk just created, as `tk init` does for `tk/`
+    // (ARCHITECTURE.md). `create_dir_all` would also succeed on one the user
+    // made or symlinked elsewhere, and `chmod` follows symlinks.
+    match fs::create_dir(dir) {
+        Ok(()) => {
+            let _ = platform::set_dir_mode_0700(dir);
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(err) => return Err(err.into()),
+    }
+
+    let partial = partial_path(dir);
     // `VACUUM INTO` refuses a non-empty target, and a `SIGKILL` mid-vacuum
     // never reaches the cleanup below, so clear a leftover from an earlier
     // process that held this pid before writing.
@@ -62,14 +84,14 @@ pub fn take(conn: &Connection, now_iso: &str) -> Result<(), BackupError> {
         return Err(err.into());
     }
 
-    vacuum_into_place(conn, &partial, &dir, now_iso).inspect_err(|_| {
+    let named = vacuum_into_place(conn, &partial, now_iso).inspect_err(|_| {
         // Pruning will not collect this: it does not match a Store Backup's
         // name. Left behind, it would sit there until some later run drew the
         // same pid, so drop it here.
         let _ = fs::remove_file(&partial);
     })?;
 
-    prune(&dir);
+    prune(dir, &named);
     Ok(())
 }
 
@@ -93,14 +115,9 @@ fn backup_dir(conn: &Connection) -> Option<PathBuf> {
     Some(Path::new(path).parent()?.join("backups"))
 }
 
-/// Vacuum into `partial`, name it from what it actually holds, and move it
-/// into place.
-fn vacuum_into_place(
-    conn: &Connection,
-    partial: &Path,
-    dir: &Path,
-    now_iso: &str,
-) -> Result<(), BackupError> {
+/// Vacuum into `partial`, name it from what it actually holds, move it into
+/// place, and return where it landed.
+fn vacuum_into_place(conn: &Connection, partial: &Path, now_iso: &str) -> Result<PathBuf, Fault> {
     // `Connection::path` yields `None` for a non-UTF-8 store rather than the
     // bytes, so `backup_dir` has already turned that case away.
     let target = partial
@@ -115,39 +132,52 @@ fn vacuum_into_place(
     // sampled before the vacuum: a concurrent migrator can commit in between
     // (ADR-0024), and a label read out of the file cannot be wrong.
     // `schema_migrations` is authoritative; `pragma user_version` mirrors it.
+    //
+    // The probe connection must close before the rename: Windows refuses to
+    // rename a file with a live handle. Keeping it a statement temporary is
+    // what closes it here — do not hoist it to a binding.
     let version = migrations::current_version(&Connection::open(partial)?)?;
-    let named = dir.join(format!("{}-v{version:03}.db", file_stamp(now_iso)));
+    // Sibling of the working file, which already sits in the backup directory.
+    let named = partial.with_file_name(format!("{}-v{version:03}.db", file_stamp(now_iso)));
     fs::rename(partial, &named)?;
-    Ok(())
+    Ok(named)
 }
 
-/// Delete all but the newest [`BACKUPS_KEPT`] Store Backups in `dir`.
+/// Delete all but the newest [`BACKUPS_KEPT`] Store Backups in `dir`, never
+/// touching `keep`.
 ///
 /// Only files matching the generated name are considered, so the hand-made
 /// copies users keep beside their store are never deleted. The timestamp
 /// leads that name and is fixed-width, so sorting by name sorts by age.
 ///
-/// Infallible by design: the backup protecting the current upgrade is already
-/// on disk by the time this runs, and one file that will not delete must not
-/// strand every older one behind it.
-fn prune(dir: &Path) {
+/// `keep` is the backup protecting the migration about to run, and age here is
+/// the caller's clock: a clock that jumped backwards past the newest
+/// `BACKUPS_KEPT` stamps would otherwise sort the fresh backup into the delete
+/// slice and silently remove the very copy this run exists to make.
+///
+/// Infallible by design: that backup is already on disk, and one file that
+/// will not delete must not strand every older one behind it.
+fn prune(dir: &Path, keep: &Path) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
     let mut found: Vec<PathBuf> = entries
         .filter_map(|entry| {
             let path = entry.ok()?.path();
-            is_backup_name(path.file_name()?.to_str()?).then_some(path)
+            (path != keep && is_backup_name(path.file_name()?.to_str()?)).then_some(path)
         })
         .collect();
-    if found.len() <= BACKUPS_KEPT {
+    // `keep` occupies one of the `BACKUPS_KEPT` slots, so only that many less
+    // one may survive among the rest.
+    let survivors = BACKUPS_KEPT - 1;
+    if found.len() <= survivors {
         return;
     }
 
     // Every path shares `dir`, so `Path`'s component-wise ordering decides on
     // the filename alone — which the leading fixed-width stamp makes an age.
     found.sort();
-    for path in &found[..found.len() - BACKUPS_KEPT] {
+    for path in &found[..found.len() - survivors] {
         let _ = fs::remove_file(path);
     }
 }
@@ -227,6 +257,33 @@ mod tests {
                 name
             })
             .collect()
+    }
+
+    /// Retention selects by filename, and the filename carries the clock, so a
+    /// clock that jumped backwards sorts this run's own backup oldest. It must
+    /// still survive: it is the copy protecting the migration about to run, and
+    /// `prune` is infallible, so losing it would be silent.
+    #[test]
+    fn a_backwards_clock_cannot_prune_this_run_s_own_backup() {
+        let store = TmpStore::new("tk");
+        let mut conn = seed_store_at_version(&store, 4);
+        // Every existing backup stamped a year after `NOW`.
+        let dir = store.tk_dir().join("backups");
+        fs::create_dir_all(&dir).unwrap();
+        for n in 0..BACKUPS_KEPT + 2 {
+            let name = format!("2027-08-{:02}T00-00-00.000Z-v004.db", n + 1);
+            fs::write(dir.join(&name), b"backup from the future").unwrap();
+        }
+
+        migrations::apply_all(&mut conn, NOW).unwrap();
+
+        let kept = backups(&store);
+        assert!(
+            kept.contains(&"2026-09-03T13-45-00.123Z-v004.db".to_owned()),
+            "the fresh backup sorts oldest under a backwards clock and must \
+             still survive its own prune: {kept:?}"
+        );
+        assert_eq!(kept.len(), BACKUPS_KEPT, "retention is still bounded");
     }
 
     /// The shapes a user actually leaves beside their store by hand.
@@ -387,8 +444,12 @@ mod tests {
 
         let err = take(&conn, NOW).expect_err("the vacuum must fail");
         assert!(
-            matches!(err, BackupError::Sqlite(_)),
+            matches!(err.source, Fault::Sqlite(_)),
             "expected the vacuum's own refusal, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("backups"),
+            "the diagnostic must name the directory the user has never seen: {err}"
         );
 
         let left: Vec<_> = fs::read_dir(store.tk_dir().join("backups"))
@@ -402,7 +463,7 @@ mod tests {
     }
 
     #[test]
-    fn pruning_keeps_the_newest_ten() {
+    fn pruning_keeps_only_the_newest_backups() {
         let store = TmpStore::new("tk");
         let mut conn = seed_store_at_version(&store, 4);
         let seeded = seed_backups(&store, 12);
@@ -410,7 +471,11 @@ mod tests {
         migrations::apply_all(&mut conn, NOW).unwrap();
 
         let kept = backups(&store);
-        assert_eq!(kept.len(), BACKUPS_KEPT, "retention is bounded at ten");
+        assert_eq!(
+            kept.len(),
+            BACKUPS_KEPT,
+            "retention is bounded at BACKUPS_KEPT"
+        );
         assert!(
             kept.contains(&"2026-09-03T13-45-00.123Z-v004.db".to_owned()),
             "the backup this run just wrote must survive its own prune"
@@ -454,7 +519,19 @@ mod tests {
         assert_eq!(
             backups(&store).len(),
             BACKUPS_KEPT,
-            "nine seeded plus this run's own backup is exactly the limit"
+            "one under the limit, plus this run's own backup, is exactly the limit"
+        );
+    }
+
+    /// The window is a recorded decision, not an implementation detail: three
+    /// documents state it, and every other assertion here tracks the constant
+    /// symbolically, so without this nothing fails when the value moves.
+    #[test]
+    fn retention_is_the_recorded_ten() {
+        assert_eq!(
+            BACKUPS_KEPT, 10,
+            "ADR-0048, ARCHITECTURE.md and man/tk.1 all state ten; changing the \
+             window is an ADR amendment, not a constant edit"
         );
     }
 

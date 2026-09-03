@@ -193,7 +193,7 @@ pub enum OpenError {
     /// (ADR-0048), so the upgrade was refused. The inner cause is rendered
     /// after this line, as for [`OpenError::MigrationFailed`]. The store is
     /// intact and still at its old schema version.
-    #[error("failed to back up the Repository Store before migrating")]
+    #[error("failed to back up the Repository Store before migrating; the store is unchanged")]
     BackupFailed(backup::BackupError),
     /// Genuine SQLite fault opening or inspecting the store.
     #[error(transparent)]

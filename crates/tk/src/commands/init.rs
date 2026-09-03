@@ -102,9 +102,12 @@ pub fn run(deps: &mut Deps<'_>, _args: Args) -> Result<Exit, CommandError> {
             migrations::ApplyError::ForeignKeyCheck(table) => CommandError::failure(format!(
                 "migration left a dangling foreign key in table '{table}'"
             )),
+            // Same body and shape as the open path renders (resolver::open_error):
+            // the backup's own error names the directory that actually failed,
+            // which is not the store path every other arm here reports.
             migrations::ApplyError::Backup(backup_err) => CommandError::failure(format!(
-                "failed to back up {} before migrating: {backup_err}",
-                db_path.display()
+                "failed to back up the Repository Store before migrating; \
+                 the store is unchanged\n{backup_err}"
             )),
             migrations::ApplyError::Sqlite(sqlite_err) => {
                 CommandError::failure(format!("migration failed: {sqlite_err}"))

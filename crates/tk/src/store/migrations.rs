@@ -267,7 +267,7 @@ pub enum ApplyError {
     /// The Store Backup that must precede a migration could not be written
     /// (ADR-0048). Fail closed: the store keeps its old schema rather than
     /// being upgraded with no copy of what it held.
-    #[error("failed to back up the Repository Store before migrating")]
+    #[error("failed to back up the Repository Store before migrating; the store is unchanged")]
     Backup(#[from] BackupError),
     /// Underlying SQLite or driver error from the migration transaction.
     #[error(transparent)]

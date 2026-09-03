@@ -34,8 +34,8 @@ crates/tk/src/
                            replaceable wire transport under remote/github/
   render/                  terminal-rendering subsystem (palette, styler,
                            sanitize)
-  store/                   Repository Store, migrations, Mutation Log, and
-                           sync helpers
+  store/                   Repository Store, migrations, the pre-migration
+                           Store Backup, Mutation Log, and sync helpers
   sync.rs                  sync engine orchestration
 crates/tk/tests/
   scenarios.rs             CLI scenario harness (insta + assert_cmd)
@@ -65,7 +65,9 @@ small boundary module after the second caller proves the shape.
   phrasing out of command modules.
 - `store/` owns Repository Store opening, migrations, current-state reads and
   writes, Display ID / Alias resolution, sequence allocation, and Mutation Log
-  persistence. A Mutation Log read projected onto an item read — the
+  persistence. `store/backup.rs` owns the Store Backup mechanism — where the
+  copy goes, how it is named, and how many survive; `store/migrations.rs` owns
+  only the decision that one is owed (ADR-0048). A Mutation Log read projected onto an item read — the
   `tk list` / `tk search` row markers, and the per-Item Mutation list
   `tk show` renders — belongs beside that item read in `store/repository/`;
   the log-oriented views belong to `store/sync.rs`, which owns Remote
@@ -137,6 +139,10 @@ Important stable contracts:
 - `schema_migrations` and `PRAGMA user_version` track migrations.
   `schema_migrations` is authoritative and `PRAGMA user_version` mirrors it;
   both are written in the migration's own transaction.
+- Directories tk creates under `<git-common-dir>/tk/` are tightened to `0700`
+  where the host has Unix-style permissions. Only a directory tk created in
+  that same call is tightened; one that already existed keeps the permissions
+  it has, since it is the user's choice, not tk's.
 - A Store Backup is written to `<git-common-dir>/tk/backups/` before any
   pending migration runs against a store that already has a schema, and the
   newest ten are kept ([ADR-0048](./docs/adr/0048-migrations-back-up-the-repository-store-first.md)).
