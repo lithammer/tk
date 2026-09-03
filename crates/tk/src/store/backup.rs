@@ -52,31 +52,37 @@ pub fn write_pre_migration(conn: &Connection, now_iso: &str) -> Result<(), Backu
     // created" rule holds unconditionally here. Best-effort, as in `tk init`.
     let _ = platform::set_dir_mode_0700(&dir);
 
-    // Unique per PID namespace, which is the scope of the concurrency
-    // ADR-0024 designs for. A clock cannot serve here: the injectable test
-    // clock is pinned, so two runs would agree on the name.
-    let partial = dir.join(format!(".partial-{}.db", std::process::id()));
+    let partial = partial_path(&dir);
     // `VACUUM INTO` refuses a non-empty target, and a `SIGKILL` mid-vacuum
     // never reaches the cleanup below, so clear a leftover from an earlier
     // process that held this pid before writing.
-    if let Err(err) = fs::remove_file(&partial) {
-        if err.kind() != std::io::ErrorKind::NotFound {
-            return Err(err.into());
-        }
+    if let Err(err) = fs::remove_file(&partial)
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(err.into());
     }
 
     vacuum_into_place(conn, &partial, &dir, now_iso).inspect_err(|_| {
-        // A failed vacuum leaves a partial image. Pruning would ignore it —
-        // it does not match a Store Backup's name — so it would sit there
-        // until this pid came round again; drop it now instead.
+        // Pruning will not collect this: it does not match a Store Backup's
+        // name. Left behind, it would sit there until some later run drew the
+        // same pid, so drop it here.
         let _ = fs::remove_file(&partial);
     })?;
 
     // Best-effort: the backup protecting this upgrade is already on disk, so
     // refusing the migration because an old one could not be deleted would
     // trade the protection away for tidiness.
-    let _ = prune(&dir);
+    prune(&dir);
     Ok(())
+}
+
+/// Working name a backup is vacuumed to before it is renamed into place.
+///
+/// Unique per PID namespace, which is the scope of the concurrency ADR-0024
+/// designs for. A clock cannot serve here: the injectable test clock is
+/// pinned, so two runs would agree on the name.
+fn partial_path(dir: &Path) -> PathBuf {
+    dir.join(format!(".partial-{}.db", std::process::id()))
 }
 
 /// Directory Store Backups are written to, or `None` when the connection has
@@ -125,22 +131,30 @@ fn vacuum_into_place(
 /// Only files matching the generated name are considered, so the hand-made
 /// copies users keep beside their store are never deleted. The timestamp
 /// leads that name and is fixed-width, so sorting by name sorts by age.
-fn prune(dir: &Path) -> Result<(), BackupError> {
-    let mut found: Vec<PathBuf> = fs::read_dir(dir)?
+///
+/// Infallible by design: the backup protecting the current upgrade is already
+/// on disk by the time this runs, and one file that will not delete must not
+/// strand every older one behind it.
+fn prune(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut found: Vec<PathBuf> = entries
         .filter_map(|entry| {
             let path = entry.ok()?.path();
             is_backup_name(path.file_name()?.to_str()?).then_some(path)
         })
         .collect();
     if found.len() <= BACKUPS_KEPT {
-        return Ok(());
+        return;
     }
 
-    found.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+    // Every path shares `dir`, so `Path`'s component-wise ordering decides on
+    // the filename alone — which the leading fixed-width stamp makes an age.
+    found.sort();
     for path in &found[..found.len() - BACKUPS_KEPT] {
-        fs::remove_file(path)?;
+        let _ = fs::remove_file(path);
     }
-    Ok(())
 }
 
 /// Whether `name` is a Store Backup this module wrote.
@@ -285,7 +299,6 @@ mod tests {
     fn an_upgrade_with_no_rebuild_pending_is_still_backed_up() {
         let store = TmpStore::new("tk");
         let mut conn = seed_store_at_version(&store, 11);
-        seed_item(&conn, "t1", 1);
 
         assert!(
             ALL_MIGRATIONS
@@ -331,7 +344,6 @@ mod tests {
     fn a_backup_that_cannot_be_written_refuses_the_migration() {
         let store = TmpStore::new("tk");
         let mut conn = seed_store_at_version(&store, 4);
-        seed_item(&conn, "t1", 1);
         // A plain file where the directory belongs, so `create_dir_all` fails
         // for a reason that does not depend on running as an unprivileged user.
         fs::write(store.tk_dir().join("backups"), b"not a directory").unwrap();
@@ -355,33 +367,45 @@ mod tests {
     fn a_leftover_working_file_does_not_wedge_the_backup() {
         let store = TmpStore::new("tk");
         let mut conn = seed_store_at_version(&store, 4);
-        seed_item(&conn, "t1", 1);
 
         let dir = store.tk_dir().join("backups");
         fs::create_dir_all(&dir).unwrap();
-        fs::write(
-            dir.join(format!(".partial-{}.db", std::process::id())),
-            b"torn image from a killed process",
-        )
-        .unwrap();
+        fs::write(partial_path(&dir), b"torn image from a killed process").unwrap();
 
         migrations::apply_all(&mut conn, NOW).unwrap();
         assert_eq!(backups(&store), vec!["2026-09-03T13-45-00.123Z-v004.db"]);
     }
 
+    /// Drives the vacuum itself to failure — an open transaction is the one
+    /// refusal `VACUUM INTO` can be provoked into deterministically — and
+    /// asserts on the raw directory, not the filtered helper, because a
+    /// working file is exactly what the filter hides.
+    ///
+    /// What this pins is that the refusal reaches the caller and that the
+    /// failed path adds nothing to the directory. It does not exercise the
+    /// cleanup itself: SQLite rejects the transaction before it attaches the
+    /// output, so no working file is ever created here. The torn image that
+    /// cleanup exists for comes from a crash or an I/O fault mid-vacuum,
+    /// which no test can produce on demand.
     #[test]
-    fn a_failed_backup_leaves_no_working_file_behind() {
+    fn a_failed_vacuum_leaves_nothing_behind() {
         let store = TmpStore::new("tk");
-        let mut conn = seed_store_at_version(&store, 4);
-        let dir = store.tk_dir().join("backups");
-        fs::create_dir_all(&dir).unwrap();
-        // Vacuuming into a directory fails, and the cleanup must still run.
-        fs::create_dir(dir.join(format!(".partial-{}.db", std::process::id()))).unwrap();
+        let conn = seed_store_at_version(&store, 4);
+        conn.execute_batch("begin").unwrap();
 
-        migrations::apply_all(&mut conn, NOW).expect_err("the migration must be refused");
+        let err = write_pre_migration(&conn, NOW).expect_err("the vacuum must fail");
         assert!(
-            backups(&store).is_empty(),
-            "a partial image must never survive to read as a Store Backup"
+            matches!(err, BackupError::Sqlite(_)),
+            "expected the vacuum's own refusal, got {err:?}"
+        );
+
+        let left: Vec<_> = fs::read_dir(store.tk_dir().join("backups"))
+            .expect("the directory is created before the vacuum runs")
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert!(
+            left.is_empty(),
+            "a failed backup must leave neither a working file nor a named one: {left:?}"
         );
     }
 
@@ -389,7 +413,6 @@ mod tests {
     fn pruning_keeps_the_newest_ten() {
         let store = TmpStore::new("tk");
         let mut conn = seed_store_at_version(&store, 4);
-        seed_item(&conn, "t1", 1);
         let seeded = seed_backups(&store, 12);
 
         migrations::apply_all(&mut conn, NOW).unwrap();
@@ -411,7 +434,6 @@ mod tests {
     fn pruning_leaves_hand_made_copies_alone() {
         let store = TmpStore::new("tk");
         let mut conn = seed_store_at_version(&store, 4);
-        seed_item(&conn, "t1", 1);
         seed_backups(&store, 12);
 
         let dir = store.tk_dir().join("backups");
@@ -433,7 +455,6 @@ mod tests {
     fn a_run_under_the_limit_prunes_nothing() {
         let store = TmpStore::new("tk");
         let mut conn = seed_store_at_version(&store, 4);
-        seed_item(&conn, "t1", 1);
         seed_backups(&store, BACKUPS_KEPT - 1);
 
         migrations::apply_all(&mut conn, NOW).unwrap();
