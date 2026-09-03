@@ -2464,20 +2464,18 @@ mod tests {
     }
 
     /// The `items` indexes and triggers ADR-0028's rebuild recipe covers, as
-    /// the store holds them, sorted. Both the name inventory and each trigger's
-    /// SQL are load-bearing: a rebuild can recreate an older body under the
-    /// same name, silently dropping a later invariant. Index SQL is omitted
-    /// because a rebuild can deliberately change an index definition.
+    /// the store holds them, sorted. SQLite's own indexes have no SQL and are
+    /// not part of the rebuild recipe. Both the name inventory and each
+    /// trigger's SQL are load-bearing: a rebuild can recreate an older body
+    /// under the same name, silently dropping a later invariant. Index SQL is
+    /// omitted because a rebuild can deliberately change an index definition.
     fn items_objects(conn: &Connection) -> Vec<(String, Option<String>)> {
         conn.prepare(
             "select name, case when type = 'trigger' then sql end \
                    from sqlite_master \
-                  where name in (\
-                    'active_backend_identity_not_owned_by_another_former_item_insert', \
-                    'active_backend_identity_not_owned_by_another_former_item_update', \
-                    'items_backend_unique', 'items_container_idx', \
-                                 'items_id_class_unique', 'items_next_idx', \
-                                 'items_no_escape_from_done') \
+                  where tbl_name = 'items' \
+                    and type in ('index', 'trigger') \
+                    and sql is not null \
                   order by name",
         )
         .unwrap()
@@ -2487,11 +2485,8 @@ mod tests {
         .unwrap()
     }
 
-    fn items_object_names(conn: &Connection) -> Vec<String> {
-        items_objects(conn)
-            .into_iter()
-            .map(|(name, _)| name)
-            .collect()
+    fn items_object_names(objects: &[(String, Option<String>)]) -> Vec<&str> {
+        objects.iter().map(|(name, _)| name.as_str()).collect()
     }
 
     #[test]
@@ -2643,9 +2638,10 @@ mod tests {
         // would fail the same name assertion.
         apply_through(&mut conn, 11, "2026-05-09T00:00:01.000Z").unwrap();
 
-        assert_eq!(items_objects(&conn), before);
+        let after = items_objects(&conn);
+        assert_eq!(after, before);
         assert_eq!(
-            items_object_names(&conn),
+            items_object_names(&after),
             vec![
                 "items_backend_unique",
                 "items_container_idx",
@@ -2684,9 +2680,10 @@ mod tests {
         // one of them on the way.
         let mut conn = open_memory();
         apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        let objects = items_objects(&conn);
 
         assert_eq!(
-            items_object_names(&conn),
+            items_object_names(&objects),
             vec![
                 "active_backend_identity_not_owned_by_another_former_item_insert",
                 "active_backend_identity_not_owned_by_another_former_item_update",
