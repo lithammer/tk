@@ -31,7 +31,7 @@ use crate::clock::Clock;
 use crate::domain::item_class::ItemClass;
 use crate::git::discovery;
 use crate::proc::ProcRunner;
-use crate::store::{migrations, sequences};
+use crate::store::{backup, migrations, sequences};
 
 pub mod create;
 pub mod dependency;
@@ -194,7 +194,7 @@ pub enum OpenError {
     /// after this line, as for [`OpenError::MigrationFailed`]. The store is
     /// intact and still at its old schema version.
     #[error("failed to back up the Repository Store before migrating")]
-    BackupFailed(migrations::BackupError),
+    BackupFailed(backup::BackupError),
     /// Genuine SQLite fault opening or inspecting the store.
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
