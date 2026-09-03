@@ -400,6 +400,13 @@ fn first_foreign_key_violation(conn: &Connection) -> Result<Option<String>, rusq
     }
 }
 
+/// How many Store Backups survive a prune (ADR-0048).
+///
+/// Ten rather than three: a lossy migration is noticed late, and the migration
+/// list moves fast enough that three is a window of days for anyone building
+/// from source. Being bounded is the property that matters.
+const BACKUPS_KEPT: usize = 10;
+
 /// Directory Store Backups are written to, or `None` when the connection has
 /// no file to copy.
 ///
@@ -441,7 +448,52 @@ fn back_up(conn: &Connection, dir: &Path, now_iso: &str) -> Result<PathBuf, Back
         // retention and read as a complete Store Backup.
         let _ = fs::remove_file(&partial);
     }
-    written
+    let named = written?;
+
+    // Best-effort: the backup protecting this upgrade is already on disk, so
+    // refusing the migration because an old one could not be deleted would
+    // trade the protection away for tidiness.
+    let _ = prune(dir);
+    Ok(named)
+}
+
+/// Delete all but the newest [`BACKUPS_KEPT`] Store Backups in `dir`.
+///
+/// Only files matching the generated name are considered, so the hand-made
+/// copies users keep beside their store are never deleted. The timestamp
+/// leads that name and is fixed-width, so sorting the names sorts by age.
+fn prune(dir: &Path) -> Result<(), BackupError> {
+    let mut found: Vec<(String, PathBuf)> = fs::read_dir(dir)?
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            let name = path.file_name()?.to_str()?.to_owned();
+            is_backup_name(&name).then_some((name, path))
+        })
+        .collect();
+    if found.len() <= BACKUPS_KEPT {
+        return Ok(());
+    }
+
+    found.sort_by(|(left, _), (right, _)| left.cmp(right));
+    for (_, path) in &found[..found.len() - BACKUPS_KEPT] {
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+/// Whether `name` is a Store Backup this runner wrote.
+///
+/// Matches the `<stamp>-v<version>.db` shape [`write_backup`] produces, and
+/// nothing else — not the working file, not the store, and not a hand-made
+/// copy such as `tk.db.bak`.
+fn is_backup_name(name: &str) -> bool {
+    let Some(rest) = name.strip_suffix(".db") else {
+        return false;
+    };
+    let Some((stamp, version)) = rest.rsplit_once("-v") else {
+        return false;
+    };
+    !stamp.is_empty() && version.len() >= 3 && version.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Vacuum into `partial`, name it from what it actually holds, and move it
@@ -3080,6 +3132,104 @@ mod backup_tests {
         assert!(
             file_stamp(NOW).contains(".123"),
             "milliseconds stay: the pinned test clock cannot uniquify a name"
+        );
+    }
+
+    /// Seed `count` Store Backups with ascending stamps, oldest first.
+    fn seed_backups(dir: &Path, count: usize) -> Vec<String> {
+        let backups = dir.join("backups");
+        fs::create_dir_all(&backups).unwrap();
+        (0..count)
+            .map(|n| {
+                let name = format!("2026-08-{:02}T00-00-00.000Z-v004.db", n + 1);
+                fs::write(backups.join(&name), b"older backup").unwrap();
+                name
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pruning_keeps_the_newest_ten() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut conn = frozen_store(tmp.path(), 4);
+        seed_item(&conn, "t1", 1);
+        let seeded = seed_backups(tmp.path(), 12);
+
+        apply_all(&mut conn, NOW).unwrap();
+
+        let kept = backups(tmp.path());
+        assert_eq!(kept.len(), BACKUPS_KEPT, "retention is bounded at ten");
+        assert!(
+            kept.contains(&"2026-09-03T13-45-00.123Z-v004.db".to_owned()),
+            "the backup this run just wrote must survive its own prune"
+        );
+        assert!(
+            !kept.contains(&seeded[0]) && !kept.contains(&seeded[1]),
+            "the two oldest go first: the stamp leads the name, so sorting sorts by age"
+        );
+        assert!(kept.contains(&seeded[11]), "the newest seeded backup stays");
+    }
+
+    #[test]
+    fn pruning_leaves_hand_made_copies_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut conn = frozen_store(tmp.path(), 4);
+        seed_item(&conn, "t1", 1);
+        seed_backups(tmp.path(), 12);
+
+        // The shapes a user actually leaves beside their store.
+        let dir = tmp.path().join("backups");
+        for stray in [
+            "tk.db.bak",
+            "ticket.db.bak",
+            "tk.db.bak-before-prefix-20260521102714",
+            "notes.txt",
+        ] {
+            fs::write(dir.join(stray), b"hand made").unwrap();
+        }
+
+        apply_all(&mut conn, NOW).unwrap();
+
+        for stray in [
+            "tk.db.bak",
+            "ticket.db.bak",
+            "tk.db.bak-before-prefix-20260521102714",
+            "notes.txt",
+        ] {
+            assert!(
+                dir.join(stray).exists(),
+                "pruning inside .git must only ever delete what it wrote: {stray} is gone"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_generated_name_counts_as_a_backup() {
+        assert!(is_backup_name("2026-09-03T13-45-00.123Z-v004.db"));
+        assert!(is_backup_name("2026-09-03T13-45-00.123Z-v1024.db"));
+
+        assert!(!is_backup_name("tk.db"));
+        assert!(!is_backup_name("tk.db.bak"));
+        assert!(!is_backup_name("tk.db.bak-before-prefix-20260521102714"));
+        assert!(!is_backup_name(".partial-4242.db"));
+        assert!(!is_backup_name("2026-09-03T13-45-00.123Z-v04.db"));
+        assert!(!is_backup_name("2026-09-03T13-45-00.123Z-vabc.db"));
+        assert!(!is_backup_name("-v004.db"));
+    }
+
+    #[test]
+    fn a_run_under_the_limit_prunes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut conn = frozen_store(tmp.path(), 4);
+        seed_item(&conn, "t1", 1);
+        seed_backups(tmp.path(), BACKUPS_KEPT - 1);
+
+        apply_all(&mut conn, NOW).unwrap();
+
+        assert_eq!(
+            backups(tmp.path()).len(),
+            BACKUPS_KEPT,
+            "nine seeded plus this run's own backup is exactly the limit"
         );
     }
 }
