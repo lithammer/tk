@@ -2466,8 +2466,8 @@ mod tests {
     /// The explicit indexes and triggers on `items` that an ADR-0028 rebuild
     /// must preserve. The table definition recreates SQLite's automatic
     /// indexes, whose schema rows have no SQL. Trigger bodies are part of this
-    /// inventory because the same name can hide an older invariant; index
-    /// bodies are not, since a rebuild may deliberately change them.
+    /// inventory because the same name can hide an older invariant; index SQL
+    /// is not, since a rebuild may deliberately change it.
     fn items_rebuild_inventory(conn: &Connection) -> Vec<(String, Option<String>)> {
         conn.prepare(
             "select name, case when type = 'trigger' then sql end \
@@ -2506,9 +2506,8 @@ mod tests {
 
     #[test]
     fn every_trigger_body_is_pinned() {
-        // The `items` rebuild inventory pins the triggers a rebuild could
-        // discard. This broader inventory pins triggers on the other tables
-        // too, so any trigger body change must update this snapshot.
+        // `items_rebuild_inventory` covers triggers owned by `items`; this
+        // snapshot also pins triggers owned by other tables.
         let mut conn = open_memory();
         apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
         let mut stmt = conn
@@ -2633,8 +2632,6 @@ mod tests {
         let after = items_rebuild_inventory(&conn);
         assert_eq!(after, before);
 
-        // The trigger is the one object with observable behaviour rather than a
-        // plan effect, so it is worth firing as well as naming.
         conn.execute("update items set status = 'done' where id = 't1'", [])
             .unwrap();
         let escape = conn.execute("update items set status = 'open' where id = 't1'", []);
@@ -2655,11 +2652,8 @@ mod tests {
 
     #[test]
     fn next_index_drop_keeps_every_other_items_object() {
-        // ADR-0045 took `items_next_idx` off the set an ADR-0028 rebuild
-        // recreates, so its absence is a contract now: a rebuild that copies an
-        // older recreate list restores it and fails here. Naming the four
-        // survivors and later `items` triggers catches a rebuild that loses
-        // one of them on the way.
+        // ADR-0045 removed `items_next_idx`. Pin the current explicit `items`
+        // objects so a later rebuild cannot restore it or drop another object.
         let mut conn = open_memory();
         apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
         let names: Vec<String> = items_rebuild_inventory(&conn)
