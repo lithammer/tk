@@ -279,7 +279,9 @@ fn render_skip_error<W: Write + ?Sized>(stderr: &mut W, err: &MarkSkippedError) 
                 "tk sync --skip: Mutation {seq} is a Promotion; skipping it would leave every Mutation queued behind it with no backend identity to apply against. Use 'tk promote cancel <id>' to withdraw the whole Promotion Operation."
             );
         }
-        MarkSkippedError::Transition(err) => {
+        MarkSkippedError::Transition(_)
+        | MarkSkippedError::ReopenMatchedNothing(_)
+        | MarkSkippedError::ReopenRefusedByTrigger(_) => {
             let _ = writeln!(
                 stderr,
                 "tk sync --skip: {err}; this is a Ticket bug — please report it"
