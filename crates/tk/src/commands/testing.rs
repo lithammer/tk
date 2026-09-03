@@ -17,6 +17,7 @@ use serde_json::json;
 
 use crate::cli::Deps;
 use crate::clock::FakeClock;
+use crate::domain::lifecycle::Lifecycle;
 use crate::proc::{FakeRunner, RunOutput};
 use crate::render::Styler;
 use crate::store::migrations;
@@ -121,6 +122,10 @@ pub(crate) fn expect_git(h: &Harness<'_>, store: &TmpStore) {
 }
 
 /// Queue one exact GraphQL Pull request and its matching Issue response.
+///
+/// `lifecycle` selects the GitHub issue `state` the response carries, mirroring
+/// the decode direction in [`crate::remote::github`]'s Pull `lifecycle()`:
+/// `Lifecycle::Open` -> `"OPEN"`, `Lifecycle::Done` -> `"CLOSED"`.
 pub(crate) fn expect_github_pull(
     h: &Harness<'_>,
     owner: &str,
@@ -128,7 +133,12 @@ pub(crate) fn expect_github_pull(
     number: i64,
     title: &str,
     body: &str,
+    lifecycle: Lifecycle,
 ) {
+    let state = match lifecycle {
+        Lifecycle::Open => "OPEN",
+        Lifecycle::Done => "CLOSED",
+    };
     let request = crate::remote::github::single_pull_request_body(owner, name, number);
     let response = serde_json::to_vec(&json!({
         "data": {
@@ -139,7 +149,7 @@ pub(crate) fn expect_github_pull(
                     "number": number,
                     "title": title,
                     "body": body,
-                    "state": "OPEN",
+                    "state": state,
                     "url": format!("https://github.com/{owner}/{name}/issues/{number}"),
                     "issueType": null,
                     "labels": { "nodes": [] },

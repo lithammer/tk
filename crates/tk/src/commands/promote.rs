@@ -1682,7 +1682,7 @@ mod tests {
                 stderr: Vec::new(),
             },
         );
-        expect_github_pull(&h, "o", "r", 42, "Local work", "");
+        expect_github_pull(&h, "o", "r", 42, "Local work", "", Lifecycle::Open);
 
         let code = run_subcommand_rendered(
             &mut h,

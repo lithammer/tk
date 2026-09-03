@@ -25,6 +25,7 @@ use crate::domain::backend_outcome::FailureClass;
 use crate::remote::factory::{self, OpenError as FactoryOpenError};
 use crate::store::sync::{
     self as store_sync, LogDetailRow, LogError, LogListFilter, LogListRow, MarkSkippedError,
+    SkipOutcome,
 };
 use crate::sync::{
     self, CreatedIdentityNotStoredCause, RunSyncError, RunSyncErrorCategory, SyncReport,
@@ -113,12 +114,16 @@ fn run_sync(deps: Deps<'_>, skip: Option<i64>) -> Exit {
     };
 
     // Commit the skip before opening the adapter: a broken or unimplemented
-    // Remote must not block an operator from bypassing a failed Mutation.
+    // Remote must not block an operator from bypassing a failed Mutation, and
+    // the committed local outcome is reported before Backend work begins
+    // (ADR-0046).
     if let Some(seq) = skip {
-        if let Err(err) = store_sync::mark_mutation_skipped(store.conn_mut(), &workflow, seq, &now)
-        {
-            render_skip_error(stderr, &err);
-            return Exit::Failure;
+        match store_sync::mark_mutation_skipped(store.conn_mut(), &workflow, seq, &now) {
+            Ok(outcome) => render_skip_outcome(stdout, seq, &outcome),
+            Err(err) => {
+                render_skip_error(stderr, &err);
+                return Exit::Failure;
+            }
         }
     }
 
@@ -151,7 +156,7 @@ fn run_sync(deps: Deps<'_>, skip: Option<i64>) -> Exit {
             return Exit::Failure;
         }
     };
-    render_sync_report(stdout, &report, skip);
+    render_sync_report(stdout, &report);
     if report.stopped_at_sequence.is_some() {
         Exit::Failure
     } else {
@@ -246,20 +251,34 @@ fn run_log(deps: Deps<'_>, args: LogArgs) -> Exit {
 }
 
 /// Render the one-line sync summary: `Sync complete: <p> pulled, <a> applied`
-/// with optional `, skipped <id>` and `, stopped at <seq>` clauses.
-fn render_sync_report<W: Write + ?Sized>(stdout: &mut W, report: &SyncReport, skip: Option<i64>) {
+/// with an optional `, stopped at <seq>` clause.
+fn render_sync_report<W: Write + ?Sized>(stdout: &mut W, report: &SyncReport) {
     let _ = write!(
         stdout,
         "Sync complete: {} pulled, {} applied",
         report.pulled_count, report.applied_count
     );
-    if let Some(seq) = skip {
-        let _ = write!(stdout, ", skipped {seq}");
-    }
     if let Some(seq) = report.stopped_at_sequence {
         let _ = write!(stdout, ", stopped at {seq}");
     }
     let _ = writeln!(stdout, ".");
+}
+
+/// Render the ADR-0046 pre-adapter skip line: the committed local outcome of
+/// `--skip`, printed before the adapter is opened so it survives even when
+/// the Remote is broken, unconfigured, or unimplemented.
+fn render_skip_outcome<W: Write + ?Sized>(stdout: &mut W, seq: i64, outcome: &SkipOutcome) {
+    match outcome {
+        SkipOutcome::Bypassed => {
+            let _ = writeln!(stdout, "Skipped Mutation {seq}.");
+        }
+        SkipOutcome::RelinquishedClose { display_id } => {
+            let _ = writeln!(
+                stdout,
+                "Skipped Mutation {seq}; restored {display_id} to open."
+            );
+        }
+    }
 }
 
 fn render_skip_error<W: Write + ?Sized>(stderr: &mut W, err: &MarkSkippedError) {
@@ -418,6 +437,7 @@ mod tests {
     use crate::commands::testing::{Harness, cwd, expect_git, expect_github_pull, seed_store};
     use crate::domain::backend_kind::BackendKind;
     use crate::domain::backend_operation::BackendItemIdentity;
+    use crate::domain::lifecycle::Lifecycle;
     use crate::domain::mutation_payload::Promotion;
     use crate::domain::mutation_type::MutationType;
     use crate::proc::{FakeRunner, ProcError, RunOutput};
@@ -627,7 +647,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
-        expect_github_pull(&h, "o", "r", 1, "Backend", "B");
+        expect_github_pull(&h, "o", "r", 1, "Backend", "B", Lifecycle::Open);
         h.runner.expect(
             &["gh", "issue", "edit", backend_key],
             RunOutput {
@@ -692,6 +712,12 @@ mod tests {
             },
         );
         assert_eq!(code, Exit::Failure);
+        assert!(
+            String::from_utf8(h.stdout)
+                .unwrap()
+                .contains("Skipped Mutation 1."),
+            "the pre-adapter skip line is reported even though sync then failed"
+        );
 
         let conn = Connection::open(store.db_path()).unwrap();
         let state: String = conn
@@ -700,6 +726,144 @@ mod tests {
             })
             .unwrap();
         assert_eq!(state, "skipped", "skip committed before the no-remote exit");
+    }
+
+    #[test]
+    fn sync_skip_reports_the_relinquished_close_before_adapter_work() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "gh-1",
+                title: "Needs its close relinquished",
+                status: "done",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("1"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "set_item_status",
+                item_id: "t1",
+                payload_json: r#"{"status":"done"}"#,
+                state: "failed",
+                failure_json: Some(r#"{"detail":"rejected"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        // No Remote configured: the skip's line is what this test cares about,
+        // reported before sync fails on the missing Remote.
+        let code = run(
+            h.deps(),
+            Args {
+                subcommand: None,
+                skip: Some(1),
+            },
+        );
+        assert_eq!(code, Exit::Failure);
+        assert!(
+            String::from_utf8(h.stdout)
+                .unwrap()
+                .contains("Skipped Mutation 1; restored gh-1 to open.")
+        );
+    }
+
+    #[test]
+    fn sync_skip_relinquished_close_reenters_pull_and_reimports_done() {
+        // ADR-0046 Consequences: "If the Backend was independently closed,
+        // Pull imports `done` again." The reopen has to land before Pull reads
+        // the working set, because `working_set_keys` selects `status = 'open'`.
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_remote(
+            &conn,
+            FixtureRemote {
+                backend_kind: "github",
+                config_json: "{}",
+                ..FixtureRemote::default()
+            },
+        )
+        .unwrap();
+        let backend_key = "https://github.com/o/r/issues/1";
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "gh-1",
+                title: "Needs its close relinquished",
+                status: "done",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some(backend_key),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "set_item_status",
+                item_id: "t1",
+                payload_json: r#"{"status":"done"}"#,
+                state: "failed",
+                failure_json: Some(r#"{"detail":"rejected"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        // The reopen lands before this Pull call, so the Item is back in the
+        // open-only working set; the Backend answers with the issue closed.
+        expect_github_pull(
+            &h,
+            "o",
+            "r",
+            1,
+            "Needs its close relinquished",
+            "",
+            Lifecycle::Done,
+        );
+        let code = run(
+            h.deps(),
+            Args {
+                subcommand: None,
+                skip: Some(1),
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        assert_eq!(
+            String::from_utf8(h.stdout).unwrap(),
+            "Skipped Mutation 1; restored gh-1 to open.\nSync complete: 1 pulled, 0 applied.\n"
+        );
+
+        let status: String = Connection::open(store.db_path())
+            .unwrap()
+            .query_row("select status from items where id = 't1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            status, "done",
+            "Pull re-imported the independently closed Item"
+        );
     }
 
     #[test]
@@ -1069,7 +1233,7 @@ mod tests {
     // ---- report / error rendering ---------------------------------------
 
     #[test]
-    fn render_report_includes_skipped_and_stopped_clauses() {
+    fn render_report_includes_stopped_clause() {
         let mut out = Vec::new();
         render_sync_report(
             &mut out,
@@ -1078,16 +1242,15 @@ mod tests {
                 applied_count: 2,
                 stopped_at_sequence: Some(9),
             },
-            Some(4),
         );
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            "Sync complete: 3 pulled, 2 applied, skipped 4, stopped at 9.\n"
+            "Sync complete: 3 pulled, 2 applied, stopped at 9.\n"
         );
     }
 
     #[test]
-    fn render_report_plain_when_no_skip_or_stop() {
+    fn render_report_plain_when_no_stop() {
         let mut out = Vec::new();
         render_sync_report(
             &mut out,
@@ -1096,7 +1259,6 @@ mod tests {
                 applied_count: 0,
                 stopped_at_sequence: None,
             },
-            None,
         );
         assert_eq!(
             String::from_utf8(out).unwrap(),
