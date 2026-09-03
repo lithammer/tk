@@ -12,15 +12,15 @@ use std::path::{Path, PathBuf};
 
 use rand::SeedableRng;
 use rand::rngs::StdRng;
-use rusqlite::Connection;
 use serde_json::json;
+
+pub(crate) use crate::store::testing::{seed_store, seed_store_at_version};
 
 use crate::cli::Deps;
 use crate::clock::FakeClock;
 use crate::domain::lifecycle::Lifecycle;
 use crate::proc::{FakeRunner, RunOutput};
 use crate::render::Styler;
-use crate::store::migrations;
 use crate::store::testing::TmpStore;
 
 /// Fixed wall clock for command tests. Timestamps and the ULIDs derived from
@@ -177,25 +177,4 @@ pub(crate) fn expect_github_pull(
             stderr: Vec::new(),
         },
     );
-}
-
-/// Seed a Repository Store at the current schema version, with the `tk`
-/// Display Prefix `tk init` would have written.
-pub(crate) fn seed_store(store: &TmpStore) -> Connection {
-    seed_store_at_version(store, migrations::MAX_KNOWN_VERSION)
-}
-
-/// Seed a store frozen at `version`, omitting later migrations — stands in
-/// for an on-disk store written by an older `tk` binary.
-pub(crate) fn seed_store_at_version(store: &TmpStore, version: u32) -> Connection {
-    std::fs::create_dir_all(store.tk_dir()).unwrap();
-    let mut conn = Connection::open(store.db_path()).unwrap();
-    conn.execute_batch("pragma foreign_keys = on").unwrap();
-    migrations::apply_through(&mut conn, version, "2026-05-09T00:00:00.000Z").unwrap();
-    conn.execute(
-        "insert into store_config(key, value) values ('display_prefix', 'tk')",
-        [],
-    )
-    .unwrap();
-    conn
 }

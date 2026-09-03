@@ -73,7 +73,17 @@ pub fn open_error(err: &OpenError) -> CommandError {
         // underlying SQLite cause (matching the storage-error shape), so the
         // upgrade fault is not reduced to a bare headline.
         OpenError::MigrationFailed(e) => CommandError::failure(format!("{err}\n{e}")),
-        _ => CommandError::failure(format!("{err}")),
+        // Same shape: the refusal headline plus the underlying cause, so the
+        // user can tell a full disk from an unwritable directory (ADR-0048).
+        OpenError::BackupFailed(e) => CommandError::failure(format!("{err}\n{e}")),
+        // Exhaustive on purpose: every variant left here renders as its own
+        // `Display` and carries no inner cause to lose. A catch-all would let
+        // the next variant that *does* carry one fall through and drop it.
+        OpenError::DiscoveryFailed(_)
+        | OpenError::StoreMissing
+        | OpenError::NotRepositoryStore
+        | OpenError::FromFutureVersion
+        | OpenError::MigrationForeignKeyCheck(_) => CommandError::failure(format!("{err}")),
     }
 }
 

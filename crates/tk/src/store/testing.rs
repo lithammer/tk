@@ -22,6 +22,7 @@ use tempfile::TempDir;
 use crate::domain::backend_operation::BackendItemIdentity;
 use crate::domain::lifecycle::Lifecycle;
 use crate::domain::work_state::WorkState;
+use crate::store::migrations;
 
 /// Apply a Promotion receipt inside the write transaction its deferred Display
 /// ID foreign key requires.
@@ -542,4 +543,25 @@ pub fn insert_fixture_remote(conn: &Connection, remote: FixtureRemote<'_>) -> ru
         ],
     )?;
     tx.commit()
+}
+
+/// Seed a Repository Store at the current schema version, with the `tk`
+/// Display Prefix `tk init` would have written.
+pub fn seed_store(store: &TmpStore) -> Connection {
+    seed_store_at_version(store, migrations::MAX_KNOWN_VERSION)
+}
+
+/// Seed a store frozen at `version`, omitting later migrations — stands in
+/// for an on-disk store written by an older `tk` binary.
+pub fn seed_store_at_version(store: &TmpStore, version: u32) -> Connection {
+    std::fs::create_dir_all(store.tk_dir()).unwrap();
+    let mut conn = Connection::open(store.db_path()).unwrap();
+    conn.execute_batch("pragma foreign_keys = on").unwrap();
+    migrations::apply_through(&mut conn, version, "2026-05-09T00:00:00.000Z").unwrap();
+    conn.execute(
+        "insert into store_config(key, value) values ('display_prefix', 'tk')",
+        [],
+    )
+    .unwrap();
+    conn
 }

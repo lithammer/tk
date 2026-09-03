@@ -11,6 +11,8 @@
 use rusqlite::{Connection, OptionalExtension};
 use thiserror::Error;
 
+use crate::store::backup::{self, BackupError};
+
 /// Application ID written to `pragma application_id` so an existing SQLite
 /// file can be identified as a tk Repository Store. Spelled `TKDB` in
 /// big-endian ASCII (`0x54 0x4B 0x44 0x42`).
@@ -262,6 +264,11 @@ pub enum ApplyError {
     /// migration transaction rolls back so the rebuild is all-or-nothing.
     #[error("migration left a dangling foreign key in table `{0}`")]
     ForeignKeyCheck(String),
+    /// The Store Backup that must precede a migration could not be written
+    /// (ADR-0048). Fail closed: the store keeps its old schema rather than
+    /// being upgraded with no copy of what it held.
+    #[error("failed to back up the Repository Store before migrating; the store is unchanged")]
+    Backup(#[from] BackupError),
     /// Underlying SQLite or driver error from the migration transaction.
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
@@ -285,6 +292,14 @@ pub fn apply_all(conn: &mut Connection, now_iso: &str) -> Result<(), ApplyError>
     let recorded = current_version(conn)?;
     if recorded > i64::from(MAX_KNOWN_VERSION) {
         return Err(ApplyError::StoreFromFutureVersion);
+    }
+
+    // One Store Backup per run, before the run (ADR-0048). A store at version
+    // 0 is being created and has nothing to lose, which is the case `tk init`
+    // brings here; below `MAX_KNOWN_VERSION` is what the loop finds pending,
+    // since `ALL_MIGRATIONS` ascends to it.
+    if recorded > 0 && recorded < i64::from(MAX_KNOWN_VERSION) {
+        backup::take(conn, now_iso)?;
     }
 
     for mig in ALL_MIGRATIONS {

@@ -67,6 +67,28 @@ same repository and is untracked local state.
 .B tk init
 is idempotent. If the store already exists and is current, it reports the
 existing path instead of recreating it.
+.PP
+Opening a store created by an older
+.B tk
+applies the pending schema migrations first. Before doing so,
+.B tk
+writes a compacted copy of the store to
+\fI<git-common-dir>/tk/backups/\fR and keeps the ten most recent. If that copy
+cannot be written, the migration is refused and the store is left untouched.
+.PP
+A backup is readable evidence, not an undo. Restoring one in place does not
+reverse an upgrade: the current binary re-applies the same migrations the next
+time it opens the store. To recover a value a migration lost, read it out of
+the backup with an external
+.BR sqlite3 (1)
+\(em which
+.B tk
+does not ship \(em and re-apply it through the normal commands. If a backup is
+copied over
+\fItk.db\fR anyway, delete \fItk.db\-wal\fR and \fItk.db\-shm\fR first; the
+copy is not in WAL mode, and the store stays out of WAL until
+.B tk init
+runs again.
 .SS Creating Tickets and Epics
 .TP
 \fBtk add\fR [\fB\-\-bug\fR | \fB\-\-epic\fR] [\fB\-\-parent\fR \fIepic-id\fR] [\fB\-\-priority\fR \fIP0..P4\fR | \fB\-\-triage\fR] (\fB\-m\fR \fIparagraph\fR... | \fB\-F\fR \fIfile\fR)

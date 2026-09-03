@@ -1,8 +1,9 @@
 //! Repository Store module: SQLite-backed current-state store + Mutation Log.
 //!
-//! The store layer owns: schema migrations, the `display_prefix` seed,
-//! the monotonic [`sequences`] counters, the [`mutations`] outbox, the
-//! [`repository`] facade exposing typed item operations
+//! The store layer owns: schema migrations, the pre-migration [`backup`]
+//! (ADR-0048), the `display_prefix` seed, the monotonic [`sequences`]
+//! counters, the [`mutations`] outbox, the [`repository`] facade exposing
+//! typed item operations
 //! (open / resolve / list / next / show / create / update / status / dependency),
 //! the [`sync`] helpers (Pull merge, Mutation Log decode + state transitions,
 //! Remote read), the [`promotion`] store side of `tk promote` (the preflight
@@ -11,6 +12,7 @@
 //! reads that say whether the operation resolved), and the `sql_value` SQLite
 //! value mapping for the domain enums.
 
+pub mod backup;
 pub mod display_prefix;
 pub mod migrations;
 pub mod mutations;

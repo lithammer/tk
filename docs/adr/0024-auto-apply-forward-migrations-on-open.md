@@ -58,7 +58,9 @@ on-disk version must refuse to operate rather than guess.
   already applied. This closes the read-then-write TOCTOU and also hardens
   `tk init`.
 - **Forward-only.** Down-migrations and rollback remain out of scope; the
-  migration list only grows.
+  migration list only grows. Because an upgrade on open is unprompted and
+  cannot be undone, ADR-0048 has the runner write a Store Backup before
+  applying anything to a store that already has a schema.
 - **Error surface.** An open-time migration failure maps to a distinct
   `OpenError::MigrationFailed` rendered as `failed to apply pending migrations
   to the Repository Store` followed by the underlying SQLite cause, rather than
