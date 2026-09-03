@@ -218,14 +218,17 @@ mod tests {
 
     const NOW: &str = "2026-09-03T13:45:00.123Z";
 
-    /// Store Backups present in `store`, sorted, excluding any working file.
+    /// Everything in the backup directory, sorted.
+    ///
+    /// Deliberately unfiltered. A working file left behind is a leak `prune`
+    /// will never collect — `is_backup_name` rejects it — and it is a full copy
+    /// of the store, so every caller listing this directory should see one.
     fn backups(store: &TmpStore) -> Vec<String> {
         let Ok(entries) = fs::read_dir(store.tk_dir().join("backups")) else {
             return Vec::new();
         };
         let mut names: Vec<String> = entries
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|name| !name.starts_with(".partial-"))
             .collect();
         names.sort();
         names
@@ -257,6 +260,28 @@ mod tests {
                 name
             })
             .collect()
+    }
+
+    /// The cleanup after a failed backup, reached the only way a test can reach
+    /// it: fail the rename rather than the vacuum, so a working file exists by
+    /// the time the failure happens. `rename(2)` onto a directory returns
+    /// `EISDIR`, and the pinned clock makes the target name predictable.
+    #[test]
+    fn a_failure_after_the_vacuum_removes_the_working_file() {
+        let store = TmpStore::new("tk");
+        let conn = seed_store_at_version(&store, 4);
+        let dir = store.tk_dir().join("backups");
+        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir(dir.join("2026-09-03T13-45-00.123Z-v004.db")).unwrap();
+
+        take(&conn, NOW).expect_err("the rename must fail");
+
+        assert_eq!(
+            backups(&store),
+            vec!["2026-09-03T13-45-00.123Z-v004.db"],
+            "a backup that fails after the vacuum must not leave its working \
+             file behind: prune never collects one"
+        );
     }
 
     /// Retention selects by filename, and the filename carries the clock, so a
