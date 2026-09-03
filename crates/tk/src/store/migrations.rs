@@ -59,6 +59,7 @@ const MIGRATION_12_SQL: &str = include_str!("migrations/012_drop_dead_next_index
 const MIGRATION_13_SQL: &str = include_str!("migrations/013_former_backend_identities.sql");
 const MIGRATION_14_SQL: &str = include_str!("migrations/014_binding_display_provenance.sql");
 const MIGRATION_15_SQL: &str = include_str!("migrations/015_readopt_reopens_a_former_identity.sql");
+const MIGRATION_16_SQL: &str = include_str!("migrations/016_sync_skip_relinquishes_a_close.sql");
 
 /// V1 Repository Store schema skeleton.
 pub const MIGRATION_1: Migration = Migration {
@@ -209,6 +210,17 @@ pub const MIGRATION_15: Migration = Migration {
     foreign_keys: ForeignKeys::On,
 };
 
+/// Recreates `items_no_escape_from_done` with a second, time-shaped exception:
+/// any `done` -> `open` write is admitted for as long as the Item carries a
+/// `failed` closing (`set_item_status` targeting `done`) Mutation, which is
+/// what authorizes Sync Skip's relinquished close (ADR-0046 as amended,
+/// ADR-0006).
+pub const MIGRATION_16: Migration = Migration {
+    version: 16,
+    sql: MIGRATION_16_SQL,
+    foreign_keys: ForeignKeys::On,
+};
+
 /// Ordered migration list applied by [`apply_all`].
 pub const ALL_MIGRATIONS: &[Migration] = &[
     MIGRATION_1,
@@ -226,13 +238,14 @@ pub const ALL_MIGRATIONS: &[Migration] = &[
     MIGRATION_13,
     MIGRATION_14,
     MIGRATION_15,
+    MIGRATION_16,
 ];
 
 /// Highest schema version this binary can apply. Named so future migrations
 /// surface the threshold to `grep` instead of hiding it behind `.last()`.
 /// Adding a migration is a two-line patch: append to `ALL_MIGRATIONS`, bump
 /// this constant, with a debug_assert below catching the drift.
-pub const MAX_KNOWN_VERSION: u32 = MIGRATION_15.version;
+pub const MAX_KNOWN_VERSION: u32 = MIGRATION_16.version;
 
 /// Errors returned while applying migrations.
 ///
@@ -558,6 +571,219 @@ mod tests {
         assert!(
             later_reopen.is_err(),
             "a restored Backend Item must not escape done again"
+        );
+    }
+
+    /// Seed a plain `done` Ticket carrying a Closing Reason: the ordinary Sync
+    /// Skip population, with no Former Backend Identity in play.
+    fn insert_done_ticket(conn: &Connection, id: &str, display: &str) {
+        insert_fixture_item(
+            conn,
+            FixtureItem {
+                id,
+                display,
+                title: "Closed by tk done",
+                status: "done",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "update items set closing_reason = 'Shipped' where id = ?1",
+            params![id],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn sync_skip_may_reopen_a_done_item_with_its_failed_closing_mutation() {
+        use crate::store::testing::{FixtureMutation, insert_fixture_mutation};
+        const TO_DONE: &str = r#"{"status":"done"}"#;
+        const REJECTION: &str = r#"{"detail":"rejected"}"#;
+
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_done_ticket(&conn, "t1", "tk-1");
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "set_item_status",
+                item_id: "t1",
+                payload_json: TO_DONE,
+                state: "failed",
+                failure_json: Some(REJECTION),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        conn.execute(
+            "update items set status = 'open', closing_reason = null where id = 't1'",
+            [],
+        )
+        .expect("a failed closing Mutation authorizes Sync Skip's reopen (ADR-0046)");
+
+        let (status, closing_reason): (String, Option<String>) = conn
+            .query_row(
+                "select status, closing_reason from items where id = 't1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((status.as_str(), closing_reason), ("open", None));
+    }
+
+    #[test]
+    fn the_reopen_exception_admits_an_epic_on_the_same_terms() {
+        use crate::store::testing::{FixtureMutation, insert_fixture_mutation};
+
+        // ADR-0046: "The rule is identical for Tickets and Epics." The
+        // trigger reaches a Mutation through `(item_id, item_class)`, the pair
+        // ADR-0010 addresses Mutations by, so an Epic has to be reachable
+        // through the same conjunct a Ticket is.
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "e1",
+                display: "tk-1",
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                title: "Closed Epic",
+                status: "done",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "set_item_status",
+                item_id: "e1",
+                item_class: "epic",
+                payload_json: r#"{"status":"done"}"#,
+                state: "failed",
+                failure_json: Some(r#"{"detail":"rejected"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        conn.execute("update items set status = 'open' where id = 'e1'", [])
+            .expect("a failed closing Mutation authorizes the reopen for an Epic too (ADR-0046)");
+
+        let status: String = conn
+            .query_row("select status from items where id = 'e1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "open");
+    }
+
+    #[test]
+    fn a_done_item_with_no_failed_closing_mutation_stays_refused() {
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_done_ticket(&conn, "t1", "tk-1");
+
+        let reopen = conn.execute("update items set status = 'open' where id = 't1'", []);
+        assert!(
+            reopen.is_err(),
+            "no failed closing Mutation exists, so the done-terminal rule still applies (ADR-0006)"
+        );
+    }
+
+    #[test]
+    fn a_failed_non_closing_status_mutation_does_not_authorize_reopen() {
+        use crate::store::testing::{FixtureMutation, insert_fixture_mutation};
+        const TO_ACTIVE: &str = r#"{"status":"active"}"#;
+        const REJECTION: &str = r#"{"detail":"rejected"}"#;
+
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_done_ticket(&conn, "t1", "tk-1");
+        // Migration 011 spares exactly this shape from its cancellation sweep —
+        // a failed, non-`done` `set_item_status` row belonging to a Promotion
+        // Operation (011_split_work_state.sql:132-135) — so it is a real
+        // population, not a hypothetical one. The payload conjunct is what
+        // keeps it from authorizing an unrelated done -> open write.
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "set_item_status",
+                item_id: "t1",
+                payload_json: TO_ACTIVE,
+                state: "failed",
+                failure_json: Some(REJECTION),
+                promotion_operation_id: Some("op-1"),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        let reopen = conn.execute("update items set status = 'open' where id = 't1'", []);
+        assert!(
+            reopen.is_err(),
+            "a failed non-closing status Mutation must not authorize a done -> open write"
+        );
+    }
+
+    #[test]
+    fn a_later_done_to_open_is_refused_once_the_mutation_moves_to_skipped() {
+        use crate::store::testing::{FixtureMutation, insert_fixture_mutation};
+        const TO_DONE: &str = r#"{"status":"done"}"#;
+        const REJECTION: &str = r#"{"detail":"rejected"}"#;
+
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        insert_done_ticket(&conn, "t1", "tk-1");
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "set_item_status",
+                item_id: "t1",
+                payload_json: TO_DONE,
+                state: "failed",
+                failure_json: Some(REJECTION),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        // The exception is live while the row is `failed` — this is the same
+        // reopen as the first test above, replayed here as the setup for the
+        // cycle below.
+        conn.execute(
+            "update items set status = 'open', closing_reason = null where id = 't1'",
+            [],
+        )
+        .expect("the failed closing Mutation authorizes this reopen");
+
+        // The Item closes again (open -> done is unrestricted), and Sync
+        // Skip's real transaction would reopen it and move this same row to
+        // `skipped` together. Simulating just the state move shows the
+        // authorization does not survive past that row leaving `failed`.
+        conn.execute(
+            "update items set status = 'done', closing_reason = 'Shipped again' where id = 't1'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "update mutations set state = 'skipped' where sequence = 1",
+            [],
+        )
+        .unwrap();
+
+        let later_reopen = conn.execute("update items set status = 'open' where id = 't1'", []);
+        assert!(
+            later_reopen.is_err(),
+            "once the closing Mutation is no longer failed, a later done -> open write is refused again (ADR-0046)"
         );
     }
 
