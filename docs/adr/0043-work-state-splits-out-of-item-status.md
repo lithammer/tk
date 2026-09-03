@@ -244,6 +244,13 @@ operator to `tk sync --skip`. A row naming `open` still decodes as
 GitHub Adapter still rejects it at Apply exactly as before — that half of
 the original paragraph stands.
 
+The exit named above survives only for a row already `failed`. Sync Skip
+admits no other state, and a `pending` row cannot reach `failed`, because
+the decode that rejects it runs over every applicable row before Apply can
+fail any of them. Such a row would leave `tk sync` with no exit through the
+CLI at all. That is accepted on the same grounds: the population is empty
+and closed.
+
 This was accepted rather than treated as a regression because the
 population it affects is empty and closed in practice: no `pending` or
 `failed` non-closing `set_item_status` row exists today, and nothing on

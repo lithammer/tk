@@ -524,6 +524,23 @@ mod tests {
         tx.commit()
     }
 
+    /// Assert a refused `done` -> `open` write was refused by the
+    /// done-terminal trigger and not by some other constraint.
+    ///
+    /// `is_err()` alone cannot tell the two apart: these fixtures carry a
+    /// Closing Reason, and an UPDATE that clears `status` without clearing it
+    /// trips the `closing_reason` CHECK too. Dropping a trigger conjunct then
+    /// leaves every negative test passing for the wrong reason.
+    fn assert_refused_by_the_done_terminal_trigger(result: rusqlite::Result<usize>, why: &str) {
+        match result {
+            Err(err) => assert!(
+                err.to_string().contains("cannot leave done state"),
+                "{why}; refused, but by {err} rather than the trigger"
+            ),
+            Ok(_) => panic!("{why}"),
+        }
+    }
+
     #[test]
     fn readopt_may_import_an_open_lifecycle_onto_a_done_item() {
         let mut conn = open_memory();
@@ -691,9 +708,9 @@ mod tests {
         insert_done_ticket(&conn);
 
         let reopen = conn.execute("update items set status = 'open' where id = 't1'", []);
-        assert!(
-            reopen.is_err(),
-            "no failed closing Mutation exists, so the done-terminal rule still applies (ADR-0006)"
+        assert_refused_by_the_done_terminal_trigger(
+            reopen,
+            "no failed closing Mutation exists, so the done-terminal rule still applies (ADR-0006)",
         );
     }
 
@@ -727,9 +744,9 @@ mod tests {
         .unwrap();
 
         let reopen = conn.execute("update items set status = 'open' where id = 't1'", []);
-        assert!(
-            reopen.is_err(),
-            "a failed non-closing status Mutation must not authorize a done -> open write"
+        assert_refused_by_the_done_terminal_trigger(
+            reopen,
+            "a failed non-closing status Mutation must not authorize a done -> open write",
         );
     }
 
@@ -781,9 +798,9 @@ mod tests {
         .unwrap();
 
         let later_reopen = conn.execute("update items set status = 'open' where id = 't1'", []);
-        assert!(
-            later_reopen.is_err(),
-            "once the closing Mutation is no longer failed, a later done -> open write is refused again (ADR-0046)"
+        assert_refused_by_the_done_terminal_trigger(
+            later_reopen,
+            "once the closing Mutation is no longer failed, a later done -> open write is refused again (ADR-0046)",
         );
     }
 
