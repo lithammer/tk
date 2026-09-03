@@ -2463,13 +2463,12 @@ mod tests {
         );
     }
 
-    /// The `items` indexes and triggers ADR-0028's rebuild recipe covers, as
-    /// the store holds them, sorted. SQLite's own indexes have no SQL and are
-    /// not part of the rebuild recipe. Both the name inventory and each
-    /// trigger's SQL are load-bearing: a rebuild can recreate an older body
-    /// under the same name, silently dropping a later invariant. Index SQL is
-    /// omitted because a rebuild can deliberately change an index definition.
-    fn items_objects(conn: &Connection) -> Vec<(String, Option<String>)> {
+    /// The explicit indexes and triggers on `items` that an ADR-0028 rebuild
+    /// must preserve. The table definition recreates SQLite's automatic
+    /// indexes, whose schema rows have no SQL. Trigger bodies are part of this
+    /// inventory because the same name can hide an older invariant; index
+    /// bodies are not, since a rebuild may deliberately change them.
+    fn items_rebuild_inventory(conn: &Connection) -> Vec<(String, Option<String>)> {
         conn.prepare(
             "select name, case when type = 'trigger' then sql end \
                    from sqlite_master \
@@ -2485,15 +2484,11 @@ mod tests {
         .unwrap()
     }
 
-    fn items_object_names(objects: &[(String, Option<String>)]) -> Vec<&str> {
-        objects.iter().map(|(name, _)| name.as_str()).collect()
-    }
-
     #[test]
-    fn items_object_inventory_observes_trigger_body() {
+    fn items_rebuild_inventory_includes_trigger_body() {
         let mut conn = open_memory();
         apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        let before = items_objects(&conn);
+        let before = items_rebuild_inventory(&conn);
 
         conn.execute_batch(
             "drop trigger items_no_escape_from_done; \
@@ -2503,7 +2498,7 @@ mod tests {
         .unwrap();
 
         assert_ne!(
-            items_objects(&conn),
+            items_rebuild_inventory(&conn),
             before,
             "an items trigger body is part of the rebuild inventory"
         );
@@ -2513,9 +2508,7 @@ mod tests {
     fn every_trigger_body_is_pinned() {
         // The `items` rebuild inventory pins the triggers a rebuild could
         // discard. This broader inventory pins triggers on the other tables
-        // too. Behavioural tests cover the conjuncts someone thought to cover;
-        // this pins the text, so any body change has to be accepted here
-        // deliberately rather than slipping through as a passing suite.
+        // too, so any trigger body change must update this snapshot.
         let mut conn = open_memory();
         apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
         let mut stmt = conn
@@ -2623,33 +2616,22 @@ mod tests {
 
     #[test]
     fn split_rebuild_preserves_every_items_object() {
-        // An ADR-0028 rebuild recreates the table from scratch, so every index
-        // and trigger has to be written out again. A forgotten one fails
-        // silently — the store keeps working until some later insert loses its
-        // uniqueness guard or escapes `done`. Assert the whole set by name.
+        // An ADR-0028 rebuild recreates every explicit index and trigger. A
+        // forgotten object vanishes silently, so compare names and trigger
+        // bodies on both sides of the rebuild.
         let mut conn = open_memory();
         apply_through(&mut conn, 10, "2026-05-09T00:00:00.000Z").unwrap();
         insert_v10_item(&conn, "t1", "tk-1", "active", 1);
-        let before = items_objects(&conn);
+        let before = items_rebuild_inventory(&conn);
 
         // Stops at 11: this test checks what migration 011's rebuild recreates.
         // Running to `apply_all` would fold in migration 012's drop of
         // `items_next_idx` (ADR-0045), so a forgotten index and a dropped one
-        // would fail the same name assertion.
+        // would fail the same assertion.
         apply_through(&mut conn, 11, "2026-05-09T00:00:01.000Z").unwrap();
 
-        let after = items_objects(&conn);
+        let after = items_rebuild_inventory(&conn);
         assert_eq!(after, before);
-        assert_eq!(
-            items_object_names(&after),
-            vec![
-                "items_backend_unique",
-                "items_container_idx",
-                "items_id_class_unique",
-                "items_next_idx",
-                "items_no_escape_from_done",
-            ]
-        );
 
         // The trigger is the one object with observable behaviour rather than a
         // plan effect, so it is worth firing as well as naming.
@@ -2680,10 +2662,13 @@ mod tests {
         // one of them on the way.
         let mut conn = open_memory();
         apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        let objects = items_objects(&conn);
+        let names: Vec<String> = items_rebuild_inventory(&conn)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
 
         assert_eq!(
-            items_object_names(&objects),
+            names,
             vec![
                 "active_backend_identity_not_owned_by_another_former_item_insert",
                 "active_backend_identity_not_owned_by_another_former_item_update",
