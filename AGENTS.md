@@ -30,6 +30,17 @@ user-facing messages that must be preserved exactly.
 CLI bytes, exit codes, SQL schema, and the ADR-0017 verbatim messages.
 Everything else should be written in idiomatic, modern Rust.
 
+**tk is pre-v1.** One Repository Store exists and it belongs to whoever is
+changing the code, so the contracts above have no installed base to protect.
+Choose the design you would choose starting today, and reach it by
+replacement: rename the type, rewrite the migration, update every caller in
+the same change. A wide diff is the cost of the right shape, not an argument
+against it.
+
+Deliberate, not incidental. Redesigning a CLI line, a schema, or a recorded
+decision is cheap here; changing one as a side effect of something else is the
+defect it always was, and a deliberate change to a decision amends its ADR.
+
 **Lean into the type system.** Prefer enums over raw strings, traits over
 function pointers, `Result<T, E>` over flag/buffer pairs. If a SQL column
 has a CHECK constraint, the domain type is a Rust enum with a `text()`
