@@ -4546,6 +4546,68 @@ mod tests {
             .unwrap();
         assert_eq!(selection_state, "parked");
         assert_eq!(priority, "P1");
+
+        // ADR-0046's first Consequence, asserted rather than composed: the
+        // reopen restores Lifecycle, so a parked Ticket must still be held out
+        // of selection. Reading it through `next_ready_ticket` means a column
+        // added to that predicate later cannot quietly falsify the claim.
+        let store = crate::store::repository::Store::for_test(conn);
+        assert!(
+            repository::next::next_ready_ticket(&store, repository::next::NextOptions::default())
+                .unwrap()
+                .is_none(),
+            "a parked Ticket stays out of tk next after its close is relinquished"
+        );
+    }
+
+    #[test]
+    fn mark_skipped_relinquish_returns_an_accepted_ticket_to_tk_next() {
+        // The other half of the same Consequence: an accepted, idle Ticket
+        // becomes eligible again. `tk next` reads exactly the three columns
+        // the reopen writes or preserves (status, work_state,
+        // selection_state), so this is the claim's only direct assertion.
+        let mut conn = open_seeded();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "gh-53",
+                item_class: "ticket",
+                status: "done",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("53"),
+                title: "Accepted, closed, close failed",
+                selection_state: Some("accepted"),
+                priority: Some("P1"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "set_item_status",
+                item_id: "t1",
+                payload_json: r#"{"status":"done"}"#,
+                state: "failed",
+                failure_json: Some(r#"{"detail":"rejected"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        let workflow = RemoteWorkflowGuard::for_test();
+        mark_mutation_skipped(&mut conn, &workflow, 1, "2026-05-19T00:00:00Z").unwrap();
+
+        let store = crate::store::repository::Store::for_test(conn);
+        let next =
+            repository::next::next_ready_ticket(&store, repository::next::NextOptions::default())
+                .unwrap()
+                .expect("the reopened accepted Ticket is selectable again (ADR-0046)");
+        assert_eq!(next.display_id, "gh-53");
     }
 
     #[test]
