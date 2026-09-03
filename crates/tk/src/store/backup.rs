@@ -51,8 +51,7 @@ enum Fault {
 
 /// Write one Store Backup of `conn` before its pending migrations run.
 ///
-/// A connection with no file to copy is a no-op, so callers need not ask
-/// whether one is worth taking.
+/// A connection with no file to copy is a no-op.
 pub fn take(conn: &Connection, now_iso: &str) -> Result<(), BackupError> {
     let Some(dir) = backup_dir(conn) else {
         return Ok(());
@@ -61,7 +60,7 @@ pub fn take(conn: &Connection, now_iso: &str) -> Result<(), BackupError> {
 }
 
 /// The whole backup sequence, reporting the bare fault. [`take`] attaches the
-/// directory once here rather than at each of the six fallible steps.
+/// directory to it once, rather than at every fallible step here.
 fn write_into(conn: &Connection, dir: &Path, now_iso: &str) -> Result<(), Fault> {
     // Tighten only a directory tk just created, as `tk init` does for `tk/`
     // (ARCHITECTURE.md). `create_dir_all` would also succeed on one the user
@@ -97,9 +96,9 @@ fn write_into(conn: &Connection, dir: &Path, now_iso: &str) -> Result<(), Fault>
 
 /// Working name a backup is vacuumed to before it is renamed into place.
 ///
-/// Unique per PID namespace, which is the scope of the concurrency ADR-0024
-/// designs for. A clock cannot serve here: the injectable test clock is
-/// pinned, so two runs would agree on the name.
+/// A clock cannot serve here: the injectable test clock is pinned, so two runs
+/// would agree on the name. ADR-0048 records how far the pid's uniqueness
+/// reaches.
 fn partial_path(dir: &Path) -> PathBuf {
     dir.join(format!(".partial-{}.db", std::process::id()))
 }
@@ -109,7 +108,7 @@ fn partial_path(dir: &Path) -> PathBuf {
 ///
 /// Derived from the connection rather than passed in (ADR-0048).
 /// `Connection::path` yields an empty string for an in-memory database, so
-/// every unit test that opens `:memory:` writes no backup by construction.
+/// one writes no backup at all.
 fn backup_dir(conn: &Connection) -> Option<PathBuf> {
     let path = conn.path().filter(|path| !path.is_empty())?;
     Some(Path::new(path).parent()?.join("backups"))

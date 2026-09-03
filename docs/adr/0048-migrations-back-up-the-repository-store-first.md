@@ -46,9 +46,8 @@ merely wrong. It is the wrong gate, and the code says so:
   taken after 007 has already committed and is not the pre-upgrade state.
 
 `ForeignKeys::Off` tracks whether a table's CHECK constraints changed, not
-whether a migration can lose data. The two are not the same set, and the
-ticket that asked for this feature contains the argument against its own gate:
-a backup does not need to know what it is protecting.
+whether a migration can lose data. The two are not the same set: a backup does
+not need to know what it is protecting.
 
 Dropping the gate also removes the machinery it required. A per-rebuild backup
 had to be counted (a version 4 store crosses six `ForeignKeys::Off` migrations,
@@ -93,9 +92,10 @@ that luck holding.
 **Pass the backup directory into `apply_all`.** Rejected. `Connection::path`
 returns an empty string for an in-memory database, so deriving the directory
 makes every in-memory test a no-op by construction. An explicit parameter would
-have added an argument to 77 call sites — 54 of them in the migration tests
-alone — whose only value at 75 of them is "off". A parameter that exists to be
-disabled is a flag, and the directory is a fact about the connection.
+have added an argument to every call site — the great majority of them in the
+migration tests — whose value at all but the two production callers is "off". A
+parameter that exists to be disabled is a flag, and the directory is a fact
+about the connection.
 
 **Add `tk restore`.** Rejected, and not on scope. Restoring a version 11 file
 under a version 16 binary re-runs migrations 012 through 016 on open (ADR-0024)
@@ -110,8 +110,8 @@ just ran" window. Discovery here is late by construction — the migration 011
 loss was found by code review, not by anyone noticing missing data — and the
 migration list moves fast: ten migrations landed in the month before this
 decision, three of them on one day. For a developer building from source, three
-backups is a window of days. The user's own hand-made backups have sat
-unpruned for three and a half months. Ten is bounded, which is what the
+backups is a window of days. The hand-made backups already in the store had sat
+unpruned for months. Ten is bounded, which is what the
 objection to an unbounded directory inside `.git` actually asks for, and costs
 roughly fourteen megabytes against a 1.4 MB store.
 
@@ -125,9 +125,9 @@ feature.
 
 **A migration can now fail for a reason that is not the migration.** A full
 disk or an unwritable `backups/` refuses the upgrade, which refuses every
-command, since ADR-0024 migrates on open. The first real execution of this path
-is the first migration added after this decision, against a store holding real
-work.
+command, since ADR-0024 migrates on open. No migration shipped so far has
+exercised that path in production; the first one to do so will do it against a
+store holding real work.
 
 `tk prime` stays silent on that failure, as it already does for every other
 open failure (ADR-0020).
