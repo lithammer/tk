@@ -6,23 +6,16 @@
 -- its name, which is what the `items` object inventory an ADR-0028 rebuild
 -- must reproduce is keyed on.
 --
--- Unlike the Re-Adopt conjunct, this one is time-shaped, not statement-shaped.
--- `old.origin = 'local' and new.origin = 'backend'` holds only for the single
--- rebind statement Re-Adopt issues. This conjunct instead holds for the
--- entire period a `failed` closing Mutation exists on the Item: the `exists`
--- clause names no particular failed closing Mutation, so any `done` -> `open`
--- write on the Item is admitted for as long as one such row exists — not only
--- the reopen Sync Skip performs in the same transaction as its transition of
--- that Mutation to `skipped`. ADR-0046's "once the transaction commits, the
--- durable authorization is gone" describes only the window *after* that
--- transition; it is not a description of how narrow the exception is
--- beforehand, and this exception must not be read as "consumable" the way the
--- Re-Adopt one is.
+-- This conjunct is not consumable the way the Re-Adopt one is: it recognises
+-- a state rather than a statement, and stays open for as long as the Item
+-- carries a `failed` closing Mutation. ADR-0046's third amendment and
+-- ADR-0006's header record what that widens; do not restate the argument
+-- here.
 --
 -- The `json_extract(m.payload_json, '$.status') = 'done'` conjunct is load-
 -- bearing, not incidental: migration 011 deliberately spared a `failed`
 -- `set_item_status` row belonging to a Promotion Operation even when its
--- target was not `done` (011_split_work_state.sql:132-135). Without this
+-- target was not `done` (011_split_work_state.sql). Without this
 -- conjunct, such a spared non-closing failure would authorize an unrelated
 -- `done` -> `open` write on its Item.
 drop trigger items_no_escape_from_done;

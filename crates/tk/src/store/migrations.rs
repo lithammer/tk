@@ -576,12 +576,12 @@ mod tests {
 
     /// Seed a plain `done` Ticket carrying a Closing Reason: the ordinary Sync
     /// Skip population, with no Former Backend Identity in play.
-    fn insert_done_ticket(conn: &Connection, id: &str, display: &str) {
+    fn insert_done_ticket(conn: &Connection) {
         insert_fixture_item(
             conn,
             FixtureItem {
-                id,
-                display,
+                id: "t1",
+                display: "tk-1",
                 title: "Closed by tk done",
                 status: "done",
                 created_seq: 1,
@@ -590,8 +590,8 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "update items set closing_reason = 'Shipped' where id = ?1",
-            params![id],
+            "update items set closing_reason = 'Shipped' where id = 't1'",
+            [],
         )
         .unwrap();
     }
@@ -604,7 +604,7 @@ mod tests {
 
         let mut conn = open_memory();
         apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        insert_done_ticket(&conn, "t1", "tk-1");
+        insert_done_ticket(&conn);
         insert_fixture_mutation(
             &conn,
             FixtureMutation {
@@ -688,7 +688,7 @@ mod tests {
     fn a_done_item_with_no_failed_closing_mutation_stays_refused() {
         let mut conn = open_memory();
         apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        insert_done_ticket(&conn, "t1", "tk-1");
+        insert_done_ticket(&conn);
 
         let reopen = conn.execute("update items set status = 'open' where id = 't1'", []);
         assert!(
@@ -705,7 +705,7 @@ mod tests {
 
         let mut conn = open_memory();
         apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        insert_done_ticket(&conn, "t1", "tk-1");
+        insert_done_ticket(&conn);
         // Migration 011 spares exactly this shape from its cancellation sweep —
         // a failed, non-`done` `set_item_status` row belonging to a Promotion
         // Operation (011_split_work_state.sql:132-135) — so it is a real
@@ -741,7 +741,7 @@ mod tests {
 
         let mut conn = open_memory();
         apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        insert_done_ticket(&conn, "t1", "tk-1");
+        insert_done_ticket(&conn);
         insert_fixture_mutation(
             &conn,
             FixtureMutation {

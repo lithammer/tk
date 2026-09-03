@@ -1245,6 +1245,52 @@ impl From<mutations::TransitionError> for MarkSkippedError {
     }
 }
 
+/// Restore an Item to `open` as Sync Skip relinquishes its failed close, and
+/// report the Display ID the command layer names (ADR-0046).
+///
+/// Runs while that closing Mutation is still `failed`: the row is what
+/// authorizes migration 016's trigger exception, so moving it to `skipped`
+/// first would drop the authorization before the reopen ran. `work_state` is
+/// written rather than assumed — ADR-0046 says the Item stays idle, and
+/// ADR-0043's discipline is that the writer keeps the pair coherent instead
+/// of inheriting it from `close_item` having cleared the other axis.
+fn relinquish_close(
+    tx: &Connection,
+    item_id: &str,
+    sequence: i64,
+    now: &str,
+) -> Result<String, MarkSkippedError> {
+    let reopened = tx
+        .execute(
+            "update items \
+                set status = ?2, work_state = ?3, closing_reason = null, updated_at = ?4 \
+              where id = ?1 and status = ?5",
+            params![
+                item_id,
+                Lifecycle::Open.text(),
+                WorkState::Idle.text(),
+                now,
+                Lifecycle::Done.text(),
+            ],
+        )
+        .map_err(|err| match err {
+            rusqlite::Error::SqliteFailure(e, _)
+                if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER =>
+            {
+                MarkSkippedError::ReopenRefusedByTrigger(sequence)
+            }
+            other => other.into(),
+        })?;
+    // A failed closing Mutation implies its Item is `done` (see
+    // `MarkSkippedError::ReopenMatchedNothing`), so zero rows is not a race.
+    // It has to abort rather than let the caller's transition commit the very
+    // divergence gh-53 exists to close while reporting success.
+    if reopened == 0 {
+        return Err(MarkSkippedError::ReopenMatchedNothing(sequence));
+    }
+    Ok(repository::current_display_id(tx, item_id)?)
+}
+
 /// Transition a `failed` Mutation Log entry into `skipped`, inside its own
 /// transaction. Refuses a Mutation that is not `failed`, or whose Mutation
 /// Type is `promote_ticket` / `promote_epic` ([`MarkSkippedError::CannotSkipPromotion`]).
@@ -1268,18 +1314,15 @@ pub fn mark_mutation_skipped(
     // `json_extract` still resolves a `set_item_status` payload that no
     // longer decodes as `Lifecycle` (ADR-0043's amendment), so Skip stays the
     // operator's exit for exactly those rows.
-    let row: Option<(MutationState, MutationType, Option<String>, String, String)> = tx
+    let row: Option<(MutationState, MutationType, Option<String>, String)> = tx
         .query_row(
-            "select m.state, m.mutation_type, json_extract(m.payload_json, '$.status'), \
-                    m.item_id, i.display_value \
-               from mutations m \
-               join items i on i.id = m.item_id \
-              where m.sequence = ?1",
+            "select state, mutation_type, json_extract(payload_json, '$.status'), item_id \
+               from mutations where sequence = ?1",
             params![sequence],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?;
-    let (prior, mutation_type, target_status, item_id, display_id) =
+    let (prior, mutation_type, target_status, item_id) =
         row.ok_or(MarkSkippedError::MutationNotFound(sequence))?;
     if mutation_type.is_promotion() {
         return Err(MarkSkippedError::CannotSkipPromotion(sequence));
@@ -1288,51 +1331,38 @@ pub fn mark_mutation_skipped(
         return Err(MarkSkippedError::MutationNotFailed(sequence));
     }
 
-    // Named by `sequence`, not an `exists` over the Item the way migration
-    // 016's trigger reads it: the trigger's clause names no particular row,
-    // so it stays open for as long as any failed closing Mutation sits on the
-    // Item, but this gate must classify only the one row being skipped. An
-    // Item can hold both a spared non-closing `set_item_status` failure
-    // (migration 011) and a real failed close; skipping the former must
-    // neither reopen the Item nor report a relinquishment that never
-    // happened.
-    let outcome = if mutation_type == MutationType::SetItemStatus
-        && target_status.as_deref() == Some(Lifecycle::Done.text())
-    {
-        // The reopen runs first, while this row is still `failed`: that
-        // `failed` row is what authorizes migration 016's trigger exception.
-        // Transitioning to `skipped` first would drop the authorization
-        // before the reopen ran, and the trigger would abort it.
-        let reopened = match tx.execute(
-            "update items \
-                set status = ?2, work_state = ?3, closing_reason = null, updated_at = ?4 \
-              where id = ?1 and status = ?5",
-            params![
-                &item_id,
-                Lifecycle::Open.text(),
-                WorkState::Idle.text(),
-                now,
-                Lifecycle::Done.text(),
-            ],
-        ) {
-            Ok(n) => n,
-            Err(rusqlite::Error::SqliteFailure(e, _))
-                if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER =>
-            {
-                return Err(MarkSkippedError::ReopenRefusedByTrigger(sequence));
+    // Exhaustive by name, following `MutationType::is_promotion`: a Mutation
+    // kind added later has to answer what abandoning it does to local state
+    // instead of silently reading as `Bypassed`.
+    //
+    // The target comes from the row named by `sequence`, not from an `exists`
+    // over the Item the way migration 016's trigger reads it. The trigger's
+    // clause names no particular row, so it stays open while any failed
+    // closing Mutation sits on the Item; an Item can hold both a spared
+    // non-closing `set_item_status` failure (migration 011) and a real failed
+    // close, and skipping the former must neither reopen the Item nor report
+    // a relinquishment that never happened.
+    let outcome = match mutation_type {
+        MutationType::SetItemStatus
+            if target_status.as_deref() == Some(Lifecycle::Done.text()) =>
+        {
+            SkipOutcome::RelinquishedClose {
+                display_id: relinquish_close(&tx, &item_id, sequence, now)?,
             }
-            Err(other) => return Err(other.into()),
-        };
-        // A failed closing Mutation implies its Item is `done` (see
-        // `ReopenMatchedNothing`'s doc), so zero rows here is not a race; it
-        // must abort rather than let the transition below commit the very
-        // divergence gh-53 exists to close while reporting success.
-        if reopened == 0 {
-            return Err(MarkSkippedError::ReopenMatchedNothing(sequence));
         }
-        SkipOutcome::RelinquishedClose { display_id }
-    } else {
-        SkipOutcome::Bypassed
+        MutationType::SetItemStatus
+        | MutationType::UpdateTicket
+        | MutationType::UpdateEpic
+        | MutationType::AddTicketToEpic
+        | MutationType::RemoveTicketFromEpic
+        | MutationType::AddDependency
+        | MutationType::RemoveDependency
+        | MutationType::AddExternalBlocker
+        | MutationType::ResolveExternalBlocker
+        // Unreachable past the Promotion refusal above; named so the match
+        // stays exhaustive rather than resting on that early return.
+        | MutationType::PromoteTicket
+        | MutationType::PromoteEpic => SkipOutcome::Bypassed,
     };
 
     mutations::transition(
