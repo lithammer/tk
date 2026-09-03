@@ -2469,6 +2469,120 @@ mod tests {
     }
 
     #[test]
+    fn every_trigger_body_is_pinned() {
+        // `items_objects` compares trigger *names*, so a migration that
+        // recreates one from an older body keeps the name and passes it — and
+        // the exceptions ADR-0046 and ADR-0047 rely on live only in these
+        // bodies. Behavioural tests cover the conjuncts someone thought to
+        // cover; this pins the text, so any body change (a dropped conjunct,
+        // or a new clause that widens an exception) has to be accepted here
+        // deliberately rather than slipping through as a passing suite.
+        let mut conn = open_memory();
+        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+        let mut stmt = conn
+            .prepare("select sql from sqlite_master where type = 'trigger' order by name")
+            .unwrap();
+        let bodies: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        insta::assert_snapshot!(bodies.join("\n\n"), @"
+        CREATE TRIGGER active_backend_identity_not_owned_by_another_former_item_insert
+        before insert on items
+        when new.backend_kind is not null
+         and exists (
+            select 1
+              from former_backend_identities
+             where backend_kind = new.backend_kind
+               and backend_key = new.backend_key
+               and item_id <> new.id
+         )
+        begin
+            select raise(abort, 'backend identity is owned by another Item');
+        end
+
+        CREATE TRIGGER active_backend_identity_not_owned_by_another_former_item_update
+        before update of backend_kind, backend_key on items
+        when new.backend_kind is not null
+         and exists (
+            select 1
+              from former_backend_identities
+             where backend_kind = new.backend_kind
+               and backend_key = new.backend_key
+               and item_id <> new.id
+         )
+        begin
+            select raise(abort, 'backend identity is owned by another Item');
+        end
+
+        CREATE TRIGGER dependencies_no_cycle before insert on dependencies
+        for each row when exists (
+            with recursive reachable(id) as (
+                select new.blocking_id
+                union
+                select dependencies.blocking_id
+                  from dependencies, reachable
+                 where dependencies.blocked_id = reachable.id
+            )
+            select 1 from reachable where id = new.blocked_id
+        ) begin
+            select raise(abort, 'dependency cycle');
+        end
+
+        CREATE TRIGGER former_backend_identity_not_owned_by_another_active_item
+        before insert on former_backend_identities
+        when exists (
+            select 1
+              from items
+             where backend_kind = new.backend_kind
+               and backend_key = new.backend_key
+               and id <> new.item_id
+        )
+        begin
+            select raise(abort, 'backend identity is owned by another Item');
+        end
+
+        CREATE TRIGGER former_backend_identity_ownership_is_immutable
+        before update of backend_kind, backend_key, item_id on former_backend_identities
+        when new.backend_kind <> old.backend_kind
+          or new.backend_key <> old.backend_key
+          or new.item_id <> old.item_id
+        begin
+            select raise(abort, 'former backend identity ownership is immutable');
+        end
+
+        CREATE TRIGGER items_no_escape_from_done before update of status on items
+        for each row when old.status = 'done' and new.status != 'done'
+          and not (
+              old.origin = 'local'
+              and new.origin = 'backend'
+              and exists (
+                  select 1
+                    from former_backend_identities f
+                   where f.item_id = new.id
+                     and f.backend_kind = new.backend_kind
+                     and f.backend_key = new.backend_key
+              )
+          )
+          and not (
+              exists (
+                  select 1
+                    from mutations m
+                   where m.item_id = new.id
+                     and m.item_class = new.item_class
+                     and m.mutation_type = 'set_item_status'
+                     and m.state = 'failed'
+                     and json_extract(m.payload_json, '$.status') = 'done'
+              )
+          )
+        begin
+            select raise(abort, 'cannot leave done state');
+        end
+        ");
+    }
+
+    #[test]
     fn split_rebuild_preserves_every_items_object() {
         // An ADR-0028 rebuild recreates the table from scratch, so every index
         // and trigger has to be written out again. A forgotten one fails
