@@ -40,6 +40,11 @@ pub struct Args {
     #[command(subcommand)]
     pub subcommand: Option<Sub>,
     /// Mark one failed Mutation skipped before running sync.
+    ///
+    /// Skipping a failed close relinquishes it rather than bypassing it: the
+    /// Item returns to open and loses its Closing Reason, Dependencies it
+    /// resolved as their Blocking Item become unresolved, and an accepted
+    /// Ticket becomes selectable by `tk next` again.
     #[arg(long, value_name = "MUTATION-ID")]
     pub skip: Option<i64>,
 }
@@ -804,7 +809,7 @@ mod tests {
             FixtureItem {
                 id: "t1",
                 display: "gh-1",
-                title: "Needs its close relinquished",
+                title: "Local title before the refresh",
                 status: "done",
                 origin: "backend",
                 backend_kind: Some("github"),
@@ -839,8 +844,8 @@ mod tests {
             "o",
             "r",
             1,
-            "Needs its close relinquished",
-            "",
+            "Closed on the Backend",
+            "Backend body",
             Lifecycle::Done,
         );
         let code = run(
@@ -856,12 +861,21 @@ mod tests {
             "Skipped Mutation 1; restored gh-1 to open.\nSync complete: 1 pulled, 0 applied.\n"
         );
 
-        let status: String = Connection::open(store.db_path())
+        // Lifecycle and content together: the reopen puts the Item back in the
+        // working set, so this run's merge is free to overwrite title and body
+        // from the snapshot. Seeding the two sides differently is what lets
+        // that assertion fail if it ever stops holding.
+        let (status, title, body): (String, String, String) = Connection::open(store.db_path())
             .unwrap()
-            .query_row("select status from items where id = 't1'", [], |r| r.get(0))
+            .query_row(
+                "select status, title, body from items where id = 't1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
             .unwrap();
         assert_eq!(
-            status, "done",
+            (status.as_str(), title.as_str(), body.as_str()),
+            ("done", "Closed on the Backend", "Backend body"),
             "Pull re-imported the independently closed Item"
         );
     }

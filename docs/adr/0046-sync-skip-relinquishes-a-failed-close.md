@@ -125,6 +125,16 @@ Skipped Mutation of that shape is also produced by:
 Reopening any of those would be wrong: none of them is the divergence this
 Decision meant to repair.
 
+## Amendment: the sync summary drops its own skipped clause
+
+The Decision prescribes the pre-adapter line and says other Mutation Types
+report `Skipped Mutation 4.` through the same boundary. It is silent on the
+`, skipped <id>` clause `Sync complete:` carried before this, which is
+removed. The clause repeated, after the run, an outcome the new line already
+reports before the run and reports whether or not the run succeeds. Keeping
+both would have made the failure case say it twice and the broken-Remote case
+say it once, from the line that never printed.
+
 ## Amendment: the authorization window is wider than the Decision states
 
 "Once the transaction commits, the durable authorization is gone" is true,
