@@ -238,7 +238,7 @@ fn render<W: Write + ?Sized>(
         }
         write_section_header(stdout, styler, "UNRESOLVED MUTATIONS")?;
         for mutation in &unresolved {
-            render_item_mutation(stdout, mutation)?;
+            render_item_mutation(stdout, mutation, styler)?;
         }
         has_section = true;
     }
@@ -249,7 +249,7 @@ fn render<W: Write + ?Sized>(
         }
         write_section_header(stdout, styler, "WITHDRAWN MUTATIONS")?;
         for mutation in &withdrawn {
-            render_item_mutation(stdout, mutation)?;
+            render_item_mutation(stdout, mutation, styler)?;
         }
     }
 
@@ -322,15 +322,29 @@ fn render_external_blocker<W: Write + ?Sized>(
     stdout.write_all(b"\n")
 }
 
+/// Render one Mutation sub-row inside an UNRESOLVED or WITHDRAWN section.
+///
+/// The state token carries `palette::mutation_state_style`, the same entry
+/// the row glyphs in `tk list`, the `tk list` banner, and `tk sync log` use
+/// for that state — so one Mutation cannot read as two different things
+/// depending on which command the reader ran. The row renders after the
+/// section header's bold span has closed, so its foreground colour nests
+/// inside nothing (ADR-0014).
 fn render_item_mutation<W: Write + ?Sized>(
     stdout: &mut W,
     mutation: &ItemMutation,
+    styler: SubStyler,
 ) -> std::io::Result<()> {
     stdout.write_all(BULLET)?;
     writeln!(
         stdout,
         "{} {} {}",
-        mutation.sequence, mutation.state, mutation.mutation_type
+        mutation.sequence,
+        styler.wrap(
+            palette::mutation_state_style(mutation.state),
+            mutation.state.text()
+        ),
+        mutation.mutation_type
     )
 }
 
@@ -909,6 +923,46 @@ mod tests {
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(stdout.contains("DESCRIPTION"));
         assert!(stdout.contains("Multi-line\nbody\n"));
+    }
+
+    /// Covers every state a Mutation section can render. `applied` appears
+    /// in neither, which
+    /// `render_omits_mutation_sections_when_every_mutation_is_applied` pins.
+    #[test]
+    fn mutation_rows_style_every_rendered_state_when_colour_is_forced() {
+        // One list, used to seed the rows and then to assert them, so a state
+        // cannot be rendered without also being checked.
+        let expected = [
+            (MutationState::Pending, "90"),
+            (MutationState::Failed, "91"),
+            (MutationState::Applying, "33"),
+            (MutationState::Skipped, "90"),
+            (MutationState::Cancelled, "90"),
+            (MutationState::Abandoned, "35"),
+        ];
+        let detail = minimal_item_detail(
+            expected
+                .iter()
+                .enumerate()
+                .map(|(index, (state, _))| ItemMutation {
+                    sequence: i64::try_from(index).expect("fixture index fits i64") + 1,
+                    state: *state,
+                    mutation_type: crate::domain::mutation_type::MutationType::UpdateTicket,
+                })
+                .collect(),
+        );
+
+        let mut out = Vec::new();
+        render(&mut out, &detail, Styler::always().for_stdout()).unwrap();
+        let stdout = String::from_utf8(out).unwrap();
+
+        for (state, sgr) in expected {
+            let want = format!("\u{1b}[{sgr}m{state}\u{1b}[39m");
+            assert!(
+                stdout.contains(&want),
+                "{state} should render as {want:?}: {stdout:?}"
+            );
+        }
     }
 
     #[test]

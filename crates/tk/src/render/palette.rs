@@ -24,6 +24,7 @@
 use anstyle::{AnsiColor, Color, Style};
 
 use crate::domain::item_class::ItemClass;
+use crate::domain::mutation_state::MutationState;
 use crate::domain::priority::Priority;
 use crate::domain::status::ItemStatus;
 
@@ -74,6 +75,42 @@ pub const MUTATION_FAILED: Style = fg(AnsiColor::BrightRed);
 /// dimmed `BLOCKED_ROW` span it renders inside (ADR-0014 nesting).
 pub const MUTATION_PENDING: Style = fg(AnsiColor::BrightBlack);
 
+// One entry per Mutation state, not one per colour, on the same footing as
+// `MUTATION_PENDING` above: states that share an SGR today keep their own
+// name so recolouring one cannot drag the others with it.
+
+/// A Mutation whose Backend creation began with no confirmed identity or
+/// no-effect verdict. Yellow, the SGR `STATUS_ACTIVE` uses, because both
+/// mean work in flight. Not `MUTATION_FAILED`'s red, which says the Backend
+/// refused the Mutation — false of an Indeterminate creation, where tk never
+/// learned what happened (ADR-0039).
+pub const MUTATION_APPLYING: Style = fg(AnsiColor::Yellow);
+
+/// An Abandoned Mutation — a Promotion withdrawn before tk recorded a
+/// Backend identity, so a Backend object may exist that tk cannot address.
+/// Magenta, because CONTEXT.md singles it out as the one Withdrawn Mutation
+/// that still asks something of the reader. Not red: nothing was refused
+/// here either.
+pub const MUTATION_ABANDONED: Style = fg(AnsiColor::Magenta);
+
+/// A Skipped Mutation — Backend intent relinquished by Sync Skip. Bright
+/// black, a resolved outcome that asks nothing of the reader.
+///
+/// A foreground colour, not `dimmed()`, so its close (`39`) cannot reset a
+/// `dimmed()` outer span it renders inside (ADR-0014 nesting).
+pub const MUTATION_SKIPPED: Style = fg(AnsiColor::BrightBlack);
+
+/// A Cancelled Mutation — unapplied Backend intent withdrawn by Promotion
+/// Cancellation, Detach, or a Store migration. Muted like
+/// [`MUTATION_SKIPPED`], and resolved for the same reason.
+pub const MUTATION_CANCELLED: Style = fg(AnsiColor::BrightBlack);
+
+/// A Mutation the Backend applied. Green, as `STATUS_DONE` is for a done
+/// Item. Only `tk sync log <sequence>` renders it: the log's default filter
+/// excludes `applied`, no flag selects it, and `tk show` drops it from both
+/// Mutation sections.
+pub const MUTATION_APPLIED: Style = fg(AnsiColor::Green);
+
 /// Open Item status (placeholder — uncoloured).
 pub const STATUS_OPEN: Style = Style::new();
 
@@ -90,7 +127,13 @@ pub const BLOCKED: Style = Style::new();
 /// Pairs with `BLOCKED_ROW`'s family-disjoint inner spans.
 pub const BLOCKED_ROW: Style = Style::new().dimmed();
 
-/// Dim separator (e.g. trees, list dividers).
+/// Dim chrome: list dividers, summary parentheticals, and the pointers that
+/// send a reader to another command.
+///
+/// Not tree glyphs, despite the name. `tk list` writes its own `└── ` row
+/// prefix plain, and `tk sync log`'s `└─` failure continuation matches it, so
+/// dimming either would leave one styled tree glyph in a codebase whose
+/// others are plain.
 pub const SEPARATOR: Style = Style::new().dimmed();
 
 /// Priority P0 — highest. Mirrors `KIND_BUG`'s SGR so urgent rows draw the
@@ -128,7 +171,9 @@ pub const HUNK_SEPARATOR: Style = fg(AnsiColor::Blue);
 
 // Domain-enum → palette `Style` mappers. The single source of truth for these
 // mappings, shared by every renderer (`item_row` for list/search, `item_header`
-// for show/grep, and show's relationship sub-rows) so a recolour is one edit.
+// for show/grep, show's relationship sub-rows, and the Mutation surfaces —
+// `tk sync log`, show's Mutation sections, and the list banner) so a recolour
+// is one edit.
 
 /// Style for an Item's status glyph.
 #[must_use]
@@ -158,5 +203,69 @@ pub fn id_style(class: ItemClass) -> Style {
     match class {
         ItemClass::Epic => ID_EPIC,
         ItemClass::Ticket => ID_TICKET,
+    }
+}
+
+/// Style for a Mutation's state token.
+///
+/// Every surface that names a Mutation state renders through here, so the
+/// same Mutation cannot read as one thing in `tk sync log` and another in
+/// `tk show` or the `tk list` banner. Matched exhaustively: a state added to
+/// [`MutationState`] fails to compile here rather than defaulting into
+/// whichever arm a predicate happened to pick.
+///
+/// [`MutationState`]: crate::domain::mutation_state::MutationState
+#[must_use]
+pub fn mutation_state_style(state: MutationState) -> Style {
+    match state {
+        MutationState::Pending => MUTATION_PENDING,
+        MutationState::Failed => MUTATION_FAILED,
+        MutationState::Applying => MUTATION_APPLYING,
+        MutationState::Skipped => MUTATION_SKIPPED,
+        MutationState::Cancelled => MUTATION_CANCELLED,
+        MutationState::Abandoned => MUTATION_ABANDONED,
+        MutationState::Applied => MUTATION_APPLIED,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins every Mutation state to its palette entry. This table is the
+    /// contract `tk sync log`, `tk show`'s Mutation sections, and the
+    /// `tk list` banner all render through, so a state that would look one
+    /// way on one surface and another way elsewhere fails here first.
+    #[test]
+    fn mutation_state_style_maps_every_state() {
+        let expected = [
+            (MutationState::Pending, MUTATION_PENDING),
+            (MutationState::Failed, MUTATION_FAILED),
+            (MutationState::Applying, MUTATION_APPLYING),
+            (MutationState::Skipped, MUTATION_SKIPPED),
+            (MutationState::Cancelled, MUTATION_CANCELLED),
+            (MutationState::Abandoned, MUTATION_ABANDONED),
+            (MutationState::Applied, MUTATION_APPLIED),
+        ];
+
+        // The loop below is driven by `ALL`, so a state this table forgets
+        // fails rather than going untested. Counting catches the other
+        // direction: a duplicated row hiding a missing one.
+        assert_eq!(
+            expected.len(),
+            MutationState::ALL.len(),
+            "every MutationState needs exactly one row in this table"
+        );
+
+        for state in MutationState::ALL {
+            let Some((_, want)) = expected.iter().find(|(candidate, _)| *candidate == state) else {
+                panic!("no row in this table for {state}");
+            };
+            assert_eq!(
+                mutation_state_style(state),
+                *want,
+                "wrong palette entry for {state}"
+            );
+        }
     }
 }

@@ -23,6 +23,8 @@ use crate::cli::{Deps, Exit};
 use crate::commands::resolver;
 use crate::domain::backend_outcome::FailureClass;
 use crate::remote::factory::{self, OpenError as FactoryOpenError};
+use crate::render::palette;
+use crate::render::styler::SubStyler;
 use crate::store::sync::{
     self as store_sync, LogDetailRow, LogError, LogListFilter, LogListRow, MarkSkippedError,
     SkipOutcome,
@@ -176,8 +178,10 @@ fn run_log(deps: Deps<'_>, args: LogArgs) -> Exit {
         runner,
         clock,
         cwd,
+        styler,
         ..
     } = deps;
+    let styler = styler.for_stdout();
 
     let store = match resolver::open_for_command(runner, cwd, clock) {
         Ok(s) => s,
@@ -190,7 +194,7 @@ fn run_log(deps: Deps<'_>, args: LogArgs) -> Exit {
     if let Some(seq) = args.id {
         return match store_sync::show_mutation_log(store.conn(), seq) {
             Ok(detail) => {
-                render_log_detail(stdout, &detail);
+                render_log_detail(stdout, &detail, styler);
                 Exit::Ok
             }
             Err(LogError::MutationNotFound(seq)) => {
@@ -250,7 +254,7 @@ fn run_log(deps: Deps<'_>, args: LogArgs) -> Exit {
         return Exit::Ok;
     }
     for row in &rows {
-        render_log_row(stdout, row);
+        render_log_row(stdout, row, styler);
     }
     Exit::Ok
 }
@@ -396,11 +400,28 @@ fn render_run_sync_error<W: Write + ?Sized>(stderr: &mut W, err: &RunSyncError) 
     }
 }
 
-fn render_log_row<W: Write + ?Sized>(stdout: &mut W, row: &LogListRow) {
+/// Render one Mutation Log row.
+///
+/// The state token and the target Display ID carry palette entries; the
+/// sequence, the Mutation Type, the timestamp, the `└─` continuation, and
+/// the `[class]` tag stay plain. The continuation is plain to match
+/// `tk list`, which passes its own tree prefix unstyled, and the `[class]`
+/// tag because a Failure Class has no colour meaning anywhere else.
+///
+/// Writes are unchecked (`let _ =`) like the rest of `tk sync`, where the
+/// styled read commands instead propagate `io::Result` and convert once
+/// through `cli::write_error`. gh-95 owns unifying the two. Every span here
+/// is a self-contained `wrap`, so no dropped write can leave an `open` span
+/// unclosed and bleed style into the rest of the terminal.
+fn render_log_row<W: Write + ?Sized>(stdout: &mut W, row: &LogListRow, styler: SubStyler) {
     let _ = writeln!(
         stdout,
         "{} {} {} {} {}",
-        row.sequence, row.state, row.mutation_type, row.target_display_id, row.created_at
+        row.sequence,
+        styler.wrap(palette::mutation_state_style(row.state), row.state.text()),
+        row.mutation_type,
+        styler.wrap(palette::id_style(row.item_class), &row.target_display_id),
+        row.created_at
     );
     if let Some(detail) = &row.failure_detail {
         // The class is shown only when the adapter actually classified the
@@ -416,13 +437,32 @@ fn render_log_row<W: Write + ?Sized>(stdout: &mut W, row: &LogListRow) {
     }
 }
 
-fn render_log_detail<W: Write + ?Sized>(stdout: &mut W, detail: &LogDetailRow) {
-    let _ = writeln!(stdout, "Mutation {}  [{}]", detail.sequence, detail.state);
+/// Render the `tk sync log <sequence>` detail view.
+///
+/// Styles the same two tokens the list row does — the state, inside its
+/// brackets, and the Display ID. The aligned field labels stay plain: the
+/// alignment already guides the eye, and `tk show` bolds section headers but
+/// has no field labels of its own to match. See [`render_log_row`] on the
+/// unchecked writes.
+fn render_log_detail<W: Write + ?Sized>(stdout: &mut W, detail: &LogDetailRow, styler: SubStyler) {
+    let _ = writeln!(
+        stdout,
+        "Mutation {}  [{}]",
+        detail.sequence,
+        styler.wrap(
+            palette::mutation_state_style(detail.state),
+            detail.state.text()
+        )
+    );
     let _ = writeln!(stdout, "Type:       {}", detail.mutation_type);
     let _ = writeln!(
         stdout,
         "Target:     {} ({})",
-        detail.target_display_id, detail.item_class
+        styler.wrap(
+            palette::id_style(detail.item_class),
+            &detail.target_display_id
+        ),
+        detail.item_class
     );
     let _ = writeln!(stdout, "Created:    {}", detail.created_at);
     let _ = writeln!(stdout, "Updated:    {}", detail.state_changed_at);
@@ -447,6 +487,7 @@ mod tests {
     use crate::domain::mutation_type::MutationType;
     use crate::proc::{FakeRunner, ProcError, RunOutput};
     use crate::remote::adapter::AdapterReadError;
+    use crate::render::Styler;
     use crate::store::sync::{
         BackendCohortError, LoadApplicableError, PersistMutationOutcomeError, RefreshStoreError,
     };
@@ -468,6 +509,61 @@ mod tests {
                 backend_key: Some(key),
                 created_seq,
                 ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+    }
+
+    /// Seed the two-row Mutation Log the list-view tests read: a pending
+    /// `update_ticket` on tk-1, then a failed `set_item_status` on tk-2
+    /// carrying `failure_json`. The caller supplies the failure so a test can
+    /// choose whether the row renders a `[class]` tag.
+    fn seed_list_view_log(store: &TmpStore, failure_json: &str) {
+        let conn = seed_store(store);
+        backend_ticket(&conn, "t1", "tk-1", "1", 1);
+        backend_ticket(&conn, "t2", "tk-2", "2", 2);
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "update_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"A","body":""}"#,
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 2,
+                mutation_type: "set_item_status",
+                item_id: "t2",
+                payload_json: r#"{"status":"done"}"#,
+                state: "failed",
+                failure_json: Some(failure_json),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+    }
+
+    /// Seed the single failed Mutation the detail-view tests inspect:
+    /// sequence 7, `set_item_status` on tk-1, with an unclassified failure.
+    fn seed_detail_view_log(store: &TmpStore) {
+        let conn = seed_store(store);
+        backend_ticket(&conn, "t1", "tk-1", "1", 1);
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 7,
+                mutation_type: "set_item_status",
+                item_id: "t1",
+                payload_json: r#"{"status":"done"}"#,
+                state: "failed",
+                failure_json: Some(r#"{"detail":"backend said no"}"#),
+                ..FixtureMutation::default()
             },
         )
         .unwrap();
@@ -1084,38 +1180,46 @@ mod tests {
         );
     }
 
+    /// Holds [`render_log_row`] to its contract under forced colour: state
+    /// token and Display ID styled, continuation and `[class]` tag plain.
+    #[test]
+    fn sync_log_rows_style_the_state_token_and_the_display_id() {
+        let store = TmpStore::new("repo");
+        seed_list_view_log(
+            &store,
+            r#"{"detail":"HTTP 422: rejected","class":"validation"}"#,
+        );
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+
+        let code = run(h.deps_with(Styler::always()), log_args(None));
+
+        assert_eq!(code, Exit::Ok);
+        let out = String::from_utf8(h.stdout).unwrap();
+        assert!(
+            out.contains("\u{1b}[90mpending\u{1b}[39m"),
+            "pending should carry MUTATION_PENDING: {out:?}"
+        );
+        assert!(
+            out.contains("\u{1b}[91mfailed\u{1b}[39m"),
+            "failed should carry MUTATION_FAILED: {out:?}"
+        );
+        assert!(
+            out.contains("\u{1b}[36mtk-1\u{1b}[39m"),
+            "the Display ID should carry the cyan anchor: {out:?}"
+        );
+        assert!(
+            out.contains("  └─ [validation] HTTP 422: rejected\n"),
+            "the continuation and class tag stay plain: {out:?}"
+        );
+    }
+
     #[test]
     fn sync_log_lists_rows_with_failure_continuation() {
         let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        backend_ticket(&conn, "t1", "tk-1", "1", 1);
-        backend_ticket(&conn, "t2", "tk-2", "2", 2);
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 1,
-                mutation_type: "update_ticket",
-                item_id: "t1",
-                payload_json: r#"{"title":"A","body":""}"#,
-                state: "pending",
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 2,
-                mutation_type: "set_item_status",
-                item_id: "t2",
-                payload_json: r#"{"status":"done"}"#,
-                state: "failed",
-                failure_json: Some(r#"{"detail":"HTTP 422: rejected"}"#),
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
-        drop(conn);
+        seed_list_view_log(&store, r#"{"detail":"HTTP 422: rejected"}"#);
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
@@ -1131,22 +1235,7 @@ mod tests {
     #[test]
     fn sync_log_detail_renders_full_view() {
         let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        backend_ticket(&conn, "t1", "tk-1", "1", 1);
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 7,
-                mutation_type: "set_item_status",
-                item_id: "t1",
-                payload_json: r#"{"status":"done"}"#,
-                state: "failed",
-                failure_json: Some(r#"{"detail":"backend said no"}"#),
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
-        drop(conn);
+        seed_detail_view_log(&store);
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
@@ -1159,6 +1248,39 @@ mod tests {
         assert!(out.contains("Target:     tk-1 (ticket)"));
         assert!(out.contains("Payload:    {\"status\":\"done\"}"));
         assert!(out.contains("Failure:\n  backend said no"));
+    }
+
+    /// Holds [`render_log_detail`] to its contract under forced colour: the
+    /// bracketed state and the Display ID styled, field labels plain.
+    #[test]
+    fn sync_log_detail_styles_the_state_token_and_leaves_labels_plain() {
+        let store = TmpStore::new("repo");
+        seed_detail_view_log(&store);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+
+        let code = run(h.deps_with(Styler::always()), log_args(Some(7)));
+
+        assert_eq!(code, Exit::Ok);
+        let out = String::from_utf8(h.stdout).unwrap();
+        assert!(
+            out.contains("Mutation 7  [\u{1b}[91mfailed\u{1b}[39m]"),
+            "the state token styles inside the brackets, not with them: {out:?}"
+        );
+        assert!(
+            out.contains("Target:     \u{1b}[36mtk-1\u{1b}[39m (ticket)"),
+            "the Target Display ID should carry the cyan anchor: {out:?}"
+        );
+        assert!(
+            out.contains("Type:       set_item_status\n"),
+            "field labels stay plain: {out:?}"
+        );
+        assert!(
+            !out.contains("\u{1b}[1m"),
+            "nothing in the detail view is bold: {out:?}"
+        );
     }
 
     #[test]

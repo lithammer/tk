@@ -494,123 +494,184 @@ mod tests {
         assert_eq!(format!("{}", on.close(style)), "\x1b[39m\x1b[22m");
     }
 
+    /// One palette entry and the bytes it must emit. `name` is the entry's
+    /// constant name, lowercased — `palette_table_covers_every_entry` relies
+    /// on that to match this list against the palette source.
+    struct Case {
+        name: &'static str,
+        style: Style,
+        on_open: &'static str,
+        on_close: &'static str,
+    }
+
+    /// Every entry in [`palette`], with its expected open / close bytes.
+    const PALETTE_CASES: &[Case] = &[
+        Case {
+            name: "header",
+            style: palette::HEADER,
+            on_open: "\x1b[1m",
+            on_close: "\x1b[22m",
+        },
+        Case {
+            name: "id_epic",
+            style: palette::ID_EPIC,
+            on_open: "\x1b[36m",
+            on_close: "\x1b[39m",
+        },
+        Case {
+            name: "id_ticket",
+            style: palette::ID_TICKET,
+            on_open: "\x1b[36m",
+            on_close: "\x1b[39m",
+        },
+        Case {
+            name: "kind_bug",
+            style: palette::KIND_BUG,
+            on_open: "\x1b[31m",
+            on_close: "\x1b[39m",
+        },
+        Case {
+            name: "kind_epic",
+            style: palette::KIND_EPIC,
+            on_open: "\x1b[35m",
+            on_close: "\x1b[39m",
+        },
+        Case {
+            name: "status_open",
+            style: palette::STATUS_OPEN,
+            on_open: "",
+            on_close: "",
+        },
+        Case {
+            name: "status_active",
+            style: palette::STATUS_ACTIVE,
+            on_open: "\x1b[33m",
+            on_close: "\x1b[39m",
+        },
+        Case {
+            name: "status_done",
+            style: palette::STATUS_DONE,
+            on_open: "\x1b[32m",
+            on_close: "\x1b[39m",
+        },
+        Case {
+            name: "blocked",
+            style: palette::BLOCKED,
+            on_open: "",
+            on_close: "",
+        },
+        Case {
+            name: "blocked_row",
+            style: palette::BLOCKED_ROW,
+            on_open: "\x1b[2m",
+            on_close: "\x1b[22m",
+        },
+        Case {
+            name: "separator",
+            style: palette::SEPARATOR,
+            on_open: "\x1b[2m",
+            on_close: "\x1b[22m",
+        },
+        Case {
+            name: "priority_p0",
+            style: palette::PRIORITY_P0,
+            on_open: "\x1b[31m",
+            on_close: "\x1b[39m",
+        },
+        Case {
+            name: "priority_p1",
+            style: palette::PRIORITY_P1,
+            on_open: "\x1b[33m",
+            on_close: "\x1b[39m",
+        },
+        Case {
+            name: "priority_p2",
+            style: palette::PRIORITY_P2,
+            on_open: "",
+            on_close: "",
+        },
+        Case {
+            name: "priority_p3",
+            style: palette::PRIORITY_P3,
+            on_open: "",
+            on_close: "",
+        },
+        Case {
+            name: "priority_p4",
+            style: palette::PRIORITY_P4,
+            on_open: "",
+            on_close: "",
+        },
+        Case {
+            // Bright-black foreground, NOT dim: its close must be `39`
+            // (reset foreground), not `22`, so nesting inside the dimmed
+            // BLOCKED_ROW span leaves the row dim intact (ADR-0014).
+            name: "selection_badge",
+            style: palette::SELECTION_BADGE,
+            on_open: "\x1b[90m",
+            on_close: "\x1b[39m",
+        },
+        Case {
+            name: "mutation_failed",
+            style: palette::MUTATION_FAILED,
+            on_open: "\x1b[91m",
+            on_close: "\x1b[39m",
+        },
+        Case {
+            name: "mutation_pending",
+            style: palette::MUTATION_PENDING,
+            on_open: "\x1b[90m",
+            on_close: "\x1b[39m",
+        },
+        Case {
+            name: "mutation_applying",
+            style: palette::MUTATION_APPLYING,
+            on_open: "\x1b[33m",
+            on_close: "\x1b[39m",
+        },
+        Case {
+            name: "mutation_abandoned",
+            style: palette::MUTATION_ABANDONED,
+            on_open: "\x1b[35m",
+            on_close: "\x1b[39m",
+        },
+        Case {
+            name: "mutation_skipped",
+            style: palette::MUTATION_SKIPPED,
+            on_open: "\x1b[90m",
+            on_close: "\x1b[39m",
+        },
+        Case {
+            name: "mutation_cancelled",
+            style: palette::MUTATION_CANCELLED,
+            on_open: "\x1b[90m",
+            on_close: "\x1b[39m",
+        },
+        Case {
+            name: "mutation_applied",
+            style: palette::MUTATION_APPLIED,
+            on_open: "\x1b[32m",
+            on_close: "\x1b[39m",
+        },
+        Case {
+            name: "match",
+            style: palette::MATCH,
+            on_open: "\x1b[93m",
+            on_close: "\x1b[39m",
+        },
+        Case {
+            name: "hunk_separator",
+            style: palette::HUNK_SEPARATOR,
+            on_open: "\x1b[34m",
+            on_close: "\x1b[39m",
+        },
+    ];
+
     /// Byte-exact pin of every palette entry's open / close pair under
     /// both choices, keeping the SGR contract verifiable without a TTY.
     #[test]
     fn palette_entries_emit_expected_bytes_under_each_choice() {
-        struct Case {
-            name: &'static str,
-            style: Style,
-            on_open: &'static str,
-            on_close: &'static str,
-        }
-        let cases = [
-            Case {
-                name: "header",
-                style: palette::HEADER,
-                on_open: "\x1b[1m",
-                on_close: "\x1b[22m",
-            },
-            Case {
-                name: "id_epic",
-                style: palette::ID_EPIC,
-                on_open: "\x1b[36m",
-                on_close: "\x1b[39m",
-            },
-            Case {
-                name: "id_ticket",
-                style: palette::ID_TICKET,
-                on_open: "\x1b[36m",
-                on_close: "\x1b[39m",
-            },
-            Case {
-                name: "kind_bug",
-                style: palette::KIND_BUG,
-                on_open: "\x1b[31m",
-                on_close: "\x1b[39m",
-            },
-            Case {
-                name: "kind_epic",
-                style: palette::KIND_EPIC,
-                on_open: "\x1b[35m",
-                on_close: "\x1b[39m",
-            },
-            Case {
-                name: "status_open",
-                style: palette::STATUS_OPEN,
-                on_open: "",
-                on_close: "",
-            },
-            Case {
-                name: "status_active",
-                style: palette::STATUS_ACTIVE,
-                on_open: "\x1b[33m",
-                on_close: "\x1b[39m",
-            },
-            Case {
-                name: "status_done",
-                style: palette::STATUS_DONE,
-                on_open: "\x1b[32m",
-                on_close: "\x1b[39m",
-            },
-            Case {
-                name: "blocked",
-                style: palette::BLOCKED,
-                on_open: "",
-                on_close: "",
-            },
-            Case {
-                name: "blocked_row",
-                style: palette::BLOCKED_ROW,
-                on_open: "\x1b[2m",
-                on_close: "\x1b[22m",
-            },
-            Case {
-                name: "separator",
-                style: palette::SEPARATOR,
-                on_open: "\x1b[2m",
-                on_close: "\x1b[22m",
-            },
-            Case {
-                name: "priority_p0",
-                style: palette::PRIORITY_P0,
-                on_open: "\x1b[31m",
-                on_close: "\x1b[39m",
-            },
-            Case {
-                name: "priority_p1",
-                style: palette::PRIORITY_P1,
-                on_open: "\x1b[33m",
-                on_close: "\x1b[39m",
-            },
-            Case {
-                name: "priority_p2",
-                style: palette::PRIORITY_P2,
-                on_open: "",
-                on_close: "",
-            },
-            Case {
-                name: "priority_p3",
-                style: palette::PRIORITY_P3,
-                on_open: "",
-                on_close: "",
-            },
-            Case {
-                name: "priority_p4",
-                style: palette::PRIORITY_P4,
-                on_open: "",
-                on_close: "",
-            },
-            Case {
-                // Bright-black foreground, NOT dim: its close must be `39`
-                // (reset foreground), not `22`, so nesting inside the dimmed
-                // BLOCKED_ROW span leaves the row dim intact (ADR-0014).
-                name: "selection_badge",
-                style: palette::SELECTION_BADGE,
-                on_open: "\x1b[90m",
-                on_close: "\x1b[39m",
-            },
-        ];
+        let cases = PALETTE_CASES;
         let on = SubStyler {
             choice: ColorChoice::Always,
         };
@@ -642,6 +703,108 @@ mod tests {
                 "no-colour close should be empty for {}",
                 case.name,
             );
+        }
+    }
+
+    /// Keeps [`PALETTE_CASES`] honest about covering the whole palette.
+    ///
+    /// The byte table above is only a contract if it names every entry, and
+    /// nothing about adding a `pub const` to `palette.rs` forces a row here.
+    /// So read the palette's own source and require one. Add an entry, and
+    /// this fails until its bytes are pinned.
+    ///
+    /// One comparison of both sorted lists covers every way they can
+    /// disagree, a failed parse included.
+    #[test]
+    fn palette_table_covers_every_entry() {
+        const SOURCE: &str = include_str!("palette.rs");
+
+        let mut declared: Vec<String> = SOURCE
+            .lines()
+            .filter_map(|line| line.strip_prefix("pub const "))
+            .filter_map(|rest| rest.split_once(": Style"))
+            .map(|(name, _)| name.to_ascii_lowercase())
+            .collect();
+        declared.sort_unstable();
+
+        let mut covered: Vec<String> = PALETTE_CASES
+            .iter()
+            .map(|case| case.name.to_owned())
+            .collect();
+        covered.sort_unstable();
+
+        assert_eq!(
+            covered, declared,
+            "PALETTE_CASES and the palette's `pub const`s disagree; every \
+             entry needs exactly one row pinning its open / close bytes"
+        );
+    }
+
+    /// ADR-0014's disjoint-family invariant, asserted pairwise.
+    ///
+    /// A span's close resets its own SGR families to default; it cannot
+    /// restore a value an enclosing span set. So an entry used to bracket a
+    /// row must touch no family that an entry rendered inside it also
+    /// touches, or the inner close silently cancels the outer style for the
+    /// rest of the row.
+    ///
+    /// Two entries bracket other spans: `BLOCKED_ROW` dims a blocked list
+    /// row, and `HEADER` bolds a `tk grep` title that `MATCH` highlights
+    /// render inside. That pair is the one genuinely nested case in the
+    /// codebase, and the reason `match` earns a row in [`PALETTE_CASES`].
+    /// `MATCH` brackets with [`SubStyler::open`] / [`SubStyler::close`] too,
+    /// but only because the matched text is written by a separate call, and
+    /// no palette entry renders inside it.
+    ///
+    /// Each row's pinned `on_close` is the family evidence, and
+    /// [`palette_entries_emit_expected_bytes_under_each_choice`] holds those
+    /// bytes to production [`Close`] output — so no second reading of
+    /// [`Style`] is needed here, and none can drift from it.
+    #[test]
+    fn outer_and_inner_palette_entries_touch_disjoint_sgr_families() {
+        /// The individual SGR closes in a row's `on_close`, e.g. `39` in
+        /// `"\x1b[39m"`. Two entries share a family exactly when they share
+        /// one of these.
+        fn closes(on_close: &str) -> Vec<&str> {
+            on_close.split_inclusive('m').collect()
+        }
+
+        // `SEPARATOR` closes `22` like the bracketing entries, so it would
+        // fail as an inner. It is exempt because it nests in neither
+        // direction: standalone chrome, always `wrap`, always outside a
+        // bracketed row. Give it an inner use and this exemption needs
+        // justifying again.
+        //
+        // The bracketing entries share `22` with each other harmlessly, one
+        // dimming list rows and the other bolding show / grep headers.
+        let bracketing = ["blocked_row", "header"];
+        let never_nested = ["separator"];
+
+        for outer_name in bracketing {
+            let outer = PALETTE_CASES
+                .iter()
+                .find(|case| case.name == outer_name)
+                .expect("a bracketing entry needs a row in PALETTE_CASES");
+            let outer_closes = closes(outer.on_close);
+            assert!(
+                !outer_closes.is_empty(),
+                "{outer_name} closes nothing, so it cannot bracket a span"
+            );
+            let inners = PALETTE_CASES.iter().filter(|case| {
+                !bracketing.contains(&case.name) && !never_nested.contains(&case.name)
+            });
+            for case in inners {
+                let clash: Vec<&str> = closes(case.on_close)
+                    .into_iter()
+                    .filter(|close| outer_closes.contains(close))
+                    .collect();
+                assert!(
+                    clash.is_empty(),
+                    "`{}` shares {clash:?} with outer span `{outer_name}`: its \
+                     close would cancel the outer style mid-row (ADR-0014)",
+                    case.name,
+                );
+            }
         }
     }
 }

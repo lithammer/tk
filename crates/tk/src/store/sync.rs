@@ -1917,6 +1917,9 @@ pub struct LogListRow {
     pub state: MutationState,
     pub mutation_type: MutationType,
     pub target_display_id: String,
+    /// Class of the target Item, mirroring [`LogDetailRow::item_class`] so
+    /// both log views describe their target the same way.
+    pub item_class: ItemClass,
     pub created_at: String,
     /// Decoded `Failure.detail`; set for failed and indeterminate applying rows.
     pub failure_detail: Option<String>,
@@ -1981,7 +1984,8 @@ pub fn list_mutation_log(
         LogListFilter::Abandoned => "where m.state = 'abandoned'",
     };
     let sql = format!(
-        "select m.sequence, m.state, m.mutation_type, i.display_value, m.created_at, m.failure_json \
+        "select m.sequence, m.state, m.mutation_type, i.display_value, \
+                m.item_class, m.created_at, m.failure_json \
            from mutations m \
            join items i on i.id = m.item_id and i.item_class = m.item_class \
           {where_clause} \
@@ -1993,7 +1997,7 @@ pub fn list_mutation_log(
 
     let mut out = Vec::new();
     while let Some(row) = rows.next()? {
-        let raw_failure: Option<String> = row.get(5)?;
+        let raw_failure: Option<String> = row.get(6)?;
         let failure = raw_failure.map(|raw| decode_failure(&raw)).transpose()?;
         let (failure_detail, failure_class) = match failure {
             Some(f) => (Some(f.detail), Some(f.class)),
@@ -2004,7 +2008,8 @@ pub fn list_mutation_log(
             state: row.get(1)?,
             mutation_type: row.get(2)?,
             target_display_id: row.get(3)?,
-            created_at: row.get(4)?,
+            item_class: row.get(4)?,
+            created_at: row.get(5)?,
             failure_detail,
             failure_class,
         });
