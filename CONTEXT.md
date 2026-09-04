@@ -387,6 +387,18 @@ address and will never refresh. Usually the outcome was **Indeterminate**; a
 **Created** outcome whose identity could not be stored reaches the same state.
 _Avoid_: Cancelled Mutation, Orphaned Mutation, Stranded Promotion
 
+**Unresolved Mutation**:
+A **Mutation** still waiting on a **Backend**: `pending`, `failed`, or
+`applying`.
+_Avoid_: Pending Mutation, Waiting Mutation, Nonterminal Mutation
+
+**Withdrawn Mutation**:
+A **Mutation** whose Backend intent ended without ever being applied: a
+**Skipped Mutation**, **Cancelled Mutation**, or **Abandoned Mutation**.
+Skipping relinquishes that intent where the other two withdraw it; the group
+takes its name from the larger case.
+_Avoid_: Curated Mutation, Resolved Mutation
+
 **Sync Skip**:
 The **`tk sync`** mode that marks one failed **Mutation** as skipped and
 continues sync. Skipping a failed closing Mutation restores that Item's
