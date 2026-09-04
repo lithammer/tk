@@ -90,8 +90,9 @@ pub const MUTATION_APPLYING: Style = fg(AnsiColor::Yellow);
 /// Magenta: it is the one Withdrawn Mutation that still asks something of
 /// the reader, and CONTEXT.md singles it out for exactly that reason. Not
 /// red, for the same reason [`MUTATION_APPLYING`] is not — nothing was
-/// refused here. Not [`MUTATION_WITHDRAWN`]'s muted bright black either,
-/// which would file it with the outcomes that need no attention.
+/// refused here. Nor the bright black [`MUTATION_SKIPPED`] and
+/// [`MUTATION_CANCELLED`] carry, which would file it with the withdrawn
+/// outcomes that ask nothing of anyone.
 pub const MUTATION_ABANDONED: Style = fg(AnsiColor::Magenta);
 
 /// A Skipped Mutation — Backend intent relinquished by Sync Skip. Bright
