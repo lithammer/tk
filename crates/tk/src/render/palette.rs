@@ -24,6 +24,7 @@
 use anstyle::{AnsiColor, Color, Style};
 
 use crate::domain::item_class::ItemClass;
+use crate::domain::mutation_state::MutationState;
 use crate::domain::priority::Priority;
 use crate::domain::status::ItemStatus;
 
@@ -74,6 +75,38 @@ pub const MUTATION_FAILED: Style = fg(AnsiColor::BrightRed);
 /// dimmed `BLOCKED_ROW` span it renders inside (ADR-0014 nesting).
 pub const MUTATION_PENDING: Style = fg(AnsiColor::BrightBlack);
 
+/// A Mutation whose Backend creation began with no confirmed identity or
+/// no-effect verdict — the `applying` state, rendered as a word by
+/// `tk sync log`, `tk show`'s Mutation sections, and the `tk list` banner.
+/// Yellow, the SGR `STATUS_ACTIVE` uses: both mean work in flight, and this
+/// palette already pairs one SGR across a semantic class. Deliberately not
+/// `MUTATION_FAILED`'s red, which says the Backend refused the Mutation —
+/// false of an Indeterminate creation, where tk never learned what happened
+/// (ADR-0039).
+pub const MUTATION_APPLYING: Style = fg(AnsiColor::Yellow);
+
+/// An Abandoned Mutation — a Promotion withdrawn before tk recorded a
+/// Backend identity, so a Backend object may exist that tk cannot address.
+/// Magenta: it is the one Withdrawn Mutation that still asks something of
+/// the reader, and CONTEXT.md singles it out for exactly that reason. Not
+/// red, for the same reason [`MUTATION_APPLYING`] is not — nothing was
+/// refused here. Not [`MUTATION_WITHDRAWN`]'s muted bright black either,
+/// which would file it with the outcomes that need no attention.
+pub const MUTATION_ABANDONED: Style = fg(AnsiColor::Magenta);
+
+/// The Withdrawn Mutations that raise no alarm: `skipped` and `cancelled`.
+/// Not the whole glossary term — an Abandoned Mutation is a Withdrawn
+/// Mutation too and takes [`MUTATION_ABANDONED`], the same way `pending`
+/// and `failed` are both Unresolved Mutations with an entry each.
+///
+/// Bright black, the SGR `SELECTION_BADGE` and `MUTATION_PENDING` already
+/// share — one muted class, one SGR — kept as its own constant so a
+/// recolour of relinquished and withdrawn intent is one edit and does not
+/// drag queued Mutations along with it. A foreground colour, not
+/// `dimmed()`, so its close (`39`) cannot reset a `dimmed()` outer span
+/// (ADR-0014 nesting).
+pub const MUTATION_WITHDRAWN: Style = fg(AnsiColor::BrightBlack);
+
 /// Open Item status (placeholder — uncoloured).
 pub const STATUS_OPEN: Style = Style::new();
 
@@ -90,7 +123,13 @@ pub const BLOCKED: Style = Style::new();
 /// Pairs with `BLOCKED_ROW`'s family-disjoint inner spans.
 pub const BLOCKED_ROW: Style = Style::new().dimmed();
 
-/// Dim separator (e.g. trees, list dividers).
+/// Dim chrome: list dividers, summary parentheticals, and the pointers that
+/// send a reader to another command.
+///
+/// Not tree glyphs, despite the name. `tk list` writes its own `└── ` row
+/// prefix plain, and `tk sync log`'s `└─` failure continuation matches it, so
+/// dimming either would leave one styled tree glyph in a codebase whose
+/// others are plain.
 pub const SEPARATOR: Style = Style::new().dimmed();
 
 /// Priority P0 — highest. Mirrors `KIND_BUG`'s SGR so urgent rows draw the
@@ -128,7 +167,9 @@ pub const HUNK_SEPARATOR: Style = fg(AnsiColor::Blue);
 
 // Domain-enum → palette `Style` mappers. The single source of truth for these
 // mappings, shared by every renderer (`item_row` for list/search, `item_header`
-// for show/grep, and show's relationship sub-rows) so a recolour is one edit.
+// for show/grep, show's relationship sub-rows, and the Mutation surfaces —
+// `tk sync log`, show's Mutation sections, and the list banner) so a recolour
+// is one edit.
 
 /// Style for an Item's status glyph.
 #[must_use]
@@ -158,5 +199,72 @@ pub fn id_style(class: ItemClass) -> Style {
     match class {
         ItemClass::Epic => ID_EPIC,
         ItemClass::Ticket => ID_TICKET,
+    }
+}
+
+/// Style for a Mutation's state token.
+///
+/// Every surface that names a Mutation state renders through here, so the
+/// same Mutation cannot read as one thing in `tk sync log` and another in
+/// `tk show` or the `tk list` banner. Matched exhaustively: a state added to
+/// [`MutationState`] fails to compile here rather than defaulting into
+/// whichever arm a predicate happened to pick.
+///
+/// `applied` borrows [`STATUS_DONE`] rather than owning an entry. It is the
+/// one state no list view renders — `tk sync log`'s default filter excludes
+/// it, no flag selects it, and `tk show` drops it — so it reaches a reader
+/// only through `tk sync log <sequence>`, where it means the same thing
+/// `STATUS_DONE` does on an Item.
+///
+/// [`MutationState`]: crate::domain::mutation_state::MutationState
+#[must_use]
+pub fn mutation_state_style(state: MutationState) -> Style {
+    match state {
+        MutationState::Pending => MUTATION_PENDING,
+        MutationState::Failed => MUTATION_FAILED,
+        MutationState::Applying => MUTATION_APPLYING,
+        MutationState::Skipped | MutationState::Cancelled => MUTATION_WITHDRAWN,
+        MutationState::Abandoned => MUTATION_ABANDONED,
+        MutationState::Applied => STATUS_DONE,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::mutation_state::MutationState;
+
+    /// Pins every Mutation state to its palette entry. This table is the
+    /// contract `tk sync log`, `tk show`'s Mutation sections, and the
+    /// `tk list` banner all render through, so a state that would look one
+    /// way on one surface and another way elsewhere fails here first.
+    #[test]
+    fn mutation_state_style_maps_every_state() {
+        let expected = [
+            (MutationState::Pending, MUTATION_PENDING),
+            (MutationState::Failed, MUTATION_FAILED),
+            (MutationState::Applying, MUTATION_APPLYING),
+            (MutationState::Skipped, MUTATION_WITHDRAWN),
+            (MutationState::Cancelled, MUTATION_WITHDRAWN),
+            (MutationState::Abandoned, MUTATION_ABANDONED),
+            (MutationState::Applied, STATUS_DONE),
+        ];
+
+        // The mapper's own `match` is exhaustive, so a new state fails to
+        // compile there. Pinning the count keeps this table from falling
+        // behind that match and silently testing less than every state.
+        assert_eq!(
+            expected.len(),
+            MutationState::ALL.len(),
+            "every MutationState needs a row in this table"
+        );
+
+        for (state, want) in expected {
+            assert_eq!(
+                mutation_state_style(state),
+                want,
+                "wrong palette entry for {state}"
+            );
+        }
     }
 }

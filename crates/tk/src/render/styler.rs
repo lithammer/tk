@@ -494,17 +494,19 @@ mod tests {
         assert_eq!(format!("{}", on.close(style)), "\x1b[39m\x1b[22m");
     }
 
-    /// Byte-exact pin of every palette entry's open / close pair under
-    /// both choices, keeping the SGR contract verifiable without a TTY.
-    #[test]
-    fn palette_entries_emit_expected_bytes_under_each_choice() {
-        struct Case {
-            name: &'static str,
-            style: Style,
-            on_open: &'static str,
-            on_close: &'static str,
-        }
-        let cases = [
+    /// One palette entry and the bytes it must emit. `name` is the entry's
+    /// constant name, lowercased — `palette_table_covers_every_entry` relies
+    /// on that to match this list against the palette source.
+    struct Case {
+        name: &'static str,
+        style: Style,
+        on_open: &'static str,
+        on_close: &'static str,
+    }
+
+    /// Every entry in [`palette`], with its expected open / close bytes.
+    fn palette_cases() -> Vec<Case> {
+        vec![
             Case {
                 name: "header",
                 style: palette::HEADER,
@@ -610,7 +612,60 @@ mod tests {
                 on_open: "\x1b[90m",
                 on_close: "\x1b[39m",
             },
-        ];
+            Case {
+                name: "mutation_failed",
+                style: palette::MUTATION_FAILED,
+                on_open: "\x1b[91m",
+                on_close: "\x1b[39m",
+            },
+            Case {
+                name: "mutation_pending",
+                style: palette::MUTATION_PENDING,
+                on_open: "\x1b[90m",
+                on_close: "\x1b[39m",
+            },
+            Case {
+                // Yellow, shared with STATUS_ACTIVE: both mean in flight.
+                name: "mutation_applying",
+                style: palette::MUTATION_APPLYING,
+                on_open: "\x1b[33m",
+                on_close: "\x1b[39m",
+            },
+            Case {
+                name: "mutation_abandoned",
+                style: palette::MUTATION_ABANDONED,
+                on_open: "\x1b[35m",
+                on_close: "\x1b[39m",
+            },
+            Case {
+                // Bright-black foreground, NOT dim, for the same reason
+                // SELECTION_BADGE is: its close must be `39` so nesting
+                // inside a dimmed outer span leaves the dim intact.
+                name: "mutation_withdrawn",
+                style: palette::MUTATION_WITHDRAWN,
+                on_open: "\x1b[90m",
+                on_close: "\x1b[39m",
+            },
+            Case {
+                name: "match",
+                style: palette::MATCH,
+                on_open: "\x1b[93m",
+                on_close: "\x1b[39m",
+            },
+            Case {
+                name: "hunk_separator",
+                style: palette::HUNK_SEPARATOR,
+                on_open: "\x1b[34m",
+                on_close: "\x1b[39m",
+            },
+        ]
+    }
+
+    /// Byte-exact pin of every palette entry's open / close pair under
+    /// both choices, keeping the SGR contract verifiable without a TTY.
+    #[test]
+    fn palette_entries_emit_expected_bytes_under_each_choice() {
+        let cases = palette_cases();
         let on = SubStyler {
             choice: ColorChoice::Always,
         };
@@ -642,6 +697,117 @@ mod tests {
                 "no-colour close should be empty for {}",
                 case.name,
             );
+        }
+    }
+
+    /// Keeps [`palette_cases`] honest about covering the whole palette.
+    ///
+    /// The byte table above is only a contract if it names every entry, and
+    /// nothing about adding a `pub const` to `palette.rs` forces a row here.
+    /// So read the palette's own source and require one. Add an entry, and
+    /// this fails until its bytes are pinned.
+    #[test]
+    fn palette_table_covers_every_entry() {
+        const SOURCE: &str = include_str!("palette.rs");
+
+        let declared: Vec<String> = SOURCE
+            .lines()
+            .filter_map(|line| line.strip_prefix("pub const "))
+            .filter_map(|rest| rest.split_once(": Style"))
+            .map(|(name, _)| name.to_ascii_lowercase())
+            .collect();
+
+        // A parse that finds nothing would make this test vacuously green.
+        assert!(
+            declared.len() > 10,
+            "expected to parse the palette's entries, found {declared:?}"
+        );
+
+        let covered: Vec<&str> = palette_cases().iter().map(|case| case.name).collect();
+        for name in &declared {
+            assert!(
+                covered.contains(&name.as_str()),
+                "palette entry `{name}` has no row in palette_cases; pin its \
+                 open / close bytes"
+            );
+        }
+        assert_eq!(
+            covered.len(),
+            declared.len(),
+            "palette_cases has rows the palette does not declare: {covered:?} vs {declared:?}"
+        );
+    }
+
+    /// ADR-0014's disjoint-family invariant, asserted pairwise.
+    ///
+    /// A span's close resets its own SGR families to default; it cannot
+    /// restore a value an enclosing span set. So an entry used to bracket a
+    /// row must touch no family that an entry rendered inside it also
+    /// touches, or the inner close silently cancels the outer style for the
+    /// rest of the row.
+    ///
+    /// The outer list is the entries actually used with
+    /// [`SubStyler::open`] / [`SubStyler::close`]: `BLOCKED_ROW` dims a
+    /// blocked list row, and `HEADER` bolds a `tk grep` title that match
+    /// highlights render inside. `SEPARATOR` joins them as the third
+    /// bold/dim entry, so a future outer span reaching for it is covered
+    /// before it is written.
+    #[test]
+    fn outer_and_inner_palette_entries_touch_disjoint_sgr_families() {
+        /// Family tags a style sets, named for the SGR that closes each.
+        fn families(style: Style) -> Vec<&'static str> {
+            let effects = style.get_effects();
+            let mut out = Vec::new();
+            if effects.contains(Effects::BOLD) || effects.contains(Effects::DIMMED) {
+                out.push("bold/dim (22)");
+            }
+            if style.get_fg_color().is_some() {
+                out.push("foreground (39)");
+            }
+            if style.get_bg_color().is_some() {
+                out.push("background (49)");
+            }
+            if effects.contains(Effects::UNDERLINE) {
+                out.push("underline (24)");
+            }
+            if effects.contains(Effects::ITALIC) {
+                out.push("italic (23)");
+            }
+            out
+        }
+
+        let outers = [
+            ("blocked_row", palette::BLOCKED_ROW),
+            ("header", palette::HEADER),
+            ("separator", palette::SEPARATOR),
+        ];
+
+        // The outers are bold/dim by that convention, so they share a family
+        // with each other. That is not a clash to fix: no outer span renders
+        // inside another. Every remaining entry is an inner.
+        let outer_names: Vec<&str> = outers.iter().map(|(name, _)| *name).collect();
+
+        for (outer_name, outer) in outers {
+            let outer_families = families(outer);
+            assert!(
+                !outer_families.is_empty(),
+                "{outer_name} sets no SGR family, so it cannot bracket a span"
+            );
+            let inners = palette_cases()
+                .into_iter()
+                .filter(|case| !outer_names.contains(&case.name));
+            for case in inners {
+                let clash: Vec<&str> = families(case.style)
+                    .into_iter()
+                    .filter(|family| outer_families.contains(family))
+                    .collect();
+                assert!(
+                    clash.is_empty(),
+                    "`{}` shares {clash:?} with outer span `{outer_name}`: its \
+                     close would cancel the outer style mid-row (ADR-0014)",
+                    case.name,
+                );
+            }
         }
     }
 }

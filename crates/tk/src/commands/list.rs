@@ -181,7 +181,7 @@ fn render_sync_banner<W: Write + ?Sized>(
         "{} Mutation {} {} on {} {}",
         styler.wrap(palette::HEADER, "Sync:"),
         head.sequence,
-        head.state,
+        styler.wrap(palette::mutation_state_style(head.state), head.state.text()),
         // MutationSummary carries no Item class, so ID_TICKET and ID_EPIC
         // cannot be chosen between here; both resolve to cyan today, so the
         // anchor renders identically either way. Revisit if the two colours
@@ -1279,6 +1279,53 @@ mod tests {
             stdout.contains("Sync: Mutation 1 failed on tk-1 (tk sync log 1)\n"),
             "stdout={stdout:?}"
         );
+    }
+
+    /// The banner already styled `Sync:` bold, the Display ID cyan, and the
+    /// hint dim, but left the state token plain — the one thing the banner
+    /// exists to report. It now carries the same entry `tk sync log` and
+    /// `tk show` give that state.
+    ///
+    /// The banner fires only on a `failed` or `applying` head, so those are
+    /// the only two states reachable here. `applying` is paired with a
+    /// Promotion because the store's CHECK constraint admits no other
+    /// Mutation Type into that state.
+    #[test]
+    fn sync_banner_styles_the_state_token() {
+        for (state, mutation_type, sgr) in [
+            ("failed", "update_ticket", "91"),
+            ("applying", "promote_ticket", "33"),
+        ] {
+            let store = TmpStore::new("repo");
+            let conn = seed_store(&store);
+            insert_fixture_item(
+                &conn,
+                FixtureItem {
+                    id: "t1",
+                    display: "tk-1",
+                    title: "Row",
+                    created_seq: 1,
+                    ..FixtureItem::default()
+                },
+            )
+            .unwrap();
+            seed_mutation(&conn, 1, "t1", "ticket", mutation_type, state);
+            drop(conn);
+
+            let cwd_path = cwd();
+            let mut h = Harness::new(&cwd_path);
+            expect_git(&h, &store);
+
+            let code = run_rendered_with(&mut h, Styler::always(), default_args());
+
+            assert_eq!(code, Exit::Ok);
+            let stdout = String::from_utf8(h.stdout).unwrap();
+            let want = format!("\u{1b}[{sgr}m{state}\u{1b}[39m");
+            assert!(
+                stdout.contains(&want),
+                "banner state {state} should render as {want:?}: {stdout:?}"
+            );
+        }
     }
 
     #[test]
