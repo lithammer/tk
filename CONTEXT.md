@@ -25,8 +25,21 @@ The category of a **Ticket**: `task` or `bug`.
 _Avoid_: Type
 
 **Local Field**:
-A field stored in the **Repository Store** that is not applied to a **Backend** in v1.
+A field the **Repository Store** owns outright; no **Backend** reads or writes it.
 _Avoid_: Unsynced Field, Sync Excluded Field
+
+**Shared Field**:
+A field whose authority **tk** shares with a **Backend**: title, body,
+**Lifecycle**, and **Ticket Kind**. **Backend Pull** imports it and a
+**Mutation** may push it.
+_Avoid_: Synced Field, Backend Field, Remote Field
+
+**Reserved Representation**:
+A pre-existing **Backend** label or type that a **Backend Adapter** uses as
+private encoding of a typed **tk** field when the **Backend** has no native
+slot for it, such as GitHub's `bug` label for **Ticket Kind**; **tk** never
+stores or shows it as a label.
+_Avoid_: Label, Reserved Label, Adapter Encoding
 
 **Priority**:
 A local-only ranking for a **Ticket**: `P0`, `P1`, `P2`, `P3`, or `P4`.
@@ -78,14 +91,6 @@ _Avoid_: Status, Triage Status, Queue State, Workflow State
 **Closing Reason**:
 An optional free-text explanation recorded when a **Ticket** or **Epic** is marked `done`, captured by `tk done -m`. A **Local Field** in v1, distinct from a **Comment**; it is stored current state in the **Repository Store** and is not synced to a **Backend**.
 _Avoid_: Closing Comment, Done Comment, Resolution Note
-
-**Assignee**:
-A person or agent expected to work on a **Ticket**.
-_Avoid_: Owner
-
-**Label**:
-A descriptive facet for loose filtering or grouping, such as `python`, `ci`, or `docs`.
-_Avoid_: Priority, Ticket Kind, Epic Membership, Status, Blocker
 
 **Dependency**:
 A relationship where one **Ticket** or **Epic** cannot progress until another **Ticket** or **Epic** is done.
@@ -332,8 +337,8 @@ A named domain operation that describes the intent of a **Mutation**.
 _Avoid_: Field Patch, JSON Patch
 
 **V1 Mutation Type**:
-A **Mutation Type** supported by the first implementation: `update_ticket`, `update_epic`, `set_item_status`, `add_ticket_to_epic`, `remove_ticket_from_epic`, `add_dependency`, `remove_dependency`, `add_external_blocker`, `resolve_external_blocker`, `promote_ticket`, or `promote_epic`.
-_Avoid_: Comment Mutation, Label Mutation, Assignee Mutation
+A **Mutation Type** supported by the first implementation: `update_ticket`, `update_epic`, `set_item_status`, `add_ticket_to_epic`, `remove_ticket_from_epic`, `add_dependency`, `remove_dependency`, `promote_ticket`, or `promote_epic`.
+_Avoid_: Comment Mutation, Label Mutation, Assignee Mutation, External Blocker Mutation
 
 **Mutation Log**:
 The ordered local record of **Mutations** waiting to be applied or already applied to a backend.
@@ -429,7 +434,7 @@ _Avoid_: ticket, tickets
 - Future versions may allow the **Parent Argument** to resolve to a **Ticket** if subtickets are introduced.
 - A **Ticket** has exactly one **Ticket Kind**.
 - A **Ticket** has exactly one **Priority**.
-- **Priority** is a **Local Field** in v1.
+- **Priority** is a **Local Field**.
 - The default **Priority** is `P2`.
 - Lower **Priority** numbers sort before higher **Priority** numbers.
 - A candidate **Ticket**'s **Effective Priority** is the lowest of its own **Priority** and the **Effective Priorities** of every unfinished **Blocked Item** (**Item Status** `open` or `active`) it reaches through transitive `blocked_by` **Dependencies** within the active **Scope**.
@@ -438,12 +443,12 @@ _Avoid_: ticket, tickets
 - An **Epic** in the **Effective Priority** chain contributes the lowest **Effective Priority** over its unfinished child **Tickets**.
 - **Effective Priority** propagation stops at the **Scope** boundary; items outside the active **Scope** do not contribute.
 - **External Blockers** carry no **Priority** and do not interrupt **Effective Priority** propagation.
-- **Labels** are descriptive facets and do not replace **Priority**, **Ticket Kind**, **Epic** membership, **Item Status**, **Dependencies**, or **External Blockers**.
-- **Labels** are deferred from v1.
+- **tk** has no Label field. A **Backend Adapter** may use a **Reserved Representation** for a typed field when its **Backend** has no native slot, and it touches no other label on the object (ADR-0049).
+- A field is a **Shared Field** only when the **Backend** has a native slot or a **Reserved Representation** for it and **tk** accepts the **Backend** as authoritative for it on **Backend Pull**; every other field is a **Local Field** (ADR-0049).
 - A **Ticket** has exactly one **Item Status**.
 - A **Ticket** has exactly one **Selection State**.
 - An **Epic** has no **Selection State**.
-- **Selection State** is a **Local Field** in v1.
+- **Selection State** is a **Local Field**.
 - The default **Selection State** is `accepted`; a newly **Adopted** **Backend Ticket** also defaults to `accepted`, since **Adopting** an issue is the choice to work it.
 - A `triage` **Ticket** carries no **Priority**; `accepted` and `parked` **Tickets** carry a **Priority**.
 - **Accept** moves a `triage` **Ticket** to `accepted` and assigns its **Priority**; accepting an already `accepted` **Ticket** is a harmless no-op.
@@ -460,10 +465,7 @@ _Avoid_: ticket, tickets
 - **Backend Pull** cannot flip locally held work into progress: Adapter
   refreshes carry **Lifecycle** but no **Work State**. Pull preserves Work State
   when importing `open` and clears it when importing `done`.
-- **Assignee** support is deferred from v1 and may be omitted entirely.
-- If **Assignees** are introduced, a **Ticket** may have zero or more
-  **Assignees**.
-- `active` **Item Status** means the **Ticket** or **Epic** is currently being worked and does not imply assignment.
+- `active` **Item Status** means this **Repository Store** is working the **Ticket** or **Epic**. A **Backend**'s own in-progress or assignee state says someone is, so **Backend Pull** never imports it as **Work State**.
 - An **Epic** has exactly one **Item Status**.
 - An **Epic** is only `done` after explicit closure.
 - Child **Ticket** completion may suggest closing an **Epic**, but does not close it automatically.
@@ -739,7 +741,7 @@ _Avoid_: ticket, tickets
 - A **Mutation** has exactly one **Mutation Type**.
 - The first implementation supports only **V1 Mutation Types**.
 - `update_ticket` and `update_epic` modify title and body only.
-- Comments, labels, and assignees are deferred from v1.
+- The gh-43 Epic owns Comments; **tk** has no label or assignee field.
 - A **Mutation Log** contains zero or more **Mutations**.
 - A **Mutation** has exactly one **Mutation Sequence**.
 - A **Sync Cursor** belongs to one **Backend**.
@@ -754,7 +756,6 @@ _Avoid_: ticket, tickets
 - **`tk next`** selects the ready **Ticket** with the lowest **Effective Priority**, then lowest own **Priority**, then lowest `created_seq`, within the active **Scope**.
 - **`tk next`** is deterministic and does not randomize among candidates.
 - **Ticket Kind** does not affect **`tk next`** ordering.
-- **Assignees** do not affect **`tk next`** readiness or ordering.
 - **`tk next`** does not explain skipped candidates, but may render a rationale for the selected **Ticket** when its **Effective Priority** comes from a **Blocked Item** rather than its own **Priority**. The rationale names the **Ticket** whose **Priority** drives the **Effective Priority** signal, which is not always the item the candidate directly unblocks — in an **Epic**-mediated chain, the named **Ticket** is a child of an **Epic** the candidate blocks, not a direct **Blocked Item**.
 - **`tk next`** has no JSON or structured-output mode in v1.
 - When there is no active **Scope**, **`tk next`** searches ready **Tickets** across the **Repository Store**.
@@ -944,7 +945,7 @@ _Avoid_: ticket, tickets
 > **Domain expert:** "Yes, and the withdrawal is recorded as an **Abandoned Mutation** rather than a **Cancelled Mutation**, because tk never learned what that call did. If it did create an issue, tk holds no identity for it and will never refresh it — the exit is honest about that rather than refusing."
 >
 > **Dev:** "Does an `active` **Ticket** have to be assigned to someone?"
-> **Domain expert:** "No — `active` means current work; **Assignee** support is deferred and may be omitted entirely."
+> **Domain expert:** "No — `active` means this **Repository Store** is working it. **tk** has no assignee field; a **Backend**'s assignee says someone has it, which is a readiness question, not **Work State**."
 
 ## Flagged ambiguities
 
@@ -984,7 +985,8 @@ _Avoid_: ticket, tickets
   replayable backend intent — resolved: **Mutation Log** stores **Mutations**,
   not pre-Promotion local edit history.
 - Generic field patches were considered for **Mutations** — resolved: **Mutations** use named domain operations.
-- Comment, label, and assignee mutations were considered for v1 — resolved: they are deferred.
+- Comment, label, and assignee mutations were considered for v1 — resolved: Comments are deferred to gh-43; **tk** models neither labels nor assignees, and a **Backend Adapter** encodes a typed field through a **Reserved Representation** instead (ADR-0049).
+- A **Backend**-visible representation of **Work State** — a reserved label, a GitHub Projects status, a Jira transition — was considered (gh-68) — resolved: **Work State** stays a **Local Field** on every **Backend**, because it states what this **Repository Store** is doing while a **Backend**'s in-progress state says what someone is doing (ADR-0049).
 - Event sourcing was considered for current state — resolved: the **Repository Store** stores current state, and the **Mutation Log** acts as an outbox for backend replay.
 - Searching body text in **`tk search`**, by default or behind a `--body` flag, was considered (tk-79) — resolved: **`tk search`** matches title text only; body/content search is a separate, deferred **`tk grep`** that renders **`tk show`**-style match context. A body-only hit has no provenance slot in a reused **`tk list`** row and would read as a false positive (ADR-0025).
 - Matching **Display IDs** and **Aliases** in **`tk search`** (exact + prefix, the original tk-79 framing) was considered — resolved: dropped. Exact-identifier lookup duplicates **`tk show`** and prefix recall is thin against short sequential **Display IDs**; search's distinct value is fuzzy title recall (ADR-0025).

@@ -6,6 +6,11 @@
 > Work State to `idle`, and a refresh keeps `updated_at` at the later of the
 > stored value and refresh time.
 
+> **Resolved by ADR-0049.** It answers the question left open below — whether
+> Work State earns an outward representation — with no, on every Backend: Work
+> State states what this Repository Store is doing, and a Backend's
+> in-progress state says what someone is doing.
+
 `items.status` currently fuses two orthogonal concerns into one column: a
 lifecycle the **Backend Adapter** shares with its **Backend** — open or
 closed — and a purely local fact, whether someone is working the item right
