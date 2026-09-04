@@ -113,6 +113,15 @@ pub const MUTATION_SKIPPED: Style = fg(AnsiColor::BrightBlack);
 /// withdrawn one along with it.
 pub const MUTATION_CANCELLED: Style = fg(AnsiColor::BrightBlack);
 
+/// A Mutation the Backend applied. Green, as `STATUS_DONE` is for a done
+/// Item, and its own constant for the reason every state here has one:
+/// recolouring done Items must not drag applied Mutations along with it.
+///
+/// Only `tk sync log <sequence>` renders it — the log's default filter
+/// excludes `applied` and no flag selects it, and `tk show` drops it from
+/// both Mutation sections.
+pub const MUTATION_APPLIED: Style = fg(AnsiColor::Green);
+
 /// Open Item status (placeholder — uncoloured).
 pub const STATUS_OPEN: Style = Style::new();
 
@@ -216,12 +225,6 @@ pub fn id_style(class: ItemClass) -> Style {
 /// [`MutationState`] fails to compile here rather than defaulting into
 /// whichever arm a predicate happened to pick.
 ///
-/// `applied` borrows [`STATUS_DONE`] rather than owning an entry. It is the
-/// one state no list view renders — `tk sync log`'s default filter excludes
-/// it, no flag selects it, and `tk show` drops it — so it reaches a reader
-/// only through `tk sync log <sequence>`, where it means the same thing
-/// `STATUS_DONE` does on an Item.
-///
 /// [`MutationState`]: crate::domain::mutation_state::MutationState
 #[must_use]
 pub fn mutation_state_style(state: MutationState) -> Style {
@@ -232,7 +235,7 @@ pub fn mutation_state_style(state: MutationState) -> Style {
         MutationState::Skipped => MUTATION_SKIPPED,
         MutationState::Cancelled => MUTATION_CANCELLED,
         MutationState::Abandoned => MUTATION_ABANDONED,
-        MutationState::Applied => STATUS_DONE,
+        MutationState::Applied => MUTATION_APPLIED,
     }
 }
 
@@ -254,7 +257,7 @@ mod tests {
             (MutationState::Skipped, MUTATION_SKIPPED),
             (MutationState::Cancelled, MUTATION_CANCELLED),
             (MutationState::Abandoned, MUTATION_ABANDONED),
-            (MutationState::Applied, STATUS_DONE),
+            (MutationState::Applied, MUTATION_APPLIED),
         ];
 
         // Drive the assertions from `ALL` rather than from the table, so a

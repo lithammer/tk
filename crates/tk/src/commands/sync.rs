@@ -514,6 +514,61 @@ mod tests {
         .unwrap();
     }
 
+    /// Seed the two-row Mutation Log the list-view tests read: a pending
+    /// `update_ticket` on tk-1, then a failed `set_item_status` on tk-2
+    /// carrying `failure_json`. The caller supplies the failure so a test can
+    /// choose whether the row renders a `[class]` tag.
+    fn seed_list_view_log(store: &TmpStore, failure_json: &str) {
+        let conn = seed_store(store);
+        backend_ticket(&conn, "t1", "tk-1", "1", 1);
+        backend_ticket(&conn, "t2", "tk-2", "2", 2);
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "update_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"A","body":""}"#,
+                state: "pending",
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 2,
+                mutation_type: "set_item_status",
+                item_id: "t2",
+                payload_json: r#"{"status":"done"}"#,
+                state: "failed",
+                failure_json: Some(failure_json),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+    }
+
+    /// Seed the single failed Mutation the detail-view tests inspect:
+    /// sequence 7, `set_item_status` on tk-1, with an unclassified failure.
+    fn seed_detail_view_log(store: &TmpStore) {
+        let conn = seed_store(store);
+        backend_ticket(&conn, "t1", "tk-1", "1", 1);
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 7,
+                mutation_type: "set_item_status",
+                item_id: "t1",
+                payload_json: r#"{"status":"done"}"#,
+                state: "failed",
+                failure_json: Some(r#"{"detail":"backend said no"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+    }
+
     fn log_args(id: Option<i64>) -> Args {
         Args {
             subcommand: Some(Sub::Log(LogArgs {
@@ -1133,35 +1188,10 @@ mod tests {
     #[test]
     fn sync_log_rows_style_the_state_token_and_the_display_id() {
         let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        backend_ticket(&conn, "t1", "tk-1", "1", 1);
-        backend_ticket(&conn, "t2", "tk-2", "2", 2);
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 1,
-                mutation_type: "update_ticket",
-                item_id: "t1",
-                payload_json: r#"{"title":"A","body":""}"#,
-                state: "pending",
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 2,
-                mutation_type: "set_item_status",
-                item_id: "t2",
-                payload_json: r#"{"status":"done"}"#,
-                state: "failed",
-                failure_json: Some(r#"{"detail":"HTTP 422: rejected","class":"validation"}"#),
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
-        drop(conn);
+        seed_list_view_log(
+            &store,
+            r#"{"detail":"HTTP 422: rejected","class":"validation"}"#,
+        );
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
@@ -1192,35 +1222,7 @@ mod tests {
     #[test]
     fn sync_log_lists_rows_with_failure_continuation() {
         let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        backend_ticket(&conn, "t1", "tk-1", "1", 1);
-        backend_ticket(&conn, "t2", "tk-2", "2", 2);
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 1,
-                mutation_type: "update_ticket",
-                item_id: "t1",
-                payload_json: r#"{"title":"A","body":""}"#,
-                state: "pending",
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 2,
-                mutation_type: "set_item_status",
-                item_id: "t2",
-                payload_json: r#"{"status":"done"}"#,
-                state: "failed",
-                failure_json: Some(r#"{"detail":"HTTP 422: rejected"}"#),
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
-        drop(conn);
+        seed_list_view_log(&store, r#"{"detail":"HTTP 422: rejected"}"#);
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
@@ -1236,22 +1238,7 @@ mod tests {
     #[test]
     fn sync_log_detail_renders_full_view() {
         let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        backend_ticket(&conn, "t1", "tk-1", "1", 1);
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 7,
-                mutation_type: "set_item_status",
-                item_id: "t1",
-                payload_json: r#"{"status":"done"}"#,
-                state: "failed",
-                failure_json: Some(r#"{"detail":"backend said no"}"#),
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
-        drop(conn);
+        seed_detail_view_log(&store);
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
@@ -1273,22 +1260,7 @@ mod tests {
     #[test]
     fn sync_log_detail_styles_the_state_token_and_leaves_labels_plain() {
         let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        backend_ticket(&conn, "t1", "tk-1", "1", 1);
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 7,
-                mutation_type: "set_item_status",
-                item_id: "t1",
-                payload_json: r#"{"status":"done"}"#,
-                state: "failed",
-                failure_json: Some(r#"{"detail":"backend said no"}"#),
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
-        drop(conn);
+        seed_detail_view_log(&store);
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);

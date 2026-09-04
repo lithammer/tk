@@ -1917,8 +1917,8 @@ pub struct LogListRow {
     pub state: MutationState,
     pub mutation_type: MutationType,
     pub target_display_id: String,
-    /// Class of the target Item. Carried so a reader of the row can tell an
-    /// Epic target from a Ticket one without a second lookup.
+    /// Class of the target Item, mirroring [`LogDetailRow::item_class`] so
+    /// both log views describe their target the same way.
     pub item_class: ItemClass,
     pub created_at: String,
     /// Decoded `Failure.detail`; set for failed and indeterminate applying rows.

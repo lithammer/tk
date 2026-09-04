@@ -935,32 +935,33 @@ mod tests {
     /// `render_omits_mutation_sections_when_every_mutation_is_applied` pins.
     #[test]
     fn mutation_rows_style_every_rendered_state_when_colour_is_forced() {
-        let mutation = |sequence, state| ItemMutation {
-            sequence,
-            state,
-            mutation_type: crate::domain::mutation_type::MutationType::UpdateTicket,
-        };
-        let detail = minimal_item_detail(vec![
-            mutation(1, MutationState::Pending),
-            mutation(2, MutationState::Failed),
-            mutation(3, MutationState::Applying),
-            mutation(4, MutationState::Skipped),
-            mutation(5, MutationState::Cancelled),
-            mutation(6, MutationState::Abandoned),
-        ]);
-
-        let mut out = Vec::new();
-        render(&mut out, &detail, Styler::always().for_stdout()).unwrap();
-        let stdout = String::from_utf8(out).unwrap();
-
-        for (state, sgr) in [
+        // One list, used to seed the rows and then to assert them, so a state
+        // cannot be rendered without also being checked.
+        let expected = [
             (MutationState::Pending, "90"),
             (MutationState::Failed, "91"),
             (MutationState::Applying, "33"),
             (MutationState::Skipped, "90"),
             (MutationState::Cancelled, "90"),
             (MutationState::Abandoned, "35"),
-        ] {
+        ];
+        let detail = minimal_item_detail(
+            expected
+                .iter()
+                .enumerate()
+                .map(|(index, (state, _))| ItemMutation {
+                    sequence: i64::try_from(index).expect("fixture index fits i64") + 1,
+                    state: *state,
+                    mutation_type: crate::domain::mutation_type::MutationType::UpdateTicket,
+                })
+                .collect(),
+        );
+
+        let mut out = Vec::new();
+        render(&mut out, &detail, Styler::always().for_stdout()).unwrap();
+        let stdout = String::from_utf8(out).unwrap();
+
+        for (state, sgr) in expected {
             let want = format!("\u{1b}[{sgr}m{state}\u{1b}[39m");
             assert!(
                 stdout.contains(&want),
