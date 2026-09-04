@@ -925,13 +925,8 @@ mod tests {
         assert!(stdout.contains("Multi-line\nbody\n"));
     }
 
-    /// `tk show`'s Mutation rows style the state token through the same
-    /// `palette::mutation_state_style` mapper `tk sync log` and the
-    /// `tk list` banner use, so one Mutation cannot read as two different
-    /// things depending on which command found it.
-    ///
-    /// Covers every state a Mutation section can render — `applied` appears
-    /// in neither section, which
+    /// Covers every state a Mutation section can render. `applied` appears
+    /// in neither, which
     /// `render_omits_mutation_sections_when_every_mutation_is_applied` pins.
     #[test]
     fn mutation_rows_style_every_rendered_state_when_colour_is_forced() {

@@ -1281,10 +1281,6 @@ mod tests {
         );
     }
 
-    /// The banner's state token carries the same palette entry `tk sync log`
-    /// and `tk show` give that state, so the queue head reads the same
-    /// wherever a reader meets it.
-    ///
     /// The banner fires only on a `failed` or `applying` head, so those are
     /// the only two states reachable here. `applying` is paired with a
     /// Promotion because the store's CHECK constraint admits no other

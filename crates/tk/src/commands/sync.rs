@@ -1180,11 +1180,8 @@ mod tests {
         );
     }
 
-    /// The list view under forced colour: the state token carries its
-    /// `mutation_state_style` entry and the Display ID carries the cyan
-    /// anchor. The `└─` continuation and the `[class]` tag stay plain by
-    /// decision, not by omission — `tk list` passes its own tree prefix
-    /// unstyled, and this surface matches it.
+    /// Holds [`render_log_row`] to its contract under forced colour: state
+    /// token and Display ID styled, continuation and `[class]` tag plain.
     #[test]
     fn sync_log_rows_style_the_state_token_and_the_display_id() {
         let store = TmpStore::new("repo");
@@ -1253,10 +1250,8 @@ mod tests {
         assert!(out.contains("Failure:\n  backend said no"));
     }
 
-    /// The detail view under forced colour. Only the bracketed state token
-    /// and the Display ID are styled; the aligned field labels stay plain,
-    /// since `tk show` bolds section headers but has no field labels to
-    /// match and the alignment already carries the eye.
+    /// Holds [`render_log_detail`] to its contract under forced colour: the
+    /// bracketed state and the Display ID styled, field labels plain.
     #[test]
     fn sync_log_detail_styles_the_state_token_and_leaves_labels_plain() {
         let store = TmpStore::new("repo");

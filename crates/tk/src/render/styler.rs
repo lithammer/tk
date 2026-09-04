@@ -624,7 +624,6 @@ mod tests {
             on_close: "\x1b[39m",
         },
         Case {
-            // Yellow, shared with STATUS_ACTIVE: both mean in flight.
             name: "mutation_applying",
             style: palette::MUTATION_APPLYING,
             on_open: "\x1b[33m",
@@ -637,9 +636,6 @@ mod tests {
             on_close: "\x1b[39m",
         },
         Case {
-            // Bright-black foreground, NOT dim, for the same reason
-            // SELECTION_BADGE is: its close must be `39` so nesting
-            // inside a dimmed outer span leaves the dim intact.
             name: "mutation_skipped",
             style: palette::MUTATION_SKIPPED,
             on_open: "\x1b[90m",
@@ -717,9 +713,8 @@ mod tests {
     /// So read the palette's own source and require one. Add an entry, and
     /// this fails until its bytes are pinned.
     ///
-    /// Comparing both sorted lists in one assertion covers every way the two
-    /// can disagree: a missing row, a row naming an entry that no longer
-    /// exists, a row listed twice, and a parse that found nothing.
+    /// One comparison of both sorted lists covers every way they can
+    /// disagree, a failed parse included.
     #[test]
     fn palette_table_covers_every_entry() {
         const SOURCE: &str = include_str!("palette.rs");
@@ -761,12 +756,10 @@ mod tests {
     /// but only because the matched text is written by a separate call, and
     /// no palette entry renders inside it.
     ///
-    /// A row's own pinned `on_close` is the family evidence, so this test
-    /// reads what closes what from the same table
-    /// [`palette_entries_emit_expected_bytes_under_each_choice`] holds to
-    /// production [`Close`] output. A second reading of [`Style`] here would
-    /// be a family list to keep in step, and would call an entry reaching for
-    /// a family it had not heard of disjoint from everything.
+    /// Each row's pinned `on_close` is the family evidence, and
+    /// [`palette_entries_emit_expected_bytes_under_each_choice`] holds those
+    /// bytes to production [`Close`] output — so no second reading of
+    /// [`Style`] is needed here, and none can drift from it.
     #[test]
     fn outer_and_inner_palette_entries_touch_disjoint_sgr_families() {
         /// The individual SGR closes in a row's `on_close`, e.g. `39` in
@@ -776,15 +769,14 @@ mod tests {
             on_close.split_inclusive('m').collect()
         }
 
-        // `SEPARATOR` is `dimmed()`, so it closes `22` like the bracketing
-        // entries do and would fail as an inner. It is exempt because it
-        // nests in neither direction: it styles standalone chrome, always
-        // through `wrap`, always outside any bracketed row. Give it an inner
-        // use and this exemption is what has to be justified again.
+        // `SEPARATOR` closes `22` like the bracketing entries, so it would
+        // fail as an inner. It is exempt because it nests in neither
+        // direction: standalone chrome, always `wrap`, always outside a
+        // bracketed row. Give it an inner use and this exemption needs
+        // justifying again.
         //
-        // The two bracketing entries share `22` with each other for the same
-        // harmless reason — neither renders inside the other, one dimming
-        // list rows and the other bolding show / grep headers.
+        // The bracketing entries share `22` with each other harmlessly, one
+        // dimming list rows and the other bolding show / grep headers.
         let bracketing = ["blocked_row", "header"];
         let never_nested = ["separator"];
 

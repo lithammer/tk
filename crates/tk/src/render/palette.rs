@@ -75,51 +75,40 @@ pub const MUTATION_FAILED: Style = fg(AnsiColor::BrightRed);
 /// dimmed `BLOCKED_ROW` span it renders inside (ADR-0014 nesting).
 pub const MUTATION_PENDING: Style = fg(AnsiColor::BrightBlack);
 
+// One entry per Mutation state, not one per colour, on the same footing as
+// `MUTATION_PENDING` above: states that share an SGR today keep their own
+// name so recolouring one cannot drag the others with it.
+
 /// A Mutation whose Backend creation began with no confirmed identity or
-/// no-effect verdict — the `applying` state, rendered as a word by
-/// `tk sync log`, `tk show`'s Mutation sections, and the `tk list` banner.
-/// Yellow, the SGR `STATUS_ACTIVE` uses: both mean work in flight, and this
-/// palette already pairs one SGR across a semantic class. Deliberately not
-/// `MUTATION_FAILED`'s red, which says the Backend refused the Mutation —
-/// false of an Indeterminate creation, where tk never learned what happened
-/// (ADR-0039).
+/// no-effect verdict. Yellow, the SGR `STATUS_ACTIVE` uses, because both
+/// mean work in flight. Not `MUTATION_FAILED`'s red, which says the Backend
+/// refused the Mutation — false of an Indeterminate creation, where tk never
+/// learned what happened (ADR-0039).
 pub const MUTATION_APPLYING: Style = fg(AnsiColor::Yellow);
 
 /// An Abandoned Mutation — a Promotion withdrawn before tk recorded a
 /// Backend identity, so a Backend object may exist that tk cannot address.
-/// Magenta: it is the one Withdrawn Mutation that still asks something of
-/// the reader, and CONTEXT.md singles it out for exactly that reason. Not
-/// red, for the same reason [`MUTATION_APPLYING`] is not — nothing was
-/// refused here. Nor the bright black [`MUTATION_SKIPPED`] and
-/// [`MUTATION_CANCELLED`] carry, which would file it with the withdrawn
-/// outcomes that ask nothing of anyone.
+/// Magenta, because CONTEXT.md singles it out as the one Withdrawn Mutation
+/// that still asks something of the reader. Not red: nothing was refused
+/// here either.
 pub const MUTATION_ABANDONED: Style = fg(AnsiColor::Magenta);
 
 /// A Skipped Mutation — Backend intent relinquished by Sync Skip. Bright
-/// black: the outcome is resolved and asks nothing of the reader. One entry
-/// per state rather than one for the Withdrawn Mutations as a group, because
-/// an Abandoned Mutation is one of those too and is the exception that
-/// [`MUTATION_ABANDONED`] exists for.
+/// black, a resolved outcome that asks nothing of the reader.
 ///
 /// A foreground colour, not `dimmed()`, so its close (`39`) cannot reset a
 /// `dimmed()` outer span it renders inside (ADR-0014 nesting).
 pub const MUTATION_SKIPPED: Style = fg(AnsiColor::BrightBlack);
 
 /// A Cancelled Mutation — unapplied Backend intent withdrawn by Promotion
-/// Cancellation, Detach, or a Store migration. Bright black for the same
-/// reason [`MUTATION_SKIPPED`] is, and kept a separate constant on this
-/// palette's standing convention: one SGR may serve several semantic names,
-/// so recolouring a relinquished outcome stays one edit and cannot drag a
-/// withdrawn one along with it.
+/// Cancellation, Detach, or a Store migration. Muted like
+/// [`MUTATION_SKIPPED`], and resolved for the same reason.
 pub const MUTATION_CANCELLED: Style = fg(AnsiColor::BrightBlack);
 
 /// A Mutation the Backend applied. Green, as `STATUS_DONE` is for a done
-/// Item, and its own constant for the reason every state here has one:
-/// recolouring done Items must not drag applied Mutations along with it.
-///
-/// Only `tk sync log <sequence>` renders it — the log's default filter
-/// excludes `applied` and no flag selects it, and `tk show` drops it from
-/// both Mutation sections.
+/// Item. Only `tk sync log <sequence>` renders it: the log's default filter
+/// excludes `applied`, no flag selects it, and `tk show` drops it from both
+/// Mutation sections.
 pub const MUTATION_APPLIED: Style = fg(AnsiColor::Green);
 
 /// Open Item status (placeholder — uncoloured).
@@ -242,7 +231,6 @@ pub fn mutation_state_style(state: MutationState) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::mutation_state::MutationState;
 
     /// Pins every Mutation state to its palette entry. This table is the
     /// contract `tk sync log`, `tk show`'s Mutation sections, and the
@@ -260,10 +248,9 @@ mod tests {
             (MutationState::Applied, MUTATION_APPLIED),
         ];
 
-        // Drive the assertions from `ALL` rather than from the table, so a
-        // state the table forgets fails here instead of going untested. The
-        // length check then catches the other direction: a duplicated row
-        // that would otherwise hide a missing one.
+        // The loop below is driven by `ALL`, so a state this table forgets
+        // fails rather than going untested. Counting catches the other
+        // direction: a duplicated row hiding a missing one.
         assert_eq!(
             expected.len(),
             MutationState::ALL.len(),
