@@ -24,6 +24,7 @@ use crate::commands::resolver;
 use crate::domain::backend_outcome::FailureClass;
 use crate::remote::factory::{self, OpenError as FactoryOpenError};
 use crate::render::palette;
+use crate::render::sanitize;
 use crate::render::styler::SubStyler;
 use crate::store::sync::{
     self as store_sync, LogDetailRow, LogError, LogListFilter, LogListRow, MarkSkippedError,
@@ -424,16 +425,18 @@ fn render_log_row<W: Write + ?Sized>(stdout: &mut W, row: &LogListRow, styler: S
         row.created_at
     );
     if let Some(detail) = &row.failure_detail {
+        let _ = write!(stdout, "  └─ ");
         // The class is shown only when the adapter actually classified the
         // failure; an `unknown` row carries no signal, so it renders bare.
-        match row.failure_class.filter(|c| *c != FailureClass::Unknown) {
-            Some(class) => {
-                let _ = writeln!(stdout, "  └─ [{class}] {detail}");
-            }
-            None => {
-                let _ = writeln!(stdout, "  └─ {detail}");
-            }
+        if let Some(class) = row.failure_class.filter(|c| *c != FailureClass::Unknown) {
+            let _ = write!(stdout, "[{class}] ");
         }
+        // Backend-controlled text: `failure_detail` decodes from
+        // `failure_json`, which an Adapter fills from the Remote's own error
+        // output. Sanitised as a line, so CR / LF fold to spaces and a
+        // multi-line Remote error cannot rewrite the row layout below it.
+        let _ = sanitize::write_sanitized_line(stdout, detail.as_bytes());
+        let _ = stdout.write_all(b"\n");
     }
 }
 
@@ -466,12 +469,28 @@ fn render_log_detail<W: Write + ?Sized>(stdout: &mut W, detail: &LogDetailRow, s
     );
     let _ = writeln!(stdout, "Created:    {}", detail.created_at);
     let _ = writeln!(stdout, "Updated:    {}", detail.state_changed_at);
-    let _ = writeln!(stdout, "Payload:    {}", detail.payload_json);
+    // `payload_json` is `serde_json` output, whose escaping is narrower than
+    // it looks: the `ESCAPE` table covers `0x00..=0x1F` and leaves DEL and
+    // the whole C1 block alone. A Ticket title holding U+009B — the 8-bit CSI
+    // a terminal reads as `ESC [` — is therefore stored raw, so this line
+    // needs the same output-boundary treatment as the failure text below.
+    let _ = write!(stdout, "Payload:    ");
+    let _ = sanitize::write_sanitized_line(stdout, detail.payload_json.as_bytes());
+    let _ = stdout.write_all(b"\n");
     if let Some(d) = &detail.failure_detail {
         if let Some(class) = detail.failure_class.filter(|c| *c != FailureClass::Unknown) {
             let _ = writeln!(stdout, "Class:      {class}");
         }
-        let _ = writeln!(stdout, "Failure:\n  {d}");
+        // Backend-controlled text, as in [`render_log_row`], but sanitised as
+        // a body: this block is the one place a Remote's multi-line error is
+        // shown whole, so LF stays layout and only control bytes go inert.
+        // The trailing guard matches `show`'s body sections, so a detail that
+        // already ends in LF does not print a blank line after it.
+        let _ = write!(stdout, "Failure:\n  ");
+        let _ = sanitize::write_sanitized_body(stdout, d.as_bytes());
+        if !d.ends_with('\n') {
+            let _ = stdout.write_all(b"\n");
+        }
     }
 }
 
@@ -550,8 +569,9 @@ mod tests {
     }
 
     /// Seed the single failed Mutation the detail-view tests inspect:
-    /// sequence 7, `set_item_status` on tk-1, with an unclassified failure.
-    fn seed_detail_view_log(store: &TmpStore) {
+    /// sequence 7 on tk-1. The caller supplies both untrusted fields the view
+    /// renders, so a test can make either one hostile.
+    fn seed_detail_view_log(store: &TmpStore, payload_json: &str, failure_json: &str) {
         let conn = seed_store(store);
         backend_ticket(&conn, "t1", "tk-1", "1", 1);
         insert_fixture_mutation(
@@ -560,14 +580,29 @@ mod tests {
                 sequence: 7,
                 mutation_type: "set_item_status",
                 item_id: "t1",
-                payload_json: r#"{"status":"done"}"#,
+                payload_json,
                 state: "failed",
-                failure_json: Some(r#"{"detail":"backend said no"}"#),
+                failure_json: Some(failure_json),
                 ..FixtureMutation::default()
             },
         )
         .unwrap();
     }
+
+    const CLEAN_PAYLOAD_JSON: &str = r#"{"status":"done"}"#;
+    const CLEAN_FAILURE_JSON: &str = r#"{"detail":"backend said no"}"#;
+
+    /// A payload whose title carries U+009B, written as a Rust escape so no
+    /// control byte sits in this source. `serde_json` stores it raw — see
+    /// [`render_log_detail`] for why.
+    const HOSTILE_PAYLOAD_JSON: &str = "{\"title\":\"boom\u{9b}31m\",\"body\":\"\"}";
+
+    /// A Failure whose detail carries an SGR escape and a bell, as a Remote
+    /// error message relaying user or collaborator content can. `\u001b` is
+    /// JSON's spelling of ESC, so the stored `failure_json` decodes to a
+    /// detail holding the raw control bytes.
+    const HOSTILE_FAILURE_JSON: &str =
+        r#"{"detail":"HTTP 422: \u001b[31mred\u0007 title rejected"}"#;
 
     fn log_args(id: Option<i64>) -> Args {
         Args {
@@ -1216,6 +1251,32 @@ mod tests {
         );
     }
 
+    /// Backend text reaches the row's failure continuation inert.
+    ///
+    /// Left raw, an SGR escape in it would emit colour through no palette
+    /// entry and under no `ColorChoice` — colour even under `NO_COLOR`,
+    /// which is the one thing ADR-0014 exists to prevent. See
+    /// [`render_log_row`] on where the text comes from.
+    #[test]
+    fn sync_log_row_renders_backend_failure_text_inert() {
+        let store = TmpStore::new("repo");
+        seed_list_view_log(&store, HOSTILE_FAILURE_JSON);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+
+        let code = run(h.deps(), log_args(None));
+
+        assert_eq!(code, Exit::Ok);
+        let out = String::from_utf8(h.stdout).unwrap();
+        assert!(
+            out.contains("  └─ HTTP 422: \\x1b[31mred\\x07 title rejected\n"),
+            "Backend control bytes must reach stdout as visible text, never \
+             as SGR the palette never chose (ADR-0014): {out:?}"
+        );
+    }
+
     #[test]
     fn sync_log_lists_rows_with_failure_continuation() {
         let store = TmpStore::new("repo");
@@ -1232,10 +1293,55 @@ mod tests {
         assert!(out.contains("  └─ HTTP 422: rejected"));
     }
 
+    /// The detail view's `Failure:` block is the same Backend text on more
+    /// lines, so it sanitises as a body: LF stays layout, control bytes go
+    /// inert. See [`sync_log_row_renders_backend_failure_text_inert`].
+    #[test]
+    fn sync_log_detail_renders_backend_failure_text_inert() {
+        let store = TmpStore::new("repo");
+        seed_detail_view_log(&store, CLEAN_PAYLOAD_JSON, HOSTILE_FAILURE_JSON);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+
+        let code = run(h.deps(), log_args(Some(7)));
+
+        assert_eq!(code, Exit::Ok);
+        let out = String::from_utf8(h.stdout).unwrap();
+        assert!(
+            out.contains("Failure:\n  HTTP 422: \\x1b[31mred\\x07 title rejected"),
+            "Backend control bytes must reach stdout as visible text: {out:?}"
+        );
+    }
+
+    /// Stored payload text reaches the `Payload:` line inert too. A C1
+    /// control survives `serde_json` into the Repository Store, so this line
+    /// needs the sanitiser as much as the failure text does — see
+    /// [`render_log_detail`].
+    #[test]
+    fn sync_log_detail_renders_payload_text_inert() {
+        let store = TmpStore::new("repo");
+        seed_detail_view_log(&store, HOSTILE_PAYLOAD_JSON, CLEAN_FAILURE_JSON);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+
+        let code = run(h.deps(), log_args(Some(7)));
+
+        assert_eq!(code, Exit::Ok);
+        let out = String::from_utf8(h.stdout).unwrap();
+        assert!(
+            out.contains(r#"Payload:    {"title":"boom\x9b31m","body":""}"#),
+            "the C1 control should render as visible text: {out:?}"
+        );
+    }
+
     #[test]
     fn sync_log_detail_renders_full_view() {
         let store = TmpStore::new("repo");
-        seed_detail_view_log(&store);
+        seed_detail_view_log(&store, CLEAN_PAYLOAD_JSON, CLEAN_FAILURE_JSON);
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
@@ -1255,7 +1361,7 @@ mod tests {
     #[test]
     fn sync_log_detail_styles_the_state_token_and_leaves_labels_plain() {
         let store = TmpStore::new("repo");
-        seed_detail_view_log(&store);
+        seed_detail_view_log(&store, CLEAN_PAYLOAD_JSON, CLEAN_FAILURE_JSON);
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
