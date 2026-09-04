@@ -927,8 +927,8 @@ mod tests {
 
     /// `tk show`'s Mutation rows style the state token through the same
     /// `palette::mutation_state_style` mapper `tk sync log` and the
-    /// `tk list` banner use. This is the agreement gh-57 exists to keep: a
-    /// failed Mutation must not read as red here and plain there.
+    /// `tk list` banner use, so one Mutation cannot read as two different
+    /// things depending on which command found it.
     ///
     /// Covers every state a Mutation section can render — `applied` appears
     /// in neither section, which

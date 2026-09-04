@@ -408,12 +408,11 @@ fn render_run_sync_error<W: Write + ?Sized>(stderr: &mut W, err: &RunSyncError) 
 /// `tk list`, which passes its own tree prefix unstyled, and the `[class]`
 /// tag because a Failure Class has no colour meaning anywhere else.
 ///
-/// Writes are unchecked (`let _ =`) like the rest of `tk sync`. That differs
-/// from the styled read commands, which propagate `io::Result` and convert
-/// once through `cli::write_error`; gh-95 owns unifying the two. Threading a
-/// styler does not deepen the difference, because every span here is a
-/// self-contained `wrap` — no `open` / `close` bracketing that a dropped
-/// write could leave hanging.
+/// Writes are unchecked (`let _ =`) like the rest of `tk sync`, where the
+/// styled read commands instead propagate `io::Result` and convert once
+/// through `cli::write_error`. gh-95 owns unifying the two. Every span here
+/// is a self-contained `wrap`, so no dropped write can leave an `open` span
+/// unclosed and bleed style into the rest of the terminal.
 fn render_log_row<W: Write + ?Sized>(stdout: &mut W, row: &LogListRow, styler: SubStyler) {
     let _ = writeln!(
         stdout,

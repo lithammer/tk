@@ -641,8 +641,14 @@ mod tests {
                 // Bright-black foreground, NOT dim, for the same reason
                 // SELECTION_BADGE is: its close must be `39` so nesting
                 // inside a dimmed outer span leaves the dim intact.
-                name: "mutation_withdrawn",
-                style: palette::MUTATION_WITHDRAWN,
+                name: "mutation_skipped",
+                style: palette::MUTATION_SKIPPED,
+                on_open: "\x1b[90m",
+                on_close: "\x1b[39m",
+            },
+            Case {
+                name: "mutation_cancelled",
+                style: palette::MUTATION_CANCELLED,
                 on_open: "\x1b[90m",
                 on_close: "\x1b[39m",
             },
@@ -724,6 +730,18 @@ mod tests {
         );
 
         let covered: Vec<&str> = palette_cases().iter().map(|case| case.name).collect();
+
+        // A row listed twice would let the count check below pass while an
+        // entry went uncovered, so rule that out before counting.
+        let mut unique = covered.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            covered.len(),
+            "palette_cases names an entry twice: {covered:?}"
+        );
+
         for name in &declared {
             assert!(
                 covered.contains(&name.as_str()),
@@ -746,12 +764,15 @@ mod tests {
     /// touches, or the inner close silently cancels the outer style for the
     /// rest of the row.
     ///
-    /// The outer list is the entries actually used with
-    /// [`SubStyler::open`] / [`SubStyler::close`]: `BLOCKED_ROW` dims a
-    /// blocked list row, and `HEADER` bolds a `tk grep` title that match
-    /// highlights render inside. `SEPARATOR` joins them as the third
-    /// bold/dim entry, so a future outer span reaching for it is covered
-    /// before it is written.
+    /// Two entries bracket other spans: `BLOCKED_ROW` dims a blocked list
+    /// row, and `HEADER` bolds a `tk grep` title that `MATCH` highlights
+    /// render inside. That pair is the one genuinely nested case in the
+    /// codebase, and the reason `match` earns a row in [`palette_cases`].
+    ///
+    /// `MATCH` also brackets with [`SubStyler::open`] / [`SubStyler::close`],
+    /// but only because the matched text is written by a separate call; no
+    /// palette entry renders inside it. So the bracketing set is not "every
+    /// entry that calls `open`".
     #[test]
     fn outer_and_inner_palette_entries_touch_disjoint_sgr_families() {
         /// Family tags a style sets, named for the SGR that closes each.
@@ -776,26 +797,34 @@ mod tests {
             out
         }
 
-        let outers = [
+        let bracketing = [
             ("blocked_row", palette::BLOCKED_ROW),
             ("header", palette::HEADER),
-            ("separator", palette::SEPARATOR),
         ];
+        // Neither brackets the other — one dims list rows, the other bolds
+        // show / grep headers — so their shared bold/dim family is not a
+        // clash to fix.
+        let bracketing_names: Vec<&str> = bracketing.iter().map(|(name, _)| *name).collect();
 
-        // The outers are bold/dim by that convention, so they share a family
-        // with each other. That is not a clash to fix: no outer span renders
-        // inside another. Every remaining entry is an inner.
-        let outer_names: Vec<&str> = outers.iter().map(|(name, _)| *name).collect();
+        // `SEPARATOR` is `dimmed()`, so it would fail the assertion below as
+        // an inner. It is exempt because it nests in neither direction: it
+        // styles standalone chrome — dividers, parentheticals, and the
+        // pointers to another command — always through `wrap`, and always
+        // outside any bracketed row. Stated here rather than filtered away by
+        // parking it among the bracketing entries, which would hide the one
+        // place this invariant is load-bearing. Give `SEPARATOR` an inner use
+        // and this exemption is what has to be justified again.
+        let never_nested = ["separator"];
 
-        for (outer_name, outer) in outers {
+        for (outer_name, outer) in bracketing {
             let outer_families = families(outer);
             assert!(
                 !outer_families.is_empty(),
                 "{outer_name} sets no SGR family, so it cannot bracket a span"
             );
-            let inners = palette_cases()
-                .into_iter()
-                .filter(|case| !outer_names.contains(&case.name));
+            let inners = palette_cases().into_iter().filter(|case| {
+                !bracketing_names.contains(&case.name) && !never_nested.contains(&case.name)
+            });
             for case in inners {
                 let clash: Vec<&str> = families(case.style)
                     .into_iter()

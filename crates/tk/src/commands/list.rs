@@ -1281,10 +1281,9 @@ mod tests {
         );
     }
 
-    /// The banner already styled `Sync:` bold, the Display ID cyan, and the
-    /// hint dim, but left the state token plain — the one thing the banner
-    /// exists to report. It now carries the same entry `tk sync log` and
-    /// `tk show` give that state.
+    /// The banner's state token carries the same palette entry `tk sync log`
+    /// and `tk show` give that state, so the queue head reads the same
+    /// wherever a reader meets it.
     ///
     /// The banner fires only on a `failed` or `applying` head, so those are
     /// the only two states reachable here. `applying` is paired with a

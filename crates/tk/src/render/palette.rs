@@ -94,18 +94,23 @@ pub const MUTATION_APPLYING: Style = fg(AnsiColor::Yellow);
 /// which would file it with the outcomes that need no attention.
 pub const MUTATION_ABANDONED: Style = fg(AnsiColor::Magenta);
 
-/// The Withdrawn Mutations that raise no alarm: `skipped` and `cancelled`.
-/// Not the whole glossary term — an Abandoned Mutation is a Withdrawn
-/// Mutation too and takes [`MUTATION_ABANDONED`], the same way `pending`
-/// and `failed` are both Unresolved Mutations with an entry each.
+/// A Skipped Mutation — Backend intent relinquished by Sync Skip. Bright
+/// black: the outcome is resolved and asks nothing of the reader. One entry
+/// per state rather than one for the Withdrawn Mutations as a group, because
+/// an Abandoned Mutation is one of those too and is the exception that
+/// [`MUTATION_ABANDONED`] exists for.
 ///
-/// Bright black, the SGR `SELECTION_BADGE` and `MUTATION_PENDING` already
-/// share — one muted class, one SGR — kept as its own constant so a
-/// recolour of relinquished and withdrawn intent is one edit and does not
-/// drag queued Mutations along with it. A foreground colour, not
-/// `dimmed()`, so its close (`39`) cannot reset a `dimmed()` outer span
-/// (ADR-0014 nesting).
-pub const MUTATION_WITHDRAWN: Style = fg(AnsiColor::BrightBlack);
+/// A foreground colour, not `dimmed()`, so its close (`39`) cannot reset a
+/// `dimmed()` outer span it renders inside (ADR-0014 nesting).
+pub const MUTATION_SKIPPED: Style = fg(AnsiColor::BrightBlack);
+
+/// A Cancelled Mutation — unapplied Backend intent withdrawn by Promotion
+/// Cancellation, Detach, or a Store migration. Bright black for the same
+/// reason [`MUTATION_SKIPPED`] is, and kept a separate constant on this
+/// palette's standing convention: one SGR may serve several semantic names,
+/// so recolouring a relinquished outcome stays one edit and cannot drag a
+/// withdrawn one along with it.
+pub const MUTATION_CANCELLED: Style = fg(AnsiColor::BrightBlack);
 
 /// Open Item status (placeholder — uncoloured).
 pub const STATUS_OPEN: Style = Style::new();
@@ -223,7 +228,8 @@ pub fn mutation_state_style(state: MutationState) -> Style {
         MutationState::Pending => MUTATION_PENDING,
         MutationState::Failed => MUTATION_FAILED,
         MutationState::Applying => MUTATION_APPLYING,
-        MutationState::Skipped | MutationState::Cancelled => MUTATION_WITHDRAWN,
+        MutationState::Skipped => MUTATION_SKIPPED,
+        MutationState::Cancelled => MUTATION_CANCELLED,
         MutationState::Abandoned => MUTATION_ABANDONED,
         MutationState::Applied => STATUS_DONE,
     }
@@ -244,25 +250,29 @@ mod tests {
             (MutationState::Pending, MUTATION_PENDING),
             (MutationState::Failed, MUTATION_FAILED),
             (MutationState::Applying, MUTATION_APPLYING),
-            (MutationState::Skipped, MUTATION_WITHDRAWN),
-            (MutationState::Cancelled, MUTATION_WITHDRAWN),
+            (MutationState::Skipped, MUTATION_SKIPPED),
+            (MutationState::Cancelled, MUTATION_CANCELLED),
             (MutationState::Abandoned, MUTATION_ABANDONED),
             (MutationState::Applied, STATUS_DONE),
         ];
 
-        // The mapper's own `match` is exhaustive, so a new state fails to
-        // compile there. Pinning the count keeps this table from falling
-        // behind that match and silently testing less than every state.
+        // Drive the assertions from `ALL` rather than from the table, so a
+        // state the table forgets fails here instead of going untested. The
+        // length check then catches the other direction: a duplicated row
+        // that would otherwise hide a missing one.
         assert_eq!(
             expected.len(),
             MutationState::ALL.len(),
-            "every MutationState needs a row in this table"
+            "every MutationState needs exactly one row in this table"
         );
 
-        for (state, want) in expected {
+        for state in MutationState::ALL {
+            let Some((_, want)) = expected.iter().find(|(candidate, _)| *candidate == state) else {
+                panic!("no row in this table for {state}");
+            };
             assert_eq!(
                 mutation_state_style(state),
-                want,
+                *want,
                 "wrong palette entry for {state}"
             );
         }
