@@ -5,6 +5,10 @@
 > imports `done`; outbound `set_item_status` Apply is close-only. The earlier
 > `open`/`active` → OPEN outbound mapping no longer holds.
 
+> **Amended by ADR-0049.** The `bug` Label below is the first Reserved
+> Representation; ADR-0049 records the contract it follows and takes over the
+> label and assignee decisions this ADR left with tk-21 (now gh-68).
+
 The v1 GitHub Backend Adapter (tk-34) maps item *fields* between tk and a
 GitHub repository, chiefly through the `gh issue` subcommands:
 
