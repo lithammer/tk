@@ -590,12 +590,11 @@ mod tests {
     }
 
     const CLEAN_PAYLOAD_JSON: &str = r#"{"status":"done"}"#;
+    const CLEAN_FAILURE_JSON: &str = r#"{"detail":"backend said no"}"#;
 
-    /// A payload whose title carries U+009B, the 8-bit CSI a terminal in
-    /// 8-bit input mode reads as `ESC [`. `serde_json` does not escape it:
-    /// its `ESCAPE` table covers `0x00..=0x1F` but leaves DEL and the whole
-    /// C1 block alone, so a title typed through `tk update -m` reaches
-    /// `payload_json` as raw bytes.
+    /// A payload whose title carries U+009B, written as a Rust escape so no
+    /// control byte sits in this source. `serde_json` stores it raw — see
+    /// [`render_log_detail`] for why.
     const HOSTILE_PAYLOAD_JSON: &str = "{\"title\":\"boom\u{9b}31m\",\"body\":\"\"}";
 
     /// A Failure whose detail carries an SGR escape and a bell, as a Remote
@@ -1316,21 +1315,14 @@ mod tests {
         );
     }
 
-    /// Stored payload text reaches the `Payload:` line inert too.
-    ///
-    /// `payload_json` is `serde_json` output, and its escaping is narrower
-    /// than it looks: the `ESCAPE` table covers `0x00..=0x1F` but leaves DEL
-    /// and the whole C1 block alone. A Ticket title carrying U+009B — the
-    /// 8-bit CSI a terminal reads as `ESC [` — therefore survives
-    /// serialisation into the Repository Store and reaches this line raw.
+    /// Stored payload text reaches the `Payload:` line inert too. A C1
+    /// control survives `serde_json` into the Repository Store, so this line
+    /// needs the sanitiser as much as the failure text does — see
+    /// [`render_log_detail`].
     #[test]
     fn sync_log_detail_renders_payload_text_inert() {
         let store = TmpStore::new("repo");
-        seed_detail_view_log(
-            &store,
-            HOSTILE_PAYLOAD_JSON,
-            r#"{"detail":"backend said no"}"#,
-        );
+        seed_detail_view_log(&store, HOSTILE_PAYLOAD_JSON, CLEAN_FAILURE_JSON);
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
@@ -1349,11 +1341,7 @@ mod tests {
     #[test]
     fn sync_log_detail_renders_full_view() {
         let store = TmpStore::new("repo");
-        seed_detail_view_log(
-            &store,
-            CLEAN_PAYLOAD_JSON,
-            r#"{"detail":"backend said no"}"#,
-        );
+        seed_detail_view_log(&store, CLEAN_PAYLOAD_JSON, CLEAN_FAILURE_JSON);
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
@@ -1373,11 +1361,7 @@ mod tests {
     #[test]
     fn sync_log_detail_styles_the_state_token_and_leaves_labels_plain() {
         let store = TmpStore::new("repo");
-        seed_detail_view_log(
-            &store,
-            CLEAN_PAYLOAD_JSON,
-            r#"{"detail":"backend said no"}"#,
-        );
+        seed_detail_view_log(&store, CLEAN_PAYLOAD_JSON, CLEAN_FAILURE_JSON);
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
