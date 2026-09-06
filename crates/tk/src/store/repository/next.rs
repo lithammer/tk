@@ -5,7 +5,7 @@
 //! again — with no unresolved Dependencies and no unresolved External
 //! Blockers. Each ready candidate's *Effective Priority* is the lowest
 //! Priority reachable through unresolved Dependency edges or Epic-membership
-//! edges, walked only within the active Scope. Selection sorts by
+//! edges, bounded by Epic Scope and Plan membership (ADR-0050). Selection sorts by
 //! `(effective_priority, own_priority, created_seq)` so a ticket inherits
 //! urgency from work that transitively waits on it.
 //!
@@ -50,6 +50,8 @@ pub enum NextScope<'a> {
     /// argument / `TK_SCOPE` and rejects a Ticket before reaching here, so
     /// the store trusts the value is an Epic (ADR-0022).
     Epic(&'a str),
+    /// Plan membership, optionally intersected with a resolved Epic Scope.
+    Plan(Option<&'a str>),
 }
 
 /// Read options for ready-Ticket selection.
@@ -84,6 +86,18 @@ pub enum NextError {
 /// that Priority to ensure a deterministic rationale row.
 const NEXT_READY_TICKET_SQL: &str = "\
 with recursive \
+  selected as ( \
+      select i.* from items i \
+       where (?1 = 'all' or i.id = ?2 or i.container_id = ?2) \
+         and (not ?3 \
+              or exists (select 1 from plan_members p where p.item_id = i.id) \
+              or (i.item_class = 'epic' and exists ( \
+                  select 1 from items child \
+                  join plan_members p on p.item_id = child.id \
+                  where child.container_id = i.id \
+                    and (?1 = 'all' or child.container_id = ?2) \
+              ))) \
+  ), \
   annotated as ( \
       select i.id, i.display_value, i.item_class, i.priority, i.status, \
              i.work_state, i.selection_state, i.container_id, i.created_seq, \
@@ -101,38 +115,26 @@ with recursive \
                   where eb.item_id = i.id \
                     and eb.resolved_at is null \
              ) as has_unresolved_external_blocker \
-        from items i \
+        from selected i \
   ), \
   prop_edge(src, dst) as ( \
       select d.blocking_id, d.blocked_id \
         from dependencies d \
-        join items b on b.id = d.blocked_id \
+        join selected b on b.id = d.blocked_id \
        where b.status <> 'done' \
-         and ( \
-             ?1 = 'all' \
-             or (?1 = 'epic' and (b.id = ?2 or b.container_id = ?2)) \
-         ) \
       union all \
       select i.container_id, i.id \
-        from items i \
+        from selected i \
        where i.container_class = 'epic' \
          and i.item_class = 'ticket' \
          and i.status <> 'done' \
-         and ( \
-             ?1 = 'all' \
-             or (?1 = 'epic' and (i.id = ?2 or i.container_id = ?2)) \
-         ) \
   ), \
   reachable(start_id, node_id, path, depth) as ( \
       select id, id, ',' || id || ',', 0 \
-        from items \
+        from selected \
        where item_class = 'ticket' \
          and status = 'open' \
          and work_state = 'idle' \
-         and ( \
-             ?1 = 'all' \
-             or (?1 = 'epic' and container_id = ?2) \
-         ) \
       union all \
       select r.start_id, e.dst, r.path || e.dst || ',', r.depth + 1 \
         from reachable r \
@@ -173,10 +175,6 @@ select ann.display_value, ann.priority, eff.ep, \
    and ann.selection_state = 'accepted' \
    and not ann.has_unresolved_dependency \
    and not ann.has_unresolved_external_blocker \
-   and ( \
-       ?1 = 'all' \
-       or (?1 = 'epic' and ann.container_id = ?2) \
-   ) \
  order by eff.ep asc, ann.priority asc, ann.created_seq asc \
  limit 1";
 
@@ -185,14 +183,16 @@ pub fn next_ready_ticket(
     store: &Store,
     options: NextOptions<'_>,
 ) -> Result<Option<NextTicket>, NextError> {
-    let (scope_mode, scope_id) = match options.scope {
-        NextScope::None => ("all", ""),
-        NextScope::Epic(id) => ("epic", id),
+    let (scope_mode, scope_id, plan) = match options.scope {
+        NextScope::None => ("all", "", false),
+        NextScope::Epic(id) => ("epic", id, false),
+        NextScope::Plan(None) => ("all", "", true),
+        NextScope::Plan(Some(id)) => ("epic", id, true),
     };
 
     let row = store.conn.query_row(
         NEXT_READY_TICKET_SQL,
-        params![scope_mode, scope_id],
+        params![scope_mode, scope_id, plan],
         |row| {
             let display_id: String = row.get(0)?;
             let own_priority: Priority = row.get(1)?;

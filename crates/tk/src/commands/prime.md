@@ -10,7 +10,8 @@ Run `tk prime` after compaction, clear, or a new agent session.
   agent session.
 - Promotion and sync are explicit, human-visible operations.
 - Use `tk next` to choose agent work.
-- Scope `tk next` / `tk list` to an Epic with `tk next <epic-id>` / `tk list <epic-id>` or the `TK_SCOPE` environment variable; absent a Scope they cover the whole store.
+- When working the Plan, use `tk next --plan`; any Epic Scope intersects it.
+- Scope `tk next` / `tk list` to an Epic with `tk next <epic-id>` / `tk list <epic-id>` or the `TK_SCOPE` environment variable; without Scope or `--plan`, they cover the whole store.
 - Scope is not an implicit item target; pass explicit Display IDs to item commands.
 - Use `tk sync log` to list unresolved and withdrawn Mutations — every state except applied; `tk sync log <sequence>` inspects any single Mutation, applied included.
 - Do not run `git push` unless the user explicitly asks for it.
@@ -92,6 +93,22 @@ tk list <epic-id>
 Pass an Epic to narrow `tk next` / `tk list` to that Epic and its child
 Tickets, or export `TK_SCOPE=<epic-id>` to scope a whole session. tk does not
 create or manage git worktrees; use `git worktree` directly.
+
+### Plan
+
+```sh
+tk plan
+tk plan add <id> [<id>...]
+tk plan remove <id> [<id>...]
+tk plan clear
+tk next --plan
+```
+
+`tk plan` shows the whole local Plan and ignores `TK_SCOPE`. Membership edits
+preserve Ticket state; `clear` removes all membership, including unfinished
+work. Outside Dependencies still block selection: inspect the Plan and
+include the blocker explicitly or work it separately. No ready Ticket does
+not mean the Plan is finished.
 
 ### Human Curation
 

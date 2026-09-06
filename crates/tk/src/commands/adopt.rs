@@ -1227,6 +1227,7 @@ mod tests {
         next::run(
             &mut next_h.deps(),
             next::Args {
+                plan: false,
                 epic: None,
                 quiet: false,
             },

@@ -159,6 +159,10 @@ Important stable contracts:
   is the backstop for a writer that holds the lock past the timeout.
 - `items` stores current Ticket/Epic state. Current state is the read model;
   the Mutation Log is an outbox, not an event-sourced source of truth.
+- `plan_members` holds the single local Plan's Ticket identities. Its composite
+  foreign key restricts membership to Tickets. `store/repository/plan.rs`
+  owns atomic batch validation and a consistent read of members and blockers;
+  membership edits neither update Items nor append Mutations (ADR-0050).
 - `items.work_state` is a Local Field. `tk start` and `tk stop` write it
   directly; `tk done` and Backend Pull may clear it only when closing an Item.
   Work State itself is never recorded as a Mutation (ADR-0043).
@@ -272,6 +276,12 @@ store-facing selection runs, so the store receives an already-resolved Epic id.
 Scope is a selection context, not an implicit item target. Commands that
 inspect, update, or promote a specific item require explicit Display IDs;
 agents should pass IDs selected by `tk next` or `tk list`.
+
+`tk next --plan` intersects Plan membership with any Epic Scope. The query
+keeps Epic nodes needed to carry Dependency paths to selected child Tickets,
+but only Tickets inside the intersection can contribute Effective Priority.
+Outside Dependencies still block readiness. `commands/plan.rs` owns the
+dedicated whole-Plan view, which ignores `TK_SCOPE` (ADR-0050).
 
 tk does not create or manage git worktrees; `git worktree` is the user's or
 harness's tool. An orchestrated / AFK run exports `TK_SCOPE=<epic-id>` so every

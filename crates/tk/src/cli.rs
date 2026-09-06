@@ -209,6 +209,8 @@ enum Command {
     List(commands::list::Args),
     /// Select the next ready Ticket.
     Next(commands::next::Args),
+    /// Inspect and edit the current local Plan.
+    Plan(commands::plan::Args),
     /// Render one Ticket or Epic with current state.
     Show(commands::show::Args),
     /// Find Tickets and Epics by a title substring.
@@ -285,6 +287,10 @@ pub fn run_argv(mut deps: Deps<'_>, argv: &[String]) -> std::io::Result<Exit> {
         Command::Next(args) => {
             let result = commands::next::run(&mut deps, args);
             Ok(finish(&mut deps, "next", result))
+        }
+        Command::Plan(args) => {
+            let result = commands::plan::run(&mut deps, args);
+            Ok(finish(&mut deps, "plan", result))
         }
         Command::Show(args) => {
             let result = commands::show::run(&mut deps, args);

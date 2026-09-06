@@ -27,6 +27,7 @@ pub mod manpage;
 pub mod message;
 pub mod next;
 pub mod park;
+pub mod plan;
 pub mod prime;
 pub mod promote;
 pub mod remote;

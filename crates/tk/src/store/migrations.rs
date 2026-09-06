@@ -62,6 +62,7 @@ const MIGRATION_13_SQL: &str = include_str!("migrations/013_former_backend_ident
 const MIGRATION_14_SQL: &str = include_str!("migrations/014_binding_display_provenance.sql");
 const MIGRATION_15_SQL: &str = include_str!("migrations/015_readopt_reopens_a_former_identity.sql");
 const MIGRATION_16_SQL: &str = include_str!("migrations/016_sync_skip_relinquishes_a_close.sql");
+const MIGRATION_17_SQL: &str = include_str!("migrations/017_local_plan.sql");
 
 /// V1 Repository Store schema skeleton.
 pub const MIGRATION_1: Migration = Migration {
@@ -223,6 +224,13 @@ pub const MIGRATION_16: Migration = Migration {
     foreign_keys: ForeignKeys::On,
 };
 
+/// Local Plan membership is keyed by stable Ticket identity (ADR-0050).
+pub const MIGRATION_17: Migration = Migration {
+    version: 17,
+    sql: MIGRATION_17_SQL,
+    foreign_keys: ForeignKeys::On,
+};
+
 /// Ordered migration list applied by [`apply_all`].
 pub const ALL_MIGRATIONS: &[Migration] = &[
     MIGRATION_1,
@@ -241,13 +249,14 @@ pub const ALL_MIGRATIONS: &[Migration] = &[
     MIGRATION_14,
     MIGRATION_15,
     MIGRATION_16,
+    MIGRATION_17,
 ];
 
 /// Highest schema version this binary can apply. Named so future migrations
 /// surface the threshold to `grep` instead of hiding it behind `.last()`.
 /// Adding a migration is a two-line patch: append to `ALL_MIGRATIONS`, bump
 /// this constant, with a debug_assert below catching the drift.
-pub const MAX_KNOWN_VERSION: u32 = MIGRATION_16.version;
+pub const MAX_KNOWN_VERSION: u32 = MIGRATION_17.version;
 
 /// Errors returned while applying migrations.
 ///

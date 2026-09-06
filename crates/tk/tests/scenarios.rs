@@ -30,6 +30,171 @@ use std::process::{Command, Output};
 use assert_cmd::cargo::CommandCargoExt;
 use tempfile::TempDir;
 
+#[test]
+fn plan_bulk_edits_reject_invalid_batches_without_partial_changes() {
+    let repo = Repo::new("plan");
+    repo.run("init");
+    repo.run("add -m 'First'");
+    repo.run("add -m 'Second'");
+    repo.run("add --epic -m 'Epic'");
+    for invalid in ["missing", "plan-3"] {
+        assert!(
+            repo.run(&format!("plan add plan-1 {invalid} plan-2"))
+                .starts_with("exit 1\n")
+        );
+        assert!(repo.run("plan").contains("0/0 done"));
+    }
+    assert_eq!(
+        repo.run("plan add plan-1 PLAN-1 plan-2"),
+        "Added to Plan: plan-1\nAdded to Plan: plan-2\n"
+    );
+    let before = repo.run("plan");
+    for invalid in ["missing", "plan-3"] {
+        assert!(
+            repo.run(&format!("plan remove plan-1 {invalid} plan-2"))
+                .starts_with("exit 1\n")
+        );
+        assert_eq!(repo.run("plan"), before);
+    }
+    assert_eq!(repo.run("plan add plan-1"), "Already in Plan: plan-1\n");
+    repo.run("plan remove plan-1");
+    assert_eq!(repo.run("plan remove plan-1"), "Not in Plan: plan-1\n");
+    assert!(repo.run("plan add").starts_with("exit 2\n"));
+    assert!(repo.run("plan remove").starts_with("exit 2\n"));
+    assert_eq!(repo.run("plan clear"), "Cleared Plan (1 removed)\n");
+    assert_eq!(repo.run("plan clear"), "Cleared Plan (0 removed)\n");
+}
+
+#[test]
+fn plan_scope_intersects_epics_and_preserves_priority_paths() {
+    let repo = Repo::new("plan");
+    repo.run("init");
+    repo.run("add --epic -m 'First Epic'");
+    repo.run("add --epic -m 'Second Epic'");
+    repo.run("add -m 'Helper' -p P3 -P plan-1");
+    repo.run("add -m 'Ordinary work' -p P2 -P plan-1");
+    repo.run("add -m 'Included child' -p P1 -P plan-2");
+    repo.run("add -m 'Excluded child' -p P0 -P plan-2");
+    repo.run("block plan-2 plan-3");
+    repo.run("plan add plan-3 plan-4 plan-5");
+    let selected = repo.run("next --plan");
+    assert!(selected.contains("plan-5: Included child"), "{selected}");
+    // Child readiness is independent of its Epic's blockers.
+    repo.run("block plan-5 plan-3");
+    let selected = repo.run("next --plan");
+    assert!(selected.contains("plan-3: Helper"), "{selected}");
+    assert!(selected.contains("via plan-5"), "{selected}");
+    assert!(!selected.contains("via plan-6"), "{selected}");
+    assert_eq!(repo.run("next plan-1 --plan"), "plan-4: Ordinary work\n");
+    assert_eq!(
+        repo.run_env("next --plan", &[("TK_SCOPE", "plan-1")]),
+        "plan-4: Ordinary work\n"
+    );
+    assert_eq!(
+        repo.run_env("next plan-1 --plan -q", &[("TK_SCOPE", "plan-2")]),
+        "plan-4\n"
+    );
+    assert!(
+        repo.run("next plan-2 --plan")
+            .contains("no ready Tickets in Plan and Epic plan-2")
+    );
+    repo.run("plan remove plan-5");
+    assert_eq!(repo.run("next --plan"), "plan-4: Ordinary work\n");
+}
+
+#[test]
+fn plan_selection_bounds_candidates_and_priority() {
+    let repo = Repo::new("plan");
+    repo.run("init");
+    repo.run("add -m 'Helper' -p P3");
+    repo.run("add -m 'Other release work' -p P2");
+    repo.run("add -m 'Outside urgent work' -p P0");
+    repo.run("block plan-3 plan-1");
+    repo.run("plan add plan-1 plan-2");
+    assert!(repo.run("next").contains("plan-1: Helper\n"));
+    assert_eq!(repo.run("next --plan"), "plan-2: Other release work\n");
+    assert_eq!(repo.run("next --plan -q"), "plan-2\n");
+    repo.run("add -m 'Included downstream work' -p P1");
+    repo.run("block plan-4 plan-3");
+    repo.run("plan add plan-4");
+    assert_eq!(repo.run("next --plan"), "plan-2: Other release work\n");
+    repo.run("plan remove plan-4");
+    repo.run("plan remove plan-1 plan-2");
+    repo.run("plan add plan-3");
+    assert!(repo.run("next --plan").contains("no ready Tickets in Plan"));
+}
+
+#[test]
+fn plan_membership_is_local_and_explicit() {
+    let repo = Repo::new("plan");
+    repo.run("init");
+    repo.run("add -m 'First release work'");
+    repo.run("add -m 'Later work'");
+    assert_eq!(repo.run("plan add plan-1"), "Added to Plan: plan-1\n");
+    assert_eq!(
+        repo.run("plan"),
+        "Ready\n  ○ plan-1 P2 First release work\n\n1 remaining · 0/1 done\n"
+    );
+    assert_eq!(
+        repo.run("plan remove plan-1"),
+        "Removed from Plan: plan-1\n"
+    );
+    assert_eq!(
+        repo.run("plan"),
+        "No Tickets in Plan.\n\n0 remaining · 0/0 done\n"
+    );
+    assert_eq!(repo.run("sync log"), "No Mutations recorded.\n");
+}
+
+#[test]
+fn plan_view_covers_every_state_and_ignores_scope() {
+    let repo = Repo::new("plan");
+    repo.run("init");
+    for title in [
+        "Ready work",
+        "Active work",
+        "Outside helper",
+        "Blocked work",
+        "Parked work",
+    ] {
+        repo.run(&format!("add -m '{title}'"));
+    }
+    repo.run("add --triage -m 'Needs triage'");
+    repo.run("add -m 'Finished work'");
+    repo.run("start plan-2");
+    repo.run("block plan-4 plan-3");
+    repo.run("park plan-5");
+    repo.run("done plan-7");
+    repo.run("plan add plan-1 plan-2 plan-4 plan-5 plan-6 plan-7");
+    insta::assert_snapshot!(repo.run_env("plan", &[("TK_SCOPE", "not-an-epic")]), @"
+    Ready
+      ○ plan-1 P2 Ready work
+
+    In progress
+      ◐ plan-2 P2 Active work
+
+    Waiting
+      ○ plan-4 P2 Blocked work [blocked by plan-3 (outside Plan)]
+      ○ plan-5 P2 Parked work [parked]
+      ○ plan-6 Needs triage [triage]
+
+    Done
+      ✓ plan-7 P2 Finished work
+
+    5 remaining · 1/6 done
+    ");
+    assert_eq!(repo.run("plan clear"), "Cleared Plan (6 removed)\n");
+    assert!(repo.run("show plan-2").contains("◐ plan-2"));
+    assert!(repo.run("show plan-7").contains("✓ plan-7"));
+    repo.run("plan add plan-7");
+    insta::assert_snapshot!(repo.run("plan"), @"
+    Done
+      ✓ plan-7 P2 Finished work
+
+    0 remaining · 1/1 done
+    ");
+}
+
 /// A `$TESTROOT`-rooted scratch area for one scenario.
 struct Repo {
     _tmp: TempDir,
@@ -637,8 +802,8 @@ fn command_help_snapshots() {
     let p = Repo::new("repo");
     insta::assert_snapshot!("help_tk", p.run("--help"));
     for command in [
-        "accept", "add", "block", "detach", "done", "grep", "list", "next", "park", "promote",
-        "search", "show", "sync", "unblock", "unpark", "update",
+        "accept", "add", "block", "detach", "done", "grep", "list", "next", "park", "plan",
+        "promote", "search", "show", "sync", "unblock", "unpark", "update",
     ] {
         insta::assert_snapshot!(
             format!("help_{command}"),
@@ -648,6 +813,12 @@ fn command_help_snapshots() {
     insta::assert_snapshot!("help_promote_reconcile", p.run("promote reconcile --help"));
     insta::assert_snapshot!("help_promote_retry", p.run("promote retry --help"));
     insta::assert_snapshot!("help_promote_cancel", p.run("promote cancel --help"));
+    for subcommand in ["add", "remove", "clear"] {
+        insta::assert_snapshot!(
+            format!("help_plan_{subcommand}"),
+            p.run(&format!("plan {subcommand} --help"))
+        );
+    }
 }
 
 #[test]

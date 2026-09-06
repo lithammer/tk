@@ -46,7 +46,7 @@ A local-only ranking for a **Ticket**: `P0`, `P1`, `P2`, `P3`, or `P4`.
 _Avoid_: Severity
 
 **Effective Priority**:
-The priority used to order a candidate **Ticket** in **`tk next`**, derived from its own **Priority** and the **Priorities** of items it transitively blocks within the active **Scope**. Selection-only; not stored, not displayed by **`tk show`** or **`tk list`**, not synced to **Backends**.
+The priority used to order a candidate **Ticket** in **`tk next`**, derived from its own **Priority** and the **Priorities** of items it transitively blocks within the selected work. **Scope** and explicit **Plan** selection bound propagation; Effective Priority is not stored, displayed by **`tk show`** or **`tk list`**, or synced to **Backends**.
 _Avoid_: Inherited Priority, Critical Path Priority, Derived Priority
 
 **List Tree**:
@@ -67,6 +67,12 @@ _Avoid_: Sub-issue, Parent Link, Containment
 **Parent Argument**:
 CLI shorthand for placing a **Ticket** under a containing item.
 _Avoid_: Parent Domain Model
+
+**Plan**:
+The single current, local collection of **Tickets** chosen to be worked
+toward an outcome, initially the next release. It can span **Epics** and
+include both **Local Tickets** and **Backend Tickets**.
+_Avoid_: Release Plan, Release, Milestone, Sprint
 
 **Lifecycle**:
 The stored state a **Ticket** or **Epic** shares with a **Backend**: `open` or
@@ -113,7 +119,7 @@ A local checkout of the repository, usually a git worktree, that shares the **Re
 _Avoid_: Worktree
 
 **Scope**:
-The **Epic** that narrows **`tk next`** and **`tk list`**, supplied as an explicit `<epic-id>` argument or the `TK_SCOPE` environment variable. A **Scope** is **Epic**-only and is never persisted; an absent **Scope** means the whole **Repository Store**.
+The **Epic** that narrows **`tk next`** and **`tk list`**, supplied as an explicit `<epic-id>` argument or the `TK_SCOPE` environment variable. A **Scope** is **Epic**-only and is never persisted; **Plan** selection further narrows **`tk next`** when explicitly requested.
 _Avoid_: Workspace Scope, Workspace Binding, Inferred Workspace Scope, Filter
 
 **Ticket Branch**:
@@ -430,6 +436,25 @@ _Avoid_: ticket, tickets
 - An **Epic** contains zero or more **Tickets**.
 - An **Epic** does not contain other **Epics** in v1.
 - A **Ticket** may belong to zero or one **Epic** in v1.
+- The **Repository Store** holds one current **Plan**, with no named-plan
+  registry, archive or separate Plan status (ADR-0050).
+- Only **Tickets** belong to the **Plan**, in any **Item Status** or
+  **Selection State**. Membership is local and preserves Ticket state,
+  **Priority**, **Origin** and **Epic Membership**.
+- `tk plan add` and `tk plan remove` validate every explicit ID before
+  changing membership atomically. Unknown IDs and **Epics** reject the
+  operation; adding a member or removing a nonmember is a no-op.
+- `tk plan clear` removes all membership, including unfinished members,
+  without closing or deleting Tickets. Done members remain until removed
+  or cleared.
+- `tk plan` ignores **Scope** and shows the whole **Plan** in Ready,
+  In progress, Waiting and Done sections, omitting empty sections and a
+  redundant header. Each member appears once; Waiting explains blocked,
+  triage or parked work, and the footer counts remaining and done/total.
+- `tk next --plan` selects only **Plan** members, intersecting any Epic
+  **Scope**. Outside **Dependencies** still block readiness; their Items
+  are never included or selected automatically. `tk plan` names outside
+  blockers so the operator can include them or work them separately.
 - The v1 **Parent Argument** must resolve to an **Epic**.
 - Future versions may allow the **Parent Argument** to resolve to a **Ticket** if subtickets are introduced.
 - A **Ticket** has exactly one **Ticket Kind**.
@@ -442,6 +467,9 @@ _Avoid_: ticket, tickets
   **Effective Priority**, but does not remove the relationship.
 - An **Epic** in the **Effective Priority** chain contributes the lowest **Effective Priority** over its unfinished child **Tickets**.
 - **Effective Priority** propagation stops at the **Scope** boundary; items outside the active **Scope** do not contribute.
+- With `tk next --plan`, **Effective Priority** also stops at the **Plan**
+  boundary. When combined with **Scope**, only work in their intersection
+  contributes urgency (ADR-0050).
 - **External Blockers** carry no **Priority** and do not interrupt **Effective Priority** propagation.
 - **tk** has no Label field. A **Backend Adapter** may use a **Reserved Representation** for a typed field when its **Backend** has no native slot, and it touches no other label on the object (ADR-0049).
 - A field is a **Shared Field** only when the **Backend** has a native slot or a **Reserved Representation** for it and **tk** accepts the **Backend** as authoritative for it on **Backend Pull**; every other field is a **Local Field** (ADR-0049).
@@ -484,7 +512,8 @@ _Avoid_: ticket, tickets
 - A **Scope** references exactly one **Epic**; a **Ticket** supplied as a **Scope** is a typed error.
 - **Scope** narrows **`tk next`** and **`tk list`** to an **Epic** and its child **Tickets**; it is not an implicit target for item commands.
 - **Scope** is supplied as an explicit `<epic-id>` argument or the `TK_SCOPE` environment variable; the argument wins when both are present.
-- An absent **Scope** means **`tk next`** and **`tk list`** consider the whole **Repository Store**.
+- An absent **Scope** means **`tk list`** considers the whole **Repository
+  Store**; **`tk next`** does too unless `--plan` selects the **Plan**.
 - **Scope** is never persisted; it is read per invocation from the argument or environment.
 - **Scope** is local-only and is not synced to backends.
 - **`tk`** does not store, infer, or report **Scope** from git state.
@@ -758,7 +787,8 @@ _Avoid_: ticket, tickets
 - **Ticket Kind** does not affect **`tk next`** ordering.
 - **`tk next`** does not explain skipped candidates, but may render a rationale for the selected **Ticket** when its **Effective Priority** comes from a **Blocked Item** rather than its own **Priority**. The rationale names the **Ticket** whose **Priority** drives the **Effective Priority** signal, which is not always the item the candidate directly unblocks — in an **Epic**-mediated chain, the named **Ticket** is a child of an **Epic** the candidate blocks, not a direct **Blocked Item**.
 - **`tk next`** has no JSON or structured-output mode in v1.
-- When there is no active **Scope**, **`tk next`** searches ready **Tickets** across the **Repository Store**.
+- When there is no active **Scope** or explicit **Plan** selection,
+  **`tk next`** searches ready **Tickets** across the **Repository Store**.
 - When a **Scope** is active, **`tk next`** searches only **Tickets** directly
   contained by that **Epic**.
 - **`tk next`** does not filter by **Origin**.
@@ -774,8 +804,8 @@ _Avoid_: ticket, tickets
   typed error rather than narrowing to a single **Ticket**.
 - Store-facing **`tk next`** selection accepts a resolved **Scope**; command
   code owns **Scope** resolution from argument or environment.
-- **`tk next`** takes the optional **Scope** argument and `-q`/`--quiet`; it
-  has no other flags in v1.
+- **`tk next`** takes the optional **Scope** argument, `-q`/`--quiet`, and
+  `--plan` for **Plan** selection (ADR-0050).
 - **`tk next`** writes one stdout line, `<display-id>: <title>`. `-q`/
   `--quiet` writes the bare **Display ID** instead — the form to capture in
   a script — and is unstyled whatever the colour policy. Neither mode
