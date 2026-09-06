@@ -63,12 +63,14 @@ pub fn edit_membership(
         MembershipEdit::Remove => "delete from plan_members where item_id = ?1",
     };
     let mut results = Vec::new();
+    let mut stmt = tx.prepare(sql)?;
     for item in tickets {
         results.push(MembershipResult {
-            changed: tx.execute(sql, [&item.id])? != 0,
+            changed: stmt.execute([&item.id])? != 0,
             display_id: item.display_id,
         });
     }
+    drop(stmt);
     tx.commit()?;
     Ok(results)
 }
@@ -81,7 +83,7 @@ pub fn clear(store: &mut Store) -> Result<usize, PlanError> {
     Ok(count)
 }
 
-/// A Plan member's current Ticket state, in creation order.
+/// A Plan member's current Ticket state.
 #[derive(Debug)]
 pub struct PlanTicket {
     pub display_id: String,
@@ -130,7 +132,7 @@ impl PlanTicket {
     }
 }
 
-/// Read every member regardless of Scope, Origin or Ticket state.
+/// Read every member in creation order, regardless of Scope, Origin or Ticket state.
 pub fn read(store: &Store) -> Result<Vec<PlanTicket>, PlanError> {
     // One read snapshot keeps membership, waiting reasons and footer counts consistent.
     let tx = store.conn.unchecked_transaction()?;
@@ -138,24 +140,23 @@ pub fn read(store: &Store) -> Result<Vec<PlanTicket>, PlanError> {
         "select i.display_value, i.title, i.priority, i.status, i.work_state, i.selection_state, i.id \
          from plan_members p join items i on i.id = p.item_id order by i.created_seq",
     )?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(6)?,
-                PlanTicket {
-                    display_id: row.get(0)?,
-                    title: row.get(1)?,
-                    priority: row.get(2)?,
-                    status: ItemStatus::of(row.get(3)?, row.get(4)?),
-                    selection: row.get(5)?,
-                    blockers: Vec::new(),
-                },
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(6)?,
+            PlanTicket {
+                display_id: row.get(0)?,
+                title: row.get(1)?,
+                priority: row.get(2)?,
+                status: ItemStatus::of(row.get(3)?, row.get(4)?),
+                selection: row.get(5)?,
+                blockers: Vec::new(),
+            },
+        ))
+    })?;
     let mut indices = HashMap::new();
     let mut tickets = Vec::new();
-    for (id, ticket) in rows {
+    for row in rows {
+        let (id, ticket) = row?;
         indices.insert(id, tickets.len());
         tickets.push(ticket);
     }

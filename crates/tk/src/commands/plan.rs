@@ -1,7 +1,7 @@
 //! Dedicated Plan editing and progress view (ADR-0050).
 //!
 //! The view ignores Epic Scope and always counts the whole Plan. Its sections
-//! are independent of List Tree filters; all dynamic text is sanitized here.
+//! are independent of List Tree filters; titles and blocker reasons are sanitized here.
 
 use std::io::Write;
 
@@ -16,7 +16,7 @@ use crate::store::repository::plan::{
     self, MembershipEdit, PlanBlocker, PlanError, PlanSection, PlanTicket,
 };
 
-/// No subcommand displays the complete Plan, including done members.
+/// Without a subcommand, show the whole Plan, including done members.
 #[derive(Debug, ClapArgs)]
 pub struct Args {
     #[command(subcommand)]
@@ -47,9 +47,11 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
         .map_err(|err| resolver::open_error(&err))?;
     let result = match args.command {
-        Some(Command::Add { ids }) => edit(deps.stdout, &mut store, &ids, MembershipEdit::Add)?,
+        Some(Command::Add { ids }) => {
+            return edit(deps.stdout, &mut store, &ids, MembershipEdit::Add);
+        }
         Some(Command::Remove { ids }) => {
-            edit(deps.stdout, &mut store, &ids, MembershipEdit::Remove)?
+            return edit(deps.stdout, &mut store, &ids, MembershipEdit::Remove);
         }
         Some(Command::Clear) => {
             let count = plan::clear(&mut store).map_err(plan_error)?;
@@ -71,20 +73,20 @@ fn edit(
     store: &mut crate::store::repository::Store,
     ids: &[String],
     edit: MembershipEdit,
-) -> Result<std::io::Result<()>, CommandError> {
+) -> Result<Exit, CommandError> {
     let results = plan::edit_membership(store, ids, edit).map_err(plan_error)?;
-    Ok((|| {
-        for result in results {
-            let label = match (edit, result.changed) {
-                (MembershipEdit::Add, true) => "Added to Plan",
-                (MembershipEdit::Add, false) => "Already in Plan",
-                (MembershipEdit::Remove, true) => "Removed from Plan",
-                (MembershipEdit::Remove, false) => "Not in Plan",
-            };
-            writeln!(out, "{label}: {}", result.display_id)?;
+    for result in results {
+        let label = match (edit, result.changed) {
+            (MembershipEdit::Add, true) => "Added to Plan",
+            (MembershipEdit::Add, false) => "Already in Plan",
+            (MembershipEdit::Remove, true) => "Removed from Plan",
+            (MembershipEdit::Remove, false) => "Not in Plan",
+        };
+        if let Err(err) = writeln!(out, "{label}: {}", result.display_id) {
+            return cli::write_error(&err);
         }
-        Ok(())
-    })())
+    }
+    Ok(Exit::Ok)
 }
 
 /// Preserve the Repository Store busy diagnostic for every Plan operation.
@@ -105,8 +107,8 @@ fn render(out: &mut dyn Write, tickets: &[PlanTicket], styler: SubStyler) -> std
         (PlanSection::Waiting, "Waiting"),
         (PlanSection::Done, "Done"),
     ] {
-        let members: Vec<_> = tickets.iter().filter(|t| t.section() == section).collect();
-        if members.is_empty() {
+        let mut members = tickets.iter().filter(|t| t.section() == section).peekable();
+        if members.peek().is_none() {
             continue;
         }
         writeln!(out, "{heading}")?;
@@ -122,10 +124,10 @@ fn render(out: &mut dyn Write, tickets: &[PlanTicket], styler: SubStyler) -> std
             }
             write!(out, " ")?;
             sanitize::write_sanitized_line(out, ticket.title.as_bytes())?;
-            if ticket.status != ItemStatus::Done && ticket.selection != SelectionState::Accepted {
-                write!(out, " [{}]", ticket.selection)?;
-            }
             if ticket.status != ItemStatus::Done {
+                if ticket.selection != SelectionState::Accepted {
+                    write!(out, " [{}]", ticket.selection)?;
+                }
                 for blocker in &ticket.blockers {
                     match blocker {
                         PlanBlocker::Dependency {

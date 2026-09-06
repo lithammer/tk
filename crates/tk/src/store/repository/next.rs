@@ -84,6 +84,10 @@ pub enum NextError {
 /// Priority came from a Blocked Item and a rationale is owed. The
 /// contributor sub-SELECT picks the lowest-`created_seq` Ticket carrying
 /// that Priority to ensure a deterministic rationale row.
+///
+/// `selected` keeps Epics that carry Dependency paths to Plan members, even
+/// though Epics cannot be members. Readiness still checks blockers outside
+/// this boundary (ADR-0050).
 const NEXT_READY_TICKET_SQL: &str = "\
 with recursive \
   selected as ( \
