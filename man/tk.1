@@ -395,7 +395,7 @@ On success it prints one
 .RE
 .SS Selecting Ready Work
 .TP
-\fBtk next\fR [\fB\-q\fR] [\fIepic-id\fR]
+\fBtk next\fR [\fB\-q\fR] [\fB\-\-plan\fR] [\fIepic-id\fR]
 Select the next ready Ticket.
 .PP
 .B tk next
@@ -492,6 +492,45 @@ returns exit status 1 and reports on standard error that nothing is ready,
 naming the Epic when a Scope was active. A Scope that names no known item, or
 names a Ticket rather than an Epic, fails the same way without selecting
 anything.
+.PP
+.B \-\-plan
+restricts selection to the current Plan. An Epic argument or
+.B TK_SCOPE
+intersects that membership; the argument still wins over the environment.
+Effective Priority stops at the combined boundary. Outside Dependencies still
+block readiness, but their Items are never included or selected automatically.
+An empty result names the Plan and any Epic Scope. Bare
+.B tk next
+keeps its existing behavior.
+.SS Local Plan
+.TP
+.B tk plan
+Show the whole Plan, ignoring
+.BR TK_SCOPE .
+Tickets appear once under Ready, In progress, Waiting, or Done. Empty sections
+are omitted. Waiting explains triage, parking, Dependencies and External
+Blockers; Dependencies outside the Plan are marked. Counts show remaining
+and done/total Tickets. Rows within each section follow creation order.
+.TP
+\fBtk plan add\fR \fIid\fR [\fIid\fR ...]
+Include Tickets by Display ID or Alias. The whole batch is validated before
+membership changes; an unknown ID or an Epic rejects the operation. Duplicate
+IDs and Aliases for the same Ticket are handled once. An existing member is
+a harmless no-op.
+.TP
+\fBtk plan remove\fR \fIid\fR [\fIid\fR ...]
+Remove Tickets from the Plan, with the same atomic validation. Removing a
+nonmember is a harmless no-op. Ticket state is preserved.
+.TP
+.B tk plan clear
+Remove all membership, including unfinished Tickets, without closing or
+deleting any Ticket. There is no archive or separate Plan status.
+.PP
+One current Plan belongs to the Repository Store. It can span Epics and hold
+Local or Backend Tickets in any state. Membership is local, works offline,
+and creates no Mutation. Promotion, Detach and Re-Adopt preserve membership.
+Done Tickets remain visible until removed or cleared. Backend Ticket status
+is only as fresh as the state already in the Repository Store.
 .SS Backend Promotion and recovery
 .TP
 \fBtk promote\fR \fIid\fR [\fB\-\-children\fR]

@@ -10,6 +10,7 @@
 //!
 //! Scope is the optional `<epic-id>` argument or `TK_SCOPE` (ADR-0022),
 //! resolved Epic-only here before selection runs.
+//! Plan membership intersects that Scope when `--plan` is supplied (ADR-0050).
 
 use std::io::Write;
 
@@ -36,6 +37,9 @@ pub struct Args {
     /// Print only the bare Display ID, omitting the title.
     #[arg(short = 'q', long = "quiet")]
     pub quiet: bool,
+    /// Select only Plan members, intersecting any Epic Scope.
+    #[arg(long)]
+    pub plan: bool,
 }
 
 /// Run `tk next [epic]`. On failure returns the [`CommandError`] for the
@@ -49,9 +53,10 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
 
     let scope_epic = scope::resolve(&store, args.epic.as_deref())?;
 
-    let next_scope = match &scope_epic {
-        None => NextScope::None,
-        Some(epic) => NextScope::Epic(epic.id.as_str()),
+    let next_scope = match (&scope_epic, args.plan) {
+        (None, false) => NextScope::None,
+        (Some(epic), false) => NextScope::Epic(epic.id.as_str()),
+        (epic, true) => NextScope::Plan(epic.as_ref().map(|epic| epic.id.as_str())),
     };
 
     match next::next_ready_ticket(&store, NextOptions { scope: next_scope }) {
@@ -80,6 +85,10 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
             }
             Ok(Exit::Ok)
         }
+        Ok(None) if args.plan => Err(CommandError::failure(match &scope_epic {
+            None => "no ready Tickets in Plan".to_owned(),
+            Some(epic) => format!("no ready Tickets in Plan and Epic {}", epic.display_id),
+        })),
         Ok(None) => match &scope_epic {
             Some(epic) => Err(CommandError::failure(format!(
                 "no ready Tickets in Epic {}",
@@ -262,6 +271,7 @@ mod tests {
         Args {
             epic: epic.map(str::to_owned),
             quiet: false,
+            plan: false,
         }
     }
 
@@ -527,7 +537,14 @@ mod tests {
             cwd: cwd_path,
             styler: Styler::plain(),
         };
-        let exit = match run(&mut deps, Args { epic: None, quiet }) {
+        let exit = match run(
+            &mut deps,
+            Args {
+                epic: None,
+                quiet,
+                plan: false,
+            },
+        ) {
             Ok(exit) => exit,
             Err(err) => {
                 let exit = err.exit();

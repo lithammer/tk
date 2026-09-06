@@ -39,6 +39,7 @@ pub mod detach;
 pub mod grep;
 pub mod list;
 pub mod next;
+pub mod plan;
 pub mod search;
 pub mod selection;
 pub mod show;

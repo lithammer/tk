@@ -14,6 +14,7 @@ Commands:
   init         Initialize the Repository Store in the current Git repository
   list         Render the Repository Store List Tree
   next         Select the next ready Ticket
+  plan         Inspect and edit the current local Plan
   show         Render one Ticket or Epic with current state
   search       Find Tickets and Epics by a title substring
   grep         Search title and body text for a regular expression, with match context

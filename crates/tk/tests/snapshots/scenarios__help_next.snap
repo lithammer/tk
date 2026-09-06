@@ -11,4 +11,5 @@ Arguments:
 
 Options:
   -q, --quiet  Print only the bare Display ID, omitting the title
+      --plan   Select only Plan members, intersecting any Epic Scope
   -h, --help   Print help

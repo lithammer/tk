@@ -1,0 +1,15 @@
+---
+source: crates/tk/tests/scenarios.rs
+expression: "p.run(&format!(\"{command} --help\"))"
+---
+Inspect and edit the current local Plan
+
+Usage: tk plan [COMMAND]
+
+Commands:
+  add     Include Tickets in the Plan; validate the whole batch before editing
+  remove  Remove Tickets from the Plan without changing their state
+  clear   Remove all membership, including unfinished Tickets; keep the Tickets
+
+Options:
+  -h, --help  Print help
