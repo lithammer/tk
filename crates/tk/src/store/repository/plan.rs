@@ -10,6 +10,7 @@ use crate::domain::item_class::ItemClass;
 use crate::domain::priority::Priority;
 use crate::domain::selection_state::SelectionState;
 use crate::domain::status::ItemStatus;
+use crate::domain::ticket_kind::TicketKind;
 
 use super::{Store, resolve_item_ref};
 
@@ -86,6 +87,7 @@ pub fn clear(store: &mut Store) -> Result<usize, PlanError> {
 /// A Plan member's current Ticket state.
 #[derive(Debug)]
 pub struct PlanTicket {
+    pub ticket_kind: TicketKind,
     pub display_id: String,
     pub title: String,
     pub priority: Option<Priority>,
@@ -137,13 +139,14 @@ pub fn read(store: &Store) -> Result<Vec<PlanTicket>, PlanError> {
     // One read snapshot keeps membership, waiting reasons and footer counts consistent.
     let tx = store.conn.unchecked_transaction()?;
     let mut stmt = tx.prepare(
-        "select i.display_value, i.title, i.priority, i.status, i.work_state, i.selection_state, i.id \
+        "select i.display_value, i.title, i.priority, i.status, i.work_state, i.selection_state, i.id, i.ticket_kind \
          from plan_members p join items i on i.id = p.item_id order by i.created_seq",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(6)?,
             PlanTicket {
+                ticket_kind: row.get(7)?,
                 display_id: row.get(0)?,
                 title: row.get(1)?,
                 priority: row.get(2)?,

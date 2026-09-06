@@ -1,4 +1,5 @@
-//! Shared item-row rendering for `tk list` and `tk search`.
+//! Shared item-row rendering for `tk list` and `tk search`, with Ticket
+//! markers also used by the dedicated Plan view.
 //!
 //! Both commands render the same compact, unaligned row — status glyph,
 //! Display ID, optional blocked indicator, priority/kind markers, title —
@@ -11,6 +12,7 @@
 use std::io::Write;
 
 use crate::domain::item_class::ItemClass;
+use crate::domain::priority::Priority;
 use crate::domain::selection_state::SelectionState;
 use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
@@ -19,16 +21,39 @@ use crate::render::sanitize;
 use crate::render::styler::SubStyler;
 use crate::store::repository::list::ListRow;
 
-/// The muted list badge for a non-default Selection State, or `None` for a row
+/// The shared badge for a non-default Selection State, or `None` for a row
 /// that carries none. Rendering owns the badge token (ADR-0027); the domain
 /// enum owns only the storage spelling. `accepted` is the default and stays
 /// unbadged; `triage` and `parked` each get a cue.
-fn selection_badge(selection_state: Option<SelectionState>) -> Option<&'static str> {
+pub(crate) fn selection_badge(selection_state: Option<SelectionState>) -> Option<&'static str> {
     match selection_state {
         Some(SelectionState::Triage) => Some("[triage]"),
         Some(SelectionState::Parked) => Some("[parked]"),
         Some(SelectionState::Accepted) | None => None,
     }
+}
+
+/// Shared Priority and Bug markers for List, Search and Plan rows.
+/// Triage omits Priority but keeps the Bug marker (ADR-0027).
+pub(crate) fn render_ticket_markers<W: Write + ?Sized>(
+    out: &mut W,
+    priority: Option<Priority>,
+    kind: Option<TicketKind>,
+    styler: SubStyler,
+) -> std::io::Result<()> {
+    if let Some(priority) = priority {
+        let style = palette::priority_style(priority);
+        write!(
+            out,
+            " {} {}",
+            styler.wrap(style, "●"),
+            styler.wrap(style, priority.text())
+        )?;
+    }
+    if kind == Some(TicketKind::Bug) {
+        write!(out, " {}", styler.wrap(palette::KIND_BUG, "[bug]"))?;
+    }
+    Ok(())
 }
 
 /// Which Mutation marker glyphs [`render_row`] actually put on a row.
@@ -96,16 +121,7 @@ pub(crate) fn render_row<W: Write + ?Sized>(
 
     match row.item_class {
         ItemClass::Ticket => {
-            // A triage Ticket carries no Priority (ADR-0027); omit the `● P_`
-            // marker. The `[bug]` marker still renders.
-            if let Some(priority) = row.priority {
-                let p_style = palette::priority_style(priority);
-                write!(stdout, " {} ", styler.wrap(p_style, "\u{25cf}"))?;
-                write!(stdout, "{}", styler.wrap(p_style, priority.text()))?;
-            }
-            if row.ticket_kind == Some(TicketKind::Bug) {
-                write!(stdout, " {}", styler.wrap(palette::KIND_BUG, "[bug]"))?;
-            }
+            render_ticket_markers(stdout, row.priority, row.ticket_kind, styler)?;
             if let Some(badge) = selection_badge(row.selection_state) {
                 write!(stdout, " {}", styler.wrap(palette::SELECTION_BADGE, badge))?;
             }

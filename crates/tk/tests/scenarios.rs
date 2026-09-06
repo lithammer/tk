@@ -133,7 +133,7 @@ fn plan_membership_is_local_and_explicit() {
     assert_eq!(repo.run("plan add plan-1"), "Added to Plan: plan-1\n");
     assert_eq!(
         repo.run("plan"),
-        "Ready\n  ○ plan-1 P2 First release work\n\n1 remaining · 0/1 done\n"
+        "Ready\n  ○ plan-1 ● P2 First release work\n\n1 remaining · 0/1 done\n"
     );
     assert_eq!(
         repo.run("plan remove plan-1"),
@@ -168,18 +168,18 @@ fn plan_view_covers_every_state_and_ignores_scope() {
     repo.run("plan add plan-1 plan-2 plan-4 plan-5 plan-6 plan-7");
     insta::assert_snapshot!(repo.run_env("plan", &[("TK_SCOPE", "not-an-epic")]), @"
     Ready
-      ○ plan-1 P2 Ready work
+      ○ plan-1 ● P2 Ready work
 
     In progress
-      ◐ plan-2 P2 Active work
+      ◐ plan-2 ● P2 Active work
 
     Waiting
-      ○ plan-4 P2 Blocked work [blocked by plan-3 (outside Plan)]
-      ○ plan-5 P2 Parked work [parked]
+      ○ plan-4 ● P2 Blocked work [blocked by plan-3 (outside Plan)]
+      ○ plan-5 ● P2 Parked work [parked]
       ○ plan-6 Needs triage [triage]
 
     Done
-      ✓ plan-7 P2 Finished work
+      ✓ plan-7 ● P2 Finished work
 
     5 remaining · 1/6 done
     ");
@@ -189,7 +189,7 @@ fn plan_view_covers_every_state_and_ignores_scope() {
     repo.run("plan add plan-7");
     insta::assert_snapshot!(repo.run("plan"), @"
     Done
-      ✓ plan-7 P2 Finished work
+      ✓ plan-7 ● P2 Finished work
 
     0 remaining · 1/1 done
     ");
