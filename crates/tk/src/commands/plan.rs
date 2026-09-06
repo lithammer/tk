@@ -8,8 +8,7 @@ use std::io::Write;
 use clap::{Args as ClapArgs, Subcommand};
 
 use crate::cli::{self, CommandError, Deps, Exit};
-use crate::commands::resolver;
-use crate::domain::selection_state::SelectionState;
+use crate::commands::{item_row, resolver};
 use crate::domain::status::ItemStatus;
 use crate::render::{palette, sanitize, styler::SubStyler};
 use crate::store::repository::plan::{
@@ -113,20 +112,28 @@ fn render(out: &mut dyn Write, tickets: &[PlanTicket], styler: SubStyler) -> std
         }
         writeln!(out, "{heading}")?;
         for ticket in members {
+            write!(out, "  ")?;
+            let blocked = ticket.status != ItemStatus::Done && !ticket.blockers.is_empty();
+            if blocked {
+                write!(out, "{}", styler.open(palette::BLOCKED_ROW))?;
+            }
             write!(
                 out,
-                "  {} {}",
+                "{} {}",
                 styler.wrap(palette::status_style(ticket.status), ticket.status.glyph()),
-                ticket.display_id
+                styler.wrap(palette::ID_TICKET, &ticket.display_id)
             )?;
-            if let Some(priority) = ticket.priority {
-                write!(out, " {priority}")?;
-            }
+            item_row::render_ticket_markers(
+                out,
+                ticket.priority,
+                Some(ticket.ticket_kind),
+                styler,
+            )?;
             write!(out, " ")?;
             sanitize::write_sanitized_line(out, ticket.title.as_bytes())?;
             if ticket.status != ItemStatus::Done {
-                if ticket.selection != SelectionState::Accepted {
-                    write!(out, " [{}]", ticket.selection)?;
+                if let Some(badge) = item_row::selection_badge(Some(ticket.selection)) {
+                    write!(out, " {}", styler.wrap(palette::SELECTION_BADGE, badge))?;
                 }
                 for blocker in &ticket.blockers {
                     match blocker {
@@ -147,6 +154,9 @@ fn render(out: &mut dyn Write, tickets: &[PlanTicket], styler: SubStyler) -> std
                         }
                     }
                 }
+            }
+            if blocked {
+                write!(out, "{}", styler.close(palette::BLOCKED_ROW))?;
             }
             writeln!(out)?;
         }
@@ -197,6 +207,8 @@ mod tests {
                 id: "ticket",
                 display: "tk-1",
                 title: "Title\x1b[31m\nnext",
+                ticket_kind: Some("bug"),
+                priority: Some("P1"),
                 created_seq: 1,
                 selection_state: Some("parked"),
                 ..FixtureItem::default()
@@ -217,10 +229,52 @@ mod tests {
         run(&mut h.deps(), Args { command: None }).unwrap();
         insta::assert_snapshot!(h.out(), @r"
         Waiting
-          ○ tk-1 P2 Title\x1b[31m next [parked] [external blocker: Await\x07 review]
+          ○ tk-1 ● P1 [bug] Title\x1b[31m next [parked] [external blocker: Await\x07 review]
 
         1 remaining · 0/1 done
         ");
         assert!(h.err().is_empty());
+    }
+
+    #[test]
+    fn plan_uses_ticket_colors_and_keeps_done_rows_undimmed() {
+        use crate::domain::priority::Priority;
+        use crate::domain::{selection_state::SelectionState, ticket_kind::TicketKind};
+        use crate::render::styler::{ColorChoice, Styler};
+
+        for status in [ItemStatus::Open, ItemStatus::Active, ItemStatus::Done] {
+            for priority in [Some(Priority::P1), None] {
+                let ticket = PlanTicket {
+                    display_id: "tk-1".into(),
+                    title: "Fix crash".into(),
+                    ticket_kind: TicketKind::Bug,
+                    priority,
+                    status,
+                    selection: if priority.is_some() {
+                        SelectionState::Parked
+                    } else {
+                        SelectionState::Triage
+                    },
+                    blockers: vec![PlanBlocker::External {
+                        reason: "Review".into(),
+                    }],
+                };
+                let mut colored = Vec::new();
+                let styler = Styler {
+                    stdout: ColorChoice::Always,
+                    stderr: ColorChoice::Never,
+                };
+                render(&mut colored, &[ticket], styler.for_stdout()).unwrap();
+                let output = String::from_utf8(colored).unwrap();
+                assert!(output.contains("\x1b[36mtk-1\x1b[39m"), "{output:?}");
+                assert!(output.contains("\x1b[31m[bug]\x1b[39m"), "{output:?}");
+                assert_eq!(output.contains("\x1b[33mP1\x1b[39m"), priority.is_some());
+                assert_eq!(output.contains("\x1b[2m"), status != ItemStatus::Done);
+                assert!(
+                    !output.contains("\x1b[0m"),
+                    "inner styles must preserve the row dim"
+                );
+            }
+        }
     }
 }
