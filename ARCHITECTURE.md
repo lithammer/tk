@@ -53,7 +53,17 @@ small boundary module after the second caller proves the shape.
   to register a command module; clap derives help text and dispatch from it.
 - `commands/<cmd>.rs` owns that command's clap-derive `Args` struct,
   command-specific validation, rendering, and calls into
-  store/worktree/git/remote/sync helpers.
+  store/worktree/git/remote/sync helpers. It also writes its own blank
+  lines: one separates adjacent blocks, none before the first or after the
+  last, and every read command ends in a single newline. Which side writes
+  it differs — `tk show` before each section header, `tk grep` before each
+  item block but the first, `tk plan` after each section's rows, `tk list`
+  after its banner block and between its totals line and its legend;
+  `tk search` renders one flat block and separates nothing.
+  `render_chrome`'s rule line, between a row set and its footer, is the
+  only other separator. A helper for all of them would take the side, the
+  separator kind, and whether to suppress an empty block — three parameters
+  carrying one `writeln!`.
 - `domain/` stays pure: no SQLite, filesystem paths, Git, subprocesses, or
   command rendering. Houses the tk vocabulary types and the
   infrastructure-free sync contract types shared by `store/`, `remote/`,
