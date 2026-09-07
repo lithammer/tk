@@ -195,10 +195,10 @@ shows open Tickets parked out of automatic selection \(em accepted work
 intentionally held. The view flags are mutually exclusive.
 .PP
 .B \-\-local
-shows only local items.
+shows only items with Local Origin, including Pending Promotions.
 .B \-\-remote
-shows only Backend-backed items \(em those that entered the Repository
-Store through Adopt or Promotion.
+shows only items with Backend Origin. A Pending Promotion retains Local
+Origin until tk records its Backend identity.
 .PP
 .B \-\-epic
 restricts the listing to Epics and composes with any view or Origin filter.
@@ -249,14 +249,30 @@ for captured work not yet accepted,
 for accepted work held out of automatic selection. Accepted Tickets carry no
 badge.
 .PP
-A row whose Item carries a Mutation the Backend has not yet received shows a
-marker immediately before the title \(em ~ for a pending Mutation, ⚑ for a
+A row whose Item carries a non-Promotion Mutation the Backend has not yet
+received shows a marker before the title \(em ~ for a pending Mutation, ⚑ for a
 failed one, or ⚑ ~ when both apply. The marker renders even on a done row,
 since a queued or failed Mutation means the Backend does not yet agree with
 the Item's current state; only the summary legend below is conditional \(em
 it names a
 .B Mutations:
 line only when at least one row carries a marker.
+.PP
+Pending Promotions carry
+.B [pending promotion]
+before the title in list, search, plan, ordinary next, and the related Item
+rows in show. The main headers in show and grep instead add
+.BR "Binding: pending promotion" .
+Both forms cover pending, failed, and applying Promotion Mutations. They mean
+tk has durable Promotion intent without a recorded Backend identity;
+the Backend object may already exist. Inspect the exact Mutation state with
+.B tk show
+or
+.BR "tk sync log" .
+The label disappears when identity is recorded or Promotion intent is
+withdrawn. Other Items gain no Binding row, and
+.B tk next \-\-quiet
+keeps its bare Display ID output.
 .PP
 On success with one local Ticket carrying an edit queued behind a Promotion
 that has not applied yet,
@@ -265,7 +281,7 @@ prints:
 .PP
 .RS 4
 .nf
-○ project-1 ● P2 ~ Investigate flaky login retry
+○ project-1 ● P2 ~ [pending promotion] Investigate flaky login retry
 --------------------------------------------------------------------------------
 Total: 1 item (1 open)
 

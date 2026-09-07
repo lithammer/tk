@@ -130,6 +130,7 @@ fn render(out: &mut dyn Write, tickets: &[PlanTicket], styler: SubStyler) -> std
                 styler,
             )?;
             write!(out, " ")?;
+            item_row::render_pending_promotion(out, ticket.has_pending_promotion)?;
             sanitize::write_sanitized_line(out, ticket.title.as_bytes())?;
             if ticket.status != ItemStatus::Done {
                 if let Some(badge) = item_row::selection_badge(Some(ticket.selection)) {
@@ -245,6 +246,7 @@ mod tests {
         for status in [ItemStatus::Open, ItemStatus::Active, ItemStatus::Done] {
             for priority in [Some(Priority::P1), None] {
                 let ticket = PlanTicket {
+                    has_pending_promotion: false,
                     display_id: "tk-1".into(),
                     title: "Fix crash".into(),
                     ticket_kind: TicketKind::Bug,

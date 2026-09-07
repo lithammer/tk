@@ -62,3 +62,50 @@ not contradict it.
   reading text; a flag added without that evidence contradicts the premise
   rather than extending it.
 - ADR-0017 stays the only contract over what the read commands emit.
+
+## Pending Promotion visibility
+
+`tk promote` commits Promotion intent before running sync synchronously.
+On success, tk records Backend identity before the command returns;
+failure or interruption can leave the intent unresolved. Other readers can
+also observe it while the command runs.
+
+`tk list`, `tk search`, `tk show`, `tk grep`, `tk plan`, and ordinary `tk next`
+must identify each Pending Promotion they render. These Items retain Local
+Origin and a local Display ID while later backend-applicable changes queue
+behind their Promotion. Hiding that Binding in any of these views makes the
+same Item appear unbound depending on which command finds it.
+
+Compact Item rows place `[pending promotion]` immediately before the title.
+This covers `list`, `search`, `plan`, ordinary `next`, and the related Item
+rows in `show`'s `PARENT`, `TICKETS`, `BLOCKED BY`, and `BLOCKING` sections.
+The main Item headers in `show` and `grep` render
+`Binding: pending promotion` in the header metadata. Bare Display ID
+references in diagnostics and relationship annotations gain no label.
+The text names the existing domain concept without a new glyph or legend;
+`~` and `⚑` keep their distinct meanings for non-Promotion Mutations.
+
+Both labels cover `pending`, `failed`, and `applying` Promotion Mutations.
+They report durable Promotion intent without a recorded Backend identity;
+they do not assert that no Backend object exists or that another sync will
+resolve the Promotion. The existing Mutation views in `tk show` and
+`tk sync log` supply the state detail.
+
+The label and Binding row appear only for Pending Promotion, regardless of
+Item Status. They disappear when tk records Backend identity or withdraws
+the Promotion intent, even if other Mutations remain unresolved. Unbound
+Local Items and Items with Backend identity gain no Binding row; withdrawn
+Mutation history remains available in the existing views.
+
+The Repository Store derives the label from the Item's Origin and its own
+unresolved Promotion Mutations, alongside the displayed identity in the same
+query snapshot. Multi-Item reads resolve that set together rather than
+calling the per-Item Binding resolver for each row. The query plan must be
+checked on tk's bundled SQLite with representative Mutation history; one SQL
+call alone does not rule out repeated Mutation scans.
+
+This guarantees consistency within each Item row. `show` can still observe
+different snapshots across its root and related-Item reads during concurrent
+writes; this change does not promise a single snapshot for the whole command.
+
+`tk next --quiet` keeps its bare Display ID output.

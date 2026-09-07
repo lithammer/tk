@@ -19,7 +19,13 @@ use super::Store;
 
 /// One current-state row for a List Tree entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Independent Item and Mutation indicators, not a state machine (ADR-0041)."
+)]
 pub struct ListRow {
+    /// Pending Promotion Binding, derived with this Item row (ADR-0041).
+    pub has_pending_promotion: bool,
     pub id: String,
     pub display_id: String,
     pub item_class: ItemClass,
@@ -33,14 +39,9 @@ pub struct ListRow {
     /// `[parked]` list badge.
     pub selection_state: Option<SelectionState>,
     pub has_unresolved_blocker: bool,
-    /// True when the Item has a `pending` Mutation whose type is not a
-    /// Promotion (`promote_ticket` / `promote_epic`). The Promotion
-    /// exclusion is part of the flag's meaning, not a display choice: it
-    /// keeps "a queued edit to an existing Backend object" from being
-    /// conflated with "this Item is not on the Backend at all". There is no
-    /// Origin filter — `is_backend_bound()` is true for a Pending Promotion,
-    /// so a Local Item can carry non-Promotion Mutations queued behind it,
-    /// and those are genuinely unsent.
+    /// Pending non-Promotion Mutations, including edits queued behind a
+    /// Pending Promotion. Their glyph stays distinct from the Binding label
+    /// (ADR-0041); Origin does not filter these Mutations.
     pub has_pending_mutation: bool,
     /// Same contract as `has_pending_mutation`, for the `failed` state.
     pub has_failed_mutation: bool,
@@ -142,7 +143,8 @@ pub struct ListOptions<'a> {
 ///
 /// The `case ?1 when '<tag>' then ...` arms cover every [`ListView`]
 /// variant; the per-view tests below cover the arms.
-const LIST_ROWS_SQL: &str = "\
+const LIST_ROWS_SQL: &str = concat!(
+    "\
 with annotated as ( \
     select i.id, i.display_value, i.item_class, i.ticket_kind, \
            i.priority, i.title, i.status, i.work_state, i.origin, \
@@ -206,7 +208,9 @@ select id, display_value, item_class, ticket_kind, priority, title, \
               and m.state = 'failed' \
               and m.mutation_type not in ('promote_ticket', 'promote_epic') \
        ) as has_failed_mutation, \
-       work_state \
+       work_state, ",
+    pending_promotion_sql!("parent"),
+    " as has_pending_promotion \
   from matching parent \
  where (?2 = 'any' or parent.origin = ?2) \
    and (?3 = 'any' or parent.item_class = ?3) \
@@ -226,7 +230,8 @@ select id, display_value, item_class, ticket_kind, priority, title, \
            ) \
        ) \
    ) \
- order by created_seq asc";
+ order by created_seq asc"
+);
 
 /// Read current-state rows for the List Tree.
 pub fn list_rows(store: &Store, options: ListOptions<'_>) -> Result<Vec<ListRow>, rusqlite::Error> {
@@ -247,6 +252,7 @@ pub fn list_rows(store: &Store, options: ListOptions<'_>) -> Result<Vec<ListRow>
 
 pub(super) fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<ListRow> {
     Ok(ListRow {
+        has_pending_promotion: row.get(13)?,
         id: row.get(0)?,
         display_id: row.get(1)?,
         item_class: row.get(2)?,
@@ -254,8 +260,7 @@ pub(super) fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<ListRow>
         priority: row.get(4)?,
         title: row.get(5)?,
         // Item Status is derived, not stored (ADR-0043): column 6 is the
-        // Lifecycle and column 12 the Work State, appended last so the
-        // ordinals `tk search`'s twin SELECT shares stay put.
+        // Lifecycle and column 12 the Work State. Search shares these ordinals.
         status: ItemStatus::of(row.get(6)?, row.get(12)?),
         container_id: row.get(7)?,
         selection_state: row.get(8)?,
@@ -342,6 +347,122 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    #[test]
+    fn pending_promotion_reads_agree_with_binding_and_preserve_origin_filters() {
+        use crate::domain::backend_binding::BackendBinding;
+        use crate::store::mutations::resolve_backend_binding;
+        use crate::store::repository::{grep, next, plan, search, show};
+
+        for (state, expected) in [
+            ("pending", true),
+            ("failed", true),
+            ("applying", true),
+            ("applied", false),
+            ("cancelled", false),
+            ("abandoned", false),
+        ] {
+            for backend in [false, true] {
+                let store = open_seeded();
+                insert_fixture_item(
+                    &store.conn,
+                    FixtureItem {
+                        id: "work",
+                        display: if backend { "gh-1" } else { "tk-1" },
+                        title: "Work",
+                        created_seq: 1,
+                        origin: if backend { "backend" } else { "local" },
+                        backend_kind: backend.then_some("github"),
+                        backend_key: backend.then_some("https://github.com/test/repo/issues/1"),
+                        ..FixtureItem::default()
+                    },
+                )
+                .unwrap();
+                insert_fixture_mutation(
+                    &store.conn,
+                    FixtureMutation {
+                        item_id: "work",
+                        mutation_type: "promote_ticket",
+                        state,
+                        payload_json: r#"{"backend_kind":"github","title":"Work","body":""}"#,
+                        failure_json: (state == "failed").then_some(r#"{"detail":"rejected"}"#),
+                        ..FixtureMutation::default()
+                    },
+                )
+                .unwrap();
+                store
+                    .conn
+                    .execute("insert into plan_members(item_id) values ('work')", [])
+                    .unwrap();
+                let expected = expected && !backend;
+                assert_eq!(
+                    matches!(
+                        resolve_backend_binding(&store.conn, "work").unwrap(),
+                        BackendBinding::PendingPromotion { .. }
+                    ),
+                    expected
+                );
+                let list = list_rows(&store, ListOptions::default()).unwrap();
+                assert_eq!(
+                    list[0].has_pending_promotion, expected,
+                    "{state}, backend={backend}"
+                );
+                assert_eq!(
+                    search::search_rows(&store, "Work").unwrap()[0].has_pending_promotion,
+                    expected
+                );
+                assert_eq!(
+                    show::show_item(&store, &list[0].display_id)
+                        .unwrap()
+                        .unwrap()
+                        .has_pending_promotion,
+                    expected
+                );
+                assert_eq!(
+                    next::next_ready_ticket(&store, next::NextOptions::default())
+                        .unwrap()
+                        .unwrap()
+                        .has_pending_promotion,
+                    expected
+                );
+                assert_eq!(
+                    plan::read(&store).unwrap()[0].has_pending_promotion,
+                    expected
+                );
+                let mut grep_flags = Vec::new();
+                grep::scan(&store, |item| {
+                    grep_flags.push(item.has_pending_promotion);
+                    Ok(std::ops::ControlFlow::Continue(()))
+                })
+                .unwrap();
+                assert_eq!(grep_flags, [expected]);
+                assert_eq!(
+                    list_rows(
+                        &store,
+                        ListOptions {
+                            origin: ListOriginFilter::Local,
+                            ..ListOptions::default()
+                        }
+                    )
+                    .unwrap()
+                    .len(),
+                    usize::from(!backend)
+                );
+                assert_eq!(
+                    list_rows(
+                        &store,
+                        ListOptions {
+                            origin: ListOriginFilter::Remote,
+                            ..ListOptions::default()
+                        }
+                    )
+                    .unwrap()
+                    .len(),
+                    usize::from(backend)
+                );
+            }
+        }
     }
 
     #[test]

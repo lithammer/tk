@@ -264,8 +264,9 @@ _Avoid_: Recursive Promotion
 
 **Pending Promotion**:
 A **Local Ticket** or **Local Epic** with durable **Promotion** intent that has
-not yet received its backend identity. Later backend-applicable changes remain
-ordered behind its **Promotion** in the **Mutation Log**.
+not yet received its backend identity; its **Origin** remains local. Later
+backend-applicable changes remain ordered behind its **Promotion** in the
+**Mutation Log**.
 _Avoid_: In-flight Promotion
 
 **Backend Binding**:
@@ -533,8 +534,8 @@ _Avoid_: ticket, tickets
 - **`tk show`**, **`tk update`**, **`tk start`**, **`tk stop`**, **`tk done`**, and **`tk promote`** require an explicit **Display ID** in v1.
 - **`tk show`** renders an Item's **Former Backend Identities**, most recently
   detached first. It lists each canonical identity once by its latest Detach
-  and omits the current Backend Binding. List, next, and search views do not
-  surface that history.
+  and omits an identity while it is the current **Backend Binding**. List,
+  next, and search views do not surface that history.
 - **Prime** provides agent workflow guidance, essential commands, and close-out reminders.
 - v1 **Prime** prints static command-owned Markdown embedded from `crates/tk/src/commands/prime.md` via Rust `include_str!`.
 - **Prime** prints its briefing only when a **Repository Store** is initialized and openable in the current directory; in every other case — no store, outside a git repository, or any store-open failure — it exits 0 with empty stdout and empty stderr so a global agent hook can run it in any directory without noise.
@@ -837,10 +838,7 @@ _Avoid_: ticket, tickets
   is stuck, not which rows are in view. A `pending` head prints no banner,
   since that is the ordinary state between syncs.
 - The banner names any **Mutation** at the head, including a **Promotion**,
-  while the row markers exclude **Promotions**. So a rejected **Promotion**
-  produces a banner whose named **Item** carries no row marker; **`tk sync
-  log`** is where that case is legible until a **Pending Promotion** is
-  surfaced in its own right.
+  while the Mutation row markers exclude **Promotions**.
 - **`tk show`** groups every **Mutation** targeting the **Item** into two
   sections: one for a `pending`, `failed`, or `applying` **Mutation**, and one
   for a `skipped`, `cancelled`, or `abandoned` **Mutation**; an `applied`

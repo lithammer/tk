@@ -33,6 +33,22 @@ use crate::git::discovery;
 use crate::proc::ProcRunner;
 use crate::store::{backup, migrations, sequences};
 
+/// Pending Promotion membership for an Item table alias (ADR-0041).
+/// The uncorrelated IN read builds one set per query, without a Mutation
+/// lookup for each Item. Origin and membership share the Item row's snapshot.
+macro_rules! pending_promotion_sql {
+    ($item:literal) => {
+        concat!(
+            $item,
+            ".origin = 'local' and ",
+            $item,
+            ".id in (select item_id from mutations \
+             where mutation_type in ('promote_ticket', 'promote_epic') \
+               and state in ('pending', 'failed', 'applying'))"
+        )
+    };
+}
+
 pub mod create;
 pub mod dependency;
 pub mod detach;

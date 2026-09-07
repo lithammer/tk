@@ -56,6 +56,17 @@ pub(crate) fn render_ticket_markers<W: Write + ?Sized>(
     Ok(())
 }
 
+/// Pending Promotion label before a compact Item row's title (ADR-0041).
+pub(crate) fn render_pending_promotion<W: Write + ?Sized>(
+    out: &mut W,
+    has_pending_promotion: bool,
+) -> std::io::Result<()> {
+    if has_pending_promotion {
+        out.write_all(b"[pending promotion] ")?;
+    }
+    Ok(())
+}
+
 /// Which Mutation marker glyphs [`render_row`] actually put on a row.
 ///
 /// Accumulated across the rendered rows and handed to [`render_chrome`], so
@@ -131,14 +142,8 @@ pub(crate) fn render_row<W: Write + ?Sized>(
         }
     }
 
-    // Mutation markers sit immediately before the title in both arms above:
-    // the Ticket arm's selection badge is not an anchor the Epic arm has
-    // (Selection State is Ticket-only, ADR-0027), and a Backend Epic can
-    // carry its own Mutation (`update_epic`, `set_item_status`,
-    // `add_ticket_to_epic`). Failed leads pending — the actionable marker
-    // comes first — and both render on a `done` row (ADR-0040): a `done`
-    // Backend Item with a queued Mutation is exactly the case where the
-    // Backend does not yet agree the Item is done.
+    // Failed precedes pending; both remain visible on done rows (ADR-0040).
+    // Pending Promotion has its own label (ADR-0041).
     let mut markers = MutationMarkers::default();
     if row.has_failed_mutation {
         write!(
@@ -153,6 +158,7 @@ pub(crate) fn render_row<W: Write + ?Sized>(
         markers.pending = true;
     }
     stdout.write_all(b" ")?;
+    render_pending_promotion(stdout, row.has_pending_promotion)?;
     sanitize::write_sanitized_line(stdout, row.title.as_bytes())?;
 
     if show_blocked {

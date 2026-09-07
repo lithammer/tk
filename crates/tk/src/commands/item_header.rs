@@ -3,7 +3,8 @@
 //! Both commands open an Item with the same two lines — the label line
 //! (`<status-glyph> <display-id> · <title>`) and the facet bar
 //! (`<P_> · <Kind> · Created: …` for Tickets, `Epic · Created: …` for Epics) —
-//! before diverging: `tk show` follows with body + relationship sections,
+//! followed by an optional Pending Promotion Binding row (ADR-0041), before
+//! diverging: `tk show` follows with body + relationship sections,
 //! `tk grep` with the matching hunks. Keeping the header here is the single
 //! source of truth so the two cannot drift (parallel to how `item_row` is
 //! shared by `tk list` and `tk search`). ADR-0014 styling is preserved.
@@ -24,6 +25,8 @@ use crate::render::styler::SubStyler;
 /// Borrowed view of the fields the header renders, built by each command from
 /// its own row type (`ItemDetail` for show, `GrepItem` for grep).
 pub(crate) struct Header<'a> {
+    /// Pending Promotion Binding of the header's Item (ADR-0041).
+    pub has_pending_promotion: bool,
     pub status: ItemStatus,
     pub display_id: &'a str,
     pub item_class: ItemClass,
@@ -34,7 +37,7 @@ pub(crate) struct Header<'a> {
     pub updated_at: &'a str,
 }
 
-/// Render the label line and facet bar, terminated by a newline each.
+/// Render the label line, facet bar, and optional Pending Promotion Binding.
 ///
 /// `title_highlight` wraps matches of that regex in the title (`tk grep`'s
 /// match cue); `None` renders the title plain (`tk show`), keeping show output
@@ -108,7 +111,11 @@ pub(crate) fn render_header<W: Write + ?Sized>(
         let updated_date = date_prefix(header.updated_at);
         write!(stdout, " \u{b7} Updated: {updated_date}")?;
     }
-    stdout.write_all(b"\n")
+    stdout.write_all(b"\n")?;
+    if header.has_pending_promotion {
+        stdout.write_all(b"  Binding: pending promotion\n")?;
+    }
+    Ok(())
 }
 
 /// The `YYYY-MM-DD` date prefix of an ISO-8601 timestamp. Truncates by char
