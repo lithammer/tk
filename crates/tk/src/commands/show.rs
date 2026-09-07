@@ -221,6 +221,8 @@ fn render<W: Write + ?Sized>(
 /// Begin a section: the blank line separating it from whatever came before —
 /// the header block for the first rendered section, the previous section's
 /// last row for the rest — then the section's own header.
+///
+/// ARCHITECTURE.md records which side each command writes the line on.
 fn begin_section<W: Write + ?Sized>(
     stdout: &mut W,
     styler: SubStyler,

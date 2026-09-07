@@ -116,6 +116,8 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
 /// Appending the fence to the block separates only while every banner
 /// renderer ends its own line; one that wrote unterminated bytes would have
 /// the fence terminate that line instead.
+///
+/// ARCHITECTURE.md records which side each command writes the line on.
 fn render_banners<W: Write + ?Sized>(
     stdout: &mut W,
     scope_display_id: Option<&str>,
