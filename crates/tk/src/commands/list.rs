@@ -87,19 +87,14 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     // ARCHITECTURE.md scopes to `tk promote`. Reused rather than duplicated;
     // tk-166 moves it to `store/sync.rs`, where the equivalent
     // `applying_mutation_sequence` already sits.
-    let queue_head = store_promotion::earliest_applicable_mutation(store.conn())
-        .map_err(|err| resolver::storage_error(&err))?;
+    let banner_head = store_promotion::earliest_applicable_mutation(store.conn())
+        .map_err(|err| resolver::storage_error(&err))?
+        .filter(banner_worthy);
 
     let out = deps.styler.for_stdout();
 
-    // Hint so a Scope-filtered tree never reads as the full store (ADR-0022).
-    if let Some(epic) = scope_epic.as_ref() {
-        if let Err(err) = render_scope_hint(deps.stdout, &epic.display_id, out) {
-            return cli::write_error(&err);
-        }
-    }
-
-    if let Err(err) = render_sync_banner(deps.stdout, queue_head.as_ref(), out) {
+    let scope_display_id = scope_epic.as_ref().map(|epic| epic.display_id.as_str());
+    if let Err(err) = render_banners(deps.stdout, scope_display_id, banner_head.as_ref(), out) {
         return cli::write_error(&err);
     }
 
@@ -107,6 +102,39 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         return cli::write_error(&err);
     }
     Ok(Exit::Ok)
+}
+
+/// Render the chrome above the List Tree — the Scope hint, then the Mutation
+/// Log queue-head banner — and fence it from the tree with one blank line.
+///
+/// The List Tree is bounded below by `render_chrome`'s rule line
+/// (`item_row.rs`) and above by this fence. Banners accumulate into one
+/// buffer, so an empty buffer *is* the no-banner case: nothing reaches
+/// stdout, and an unscoped `tk list` over a quiet Mutation Log opens on its
+/// first tree row or on `empty_message`.
+///
+/// Appending the fence to the block separates only while every banner
+/// renderer ends its own line; one that wrote unterminated bytes would have
+/// the fence terminate that line instead.
+fn render_banners<W: Write + ?Sized>(
+    stdout: &mut W,
+    scope_display_id: Option<&str>,
+    banner_head: Option<&MutationSummary>,
+    styler: SubStyler,
+) -> std::io::Result<()> {
+    let mut block = Vec::new();
+    // Hint so a Scope-filtered tree never reads as the full store (ADR-0022).
+    if let Some(display_id) = scope_display_id {
+        render_scope_hint(&mut block, display_id, styler)?;
+    }
+    if let Some(head) = banner_head {
+        render_sync_banner(&mut block, head, styler)?;
+    }
+    if block.is_empty() {
+        return Ok(());
+    }
+    block.push(b'\n');
+    stdout.write_all(&block)
 }
 
 /// One-line banner above a Scope-filtered List Tree: a bold `Scope:` label,
@@ -126,14 +154,21 @@ fn render_scope_hint<W: Write + ?Sized>(
     )
 }
 
+/// Whether a Mutation Log queue head earns a `Sync:` banner: `Failed` and
+/// `Applying` are the two states that need a human.
+///
+/// `Pending` is the ordinary state between syncs for a local-first tracker
+/// with opt-in Backend support, so a banner for it would fire on nearly every
+/// invocation.
+fn banner_worthy(head: &MutationSummary) -> bool {
+    matches!(head.state, MutationState::Failed | MutationState::Applying)
+}
+
 /// One-line banner naming the Mutation Log's queue head: its Mutation
 /// Sequence, state, and target Display ID, pointing at `tk sync log
 /// <sequence>` for detail.
 ///
-/// Fires only for a `Failed` or `Applying` head — the two states that need a
-/// human. A `Pending` head is the ordinary state between syncs for a
-/// local-first tracker with opt-in Backend support, so printing it always
-/// would put a line on nearly every invocation.
+/// Callers pass a head that has cleared `banner_worthy`.
 ///
 /// Never claims a cause: `sync_cursors` has no last-error column, and an
 /// Apply that fails on the environment leaves its row `pending` with no
@@ -156,15 +191,9 @@ fn render_scope_hint<W: Write + ?Sized>(
 /// label; the Mutation glyphs remain reserved for other Mutations (ADR-0041).
 fn render_sync_banner<W: Write + ?Sized>(
     stdout: &mut W,
-    head: Option<&MutationSummary>,
+    head: &MutationSummary,
     styler: SubStyler,
 ) -> std::io::Result<()> {
-    let Some(head) = head else {
-        return Ok(());
-    };
-    if !matches!(head.state, MutationState::Failed | MutationState::Applying) {
-        return Ok(());
-    }
     let sync_log = format!("(tk sync log {})", head.sequence);
     writeln!(
         stdout,
@@ -720,12 +749,19 @@ mod tests {
         );
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
-        assert!(
-            stdout.contains("Scope: tk-1 (Epic + child Tickets)"),
-            "stdout={stdout:?}"
-        );
-        assert!(stdout.contains("[epic] Epic"));
-        assert!(stdout.contains("tk-2"));
+        insta::assert_snapshot!(stdout, @"
+        Scope: tk-1 (Epic + child Tickets)
+
+        ○ tk-1 [epic] Epic
+        └── ○ tk-2 ● P2 Child
+        --------------------------------------------------------------------------------
+        Total: 2 items (2 open)
+
+        Status: ○ open  ◐ active  ✓ done
+        Blocked: ⊘ blocked
+        ");
+        // tk-3 is a root Ticket outside the Epic: a failure here means Scope
+        // stopped filtering and the hint is now lying about what is listed.
         assert!(!stdout.contains("tk-3"), "stdout={stdout:?}");
     }
 
@@ -1372,6 +1408,7 @@ mod tests {
         let stdout = String::from_utf8(h.stdout).unwrap();
         insta::assert_snapshot!(stdout, @"
         Sync: Mutation 1 failed on tk-1 (tk sync log 1)
+
         ○ tk-1 ● P2 [pending promotion] Row
         --------------------------------------------------------------------------------
         Total: 1 item (1 open)
@@ -1467,14 +1504,18 @@ mod tests {
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert_eq!(
             stdout,
-            "Sync: Mutation 1 failed on tk-1 (tk sync log 1)\nNo open or active items.\n"
+            "Sync: Mutation 1 failed on tk-1 (tk sync log 1)\n\nNo open or active items.\n"
         );
     }
 
     #[test]
     fn queue_head_banner_renders_below_the_scope_hint_and_may_name_an_out_of_scope_item() {
         // The banner describes the Mutation Log, not the rows in view, so it
-        // may correctly name an Item the active Scope excludes (tk-158).
+        // may correctly name an Item the active Scope excludes. This is also
+        // the only reachable path where both banners stack, so it pins the
+        // fence's shape: the two banners adjacent, then exactly one blank
+        // line, then the tree — a failure here means the fence or the pairing
+        // regressed.
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_item(
@@ -1529,18 +1570,64 @@ mod tests {
         );
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
-        let scope_at = stdout
-            .find("Scope: tk-1 (Epic + child Tickets)")
-            .unwrap_or_else(|| panic!("no Scope hint in {stdout:?}"));
-        let banner_at = stdout
-            .find("Sync: Mutation 1 failed on tk-3 (tk sync log 1)")
-            .unwrap_or_else(|| panic!("no Sync banner in {stdout:?}"));
-        let tree_at = stdout
-            .find("[epic] Epic")
-            .unwrap_or_else(|| panic!("no tree content in {stdout:?}"));
-        assert!(
-            scope_at < banner_at && banner_at < tree_at,
-            "expected Scope hint, then Sync banner, then the tree: {stdout:?}"
+        insta::assert_snapshot!(stdout, @"
+        Scope: tk-1 (Epic + child Tickets)
+        Sync: Mutation 1 failed on tk-3 (tk sync log 1)
+
+        ○ tk-1 [epic] Epic
+        └── ○ tk-2 ● P2 Child
+        --------------------------------------------------------------------------------
+        Total: 2 items (2 open)
+
+        Status: ○ open  ◐ active  ✓ done
+        Blocked: ⊘ blocked
+        ");
+    }
+
+    #[test]
+    fn scoped_empty_list_still_opens_on_the_empty_message_after_the_fence() {
+        // A scoped list with no matching rows short-circuits to
+        // `empty_message` before the footer renders. A failure here means the
+        // fence stopped covering that path, leaving the `Scope:` hint flush
+        // against the empty message.
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "epic",
+                display: "tk-1",
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                title: "Epic",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("99"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run_rendered(
+            &mut h,
+            Args {
+                epic_id: Some("tk-1".to_owned()),
+                epic: true,
+                local: true,
+                ..default_args()
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        let stdout = String::from_utf8(h.stdout).unwrap();
+        assert_eq!(
+            stdout,
+            "Scope: tk-1 (Epic + child Tickets)\n\nNo local epics.\n"
         );
     }
 }
