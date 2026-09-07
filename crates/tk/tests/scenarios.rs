@@ -363,6 +363,61 @@ fn list_scoped_to_an_epic_fences_the_scope_hint_from_the_tree() {
     ");
 }
 
+/// The `Sync:` banner through the real binary, which no other scenario
+/// reaches — they all run a quiet Mutation Log. Pins the whole chrome a
+/// failed queue head produces, in one artifact: the banner stacked under the
+/// ADR-0022 `Scope:` hint, the fence below the pair, the row's Mutation
+/// marker, and the `Mutations:` legend. A failure means one of those four
+/// moved, and the unit tests in `commands/list.rs` say which.
+#[test]
+fn list_fences_a_stacked_scope_and_sync_banner_block_from_the_tree() {
+    let p = Repo::new("project");
+    p.run("init");
+    p.run("add --epic -m 'Feature Epic'"); // project-1
+    p.run("add --parent project-1 -m 'Build child Ticket'"); // project-2
+
+    // `failed` is one of the two queue-head states that earn a `Sync:` banner,
+    // and no tk command leaves one behind on a Local Ticket, so seed the
+    // Mutation Log directly.
+    let db_path = p.cwd.join(".git/tk/tk.db");
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let item_id: String = conn
+            .query_row(
+                "select id from items where display_value = 'project-2'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "insert into mutations( \
+                sequence, mutation_type, item_id, item_class, payload_json, state, \
+                failure_json, created_at, state_changed_at \
+             ) values ( \
+                1, 'update_ticket', ?1, 'ticket', '{\"title\":\"Build child Ticket\"}', \
+                'failed', '{\"detail\":\"boom\"}', \
+                '2026-05-01T00:00:00.000Z', '2026-05-01T00:00:00.000Z' \
+             )",
+            [&item_id],
+        )
+        .unwrap();
+    }
+
+    tk!(p, "list project-1", @r"
+    Scope: project-1 (Epic + child Tickets)
+    Sync: Mutation 1 failed on project-2 (tk sync log 1)
+
+    ○ project-1 [epic] Feature Epic
+    └── ○ project-2 ● P2 ⚑ Build child Ticket
+    --------------------------------------------------------------------------------
+    Total: 2 items (2 open)
+
+    Status: ○ open  ◐ active  ✓ done
+    Blocked: ⊘ blocked
+    Mutations: ⚑ failed
+    ");
+}
+
 #[test]
 fn done_records_a_closing_reason_and_refuses_to_amend() {
     let p = Repo::new("project");
