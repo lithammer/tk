@@ -1,11 +1,8 @@
 //! `tk show` — render one Ticket or Epic with current state.
 //!
-//! Layout:
+//! Layout, below the header block [`item_header`] renders:
 //!
 //! ```text
-//! <status-glyph> <display-id> · <title>
-//!   <P_> · <Kind> · Created: <created>[ · Updated: <updated>]    (Tickets)
-//!   Epic · Created: <created>[ · Updated: <updated>]             (Epics)
 //!   Selection: <triage|accepted|parked>                          (Tickets)
 //!
 //! DESCRIPTION
@@ -25,7 +22,8 @@
 //!   Inspect with 'tk sync log <sequence>'.
 //! ```
 //!
-//! Empty sections are omitted. Output ends with a single trailing newline.
+//! Empty sections are omitted; every rendered section is preceded by a
+//! blank line. Output ends with a single trailing newline.
 //! The status word and Origin row are intentionally dropped — both
 //! duplicate information already carried by the glyph and Display ID
 //! shape (ADR-0014 anti-drift; the v1 single-Remote invariant lets the
@@ -119,91 +117,51 @@ fn render<W: Write + ?Sized>(
         writeln!(stdout, "  Selection: {}", selection.text())?;
     }
 
-    let mut has_section = false;
-
     if !detail.body.is_empty() {
-        stdout.write_all(b"\n")?;
-        write_section_header(stdout, styler, "DESCRIPTION")?;
+        begin_section(stdout, styler, "DESCRIPTION")?;
         sanitize::write_sanitized_body(stdout, detail.body.as_bytes())?;
         if !detail.body.ends_with('\n') {
             stdout.write_all(b"\n")?;
         }
-        has_section = true;
     }
 
     // Closing Reason (ADR-0023): a Local Field rendered right after the body,
-    // present only on `done` items. Body-like prose, so it mirrors DESCRIPTION
-    // with an unconditional leading blank line rather than the relationship
-    // sections' `if has_section` separator — local Tickets are often
-    // title-only, so the bodyless done item is the common case.
+    // present only on `done` items.
     if let Some(reason) = detail.closing_reason.as_deref() {
-        stdout.write_all(b"\n")?;
-        write_section_header(stdout, styler, "CLOSING REASON")?;
+        begin_section(stdout, styler, "CLOSING REASON")?;
         sanitize::write_sanitized_body(stdout, reason.as_bytes())?;
         if !reason.ends_with('\n') {
             stdout.write_all(b"\n")?;
         }
-        has_section = true;
     }
 
-    if let Some(parent) = detail.parent.as_ref() {
-        if has_section {
-            stdout.write_all(b"\n")?;
+    // The four directional glyphs are the contract: PARENT up, TICKETS down,
+    // BLOCKED BY and BLOCKING as opposite horizontals. Held in one table so
+    // they read against each other rather than four screens apart.
+    for (label, glyph, items) in [
+        ("PARENT", "\u{2191}", detail.parent.as_slice()),
+        ("TICKETS", "\u{2193}", detail.children.as_slice()),
+        ("BLOCKED BY", "\u{2192}", detail.blocked_by.as_slice()),
+        ("BLOCKING", "\u{2190}", detail.blocking.as_slice()),
+    ] {
+        if items.is_empty() {
+            continue;
         }
-        write_section_header(stdout, styler, "PARENT")?;
-        render_sub_row(stdout, "\u{2191}", parent, styler)?;
-        has_section = true;
-    }
-
-    if !detail.children.is_empty() {
-        if has_section {
-            stdout.write_all(b"\n")?;
+        begin_section(stdout, styler, label)?;
+        for item in items {
+            render_sub_row(stdout, glyph, item, styler)?;
         }
-        write_section_header(stdout, styler, "TICKETS")?;
-        for child in &detail.children {
-            render_sub_row(stdout, "\u{2193}", child, styler)?;
-        }
-        has_section = true;
-    }
-
-    if !detail.blocked_by.is_empty() {
-        if has_section {
-            stdout.write_all(b"\n")?;
-        }
-        write_section_header(stdout, styler, "BLOCKED BY")?;
-        for item in &detail.blocked_by {
-            render_sub_row(stdout, "\u{2192}", item, styler)?;
-        }
-        has_section = true;
-    }
-
-    if !detail.blocking.is_empty() {
-        if has_section {
-            stdout.write_all(b"\n")?;
-        }
-        write_section_header(stdout, styler, "BLOCKING")?;
-        for item in &detail.blocking {
-            render_sub_row(stdout, "\u{2190}", item, styler)?;
-        }
-        has_section = true;
     }
 
     if !detail.external_blockers.is_empty() {
-        if has_section {
-            stdout.write_all(b"\n")?;
-        }
-        write_section_header(stdout, styler, "EXTERNAL BLOCKERS")?;
+        begin_section(stdout, styler, "EXTERNAL BLOCKERS")?;
         for eb in &detail.external_blockers {
             render_external_blocker(stdout, eb)?;
         }
-        has_section = true;
     }
 
     if !detail.former_backend_identities.is_empty() {
-        if has_section {
-            stdout.write_all(b"\n")?;
-        }
-        write_section_header(stdout, styler, "FORMER BACKEND IDENTITIES")?;
+        begin_section(stdout, styler, "FORMER BACKEND IDENTITIES")?;
         for identity in &detail.former_backend_identities {
             writeln!(
                 stdout,
@@ -211,7 +169,6 @@ fn render<W: Write + ?Sized>(
                 identity.backend_kind, identity.backend_key
             )?;
         }
-        has_section = true;
     }
 
     // Exhaustive over MutationState rather than a terminality predicate:
@@ -234,21 +191,14 @@ fn render<W: Write + ?Sized>(
     }
 
     if !unresolved.is_empty() {
-        if has_section {
-            stdout.write_all(b"\n")?;
-        }
-        write_section_header(stdout, styler, "UNRESOLVED MUTATIONS")?;
+        begin_section(stdout, styler, "UNRESOLVED MUTATIONS")?;
         for mutation in &unresolved {
             render_item_mutation(stdout, mutation, styler)?;
         }
-        has_section = true;
     }
 
     if !withdrawn.is_empty() {
-        if has_section {
-            stdout.write_all(b"\n")?;
-        }
-        write_section_header(stdout, styler, "WITHDRAWN MUTATIONS")?;
+        begin_section(stdout, styler, "WITHDRAWN MUTATIONS")?;
         for mutation in &withdrawn {
             render_item_mutation(stdout, mutation, styler)?;
         }
@@ -268,12 +218,15 @@ fn render<W: Write + ?Sized>(
     Ok(())
 }
 
-fn write_section_header<W: Write + ?Sized>(
+/// Begin a section: the blank line separating it from whatever came before —
+/// the header block for the first rendered section, the previous section's
+/// last row for the rest — then the section's own header.
+fn begin_section<W: Write + ?Sized>(
     stdout: &mut W,
     styler: SubStyler,
     label: &str,
 ) -> std::io::Result<()> {
-    writeln!(stdout, "{}", styler.wrap(palette::HEADER, label))
+    writeln!(stdout, "\n{}", styler.wrap(palette::HEADER, label))
 }
 
 fn render_sub_row<W: Write + ?Sized>(
@@ -657,18 +610,19 @@ mod tests {
         let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
-        // Facet bar carries the capitalized `Epic` token (asserted on the
-        // leading `  Epic \u{b7}` so the Epic title can't satisfy it by chance).
-        assert!(
-            stdout.contains("  Epic \u{b7} Created: 2026-05-09"),
-            "stdout={stdout:?}"
-        );
         // Epics stay outside Selection State (ADR-0027): no Selection line.
         assert!(
             !stdout.contains("Selection:"),
             "Epics omit Selection State: stdout={stdout:?}"
         );
-        assert!(stdout.contains("TICKETS"));
+        // TICKETS is the first section on a bodyless Epic, and an Epic carries
+        // no `Selection:` line — a failure means the separator stopped covering
+        // the shortest header block `tk show` renders. Anchored on the leading
+        // `  Epic \u{b7}` so the Epic's title cannot satisfy it by chance.
+        assert!(
+            stdout.contains("  Epic \u{b7} Created: 2026-05-09\n\nTICKETS\n  \u{2193} "),
+            "stdout={stdout:?}"
+        );
         assert!(stdout.contains("tk-2: Child ticket"));
     }
 
@@ -1044,6 +998,7 @@ mod tests {
         ○ tk-1 · Ticket with mutations
           P2 · Task · Created: 2026-05-09
           Selection: accepted
+
         UNRESOLVED MUTATIONS
           • 7 failed update_ticket
 
