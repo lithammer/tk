@@ -16,12 +16,8 @@ use super::list::{ListRow, row_from_sql};
 /// SQL for the title-substring search. Bound with one text parameter (`?1`,
 /// the query). `instr(lower(title), lower(?1)) > 0` is a case-insensitive
 /// *literal* substring test — the query is never interpreted as a `LIKE`
-/// pattern or regex, so `%` and `_` match themselves. The
-/// `has_unresolved_blocker`, `has_pending_mutation`, and `has_failed_mutation`
-/// expressions mirror the List Tree read so both commands feed the shared row
-/// renderer the same derived flags. The select list is ordinal-for-ordinal the
-/// List Tree read's because `row_from_sql` is shared: the
-/// two lists must be changed together.
+/// pattern or regex, so `%` and `_` match themselves. Column order and derived
+/// flags must match the List Tree read because both use [`row_from_sql`].
 const SEARCH_ROWS_SQL: &str = concat!(
     "\
 select i.id, i.display_value, i.item_class, i.ticket_kind, i.priority, i.title, \

@@ -6,43 +6,6 @@ use crate::store::testing::{
     FixtureItem, FixtureMutation, TmpStore, insert_fixture_item, insert_fixture_mutation,
 };
 
-fn run(store: &TmpStore, args: &[&str]) -> String {
-    let cwd = cwd();
-    let mut harness = Harness::new(&cwd);
-    expect_git(&harness, store);
-    let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
-    let exit = cli::run_argv(harness.deps(), &args).unwrap();
-    assert_eq!(exit, Exit::Ok, "{}", harness.err());
-    harness.out()
-}
-
-fn promotion(
-    conn: &rusqlite::Connection,
-    item_id: &str,
-    item_class: &str,
-    sequence: i64,
-    state: &str,
-) {
-    insert_fixture_mutation(
-        conn,
-        FixtureMutation {
-            sequence,
-            item_id,
-            item_class,
-            mutation_type: if item_class == "epic" {
-                "promote_epic"
-            } else {
-                "promote_ticket"
-            },
-            state,
-            payload_json: r#"{"backend_kind":"github","title":"Work","body":""}"#,
-            failure_json: (state == "failed").then_some(r#"{"detail":"rejected"}"#),
-            ..FixtureMutation::default()
-        },
-    )
-    .unwrap();
-}
-
 #[test]
 fn show_identifies_pending_promotion_in_header() {
     let store = TmpStore::new("repo");
@@ -285,4 +248,41 @@ fn recorded_identity_removes_binding_label_while_queued_edits_stay_visible() {
     assert!(output.starts_with("○ gh-1 · Work\n"), "{output}");
     assert!(!output.contains("Binding:"), "{output}");
     assert!(output.contains("2 pending update_ticket"), "{output}");
+}
+
+fn run(store: &TmpStore, args: &[&str]) -> String {
+    let cwd = cwd();
+    let mut harness = Harness::new(&cwd);
+    expect_git(&harness, store);
+    let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+    let exit = cli::run_argv(harness.deps(), &args).unwrap();
+    assert_eq!(exit, Exit::Ok, "{}", harness.err());
+    harness.out()
+}
+
+fn promotion(
+    conn: &rusqlite::Connection,
+    item_id: &str,
+    item_class: &str,
+    sequence: i64,
+    state: &str,
+) {
+    insert_fixture_mutation(
+        conn,
+        FixtureMutation {
+            sequence,
+            item_id,
+            item_class,
+            mutation_type: if item_class == "epic" {
+                "promote_epic"
+            } else {
+                "promote_ticket"
+            },
+            state,
+            payload_json: r#"{"backend_kind":"github","title":"Work","body":""}"#,
+            failure_json: (state == "failed").then_some(r#"{"detail":"rejected"}"#),
+            ..FixtureMutation::default()
+        },
+    )
+    .unwrap();
 }
