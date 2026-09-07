@@ -338,6 +338,31 @@ fn create_epic_child() {
     ");
 }
 
+/// The positional Scope argument end to end (ADR-0022): the real binary
+/// resolves the Epic, filters to it, and prints the `Scope:` hint fenced off
+/// the List Tree the way `render_chrome`'s rule line closes it below. A
+/// failure means the positional argument, the fence, or the chrome around the
+/// tree moved; the unit tests in `commands/list.rs` say which.
+#[test]
+fn list_scoped_to_an_epic_fences_the_scope_hint_from_the_tree() {
+    let p = Repo::new("project");
+    p.run("init");
+    p.run("add --epic -m 'Feature Epic'"); // project-1
+    p.run("add --parent project-1 -m 'Build child Ticket'"); // project-2
+
+    tk!(p, "list project-1", @r"
+    Scope: project-1 (Epic + child Tickets)
+
+    ○ project-1 [epic] Feature Epic
+    └── ○ project-2 ● P2 Build child Ticket
+    --------------------------------------------------------------------------------
+    Total: 2 items (2 open)
+
+    Status: ○ open  ◐ active  ✓ done
+    Blocked: ⊘ blocked
+    ");
+}
+
 #[test]
 fn done_records_a_closing_reason_and_refuses_to_amend() {
     let p = Repo::new("project");

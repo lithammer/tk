@@ -839,6 +839,10 @@ _Avoid_: ticket, tickets
   since that is the ordinary state between syncs.
 - The banner names any **Mutation** at the head, including a **Promotion**,
   while the Mutation row markers exclude **Promotions**.
+- The **Scope** hint and the **Mutation Log** banner render as one block, and
+  a single blank line separates that block from whatever follows it — the
+  **List Tree** or the empty-view line. No blank line is printed when
+  neither banner applies.
 - **`tk show`** groups every **Mutation** targeting the **Item** into two
   sections: one for a `pending`, `failed`, or `applying` **Mutation**, and one
   for a `skipped`, `cancelled`, or `abandoned` **Mutation**; an `applied`
