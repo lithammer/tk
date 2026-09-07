@@ -15,7 +15,7 @@
 //! rationale, so the typed [`NextTicket`] carries the Display ID, the
 //! title, and an optional [`Rationale`].
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 
 use crate::domain::priority::Priority;
 
@@ -200,45 +200,27 @@ pub fn next_ready_ticket(
         NextScope::Plan(Some(id)) => ("epic", id, true),
     };
 
-    let row = store.conn.query_row(
-        NEXT_READY_TICKET_SQL,
-        params![scope_mode, scope_id, plan],
-        |row| {
-            let display_id: String = row.get(0)?;
-            let own_priority: Priority = row.get(1)?;
-            let effective_priority: Priority = row.get(2)?;
-            let contributor: Option<String> = row.get(3)?;
-            let title: String = row.get(4)?;
-            Ok((
-                display_id,
-                own_priority,
-                effective_priority,
-                contributor,
-                title,
-                row.get::<_, bool>(5)?,
-            ))
-        },
-    );
-    match row {
-        Ok((
-            display_id,
-            own_priority,
-            effective_priority,
-            contributor,
-            title,
-            has_pending_promotion,
-        )) => {
-            let rationale = build_rationale(own_priority, effective_priority, contributor);
-            Ok(Some(NextTicket {
-                has_pending_promotion,
-                display_id,
-                title,
-                rationale,
-            }))
-        }
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(err) => Err(NextError::Storage(err)),
-    }
+    store
+        .conn
+        .query_row(
+            NEXT_READY_TICKET_SQL,
+            params![scope_mode, scope_id, plan],
+            |row| {
+                let display_id: String = row.get(0)?;
+                let own_priority: Priority = row.get(1)?;
+                let effective_priority: Priority = row.get(2)?;
+                let contributor: Option<String> = row.get(3)?;
+                let title: String = row.get(4)?;
+                Ok(NextTicket {
+                    has_pending_promotion: row.get(5)?,
+                    display_id,
+                    title,
+                    rationale: build_rationale(own_priority, effective_priority, contributor),
+                })
+            },
+        )
+        .optional()
+        .map_err(NextError::Storage)
 }
 
 fn build_rationale(
