@@ -17,8 +17,8 @@
 //! env knobs (tk-105), so nothing else needs pinning: the random `items.id`
 //! never appears in output and OS entropy keeps it distinct across a scenario's
 //! `tk add` calls; and the two values that do vary — the `Created:` date in
-//! `tk grep` output and git's refusal stderr — are pinned with insta
-//! redaction filters (the `tk show` scenarios assert substrings instead).
+//! `tk grep` and `tk show` output and git's refusal stderr — are pinned with
+//! insta redaction filters.
 //! `GIT_CEILING_DIRECTORIES` pins git discovery to the scratch tree so a
 //! `$TESTROOT` under an ambient repo cannot make a refusal scenario pass
 //! spuriously.
@@ -402,6 +402,36 @@ fn show_renders_selection_state_for_tickets_only() {
         !epic.contains("Selection:"),
         "Epics omit Selection State: epic={epic}"
     );
+}
+
+/// A bodyless Item separates its first section from the header block, through
+/// the real binary (gh-54). The child Ticket's PARENT follows a `Selection:`
+/// line; the Epic's TICKETS follows the facet bar directly, the shortest
+/// header block `tk show` renders. A failure means the separator regressed
+/// for one of the two header shapes.
+#[test]
+fn show_separates_the_first_section_from_the_header_block() {
+    let p = Repo::new("project");
+    p.run("init");
+    p.run("add --epic -m 'Big work'"); // project-1
+    p.run("add -m 'Small step' --parent project-1"); // project-2
+
+    tk!(dated: p, "show project-2", @r"
+    ○ project-2 · Small step
+      P2 · Task · Created: [DATE]
+      Selection: accepted
+
+    PARENT
+      ↑ ○ project-1: (Epic) Big work
+    ");
+
+    tk!(dated: p, "show project-1", @r"
+    ○ project-1 · Big work
+      Epic · Created: [DATE]
+
+    TICKETS
+      ↓ ○ project-2: Small step ● P2
+    ");
 }
 
 #[test]
