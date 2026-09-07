@@ -1,11 +1,8 @@
 //! `tk show` — render one Ticket or Epic with current state.
 //!
-//! Layout:
+//! Layout, below the header block [`item_header`] renders:
 //!
 //! ```text
-//! <status-glyph> <display-id> · <title>
-//!   <P_> · <Kind> · Created: <created>[ · Updated: <updated>]    (Tickets)
-//!   Epic · Created: <created>[ · Updated: <updated>]             (Epics)
 //!   Selection: <triage|accepted|parked>                          (Tickets)
 //!
 //! DESCRIPTION
