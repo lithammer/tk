@@ -37,7 +37,7 @@ use clap::Args as ClapArgs;
 
 use crate::cli::{self, CommandError, Deps, Exit};
 use crate::commands::item_header::{self, Header};
-use crate::commands::resolver;
+use crate::commands::{item_row, resolver};
 use crate::domain::item_class::ItemClass;
 use crate::domain::mutation_state::MutationState;
 use crate::render::palette;
@@ -97,6 +97,7 @@ fn render<W: Write + ?Sized>(
     item_header::render_header(
         stdout,
         &Header {
+            has_pending_promotion: detail.has_pending_promotion,
             status: detail.status,
             display_id: &detail.display_id,
             item_class: detail.item_class,
@@ -295,6 +296,7 @@ fn render_sub_row<W: Write + ?Sized>(
     if item.item_class == ItemClass::Epic {
         write!(stdout, "{} ", styler.wrap(palette::KIND_EPIC, "(Epic)"))?;
     }
+    item_row::render_pending_promotion(stdout, item.has_pending_promotion)?;
     sanitize::write_sanitized_line(stdout, item.title.as_bytes())?;
     if let Some(p) = item.priority {
         let p_st = palette::priority_style(p);
@@ -369,6 +371,7 @@ mod tests {
     /// exhaustive on purpose — not this one too.
     fn minimal_item_detail(mutations: Vec<ItemMutation>) -> ItemDetail {
         ItemDetail {
+            has_pending_promotion: false,
             display_id: "tk-1".into(),
             item_class: ItemClass::Ticket,
             ticket_kind: Some(crate::domain::ticket_kind::TicketKind::Task),
@@ -784,6 +787,7 @@ mod tests {
     #[test]
     fn render_pins_every_section_header_glyph_and_order() {
         let summary = |display_id: &str, title: &str, class, status, priority| ItemSummary {
+            has_pending_promotion: false,
             display_id: display_id.into(),
             title: title.into(),
             item_class: class,
@@ -791,6 +795,7 @@ mod tests {
             priority,
         };
         let detail = ItemDetail {
+            has_pending_promotion: false,
             display_id: "tk-1".into(),
             item_class: ItemClass::Ticket,
             ticket_kind: Some(crate::domain::ticket_kind::TicketKind::Task),

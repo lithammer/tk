@@ -21,6 +21,8 @@ use super::Store;
 /// and the facets a `tk show`-style block renders.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrepItem {
+    /// Pending Promotion Binding, derived with this Item row (ADR-0041).
+    pub has_pending_promotion: bool,
     pub display_id: String,
     pub item_class: ItemClass,
     pub ticket_kind: Option<TicketKind>,
@@ -53,11 +55,15 @@ pub fn scan<F>(store: &Store, mut visit: F) -> Result<(), ScanError>
 where
     F: FnMut(GrepItem) -> std::io::Result<ControlFlow<()>>,
 {
-    const SCAN_SQL: &str = "\
+    const SCAN_SQL: &str = concat!(
+        "\
 select display_value, item_class, ticket_kind, priority, title, body, status, \
-       created_at, updated_at, work_state \
+       created_at, updated_at, work_state, ",
+        pending_promotion_sql!("items"),
+        " \
   from items \
- order by created_seq asc";
+ order by created_seq asc"
+    );
 
     let mut stmt = store.conn().prepare(SCAN_SQL).map_err(ScanError::Sql)?;
     let mut rows = stmt.query([]).map_err(ScanError::Sql)?;
@@ -72,6 +78,7 @@ select display_value, item_class, ticket_kind, priority, title, body, status, \
 
 fn item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GrepItem> {
     Ok(GrepItem {
+        has_pending_promotion: row.get(10)?,
         display_id: row.get(0)?,
         item_class: row.get(1)?,
         ticket_kind: row.get(2)?,

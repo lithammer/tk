@@ -2,7 +2,8 @@
 //!
 //! Ranks ready Tickets by Effective Priority (lowest first), then own
 //! Priority, then created_seq, within the active Scope (per ADR-0015).
-//! Prints `<display-id>: <title>` to stdout by default; `-q`/`--quiet`
+//! Prints `<display-id>: <title>`, with `[pending promotion]` before the title
+//! when applicable (ADR-0041). `-q`/`--quiet`
 //! prints the bare Display ID instead, for `id="$(tk next -q)"` scripting.
 //! When the pick's Effective Priority is lower than its own Priority, also
 //! writes a rationale line to stderr (`<display>: Effective Priority <ep>
@@ -17,7 +18,7 @@ use std::io::Write;
 use clap::Args as ClapArgs;
 
 use crate::cli::{self, CommandError, Deps, Exit};
-use crate::commands::{resolver, scope};
+use crate::commands::{item_row, resolver, scope};
 use crate::domain::item_class::ItemClass;
 use crate::render::palette;
 use crate::render::sanitize;
@@ -124,6 +125,7 @@ fn render_selection<W: Write + ?Sized>(
         "{}: ",
         styler.wrap(palette::id_style(ItemClass::Ticket), &ticket.display_id)
     )?;
+    item_row::render_pending_promotion(stdout, ticket.has_pending_promotion)?;
     sanitize::write_sanitized_line(stdout, ticket.title.as_bytes())?;
     stdout.write_all(b"\n")
 }

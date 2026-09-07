@@ -24,6 +24,8 @@ use super::Store;
 /// One ready Ticket selected by [`next_ready_ticket`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NextTicket {
+    /// Pending Promotion Binding, derived with this Item row (ADR-0041).
+    pub has_pending_promotion: bool,
     pub display_id: String,
     pub title: String,
     /// Populated only when Effective Priority < own Priority — i.e. the
@@ -88,7 +90,8 @@ pub enum NextError {
 /// `selected` keeps Epics that carry Dependency paths to Plan members, even
 /// though Epics cannot be members. Readiness still checks blockers outside
 /// this boundary (ADR-0050).
-const NEXT_READY_TICKET_SQL: &str = "\
+const NEXT_READY_TICKET_SQL: &str = concat!(
+    "\
 with recursive \
   selected as ( \
       select i.* from items i \
@@ -105,7 +108,7 @@ with recursive \
   annotated as ( \
       select i.id, i.display_value, i.item_class, i.priority, i.status, \
              i.work_state, i.selection_state, i.container_id, i.created_seq, \
-             i.title, \
+             i.title, i.origin, \
              exists ( \
                  select 1 \
                    from dependencies d \
@@ -170,7 +173,9 @@ select ann.display_value, ann.priority, eff.ep, \
             order by contributor.created_seq asc \
             limit 1 \
        ) as contributor_display, \
-       ann.title \
+       ann.title, ",
+    pending_promotion_sql!("ann"),
+    " \
   from annotated ann \
   join eff on eff.start_id = ann.id \
  where ann.item_class = 'ticket' \
@@ -180,7 +185,8 @@ select ann.display_value, ann.priority, eff.ep, \
    and not ann.has_unresolved_dependency \
    and not ann.has_unresolved_external_blocker \
  order by eff.ep asc, ann.priority asc, ann.created_seq asc \
- limit 1";
+ limit 1"
+);
 
 /// Select the next ready Ticket from current Repository Store state.
 pub fn next_ready_ticket(
@@ -209,13 +215,22 @@ pub fn next_ready_ticket(
                 effective_priority,
                 contributor,
                 title,
+                row.get::<_, bool>(5)?,
             ))
         },
     );
     match row {
-        Ok((display_id, own_priority, effective_priority, contributor, title)) => {
+        Ok((
+            display_id,
+            own_priority,
+            effective_priority,
+            contributor,
+            title,
+            has_pending_promotion,
+        )) => {
             let rationale = build_rationale(own_priority, effective_priority, contributor);
             Ok(Some(NextTicket {
+                has_pending_promotion,
                 display_id,
                 title,
                 rationale,

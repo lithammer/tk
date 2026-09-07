@@ -35,6 +35,11 @@ Promotion is already in the Mutation Log. CONTEXT.md's **Mutation** and
 **Ticket Mutation** entries and the "Origin gates Mutations" paragraph in
 ARCHITECTURE.md are amended to match.
 
+`tk list --local` and `--remote` filter by Origin. A Pending Promotion stays
+in Local results and out of Remote results until tk records its Backend
+identity. Backend Binding describes the durable intent separately: queued
+creation alone does not give the Item Backend Origin.
+
 The Promotion payload records the Backend the operation targets, alongside the
 title and body snapshot. Resolving the Pending Promotion state then reads the
 Mutation Log alone, and no Repository Store write path consults Remote

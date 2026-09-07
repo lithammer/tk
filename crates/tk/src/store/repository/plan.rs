@@ -87,6 +87,8 @@ pub fn clear(store: &mut Store) -> Result<usize, PlanError> {
 /// A Plan member's current Ticket state.
 #[derive(Debug)]
 pub struct PlanTicket {
+    /// Pending Promotion Binding, derived with this Item row (ADR-0041).
+    pub has_pending_promotion: bool,
     pub ticket_kind: TicketKind,
     pub display_id: String,
     pub title: String,
@@ -139,13 +141,14 @@ pub fn read(store: &Store) -> Result<Vec<PlanTicket>, PlanError> {
     // One read snapshot keeps membership, waiting reasons and footer counts consistent.
     let tx = store.conn.unchecked_transaction()?;
     let mut stmt = tx.prepare(
-        "select i.display_value, i.title, i.priority, i.status, i.work_state, i.selection_state, i.id, i.ticket_kind \
-         from plan_members p join items i on i.id = p.item_id order by i.created_seq",
+        concat!("select i.display_value, i.title, i.priority, i.status, i.work_state, i.selection_state, i.id, i.ticket_kind, ", pending_promotion_sql!("i"), " \
+         from plan_members p join items i on i.id = p.item_id order by i.created_seq"),
     )?;
     let rows = stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(6)?,
             PlanTicket {
+                has_pending_promotion: row.get(8)?,
                 ticket_kind: row.get(7)?,
                 display_id: row.get(0)?,
                 title: row.get(1)?,

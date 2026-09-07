@@ -20,9 +20,10 @@ use super::list::{ListRow, row_from_sql};
 /// `has_unresolved_blocker`, `has_pending_mutation`, and `has_failed_mutation`
 /// expressions mirror the List Tree read so both commands feed the shared row
 /// renderer the same derived flags. The select list is ordinal-for-ordinal the
-/// List Tree read's, `work_state` last, because `row_from_sql` is shared: the
+/// List Tree read's because `row_from_sql` is shared: the
 /// two lists must be changed together.
-const SEARCH_ROWS_SQL: &str = "\
+const SEARCH_ROWS_SQL: &str = concat!(
+    "\
 select i.id, i.display_value, i.item_class, i.ticket_kind, i.priority, i.title, \
        i.status, i.container_id, i.selection_state, \
        ( \
@@ -54,10 +55,13 @@ select i.id, i.display_value, i.item_class, i.ticket_kind, i.priority, i.title, 
               and m.state = 'failed' \
               and m.mutation_type not in ('promote_ticket', 'promote_epic') \
        ) as has_failed_mutation, \
-       i.work_state \
+       i.work_state, ",
+    pending_promotion_sql!("i"),
+    " as has_pending_promotion \
   from items i \
  where instr(lower(i.title), lower(?1)) > 0 \
- order by i.created_seq asc";
+ order by i.created_seq asc"
+);
 
 /// Read current-state rows whose title contains `query` (case-insensitive
 /// literal substring), ordered by `created_seq` ascending. Covers every

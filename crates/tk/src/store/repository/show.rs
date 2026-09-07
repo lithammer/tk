@@ -22,6 +22,8 @@ use super::{Store, resolve_item_ref};
 /// Compact summary of a related item shown in the `tk show` sub-sections.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemSummary {
+    /// Pending Promotion Binding of this related Item (ADR-0041).
+    pub has_pending_promotion: bool,
     pub display_id: String,
     pub title: String,
     pub item_class: ItemClass,
@@ -56,6 +58,8 @@ pub struct FormerBackendIdentity {
 /// model is where one command joins them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemDetail {
+    /// Pending Promotion Binding, derived with this Item row (ADR-0041).
+    pub has_pending_promotion: bool,
     pub display_id: String,
     pub item_class: ItemClass,
     pub ticket_kind: Option<TicketKind>,
@@ -102,10 +106,14 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
     let row = store
         .conn
         .query_row(
-            "select display_value, item_class, ticket_kind, priority, selection_state, title, \
+            concat!(
+                "select display_value, item_class, ticket_kind, priority, selection_state, title, \
                     body, closing_reason, status, created_at, updated_at, container_id, \
-                    work_state \
-               from items where id = ?1",
+                    work_state, ",
+                pending_promotion_sql!("items"),
+                " \
+               from items where id = ?1"
+            ),
             params![&reference.id],
             |r| {
                 Ok((
@@ -122,6 +130,7 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
                     r.get::<_, String>(9)?,
                     r.get::<_, String>(10)?,
                     r.get::<_, Option<String>>(11)?,
+                    r.get::<_, bool>(13)?,
                 ))
             },
         )
@@ -139,6 +148,7 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
         created_at,
         updated_at,
         container_id,
+        has_pending_promotion,
     )) = row
     else {
         return Ok(None);
@@ -162,6 +172,7 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
     let mutations = read_mutations(&store.conn, &reference.id)?;
 
     Ok(Some(ItemDetail {
+        has_pending_promotion,
         display_id,
         item_class,
         ticket_kind,
@@ -213,8 +224,12 @@ fn read_item_summary_by_id(
     id: &str,
 ) -> Result<Option<ItemSummary>, rusqlite::Error> {
     conn.query_row(
-        "select display_value, title, item_class, status, priority, work_state \
-           from items where id = ?1",
+        concat!(
+            "select display_value, title, item_class, status, priority, work_state, ",
+            pending_promotion_sql!("items"),
+            " \
+           from items where id = ?1"
+        ),
         params![id],
         item_summary_from_row,
     )
@@ -225,12 +240,14 @@ fn read_children(
     conn: &rusqlite::Connection,
     parent_id: &str,
 ) -> Result<Vec<ItemSummary>, rusqlite::Error> {
-    let mut stmt = conn.prepare(
-        "select display_value, title, item_class, status, priority, work_state \
+    let mut stmt = conn.prepare(concat!(
+        "select display_value, title, item_class, status, priority, work_state, ",
+        pending_promotion_sql!("items"),
+        " \
            from items \
           where container_id = ?1 \
-          order by created_seq asc",
-    )?;
+          order by created_seq asc"
+    ))?;
     stmt.query_map(params![parent_id], item_summary_from_row)?
         .collect()
 }
@@ -239,14 +256,16 @@ fn read_blocked_by(
     conn: &rusqlite::Connection,
     item_id: &str,
 ) -> Result<Vec<ItemSummary>, rusqlite::Error> {
-    let mut stmt = conn.prepare(
-        "select i.display_value, i.title, i.item_class, i.status, i.priority, i.work_state \
+    let mut stmt = conn.prepare(concat!(
+        "select i.display_value, i.title, i.item_class, i.status, i.priority, i.work_state, ",
+        pending_promotion_sql!("i"),
+        " \
            from dependencies d \
            join items i on i.id = d.blocking_id \
           where d.blocked_id = ?1 \
             and i.status <> 'done' \
-          order by i.created_seq asc",
-    )?;
+          order by i.created_seq asc"
+    ))?;
     stmt.query_map(params![item_id], item_summary_from_row)?
         .collect()
 }
@@ -255,14 +274,16 @@ fn read_blocking(
     conn: &rusqlite::Connection,
     item_id: &str,
 ) -> Result<Vec<ItemSummary>, rusqlite::Error> {
-    let mut stmt = conn.prepare(
-        "select i.display_value, i.title, i.item_class, i.status, i.priority, i.work_state \
+    let mut stmt = conn.prepare(concat!(
+        "select i.display_value, i.title, i.item_class, i.status, i.priority, i.work_state, ",
+        pending_promotion_sql!("i"),
+        " \
            from dependencies d \
            join items i on i.id = d.blocked_id \
           where d.blocking_id = ?1 \
             and i.status <> 'done' \
-          order by i.created_seq asc",
-    )?;
+          order by i.created_seq asc"
+    ))?;
     stmt.query_map(params![item_id], item_summary_from_row)?
         .collect()
 }
@@ -311,6 +332,7 @@ fn read_mutations(
 /// Lifecycle at column 3 and the Work State at column 5 (ADR-0043).
 fn item_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemSummary> {
     Ok(ItemSummary {
+        has_pending_promotion: row.get(6)?,
         display_id: row.get(0)?,
         title: row.get(1)?,
         item_class: row.get(2)?,

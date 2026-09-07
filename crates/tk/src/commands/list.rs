@@ -50,10 +50,10 @@ pub struct Args {
     /// Show parked Tickets (accepted, held out of automatic selection).
     #[arg(long, conflicts_with_all = ["ready", "blocked", "active", "triage"])]
     pub parked: bool,
-    /// Restrict to locally-authored items.
+    /// Restrict to items with Local Origin.
     #[arg(long, conflicts_with = "remote")]
     pub local: bool,
-    /// Restrict to Remote-backed items.
+    /// Restrict to items with Backend Origin.
     #[arg(long, conflicts_with = "local")]
     pub remote: bool,
     /// Show only Epics.
@@ -152,18 +152,8 @@ fn render_scope_hint<W: Write + ?Sized>(
 /// `commands/promote.rs` owns the verbatim ADR-0017 wording for `tk promote
 /// reconcile` / `retry` / `cancel`. This banner only points at `tk sync log`.
 ///
-/// Disagrees with the row markers on one case, deliberately: this read
-/// applies no Mutation Type filter, while the markers exclude Promotions. So
-/// a rejected Promotion — the first thing that goes wrong on a fresh
-/// Backend — names an Item whose row then carries no marker, and a reader
-/// following the banner to that row finds nothing on it. Surfacing a Pending
-/// Promotion as such is tk-160; until it lands, `tk sync log <sequence>` is
-/// the only place that case is legible.
-///
-/// In the other direction the two surfaces do agree: a failed row marker
-/// always has a matching banner, because sync stops at the first rejection
-/// so a failed Mutation is always the head. That coupling comes from the
-/// write path, not from this function.
+/// Promotion failures appear here too. Their rows carry a Pending Promotion
+/// label; the Mutation glyphs remain reserved for other Mutations (ADR-0041).
 fn render_sync_banner<W: Write + ?Sized>(
     stdout: &mut W,
     head: Option<&MutationSummary>,
@@ -1129,7 +1119,7 @@ mod tests {
     }
 
     #[test]
-    fn queued_edit_behind_a_pending_promotion_marks_but_the_promotion_alone_does_not() {
+    fn pending_promotion_label_stays_distinct_from_queued_edit_markers() {
         // `has_pending_mutation` excludes the Promotion's own Mutation type;
         // this drives a real Promotion through `commit_promotion` rather
         // than fixturing a `promote_ticket` row by hand, so the exclusion
@@ -1179,11 +1169,12 @@ mod tests {
                 .to_owned()
         };
         assert!(
-            line_of("tk-1").contains(" ~ Edit queued"),
+            line_of("tk-1").contains(" ~ [pending promotion] Edit queued"),
             "a queued edit behind a Pending Promotion is genuinely unsent \
              and must still mark: {stdout:?}"
         );
         let promotion_only_line = line_of("tk-2");
+        assert!(promotion_only_line.contains("[pending promotion] Promotion pending"));
         assert!(
             !promotion_only_line.contains('~') && !promotion_only_line.contains('\u{2691}'),
             "a Pending Promotion is the Item's own creation, not a queued \
@@ -1356,15 +1347,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_promotion_prints_the_banner_but_marks_no_row() {
-        // `render_sync_banner`'s doc comment names this as the case a reader
-        // hits first: the banner applies no Mutation Type filter, but the row
-        // markers exclude Promotions (`has_pending_mutation` /
-        // `has_failed_mutation` filter out promote_ticket/promote_epic). So a
-        // failed Promotion names its Item in the `Sync:` banner while the
-        // matching row stays unmarked and no `Mutations:` legend appears — a
-        // failure here means the two surfaces stopped disagreeing on the
-        // documented case, so check which one moved.
+    fn failed_promotion_has_a_binding_label_and_queue_banner() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_item(
@@ -1389,7 +1372,7 @@ mod tests {
         let stdout = String::from_utf8(h.stdout).unwrap();
         insta::assert_snapshot!(stdout, @"
         Sync: Mutation 1 failed on tk-1 (tk sync log 1)
-        ○ tk-1 ● P2 Row
+        ○ tk-1 ● P2 [pending promotion] Row
         --------------------------------------------------------------------------------
         Total: 1 item (1 open)
 

@@ -15,7 +15,7 @@ Options:
       --active   Show active Tickets and Epics
       --triage   Show triage Tickets (captured, not yet accepted)
       --parked   Show parked Tickets (accepted, held out of automatic selection)
-      --local    Restrict to locally-authored items
-      --remote   Restrict to Remote-backed items
+      --local    Restrict to items with Local Origin
+      --remote   Restrict to items with Backend Origin
       --epic     Show only Epics
   -h, --help     Print help

@@ -27,6 +27,8 @@ pub mod manpage;
 pub mod message;
 pub mod next;
 pub mod park;
+#[cfg(test)]
+mod pending_promotion_tests;
 pub mod plan;
 pub mod prime;
 pub mod promote;

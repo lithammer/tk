@@ -219,6 +219,7 @@ fn render_match<W: Write + ?Sized>(
     item_header::render_header(
         stdout,
         &Header {
+            has_pending_promotion: item.has_pending_promotion,
             status: item.status,
             display_id: &item.display_id,
             item_class: item.item_class,
