@@ -138,29 +138,21 @@ fn render<W: Write + ?Sized>(
         }
     }
 
-    if let Some(parent) = detail.parent.as_ref() {
-        begin_section(stdout, styler, "PARENT")?;
-        render_sub_row(stdout, "\u{2191}", parent, styler)?;
-    }
-
-    if !detail.children.is_empty() {
-        begin_section(stdout, styler, "TICKETS")?;
-        for child in &detail.children {
-            render_sub_row(stdout, "\u{2193}", child, styler)?;
+    // The four directional glyphs are the contract: PARENT up, TICKETS down,
+    // BLOCKED BY and BLOCKING as opposite horizontals. Held in one table so
+    // they read against each other rather than four screens apart.
+    for (label, glyph, items) in [
+        ("PARENT", "\u{2191}", detail.parent.as_slice()),
+        ("TICKETS", "\u{2193}", detail.children.as_slice()),
+        ("BLOCKED BY", "\u{2192}", detail.blocked_by.as_slice()),
+        ("BLOCKING", "\u{2190}", detail.blocking.as_slice()),
+    ] {
+        if items.is_empty() {
+            continue;
         }
-    }
-
-    if !detail.blocked_by.is_empty() {
-        begin_section(stdout, styler, "BLOCKED BY")?;
-        for item in &detail.blocked_by {
-            render_sub_row(stdout, "\u{2192}", item, styler)?;
-        }
-    }
-
-    if !detail.blocking.is_empty() {
-        begin_section(stdout, styler, "BLOCKING")?;
-        for item in &detail.blocking {
-            render_sub_row(stdout, "\u{2190}", item, styler)?;
+        begin_section(stdout, styler, label)?;
+        for item in items {
+            render_sub_row(stdout, glyph, item, styler)?;
         }
     }
 
