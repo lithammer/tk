@@ -258,6 +258,23 @@ it names a
 .B Mutations:
 line only when at least one row carries a marker.
 .PP
+Below that legend, in its own block, comes a
+.B Mutation Log:
+line counting the Unresolved Mutations in the Repository Store \(em pending,
+failed and applying \(em broken down by state, omitting a state with none,
+and omitted entirely when there are none. It counts the Mutation Log rather
+than the rows in view, so it includes Mutations on Items no view shows and
+Promotions the row markers exclude: the example below counts two where one
+row carries a marker. It renders below the empty-view line as well, where no
+row or legend exists to carry a marker.
+.PP
+The count says what is waiting on the Backend, not whether a sync would do
+anything. Backend Pull covers every Adopted open Item whatever the Mutation
+Log holds, so an absent line does not mean
+.B tk sync
+would be idle. Inspect the queue itself with
+.BR "tk sync log" .
+.PP
 Pending Promotions carry
 .B [pending promotion]
 before the title in list, search, plan, ordinary next, and the related Item
@@ -288,6 +305,8 @@ Total: 1 item (1 open)
 Status: ○ open  ◐ active  ✓ done
 Blocked: ⊘ blocked
 Mutations: ~ pending
+
+Mutation Log: 2 pending
 .fi
 .RE
 .SS Searching by title

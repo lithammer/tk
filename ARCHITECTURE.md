@@ -58,8 +58,10 @@ small boundary module after the second caller proves the shape.
   last, and every read command ends in a single newline. Which side writes
   it differs — `tk show` before each section header, `tk grep` before each
   item block but the first, `tk plan` after each section's rows, `tk list`
-  after its banner block and between its totals line and its legend;
-  `tk search` renders one flat block and separates nothing.
+  after its banner block, between its totals line and its legend, and before
+  its `Mutation Log:` trailer on both the tree path (below the legend) and
+  the empty-view path (below that line, where no legend or totals line
+  exists); `tk search` renders one flat block and separates nothing.
   `render_chrome`'s rule line, between a row set and its footer, is the
   only other separator. A helper for all of them would take the side, the
   separator kind, and whether to suppress an empty block — three parameters

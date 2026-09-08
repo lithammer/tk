@@ -850,6 +850,14 @@ _Avoid_: ticket, tickets
   a single blank line separates that block from whatever follows it — the
   **List Tree** or the empty-view line. No blank line is printed when
   neither banner applies.
+- The **List Tree** summary chrome adds a `Mutation Log:` line counting the
+  **Unresolved Mutations** in the **Repository Store** — `pending`, `failed`,
+  and `applying` — broken down by state and omitting a state with none. It
+  renders as its own block below the legend, and below the empty-view line
+  when no rows matched. Its subject is the **Mutation Log** rather than the
+  rows in view, so it counts **Mutations** on **Items** no view arm can show
+  and **Promotions** the row markers exclude; the line is omitted entirely
+  when there are none. **`tk search`** and **`tk plan`** carry no such count.
 - **`tk show`** groups every **Mutation** targeting the **Item** into two
   sections: one for a `pending`, `failed`, or `applying` **Mutation**, and one
   for a `skipped`, `cancelled`, or `abandoned` **Mutation**; an `applied`

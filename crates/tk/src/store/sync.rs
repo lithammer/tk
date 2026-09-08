@@ -1484,12 +1484,52 @@ fn legacy_adopt_backend_key(backend_kind: BackendKind, adopted: &AdoptedItem) ->
     (number == url_number && number.parse::<u64>().is_ok()).then_some(number)
 }
 
-/// Count Mutation Log entries in `pending` or `failed` state.
-pub fn pending_or_failed_mutation_count(conn: &Connection) -> rusqlite::Result<i64> {
+/// How many **Unresolved Mutations** the Mutation Log holds, one count per
+/// state.
+///
+/// Unresolved is `pending`, `failed`, or `applying` (CONTEXT.md) — every
+/// Mutation still waiting on a Backend. The three fields are that definition,
+/// compile-checked: widening the set means adding a field here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UnresolvedMutationCounts {
+    pub pending: i64,
+    pub failed: i64,
+    pub applying: i64,
+}
+
+impl UnresolvedMutationCounts {
+    /// Every Unresolved Mutation, whatever its state.
+    #[must_use]
+    pub fn total(self) -> i64 {
+        self.pending + self.failed + self.applying
+    }
+}
+
+/// Read the Unresolved Mutation counts.
+///
+/// One query rather than one per state, so a concurrent transition cannot land
+/// between two reads and produce a total the Mutation Log never held. The
+/// `where` clause narrows the walk to `mutations_state_idx`; the aggregate
+/// still returns one row, of zeros, when nothing matches.
+pub fn unresolved_mutation_counts(conn: &Connection) -> rusqlite::Result<UnresolvedMutationCounts> {
     conn.query_row(
-        "select count(*) from mutations where state in ('pending','failed')",
-        [],
-        |r| r.get(0),
+        "select count(case when state = ?1 then 1 end), \
+                count(case when state = ?2 then 1 end), \
+                count(case when state = ?3 then 1 end) \
+           from mutations \
+          where state in (?1, ?2, ?3)",
+        (
+            MutationState::Pending,
+            MutationState::Failed,
+            MutationState::Applying,
+        ),
+        |row| {
+            Ok(UnresolvedMutationCounts {
+                pending: row.get(0)?,
+                failed: row.get(1)?,
+                applying: row.get(2)?,
+            })
+        },
     )
 }
 
@@ -1859,7 +1899,7 @@ pub fn clear_remote(conn: &mut Connection) -> Result<(), ClearRemoteError> {
         return Err(ClearRemoteError::ApplyingMutation(sequence));
     }
 
-    let in_flight = pending_or_failed_mutation_count(&tx)?;
+    let in_flight = unresolved_mutation_counts(&tx)?.total();
     if in_flight > 0 {
         return Err(match earliest_in_flight_promotion(&tx)? {
             Some(promotion) => ClearRemoteError::WouldOrphanPromotion {
@@ -4790,27 +4830,51 @@ mod tests {
         assert_eq!(mutation_state, "failed");
     }
 
-    // ---- pending/failed count -------------------------------------------
+    // ---- unresolved counts ----------------------------------------------
 
-    #[test]
-    fn pending_or_failed_count_counts_only_in_flight() {
-        let conn = open_seeded();
-        backend_ticket(&conn, "t1", "gh-1", "1", 1);
-        for (seq, state) in [
-            (1, "pending"),
-            (2, "failed"),
-            (3, "applied"),
-            (4, "skipped"),
-        ] {
+    /// Seed one Mutation per `(sequence, state)`.
+    ///
+    /// The `mutations` CHECK pairs `applying` and `abandoned` with
+    /// `promote_ticket` / `promote_epic` and a matching `item_class`, so those
+    /// rows are seeded as Promotions; they target a Local Ticket awaiting
+    /// Promotion because that is what a Promotion addresses, not because the
+    /// CHECK inspects Origin. The rest are edits to a backend-bound Ticket.
+    fn seed_states(conn: &Connection, states: &[(i64, &str)]) {
+        backend_ticket(conn, "t1", "gh-1", "1", 1);
+        insert_fixture_item(
+            conn,
+            FixtureItem {
+                id: "t2",
+                display: "tk-2",
+                title: "Local work",
+                origin: "local",
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+
+        for (sequence, state) in states {
+            let (mutation_type, item_id, payload_json) =
+                if matches!(*state, "applying" | "abandoned") {
+                    (
+                        "promote_ticket",
+                        "t2",
+                        r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
+                    )
+                } else {
+                    ("update_ticket", "t1", r#"{"title":"X","body":""}"#)
+                };
             insert_fixture_mutation(
-                &conn,
+                conn,
                 FixtureMutation {
-                    sequence: seq,
-                    mutation_type: "update_ticket",
-                    item_id: "t1",
-                    payload_json: r#"{"title":"X","body":""}"#,
+                    sequence: *sequence,
+                    mutation_type,
+                    item_id,
+                    item_class: "ticket",
+                    payload_json,
                     state,
-                    failure_json: if state == "failed" {
+                    failure_json: if *state == "failed" {
                         Some(r#"{"detail":"x"}"#)
                     } else {
                         None
@@ -4820,7 +4884,50 @@ mod tests {
             )
             .unwrap();
         }
-        assert_eq!(pending_or_failed_mutation_count(&conn).unwrap(), 2);
+    }
+
+    #[test]
+    fn unresolved_counts_split_by_state_and_ignore_terminal_rows() {
+        // Pins the membership of Unresolved Mutation (CONTEXT.md): pending,
+        // failed and applying count; every terminal state does not. A failure
+        // here means `tk list`'s footer count has silently changed which
+        // Mutations it reports to the reader.
+        let conn = open_seeded();
+        seed_states(
+            &conn,
+            &[
+                (1, "pending"),
+                (2, "pending"),
+                (3, "failed"),
+                (4, "applying"),
+                (5, "applied"),
+                (6, "skipped"),
+                (7, "cancelled"),
+                (8, "abandoned"),
+            ],
+        );
+
+        let counts = unresolved_mutation_counts(&conn).unwrap();
+        assert_eq!(
+            counts,
+            UnresolvedMutationCounts {
+                pending: 2,
+                failed: 1,
+                applying: 1,
+            }
+        );
+        assert_eq!(counts.total(), 4);
+    }
+
+    #[test]
+    fn unresolved_counts_are_zero_on_a_quiet_log() {
+        // The `where` clause matches nothing here, and the aggregate still has
+        // to yield one row of zeros rather than no row at all: a `group by`
+        // form returns nothing, and `query_row` then fails.
+        let conn = open_seeded();
+        let counts = unresolved_mutation_counts(&conn).unwrap();
+        assert_eq!(counts, UnresolvedMutationCounts::default());
+        assert_eq!(counts.total(), 0);
     }
 
     // ---- set_remote / clear_remote --------------------------------------
@@ -5372,7 +5479,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(origin, "local");
-        assert_eq!(pending_or_failed_mutation_count(&conn).unwrap(), 0);
+        assert_eq!(unresolved_mutation_counts(&conn).unwrap().total(), 0);
     }
 
     #[test]
@@ -5446,7 +5553,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(origin, "local");
-        assert_eq!(pending_or_failed_mutation_count(&conn).unwrap(), 0);
+        assert_eq!(unresolved_mutation_counts(&conn).unwrap().total(), 0);
     }
 
     #[test]

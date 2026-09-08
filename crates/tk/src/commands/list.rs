@@ -24,6 +24,7 @@ use crate::store::promotion::{self as store_promotion, MutationSummary};
 use crate::store::repository::list::{
     self, ListClassFilter, ListOptions, ListOriginFilter, ListRow, ListView,
 };
+use crate::store::sync::{UnresolvedMutationCounts, unresolved_mutation_counts};
 
 /// Flags for `tk list`.
 ///
@@ -91,6 +92,11 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         .map_err(|err| resolver::storage_error(&err))?
         .filter(banner_worthy);
 
+    // Same read-before-write rule: the trailer is written last, so reading it
+    // where it is written would put a whole List Tree on stdout and then fail.
+    let unresolved =
+        unresolved_mutation_counts(store.conn()).map_err(|err| resolver::storage_error(&err))?;
+
     let out = deps.styler.for_stdout();
 
     let scope_display_id = scope_epic.as_ref().map(|epic| epic.display_id.as_str());
@@ -98,7 +104,7 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         return cli::write_error(&err);
     }
 
-    if let Err(err) = render(deps.stdout, &rows, options, out) {
+    if let Err(err) = render(deps.stdout, &rows, options, unresolved, out) {
         return cli::write_error(&err);
     }
     Ok(Exit::Ok)
@@ -179,11 +185,13 @@ fn banner_worthy(head: &MutationSummary) -> bool {
 /// where the queue is stuck, not why.
 ///
 /// Never carries an item count: a store-wide rollup would count Items that
-/// Scope, `--local` / `--remote`, and `--epic` deliberately exclude,
-/// contradicting ADR-0022's confinement of this command. Naming the queue
-/// head is a statement about the Mutation Log, not the rows in view — so
-/// under an active Scope the banner may correctly name an Item outside that
-/// Scope, directly beneath the `Scope:` hint. That is not a bug.
+/// Scope, `--local` / `--remote`, and `--epic` deliberately exclude, against
+/// ADR-0022's consequence that "`tk list` prints a hint when scoped so a
+/// filtered tree never reads as the full store".
+///
+/// Naming the queue head is a statement about the Mutation Log, not the rows
+/// in view — so under an active Scope the banner may correctly name an Item
+/// outside that Scope, directly beneath the `Scope:` hint. That is not a bug.
 ///
 /// Never restates recovery guidance: `unresolved_failure` in
 /// `commands/promote.rs` owns the verbatim ADR-0017 wording for `tk promote
@@ -250,25 +258,71 @@ fn render<W: Write + ?Sized>(
     stdout: &mut W,
     rows: &[ListRow],
     options: ListOptions<'_>,
+    unresolved: UnresolvedMutationCounts,
     styler: SubStyler,
 ) -> std::io::Result<()> {
     if rows.is_empty() {
         writeln!(stdout, "{}", empty_message(options))?;
+    } else {
+        // Walk roots first; embed children inline so the renderer can lay
+        // out a tree without a second pass over the row vector.
+        let mut markers = MutationMarkers::default();
+        for row in rows {
+            if parent_is_in_rows(rows, row) {
+                continue;
+            }
+            markers = markers.merge(render_row(stdout, row, "", styler)?);
+            markers = markers.merge(render_children(stdout, rows, row, styler)?);
+        }
+        render_chrome(stdout, rows, markers, styler)?;
+    }
+
+    // One exit, so the trailer follows whichever body ran.
+    render_unresolved_counts(stdout, unresolved, styler)
+}
+
+/// The `Mutation Log:` trailer: how many **Unresolved Mutations** the
+/// Repository Store holds, per state, or nothing at all when it holds none.
+///
+/// Writes the blank line that separates it from whatever precedes it, so
+/// suppression stays atomic — no count, no stray separator. ARCHITECTURE.md
+/// records both positions it takes.
+///
+/// Counts Promotion Mutations, which the row markers exclude (ADR-0041). It
+/// has to: the `mutations` CHECK pairs `applying` with a Promotion, so a
+/// count that dropped Promotions could never report that state at all.
+///
+/// Lives here rather than in [`render_chrome`] because `commands/search.rs`
+/// shares that function, and a lookup returns the Items asked for and nothing
+/// ambient (CONTEXT.md).
+fn render_unresolved_counts<W: Write + ?Sized>(
+    stdout: &mut W,
+    unresolved: UnresolvedMutationCounts,
+    styler: SubStyler,
+) -> std::io::Result<()> {
+    if unresolved.total() == 0 {
         return Ok(());
     }
 
-    // Walk roots first; embed children inline so the renderer can lay
-    // out a tree without a second pass over the row vector.
-    let mut markers = MutationMarkers::default();
-    for row in rows {
-        if parent_is_in_rows(rows, row) {
-            continue;
-        }
-        markers = markers.merge(render_row(stdout, row, "", styler)?);
-        markers = markers.merge(render_children(stdout, rows, row, styler)?);
-    }
+    // Ordered as `MutationState::ALL` and CONTEXT.md's Unresolved Mutation
+    // definition are, not failed-first like the row markers.
+    let by_state = [
+        (unresolved.pending, MutationState::Pending),
+        (unresolved.failed, MutationState::Failed),
+        (unresolved.applying, MutationState::Applying),
+    ];
+    let parts: Vec<String> = by_state
+        .into_iter()
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, state)| {
+            format!(
+                "{count} {}",
+                styler.wrap(palette::mutation_state_style(state), state.text())
+            )
+        })
+        .collect();
 
-    render_chrome(stdout, rows, markers, styler)
+    writeln!(stdout, "\nMutation Log: {}", parts.join(", "))
 }
 
 fn render_children<W: Write + ?Sized>(
@@ -899,6 +953,8 @@ mod tests {
         Status: ○ open  ◐ active  ✓ done
         Blocked: ⊘ blocked
         Mutations: ~ pending
+
+        Mutation Log: 1 pending
         ");
     }
 
@@ -989,6 +1045,8 @@ mod tests {
         Status: ○ open  ◐ active  ✓ done
         Blocked: ⊘ blocked
         Mutations: ⚑ failed  ~ pending
+
+        Mutation Log: 2 pending, 2 failed
         ");
     }
 
@@ -1417,6 +1475,8 @@ mod tests {
 
         Status: ○ open  ◐ active  ✓ done
         Blocked: ⊘ blocked
+
+        Mutation Log: 1 failed
         ");
     }
 
@@ -1506,8 +1566,122 @@ mod tests {
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert_eq!(
             stdout,
-            "Sync: Mutation 1 failed on tk-1 (tk sync log 1)\n\nNo open or active items.\n"
+            "Sync: Mutation 1 failed on tk-1 (tk sync log 1)\n\
+             \n\
+             No open or active items.\n\
+             \n\
+             Mutation Log: 1 failed\n"
         );
+    }
+
+    #[test]
+    fn unresolved_count_reports_a_mutation_no_row_can_show() {
+        // The case this line exists for: `tk done` on a backend-bound Item
+        // queues a Mutation and the Item leaves the Default view's
+        // `status = 'open'` arm, so no row and no glyph legend mentions it,
+        // and a `pending` head prints no banner. A failure here means that
+        // Mutation reaches no surface at all.
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "d1",
+                display: "tk-1",
+                title: "Done row",
+                status: "done",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "o1",
+                display: "tk-2",
+                title: "Open row",
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        seed_mutation(&conn, 1, "d1", "ticket", "update_ticket", "pending");
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run_rendered(&mut h, default_args());
+        assert_eq!(code, Exit::Ok);
+        let stdout = String::from_utf8(h.stdout).unwrap();
+        assert_eq!(
+            stdout,
+            "\
+○ tk-2 ● P2 Open row
+--------------------------------------------------------------------------------
+Total: 1 item (1 open)
+
+Status: ○ open  ◐ active  ✓ done
+Blocked: ⊘ blocked
+
+Mutation Log: 1 pending
+"
+        );
+    }
+
+    #[test]
+    fn unresolved_count_names_each_state_in_order_and_omits_the_empty_ones() {
+        // A failure here means the line dropped or reordered a state, so a
+        // reader can no longer tell which states the count covers.
+        let mut out = Vec::new();
+        render_unresolved_counts(
+            &mut out,
+            UnresolvedMutationCounts {
+                pending: 2,
+                failed: 1,
+                applying: 1,
+            },
+            Styler::plain().for_stdout(),
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "\nMutation Log: 2 pending, 1 failed, 1 applying\n"
+        );
+    }
+
+    #[test]
+    fn unresolved_count_omits_a_state_holding_nothing() {
+        let mut out = Vec::new();
+        render_unresolved_counts(
+            &mut out,
+            UnresolvedMutationCounts {
+                pending: 2,
+                failed: 0,
+                applying: 0,
+            },
+            Styler::plain().for_stdout(),
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "\nMutation Log: 2 pending\n"
+        );
+    }
+
+    #[test]
+    fn a_quiet_mutation_log_renders_no_count_line() {
+        // Suppression covers the separator too: a quiet Mutation Log writes
+        // nothing at all, not even a blank line.
+        let mut out = Vec::new();
+        render_unresolved_counts(
+            &mut out,
+            UnresolvedMutationCounts::default(),
+            Styler::plain().for_stdout(),
+        )
+        .unwrap();
+        assert!(out.is_empty(), "out={out:?}");
     }
 
     #[test]
@@ -1583,6 +1757,8 @@ mod tests {
 
         Status: ○ open  ◐ active  ✓ done
         Blocked: ⊘ blocked
+
+        Mutation Log: 1 failed
         ");
     }
 
