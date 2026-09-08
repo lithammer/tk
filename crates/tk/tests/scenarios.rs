@@ -259,6 +259,35 @@ impl Repo {
         let out = command.output().expect("run tk");
         render(&out, &self.root)
     }
+
+    /// Write one Mutation straight into this repo's Mutation Log.
+    ///
+    /// No `tk` command leaves a `pending` or `failed` Mutation on a Local
+    /// Ticket, and a scenario has no Remote to reach one through, so the
+    /// states that drive the `Sync:` banner and the `Mutation Log:` count are
+    /// out of reach otherwise. Keeps the `mutations` column list in one place,
+    /// so a migration adding a column breaks one literal.
+    fn seed_mutation(&self, display_value: &str, state: &str, failure_json: Option<&str>) {
+        let conn = rusqlite::Connection::open(self.cwd.join(".git/tk/tk.db")).unwrap();
+        let item_id: String = conn
+            .query_row(
+                "select id from items where display_value = ?1",
+                [display_value],
+                |row| row.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "insert into mutations( \
+                sequence, mutation_type, item_id, item_class, payload_json, state, \
+                failure_json, created_at, state_changed_at \
+             ) values ( \
+                1, 'update_ticket', ?1, 'ticket', '{\"title\":\"seeded\"}', ?2, ?3, \
+                '2026-05-01T00:00:00.000Z', '2026-05-01T00:00:00.000Z' \
+             )",
+            rusqlite::params![&item_id, state, failure_json],
+        )
+        .unwrap();
+    }
 }
 
 /// Render a command result with `$TESTROOT` redacted: bare stdout on the happy
@@ -367,8 +396,12 @@ fn list_scoped_to_an_epic_fences_the_scope_hint_from_the_tree() {
 /// reaches — they all run a quiet Mutation Log. Pins the whole chrome a
 /// failed queue head produces, in one artifact: the banner stacked under the
 /// ADR-0022 `Scope:` hint, the fence below the pair, the row's Mutation
-/// marker, and the `Mutations:` legend. A failure means one of those four
-/// moved, and the unit tests in `commands/list.rs` say which.
+/// marker, the `Mutations:` legend, and the `Mutation Log:` trailer below it.
+/// A failure means one of those five moved, and the unit tests in
+/// `commands/list.rs` say which.
+///
+/// The trailer counts the Mutation under an active Scope: it reports the
+/// Mutation Log, not the rows in view.
 #[test]
 fn list_fences_a_stacked_scope_and_sync_banner_block_from_the_tree() {
     let p = Repo::new("project");
@@ -376,32 +409,8 @@ fn list_fences_a_stacked_scope_and_sync_banner_block_from_the_tree() {
     p.run("add --epic -m 'Feature Epic'"); // project-1
     p.run("add --parent project-1 -m 'Build child Ticket'"); // project-2
 
-    // `failed` is one of the two queue-head states that earn a `Sync:` banner,
-    // and no tk command leaves one behind on a Local Ticket, so seed the
-    // Mutation Log directly.
-    let db_path = p.cwd.join(".git/tk/tk.db");
-    {
-        let conn = rusqlite::Connection::open(&db_path).unwrap();
-        let item_id: String = conn
-            .query_row(
-                "select id from items where display_value = 'project-2'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        conn.execute(
-            "insert into mutations( \
-                sequence, mutation_type, item_id, item_class, payload_json, state, \
-                failure_json, created_at, state_changed_at \
-             ) values ( \
-                1, 'update_ticket', ?1, 'ticket', '{\"title\":\"Build child Ticket\"}', \
-                'failed', '{\"detail\":\"boom\"}', \
-                '2026-05-01T00:00:00.000Z', '2026-05-01T00:00:00.000Z' \
-             )",
-            [&item_id],
-        )
-        .unwrap();
-    }
+    // `failed` is one of the two queue-head states that earn a `Sync:` banner.
+    p.seed_mutation("project-2", "failed", Some(r#"{"detail":"boom"}"#));
 
     tk!(p, "list project-1", @r"
     Scope: project-1 (Epic + child Tickets)
@@ -415,6 +424,28 @@ fn list_fences_a_stacked_scope_and_sync_banner_block_from_the_tree() {
     Status: ○ open  ◐ active  ✓ done
     Blocked: ⊘ blocked
     Mutations: ⚑ failed
+
+    Mutation Log: 1 failed
+    ");
+}
+
+/// The `Mutation Log:` trailer where the summary chrome never runs: with
+/// nothing open, `tk list` writes the empty-view line and the trailer follows
+/// it. A `pending` Mutation earns no banner and a `done` Item reaches no row,
+/// so here the trailer is the only mention of the queue in the output.
+#[test]
+fn list_reports_unresolved_mutations_below_the_empty_view_line() {
+    let p = Repo::new("project");
+    p.run("init");
+    p.run("add -m 'Fix the bug'"); // project-1
+    p.run("done project-1");
+
+    p.seed_mutation("project-1", "pending", None);
+
+    tk!(p, "list", @r"
+    No open or active items.
+
+    Mutation Log: 1 pending
     ");
 }
 

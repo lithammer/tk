@@ -397,5 +397,13 @@ mod tests {
             "the marker on the row must be explained by the legend; a missing \
              legend means search's marker fold never reached render_chrome: {stdout:?}"
         );
+        assert!(
+            !stdout.contains("Mutation Log:"),
+            "search shares the row markers and their legend but carries no \
+             Mutation Log chrome, because a lookup returns the Items asked for \
+             and nothing ambient (CONTEXT.md). This line appearing means \
+             `tk list`'s queue count was folded into render_chrome, which \
+             search shares: {stdout:?}"
+        );
     }
 }
