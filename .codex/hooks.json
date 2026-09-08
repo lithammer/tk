@@ -2,11 +2,12 @@
 	"hooks": {
 		"SessionStart": [
 			{
-				"matcher": "startup|resume",
+				"matcher": "startup|clear|compact",
 				"hooks": [
 					{
 						"type": "command",
 						"command": "./target/debug/tk prime",
+						"additionalContextLimit": 0,
 						"statusMessage": "Priming `tk`"
 					}
 				]
