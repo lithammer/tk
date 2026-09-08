@@ -472,6 +472,13 @@ _Avoid_: ticket, tickets
   boundary. When combined with **Scope**, only work in their intersection
   contributes urgency (ADR-0050).
 - **External Blockers** carry no **Priority** and do not interrupt **Effective Priority** propagation.
+- A proposed field earns a place in the model only when it is a **Shared
+  Field** or it feeds **`tk next`** selection. **Priority**, **Selection
+  State**, **Work State**, and **Plan** membership qualify through selection.
+  **Closing Reason** and an **External Blocker**'s reason are the standing
+  exceptions: free text admitted to explain a state **tk** already holds,
+  never to add one. Agent memory, agent roles, and session task lists satisfy
+  neither clause and stay with the harness (ADR-0023, ADR-0049).
 - **tk** has no Label field. A **Backend Adapter** may use a **Reserved Representation** for a typed field when its **Backend** has no native slot, and it touches no other label on the object (ADR-0049).
 - A field is a **Shared Field** only when the **Backend** has a native slot or a **Reserved Representation** for it and **tk** accepts the **Backend** as authoritative for it on **Backend Pull**; every other field is a **Local Field** (ADR-0049).
 - A **Ticket** has exactly one **Item Status**.
