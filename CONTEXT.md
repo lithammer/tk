@@ -853,13 +853,15 @@ _Avoid_: ticket, tickets
 - **`tk search`** finds **Tickets** and **Epics** whose title contains the query as a case-insensitive literal substring.
 - **`tk search`** covers the whole **Repository Store** and every **Item Status**, including `done`; it ignores **Scope** and is never narrowed by `TK_SCOPE`.
 - **`tk search`** matches title text only. Exact **Display ID** / **Alias** lookup is **`tk show`**; title-or-body content search is **`tk grep`**.
-- **`tk search`** renders matches reusing **`tk list`** row rendering and chrome, laid out flat without **List Tree** nesting.
+- **`tk search`** renders matches reusing **`tk list`** row rendering and summary chrome, laid out flat without **List Tree** nesting.
 - **`tk search`** takes a single required positional query and has no flags in v1; result limiting, **Origin** / **Ticket Kind** / **Priority** / status filtering, and sorting are deferred.
-- **`tk search`** shares **`tk list`**'s row markers and legend but not its
-  stuck-queue banner, so a `~` or `⚑` marker there carries no way to reach
-  the "queued behind someone else's problem" reading the banner provides.
-  The reader cannot tell an unsent edit of their own from someone else's
-  failure blocking the queue; **`tk list`** or **`tk sync log`** answers that.
+- **`tk search`** shares **`tk list`**'s row markers and legend but carries no
+  **Mutation Log** chrome — not the stuck-queue banner, and no queue-wide
+  count. A lookup returns the **Items** asked for and nothing ambient, and a
+  marker says all it needs to without the queue: the **Backend** does not have
+  this change, whatever the **Mutation Log** is doing. What the reader loses is
+  telling an unsent edit of their own from someone else's failure blocking the
+  queue; **`tk list`** or **`tk sync log`** answers that.
 - **`tk grep`** finds **Tickets** and **Epics** whose title or body text matches a regular expression, rendering each match as a **`tk show`**-style block with the body collapsed to the matching lines plus surrounding context.
 - **`tk grep`** covers the whole **Repository Store** and every **Item Status**; like **`tk search`** it ignores **Scope** and is never narrowed by `TK_SCOPE`, because a lookup must not be silently narrowed.
 - **`tk grep`** matches title and body text; it is content search, distinct from **`tk search`** (title-only item lookup) and **`tk show`** (exact identifier lookup).
