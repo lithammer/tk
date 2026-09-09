@@ -15,6 +15,7 @@ use crate::domain::mutation_type::MutationType;
 use crate::store::mutations::{self, BackendBindingError};
 use crate::store::promotion;
 use crate::store::sequences::SequenceError;
+use crate::store::sync::MutationSummary;
 
 use super::{
     Store, current_display_id, insert_display_resolver, next_display_id, resolve_item_ref,
@@ -63,7 +64,7 @@ pub enum DetachError {
     UnresolvedPromotionOperation {
         sequence: i64,
         mutation_type: MutationType,
-        promotion: promotion::MutationSummary,
+        promotion: MutationSummary,
     },
     #[error("a Backend-bound Blocked Item would wait on the detached Local Item")]
     BackendBlockedByDetached {

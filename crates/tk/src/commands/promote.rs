@@ -39,12 +39,12 @@ use crate::remote::factory::{self, OpenError as FactoryOpenError};
 use crate::store::mutations::AppendError;
 use crate::store::promotion::{
     self as store_promotion, CancelPromotionError, CancellationReport, CommitPlanError,
-    MutationSummary, ReadGraphError, RecoveryPromotion, RecoveryPromotionError,
-    RecoveryPromotionMapping, UnrepresentableDependency,
+    ReadGraphError, RecoveryPromotion, RecoveryPromotionError, RecoveryPromotionMapping,
+    UnrepresentableDependency,
 };
 use crate::store::repository::RemoteWorkflowGuard;
 use crate::store::repository::{ResolvedItemRef, Store};
-use crate::store::sync::BackendCohortError;
+use crate::store::sync::{self as store_sync, BackendCohortError, MutationSummary};
 use crate::sync::{self, CreatedIdentityNotStoredCause, RunSyncError, RunSyncErrorCategory};
 
 /// Flags for `tk promote`.
@@ -631,7 +631,7 @@ fn promote(
             None => Ok(Exit::Ok),
         };
     };
-    let blocker = store_promotion::earliest_applicable_mutation(store.conn())
+    let blocker = store_sync::earliest_applicable_mutation(store.conn())
         .map_err(|e| resolver::storage_error(&e))?;
     Err(unresolved_failure(
         blocker.as_ref(),
