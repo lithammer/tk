@@ -68,7 +68,8 @@ title. Later paragraphs become the body.
 ### Update Work
 
 ```sh
-tk update <id> -F -
+tk update <id> --title "New title"
+tk update <id> --body-file -
 tk start <id>
 tk stop <id>
 tk done <id>

@@ -172,6 +172,35 @@ Created Epic: <display-id> - <title>
 Status: open
 .fi
 .RE
+.SS Updating a Ticket or Epic
+.B tk update
+edits the fields supplied on the command line. Omitted fields keep their
+Repository Store values.
+.PP
+.B \-t
+and
+.B \-\-title
+set a nonblank, single-line title, trimming outer ASCII spaces and tabs.
+.B \-b
+and
+.B \-\-body
+set the body to literal text, including a leading @.
+.B \-\-body\-file
+reads the body from a UTF-8 file; use
+.B \-
+for standard input. The two body sources are mutually exclusive.
+.PP
+Body input preserves whitespace and line endings. An empty body, file, or
+input stream clears the body. NUL is rejected in both title and body.
+.PP
+Title and body edits can be combined with
+.BR \-\-priority ,
+.BR \-\-parent ,
+or
+.BR \-\-no\-parent
+for Tickets. All requested edits and their Mutations commit together in the
+Repository Store. Backend delivery uses complete title/body snapshots and
+separate relationship Mutations.
 .SS Reading the List Tree
 .TP
 \fBtk list\fR [\fB\-\-ready\fR | \fB\-\-blocked\fR | \fB\-\-active\fR | \fB\-\-triage\fR | \fB\-\-parked\fR] [\fB\-\-local\fR | \fB\-\-remote\fR] [\fB\-\-epic\fR] [\fIepic-id\fR]

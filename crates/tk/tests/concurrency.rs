@@ -128,7 +128,7 @@ fn parallel_updates_on_distinct_tickets_all_succeed() {
                 vec![
                     "update".into(),
                     id.clone(),
-                    "-m".into(),
+                    "-t".into(),
                     format!("racer {i}"),
                 ]
             })

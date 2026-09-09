@@ -1,4 +1,4 @@
-//! Git-commit-style message parsing for `tk add` and `tk update`.
+//! Git-commit-style message parsing for `tk add`.
 //!
 //! The first paragraph becomes the title (joined with single spaces when
 //! it spans multiple lines); subsequent paragraphs become the body
