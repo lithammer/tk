@@ -4639,19 +4639,13 @@ mod tests {
                 priority: (item_class == "ticket").then_some("P2"),
                 title: "Needs its close relinquished",
                 status: "done",
+                closing_reason: Some("Not planned"),
                 origin: "backend",
                 backend_kind: Some("github"),
                 backend_key: Some("53"),
                 created_seq: 1,
                 ..FixtureItem::default()
             },
-        )
-        .unwrap();
-        // `FixtureItem` has no Closing Reason field; set one directly so the
-        // test can assert Sync Skip clears it.
-        conn.execute(
-            "update items set closing_reason = 'Not planned' where id = 't1'",
-            [],
         )
         .unwrap();
         insert_fixture_mutation(

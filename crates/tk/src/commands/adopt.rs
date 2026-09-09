@@ -1470,13 +1470,9 @@ mod tests {
             &conn,
             FixtureItem {
                 status: "done",
+                closing_reason: Some("Superseded"),
                 ..backend_ticket("gh-42", "https://github.com/o/r/issues/42")
             },
-        )
-        .unwrap();
-        conn.execute(
-            "update items set closing_reason = 'Superseded' where id = 'stable'",
-            [],
         )
         .unwrap();
         let cwd_path = cwd();

@@ -492,7 +492,11 @@ mod tests {
     /// Seed one detached Backend Ticket: a `done` Local Item whose Former
     /// Backend Identity still reserves the canonical Backend object to it,
     /// which is the state Re-Adopt rebinds from (ADR-0047).
-    fn insert_detached_done_ticket(conn: &Connection, backend_key: &str) {
+    fn insert_detached_done_ticket(
+        conn: &Connection,
+        backend_key: &str,
+        closing_reason: Option<&str>,
+    ) {
         insert_fixture_item(
             conn,
             FixtureItem {
@@ -500,6 +504,7 @@ mod tests {
                 display: "tk-1",
                 title: "Closed locally",
                 status: "done",
+                closing_reason,
                 created_seq: 1,
                 ..FixtureItem::default()
             },
@@ -569,12 +574,7 @@ mod tests {
     fn readopt_may_import_an_open_lifecycle_onto_a_done_item() {
         let mut conn = open_memory();
         apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        insert_detached_done_ticket(&conn, "https://github.com/o/r/issues/7");
-        conn.execute(
-            "update items set closing_reason = 'Superseded' where id = 't1'",
-            [],
-        )
-        .unwrap();
+        insert_detached_done_ticket(&conn, "https://github.com/o/r/issues/7", Some("Superseded"));
 
         readopt_rebind(&mut conn, "https://github.com/o/r/issues/7")
             .expect("Re-Adopt imports the Backend Lifecycle (ADR-0047)");
@@ -593,7 +593,7 @@ mod tests {
     fn the_readopt_exception_needs_the_items_own_former_identity() {
         let mut conn = open_memory();
         apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        insert_detached_done_ticket(&conn, "https://github.com/o/r/issues/7");
+        insert_detached_done_ticket(&conn, "https://github.com/o/r/issues/7", None);
 
         // A Backend object this Item never held is ordinary intake, not a
         // rebind, so it stays under the done-terminal rule (ADR-0006).
@@ -625,14 +625,10 @@ mod tests {
                 display: "tk-1",
                 title: "Closed by tk done",
                 status: "done",
+                closing_reason: Some("Shipped"),
                 created_seq: 1,
                 ..FixtureItem::default()
             },
-        )
-        .unwrap();
-        conn.execute(
-            "update items set closing_reason = 'Shipped' where id = 't1'",
-            [],
         )
         .unwrap();
     }
@@ -1136,15 +1132,10 @@ mod tests {
                 display: "tk-1",
                 title: "Done",
                 status: "done",
+                closing_reason: Some("Fixed in PR #12"),
                 created_seq: 1,
                 ..FixtureItem::default()
             },
-        )
-        .unwrap();
-
-        conn.execute(
-            "update items set closing_reason = ?1 where id = 't1'",
-            rusqlite::params!["Fixed in PR #12"],
         )
         .unwrap();
 
@@ -2410,19 +2401,13 @@ mod tests {
                 title: "Subject",
                 body: "Body text",
                 status: "done",
+                closing_reason: Some("Fixed in PR #12"),
                 container_id: Some("e1"),
                 created_at: "2026-01-01T00:00:00.000Z",
                 updated_at: "2026-02-02T00:00:00.000Z",
                 created_seq: 7,
                 ..FixtureItem::default()
             },
-        )
-        .unwrap();
-        // Not a `FixtureItem` field, and the column CHECK confines it to
-        // `done` rows, which the fixture above already is.
-        conn.execute(
-            "update items set closing_reason = 'Fixed in PR #12' where id = 't1'",
-            [],
         )
         .unwrap();
 

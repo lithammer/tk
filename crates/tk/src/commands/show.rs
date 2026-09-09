@@ -640,14 +640,10 @@ mod tests {
                 title: "Ticket",
                 body: "Some body",
                 status: "done",
+                closing_reason: Some("Fixed in PR #12"),
                 created_seq: 1,
                 ..FixtureItem::default()
             },
-        )
-        .unwrap();
-        conn.execute(
-            "update items set closing_reason = ?1 where id = 't1'",
-            rusqlite::params!["Fixed in PR #12"],
         )
         .unwrap();
         drop(conn);
@@ -680,14 +676,10 @@ mod tests {
                 display: "tk-1",
                 title: "Quick fix",
                 status: "done",
+                closing_reason: Some("Done in standup"),
                 created_seq: 1,
                 ..FixtureItem::default()
             },
-        )
-        .unwrap();
-        conn.execute(
-            "update items set closing_reason = ?1 where id = 't1'",
-            rusqlite::params!["Done in standup"],
         )
         .unwrap();
         drop(conn);

@@ -118,6 +118,8 @@ pub struct FixtureItem<'a> {
     /// and only against a store past the split, since a pre-split `items` has
     /// no column to put it in. Setting it on an older store panics.
     pub work_state: Option<&'a str>,
+    /// Closing Reason for a done Item; Sync Skip clears it on reopen (ADR-0046).
+    pub closing_reason: Option<&'a str>,
     pub origin: &'a str,
     pub backend_kind: Option<&'a str>,
     pub backend_key: Option<&'a str>,
@@ -147,6 +149,7 @@ impl Default for FixtureItem<'_> {
             body: "",
             status: "open",
             work_state: None,
+            closing_reason: None,
             origin: "local",
             backend_kind: None,
             backend_key: None,
@@ -231,8 +234,8 @@ fn insert_item_row(
         "insert into items(\
             id, display_value, item_class, ticket_kind, priority, title, body, \
             container_id, container_class, origin, backend_kind, backend_key, \
-            status, selection_state, created_seq, created_at, updated_at\
-         ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            status, selection_state, created_seq, created_at, updated_at, closing_reason\
+         ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             item.id,
             item.display,
@@ -251,6 +254,7 @@ fn insert_item_row(
             item.created_seq,
             item.created_at,
             item.updated_at,
+            item.closing_reason,
         ],
     )?;
     // `idle` is what migration 011 declares as the column default, so writing
