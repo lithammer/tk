@@ -2,8 +2,8 @@
 
 `tk grep <pattern>` (tk-113) finds **Tickets** and **Epics** whose **title** or
 **body** text matches a **regular expression**, and renders each match as a
-**`tk show`**-style block with the body collapsed to the matching lines plus
-surrounding context, like `grep -C`. It is the content-search companion to
+**`tk show`**-style block by default, with the body collapsed to the matching
+lines plus surrounding context, like `grep -C`. It is the content-search companion to
 **`tk search`**: where **`tk search`** answers *"which item is it?"* by title and
 returns **`tk list`** rows, **`tk grep`** answers *"where does this text
 appear?"* and returns matches in context. ADR-0025 established that the distinct
@@ -86,7 +86,7 @@ These user-facing contracts are frozen because none can change additively later:
   whitespace pattern is a valid needle — see the Amendment). (The
   no-match `1` carries no stderr diagnostic, unlike the existing `Exit::Failure`
   definition; the command owns reconciling that with the `Exit` taxonomy.)
-- **Output is `tk show`-style blocks only, no `tk list` chrome:** label line +
+- **Default output is `tk show`-style blocks only, no `tk list` chrome:** label line +
   facet bar + a `DESCRIPTION` collapsed to the matching lines ± 3 context lines
   (matching `git diff`'s default), with `--` between non-contiguous hunks within
   one body and a blank line between item blocks. Relationship/blocker sections
@@ -147,3 +147,24 @@ not be empty" / "query must not be empty" messages (ADR-0017) are unchanged and
 become accurate, since they now fire only on the empty case. Each command keeps
 its existing exit code for the empty case (**`tk grep`** `2`, **`tk search`**
 `1`).
+
+## Amendment (tk-182): list matching Items without context
+
+`tk grep -l <pattern>` (or `--list`) prints one
+`<display-id>: <title>` line for each matching Item. It keeps grep's raw,
+per-line title and body matching, creation order, whole-store scan, and `0`/`1`
+exit predicate. A title and body with several matching lines still produce one
+line for the Item.
+
+The list form accepts `-i` and `-F`. It also accepts `-A`, `-B`, and `-C`, but
+context flags have no effect because this form renders no body lines. `-l`
+conflicts with `-q` and `-c`; clap rejects either combination as a usage error
+before the store opens. Empty and malformed patterns keep the same fail-fast
+usage errors as the default form.
+
+The Display ID and title are sanitised as single-line fields, and the output is
+plain even under `--color always`. The list form omits all Item metadata,
+including status, kind, priority, dates, Mutation markers, and the Pending
+Promotion label or Binding row. This last omission is deliberate for `pending`,
+`failed`, and `applying` Promotions: the one-line form is only an Item identity
+and title, while the default context form remains the path to Binding details.

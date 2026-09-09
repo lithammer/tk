@@ -1,13 +1,13 @@
-//! Shared detail-header rendering for `tk show` and `tk grep`.
+//! Shared detail-header rendering for `tk show` and default `tk grep` output.
 //!
 //! Both commands open an Item with the same two lines — the label line
 //! (`<status-glyph> <display-id> · <title>`) and the facet bar
 //! (`<P_> · <Kind> · Created: …` for Tickets, `Epic · Created: …` for Epics) —
 //! followed by an optional Pending Promotion Binding row (ADR-0041), before
 //! diverging: `tk show` follows with body + relationship sections,
-//! `tk grep` with the matching hunks. Keeping the header here is the single
-//! source of truth so the two cannot drift (parallel to how `item_row` is
-//! shared by `tk list` and `tk search`). ADR-0014 styling is preserved.
+//! default `tk grep` with the matching hunks. Keeping the header here is the
+//! single source of truth so the two cannot drift (parallel to how `item_row`
+//! is shared by `tk list` and `tk search`). ADR-0014 styling is preserved.
 
 use std::io::Write;
 

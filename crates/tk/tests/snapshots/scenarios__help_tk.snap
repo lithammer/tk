@@ -17,7 +17,7 @@ Commands:
   plan         Inspect and edit the current local Plan
   show         Render one Ticket or Epic with current state
   search       Find Tickets and Epics by a title substring
-  grep         Search title and body text for a regular expression, with match context
+  grep         Search title and body text for a regular expression; show context by default
   update       Update the title, body, priority, or parent of a Ticket or Epic
   start        Mark a Ticket or Epic active
   stop         Return a Ticket or Epic to open

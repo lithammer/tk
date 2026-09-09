@@ -307,7 +307,7 @@ would be idle. Inspect the queue itself with
 Pending Promotions carry
 .B [pending promotion]
 before the title in list, search, plan, ordinary next, and the related Item
-rows in show. The main headers in show and grep instead add
+rows in show. The main headers in show and default grep output instead add
 .BR "Binding: pending promotion" .
 Both forms cover pending, failed, and applying Promotion Mutations. They mean
 tk has durable Promotion intent without a recorded Backend identity;
@@ -315,7 +315,10 @@ the Backend object may already exist. Inspect the exact Mutation state with
 .B tk show
 or
 .BR "tk sync log" .
-The label disappears when identity is recorded or Promotion intent is
+The minimal
+.B "tk grep --list"
+form omits all metadata, including this label and Binding row. The label
+disappears from other views when identity is recorded or Promotion intent is
 withdrawn. Other Items gain no Binding row, and
 .B tk next \-\-quiet
 keeps its bare Display ID output.
@@ -391,10 +394,10 @@ Mutations: ~ pending
 .RE
 .SS Searching content
 .TP
-\fBtk grep\fR [\fB\-i\fR] [\fB\-F\fR] [\fB\-C\fR \fIN\fR] [\fB\-A\fR \fIN\fR] [\fB\-B\fR \fIN\fR] [\fB\-q\fR | \fB\-c\fR] \fIPATTERN\fR
+\fBtk grep\fR [\fB\-i\fR] [\fB\-F\fR] [\fB\-C\fR \fIN\fR] [\fB\-A\fR \fIN\fR] [\fB\-B\fR \fIN\fR] [\fB\-q\fR | \fB\-c\fR | \fB\-l\fR] \fIPATTERN\fR
 Find Tickets and Epics whose title or body matches the regular expression
 .I PATTERN
-and render each match as a
+and, by default, render each match as a
 .BR "tk show" -style
 block with the body collapsed to the matching lines plus surrounding context.
 .PP
@@ -438,7 +441,27 @@ shows only the matching lines.
 .B \-q
 suppresses all output and exits on the first match;
 .B \-c
-prints the count of matching items instead of the blocks. Both keep the
+prints the count of matching items instead of the blocks.
+.B \-l
+or
+.B \-\-list
+prints one plain
+.B "<display-id>: <title>"
+line per matching Item. A title and body with several matching lines still
+produce one line. The list form includes Epics and done Items, prints in
+creation order, and ignores TK_SCOPE like the default form. It accepts
+.BR \-i ,
+.BR \-F ,
+and the context flags; context flags have no effect. It emits no colour, even
+with
+.BR "--color always" ,
+and omits all metadata, including status, kind, priority, dates, Mutation
+markers, and Pending Promotion labels or Binding rows.
+.BR \-q ,
+.BR \-c ,
+and
+.B \-l
+are mutually exclusive. All three keep the
 exit-status predicate described below.
 .PP
 .B tk grep
@@ -446,7 +469,7 @@ overloads its exit status as a \fBgrep \-q\fR\-style predicate: it exits 0 when
 at least one item matches and 1 when none do, leaving stderr empty so a script
 can tell \(lqno match\(rq from a real failure. A usage error exits 2.
 .PP
-On success it prints one
+By default, on success it prints one
 .B tk show
 \-style block per matching item:
 .PP

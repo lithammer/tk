@@ -215,7 +215,7 @@ enum Command {
     Show(commands::show::Args),
     /// Find Tickets and Epics by a title substring.
     Search(commands::search::Args),
-    /// Search title and body text for a regular expression, with match context.
+    /// Search title and body text for a regular expression; show context by default.
     Grep(commands::grep::Args),
     /// Update the title, body, priority, or parent of a Ticket or Epic.
     Update(commands::update::Args),

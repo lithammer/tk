@@ -1212,12 +1212,55 @@ fn grep_count_prints_matching_item_total() {
     tk!(p, "grep auth -c", @"2");
 }
 
-/// `-c` and `-q` are mutually exclusive (tk-121): one prints a count, the other
-/// suppresses all output, so clap rejects the combination as a usage error
-/// before any store work. This guard is load-bearing — without it, `-q -c` would
-/// break on the first match without counting, then print a bogus `0`.
 #[test]
-fn grep_count_and_quiet_conflict() {
+fn grep_list_prints_matching_items_in_creation_order_and_ignores_scope() {
+    let p = Repo::new("project");
+    p.run("init");
+    p.run("add --epic -m 'Release auth' -m 'auth rollout'"); // project-1
+    p.run("add -m 'Auth middleware' -m 'auth once' -m 'auth twice'"); // project-2
+    p.run("done project-2");
+    p.run("add --epic -m 'Other scope'"); // project-3
+
+    insta::assert_snapshot!(
+        p.run_env("grep auth -ilF -C 0", &[("TK_SCOPE", "project-3")]),
+        @"
+    project-1: Release auth
+    project-2: Auth middleware
+    "
+    );
+    tk!(p, "grep auth -i --list", @"
+    project-1: Release auth
+    project-2: Auth middleware
+    ");
+}
+
+#[test]
+fn grep_list_no_match_is_silent() {
+    let p = Repo::new("project");
+    p.run("init");
+    p.run("add -m 'Unrelated chore'");
+
+    tk!(p, "grep absent -l", @"
+    exit 1
+    -- stdout --
+    -- stderr --
+    ");
+}
+
+#[test]
+fn grep_list_prints_single_title_only_and_body_only_matches() {
+    let p = Repo::new("project");
+    p.run("init");
+    p.run("add -m 'Title needle' -m 'Body token'");
+    p.run("add -m 'Unrelated chore'");
+
+    tk!(p, "grep needle -l", @"project-1: Title needle");
+    tk!(p, "grep token --list", @"project-1: Title needle");
+}
+
+/// Reject conflicting output modes rather than let branch order pick one.
+#[test]
+fn grep_output_modes_conflict() {
     let p = Repo::new("project");
     p.run("init");
     p.run("add -m 'Add middleware' -m 'the auth token'"); // project-1
@@ -1227,6 +1270,56 @@ fn grep_count_and_quiet_conflict() {
     -- stdout --
     -- stderr --
     error: the argument '--count' cannot be used with '--quiet'
+
+    Usage: tk grep --count <PATTERN>
+
+    For more information, try '--help'.
+    ");
+    tk!(p, "grep auth -q -c", @"
+    exit 2
+    -- stdout --
+    -- stderr --
+    error: the argument '--quiet' cannot be used with '--count'
+
+    Usage: tk grep --quiet <PATTERN>
+
+    For more information, try '--help'.
+    ");
+    tk!(p, "grep auth -l -q", @"
+    exit 2
+    -- stdout --
+    -- stderr --
+    error: the argument '--list' cannot be used with '--quiet'
+
+    Usage: tk grep --list <PATTERN>
+
+    For more information, try '--help'.
+    ");
+    tk!(p, "grep auth -q -l", @"
+    exit 2
+    -- stdout --
+    -- stderr --
+    error: the argument '--quiet' cannot be used with '--list'
+
+    Usage: tk grep --quiet <PATTERN>
+
+    For more information, try '--help'.
+    ");
+    tk!(p, "grep auth -l -c", @"
+    exit 2
+    -- stdout --
+    -- stderr --
+    error: the argument '--list' cannot be used with '--count'
+
+    Usage: tk grep --list <PATTERN>
+
+    For more information, try '--help'.
+    ");
+    tk!(p, "grep auth -c -l", @"
+    exit 2
+    -- stdout --
+    -- stderr --
+    error: the argument '--count' cannot be used with '--list'
 
     Usage: tk grep --count <PATTERN>
 
