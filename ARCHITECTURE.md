@@ -82,18 +82,19 @@ small boundary module after the second caller proves the shape.
   only the decision that one is owed (ADR-0048). A Mutation Log read projected onto an item read — the
   `tk list` / `tk search` row markers, and the per-Item Mutation list
   `tk show` renders — belongs beside that item read in `store/repository/`;
-  the log-oriented views belong to `store/sync.rs`, which owns Remote
-  configuration, retained Backend cohort validation, canonical Adopt
-  insertion, Re-Adopt, Pull refresh, and Mutation Log replay and inspection
-  helpers. The Store also owns atomic Detach, Former Backend Identity
-  provenance, and the uniqueness invariant spanning active and former Backend
-  ownership ([ADR 0047](./docs/adr/0047-detach-retains-reversible-backend-history.md)).
+  the log-oriented views, including the global post-sync queue-head read,
+  belong to `store/sync.rs`, which owns Remote configuration, retained Backend
+  cohort validation, canonical Adopt insertion, Re-Adopt, Pull refresh, and
+  Mutation Log replay and inspection helpers. The Store also owns atomic
+  Detach, Former Backend Identity provenance, and the uniqueness invariant
+  spanning active and former Backend ownership
+  ([ADR 0047](./docs/adr/0047-detach-retains-reversible-backend-history.md)).
   `store/promotion.rs` exposes the SQL half of `tk promote` — the preflight
   graph read, the one-transaction outbox commit, receipt application, and the
-  post-sync Mutation Log reads. Promotion recovery also lives here:
-  unique-target lookup, queue-wide mapping capture, and atomic reconcile/retry
-  transitions. `commands/promote.rs` owns Backend inspection, snapshot
-  comparison, recovery guidance, and the nested sync report.
+  operation-scoped post-sync Mutation Log read. Promotion recovery also lives
+  here: unique-target lookup, queue-wide mapping capture, and atomic
+  reconcile/retry transitions. `commands/promote.rs` owns Backend inspection,
+  snapshot comparison, recovery guidance, and the nested sync report.
 - `remote/` owns the type-erased Backend Adapter trait (mirroring
   `ProcRunner`), the factory that dispatches by configured backend kind, and
   the FakeAdapter used by engine tests. It imports `store/`, `proc`, and

@@ -20,11 +20,13 @@ use crate::commands::{resolver, scope};
 use crate::domain::mutation_state::MutationState;
 use crate::render::palette;
 use crate::render::styler::SubStyler;
-use crate::store::promotion::{self as store_promotion, MutationSummary};
 use crate::store::repository::list::{
     self, ListClassFilter, ListOptions, ListOriginFilter, ListRow, ListView,
 };
-use crate::store::sync::{UnresolvedMutationCounts, unresolved_mutation_counts};
+use crate::store::sync::{
+    MutationSummary, UnresolvedMutationCounts, earliest_applicable_mutation,
+    unresolved_mutation_counts,
+};
 
 /// Flags for `tk list`.
 ///
@@ -83,12 +85,7 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
 
     // Read before writing anything: a storage failure here must not leave a
     // Scope hint on stdout promising a tree that never arrives.
-    //
-    // This read is store-wide, but it lives in `store/promotion.rs`, which
-    // ARCHITECTURE.md scopes to `tk promote`. Reused rather than duplicated;
-    // tk-166 moves it to `store/sync.rs`, where the equivalent
-    // `applying_mutation_sequence` already sits.
-    let banner_head = store_promotion::earliest_applicable_mutation(store.conn())
+    let banner_head = earliest_applicable_mutation(store.conn())
         .map_err(|err| resolver::storage_error(&err))?
         .filter(banner_worthy);
 

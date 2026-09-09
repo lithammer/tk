@@ -6,8 +6,8 @@ use clap::Args as ClapArgs;
 use crate::cli::{CommandError, Deps, Exit};
 use crate::commands::resolver;
 use crate::domain::mutation_state::MutationState;
-use crate::store::promotion;
 use crate::store::repository::detach;
+use crate::store::sync::MutationSummary;
 
 /// Flags for `tk detach`.
 #[derive(Debug, ClapArgs)]
@@ -56,7 +56,7 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
 /// Only an indeterminate creation may be retried, and ordinary sync still
 /// carries a pending or failed Promotion, so naming all three recovery verbs
 /// everywhere would recommend a command that refuses (ADR-0037).
-fn promotion_remedy(promotion: &promotion::MutationSummary) -> String {
+fn promotion_remedy(promotion: &MutationSummary) -> String {
     let target = &promotion.target_display_id;
     match promotion.state {
         MutationState::Applying => format!(

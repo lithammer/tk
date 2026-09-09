@@ -1203,6 +1203,44 @@ pub fn applying_mutation_sequence(conn: &Connection) -> rusqlite::Result<Option<
     .optional()
 }
 
+/// The Mutation Log fields a diagnostic names: which Mutation, what state, and
+/// the Item it targets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutationSummary {
+    pub sequence: i64,
+    pub state: MutationState,
+    pub target_display_id: String,
+}
+
+/// The earliest nonterminal Mutation: the lowest Mutation Sequence in
+/// `pending`, `failed`, or `applying` state, across the whole Mutation Log.
+///
+/// Deliberately not scoped to a Promotion Operation. A Promotion is appended
+/// behind whatever the outbox already held, so the Mutation that stops the sync
+/// may predate the operation and carry no Promotion Operation at all — an
+/// operation-scoped query could never name it. It is also the only place the
+/// answer exists when Apply hits an environment failure, which leaves the
+/// in-flight row `pending` and writes no outcome.
+pub fn earliest_applicable_mutation(
+    conn: &Connection,
+) -> rusqlite::Result<Option<MutationSummary>> {
+    conn.query_row(
+        "select m.sequence, m.state, i.display_value \
+           from mutations m join items i on i.id = m.item_id \
+          where m.state in ('pending','failed','applying') \
+          order by m.sequence asc limit 1",
+        [],
+        |r| {
+            Ok(MutationSummary {
+                sequence: r.get(0)?,
+                state: r.get(1)?,
+                target_display_id: r.get(2)?,
+            })
+        },
+    )
+    .optional()
+}
+
 /// Local consequence of skipping one failed Mutation, returned by
 /// [`mark_mutation_skipped`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2134,6 +2172,169 @@ mod tests {
         conn.execute_batch("pragma foreign_keys = on").unwrap();
         migrations::apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
         conn
+    }
+
+    #[test]
+    fn no_applicable_mutation_when_the_log_is_drained() {
+        let conn = open_seeded();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Ticket",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        for (sequence, state) in [(1, "applied"), (2, "skipped")] {
+            insert_fixture_mutation(
+                &conn,
+                FixtureMutation {
+                    sequence,
+                    mutation_type: "update_ticket",
+                    item_id: "t1",
+                    payload_json: r#"{"title":"T","body":""}"#,
+                    state,
+                    ..FixtureMutation::default()
+                },
+            )
+            .unwrap();
+        }
+
+        assert_eq!(earliest_applicable_mutation(&conn).unwrap(), None);
+    }
+
+    #[test]
+    fn the_earliest_applicable_mutation_may_predate_the_promotion_operation() {
+        let conn = open_seeded();
+        for (id, display, created_seq) in [("older", "tk-1", 1), ("t2", "tk-2", 2)] {
+            insert_fixture_item(
+                &conn,
+                FixtureItem {
+                    id,
+                    display,
+                    title: "Ticket",
+                    created_seq,
+                    ..FixtureItem::default()
+                },
+            )
+            .unwrap();
+        }
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                mutation_type: "update_ticket",
+                item_id: "older",
+                payload_json: r#"{"title":"T","body":""}"#,
+                state: "failed",
+                failure_json: Some(r#"{"detail":"boom"}"#),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 2,
+                mutation_type: "update_ticket",
+                item_id: "t2",
+                payload_json: r#"{"title":"T","body":""}"#,
+                promotion_operation_id: Some("op-1"),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            earliest_applicable_mutation(&conn).unwrap(),
+            Some(MutationSummary {
+                sequence: 1,
+                state: MutationState::Failed,
+                target_display_id: "tk-1".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn an_applying_mutation_is_the_earliest_applicable_blocker() {
+        let conn = open_seeded();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Current title",
+                body: "Current body",
+                created_seq: 3,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 3,
+                mutation_type: "promote_ticket",
+                item_id: "t1",
+                payload_json: r#"{"title":"Original title","body":"Original body","backend_kind":"github"}"#,
+                state: "applying",
+                failure_json: Some(r#"{"detail":"prior"}"#),
+                promotion_operation_id: Some("op-1"),
+                ..FixtureMutation::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            earliest_applicable_mutation(&conn).unwrap(),
+            Some(MutationSummary {
+                sequence: 3,
+                state: MutationState::Applying,
+                target_display_id: "tk-1".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn an_applied_row_ahead_of_a_pending_one_is_not_the_blocker() {
+        let conn = open_seeded();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Ticket",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        for (sequence, state) in [(1, "applied"), (2, "pending")] {
+            insert_fixture_mutation(
+                &conn,
+                FixtureMutation {
+                    sequence,
+                    mutation_type: "update_ticket",
+                    item_id: "t1",
+                    payload_json: r#"{"title":"T","body":""}"#,
+                    state,
+                    promotion_operation_id: Some("op-1"),
+                    ..FixtureMutation::default()
+                },
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            earliest_applicable_mutation(&conn)
+                .unwrap()
+                .unwrap()
+                .sequence,
+            2
+        );
     }
 
     fn adopted(backend_key: &str, display_id: &str, title: &str, status: Lifecycle) -> AdoptedItem {

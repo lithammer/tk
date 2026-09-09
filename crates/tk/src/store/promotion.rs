@@ -17,10 +17,8 @@
 //! records the Promotion as applied. No window exists in which a Mutation is
 //! `applied` while its Item is still Local.
 //!
-//! [`earliest_applicable_mutation`] and [`unresolved_in_operation`]
-//! close the loop: after the sync that follows the commit, they are how the
-//! command tells a Promotion queued behind an older Mutation from one whose
-//! own Mutations did not land.
+//! After sync, [`unresolved_in_operation`] reports which Mutations in the
+//! Promotion Operation still await an outcome.
 //!
 //! Promotion recovery also lives here (ADR-0037, ADR-0038, ADR-0039):
 //! [`recoverable_promotion`] and [`capture_recovery_mappings`] locate what a
@@ -54,6 +52,7 @@ use crate::store::mutations;
 use crate::store::repository::RemoteWorkflowGuard;
 use crate::store::repository::create::generate_internal_id;
 use crate::store::repository::current_display_id;
+use crate::store::sync::MutationSummary;
 
 /// Error returned by [`read_graph`].
 #[derive(Debug, Error)]
@@ -1268,52 +1267,15 @@ pub fn unresolved_promotion(
     .optional()
 }
 
-/// The Mutation Log fields a diagnostic names: which Mutation, what state, and
-/// the Item it targets.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MutationSummary {
-    pub sequence: i64,
-    pub state: MutationState,
-    pub target_display_id: String,
-}
-
-/// The earliest nonterminal Mutation: the lowest Mutation Sequence in
-/// `pending`, `failed`, or `applying` state, across the whole Mutation Log.
-///
-/// Deliberately not scoped to a Promotion Operation. A Promotion is appended
-/// behind whatever the outbox already held, so the Mutation that stops the sync
-/// may predate the operation and carry no Promotion Operation at all — an
-/// operation-scoped query could never name it. It is also the only place the
-/// answer exists when Apply hits an environment failure, which leaves the
-/// in-flight row `pending` and writes no outcome.
-pub fn earliest_applicable_mutation(
-    conn: &Connection,
-) -> rusqlite::Result<Option<MutationSummary>> {
-    conn.query_row(
-        "select m.sequence, m.state, i.display_value \
-           from mutations m join items i on i.id = m.item_id \
-          where m.state in ('pending','failed','applying') \
-          order by m.sequence asc limit 1",
-        [],
-        |r| {
-            Ok(MutationSummary {
-                sequence: r.get(0)?,
-                state: r.get(1)?,
-                target_display_id: r.get(2)?,
-            })
-        },
-    )
-    .optional()
-}
-
 /// The Mutations of `operation_id` still awaiting an outcome, in Mutation
 /// Sequence order.
 ///
 /// An empty result is the success condition for one `tk promote`: overall
 /// success requires every Mutation in the requested Promotion Operation to
 /// resolve (CONTEXT.md Promotion Operation). Comparing a non-empty result
-/// against [`earliest_applicable_mutation`] separates a Promotion queued behind
-/// an older Mutation from one of the operation's own Mutations being rejected.
+/// against [`crate::store::sync::earliest_applicable_mutation`] separates a
+/// Promotion queued behind an older Mutation from one of the operation's own
+/// Mutations being rejected.
 ///
 /// The question is the nonterminal set, not "not applied": a human-curated
 /// terminal omission — Skipped or Cancelled — is a resolved outcome, not a
@@ -3033,75 +2995,6 @@ mod tests {
             },
         )
         .unwrap();
-    }
-
-    #[test]
-    fn no_applicable_mutation_when_the_log_is_drained() {
-        let conn = open_seeded();
-        seed_ticket(&conn, "t1", "tk-1", 1);
-        seed_mutation(&conn, 1, "t1", "applied", None);
-        seed_mutation(&conn, 2, "t1", "skipped", None);
-
-        assert_eq!(earliest_applicable_mutation(&conn).unwrap(), None);
-    }
-
-    #[test]
-    fn the_earliest_applicable_mutation_may_predate_the_promotion_operation() {
-        // The whole reason this read is not operation-scoped: the row that
-        // stops the sync carries no Promotion Operation.
-        let conn = open_seeded();
-        seed_ticket(&conn, "older", "tk-1", 1);
-        seed_ticket(&conn, "t2", "tk-2", 2);
-        seed_mutation(&conn, 1, "older", "failed", None);
-        seed_mutation(&conn, 2, "t2", "pending", Some("op-1"));
-
-        assert_eq!(
-            earliest_applicable_mutation(&conn).unwrap(),
-            Some(MutationSummary {
-                sequence: 1,
-                state: MutationState::Failed,
-                target_display_id: "tk-1".to_owned(),
-            })
-        );
-    }
-
-    #[test]
-    fn an_applying_mutation_is_the_earliest_applicable_blocker() {
-        let conn = open_seeded();
-        seed_recovery(
-            &conn,
-            "t1",
-            "tk-1",
-            3,
-            "applying",
-            ItemClass::Ticket,
-            Some("op-1"),
-        );
-
-        assert_eq!(
-            earliest_applicable_mutation(&conn).unwrap(),
-            Some(MutationSummary {
-                sequence: 3,
-                state: MutationState::Applying,
-                target_display_id: "tk-1".into(),
-            })
-        );
-    }
-
-    #[test]
-    fn an_applied_row_ahead_of_a_pending_one_is_not_the_blocker() {
-        let conn = open_seeded();
-        seed_ticket(&conn, "t1", "tk-1", 1);
-        seed_mutation(&conn, 1, "t1", "applied", Some("op-1"));
-        seed_mutation(&conn, 2, "t1", "pending", Some("op-1"));
-
-        assert_eq!(
-            earliest_applicable_mutation(&conn)
-                .unwrap()
-                .unwrap()
-                .sequence,
-            2
-        );
     }
 
     #[test]
