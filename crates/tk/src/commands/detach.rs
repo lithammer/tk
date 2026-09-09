@@ -371,6 +371,7 @@ mod tests {
             &conn,
             FixtureItem {
                 status: "done",
+                closing_reason: Some("Already shipped"),
                 ..backend_ticket(
                     "target",
                     "gh-7",
@@ -379,11 +380,6 @@ mod tests {
                     1,
                 )
             },
-        )
-        .unwrap();
-        conn.execute(
-            "update items set closing_reason = 'Already shipped' where id = 'target'",
-            [],
         )
         .unwrap();
         let cwd_path = cwd();
