@@ -17,8 +17,8 @@
 //! records the Promotion as applied. No window exists in which a Mutation is
 //! `applied` while its Item is still Local.
 //!
-//! [`unresolved_in_operation`] closes the loop after the sync that follows the
-//! commit by reporting whether the operation's own Mutations landed.
+//! After sync, [`unresolved_in_operation`] reports which Mutations in the
+//! Promotion Operation still await an outcome.
 //!
 //! Promotion recovery also lives here (ADR-0037, ADR-0038, ADR-0039):
 //! [`recoverable_promotion`] and [`capture_recovery_mappings`] locate what a

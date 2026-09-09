@@ -2208,8 +2208,6 @@ mod tests {
 
     #[test]
     fn the_earliest_applicable_mutation_may_predate_the_promotion_operation() {
-        // The whole reason this read is not operation-scoped: the row that
-        // stops the sync carries no Promotion Operation.
         let conn = open_seeded();
         for (id, display, created_seq) in [("older", "tk-1", 1), ("t2", "tk-2", 2)] {
             insert_fixture_item(
