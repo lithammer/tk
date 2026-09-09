@@ -420,7 +420,83 @@ fn render_clap_error(deps: Deps<'_>, err: &clap::Error) -> Exit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn prime_command_examples_parse() {
+        let examples: [(&str, &[&str]); 31] = [
+            ("tk prime", &["prime"]),
+            ("tk next", &["next"]),
+            ("tk sync log", &["sync", "log"]),
+            ("tk list", &["list"]),
+            ("tk list --ready", &["list", "--ready"]),
+            ("tk show <id>", &["show", "tk-1"]),
+            ("tk add -F -", &["add", "-F", "-"]),
+            ("tk add --bug -F -", &["add", "--bug", "-F", "-"]),
+            ("tk add --epic -F -", &["add", "--epic", "-F", "-"]),
+            (
+                "tk add --parent <epic-id> -F -",
+                &["add", "--parent", "tk-2", "-F", "-"],
+            ),
+            (
+                "tk update <id> --title \"New title\"",
+                &["update", "tk-1", "--title", "New title"],
+            ),
+            (
+                "tk update <id> --body-file -",
+                &["update", "tk-1", "--body-file", "-"],
+            ),
+            ("tk start <id>", &["start", "tk-1"]),
+            ("tk stop <id>", &["stop", "tk-1"]),
+            ("tk done <id>", &["done", "tk-1"]),
+            (
+                "tk block <blocked-id> <blocking-id>",
+                &["block", "tk-1", "tk-2"],
+            ),
+            (
+                "tk unblock <blocked-id> <blocking-id>",
+                &["unblock", "tk-1", "tk-2"],
+            ),
+            ("tk next <epic-id>", &["next", "tk-2"]),
+            ("tk list <epic-id>", &["list", "tk-2"]),
+            ("tk plan", &["plan"]),
+            (
+                "tk plan add <id> [<id>...]",
+                &["plan", "add", "tk-1", "tk-2"],
+            ),
+            (
+                "tk plan remove <id> [<id>...]",
+                &["plan", "remove", "tk-1", "tk-2"],
+            ),
+            ("tk plan clear", &["plan", "clear"]),
+            ("tk next --plan", &["next", "--plan"]),
+            (
+                "tk promote <id> [--children]",
+                &["promote", "tk-2", "--children"],
+            ),
+            (
+                "tk promote reconcile <id> <backend-key>",
+                &["promote", "reconcile", "tk-1", "42"],
+            ),
+            ("tk promote retry <id>", &["promote", "retry", "tk-1"]),
+            ("tk promote cancel <id>", &["promote", "cancel", "tk-1"]),
+            ("tk sync", &["sync"]),
+            ("tk sync --skip <mutation-id>", &["sync", "--skip", "1"]),
+            ("tk remote", &["remote"]),
+        ];
+        let documented: BTreeSet<_> = include_str!("commands/prime.md")
+            .lines()
+            .filter(|line| line.starts_with("tk "))
+            .collect();
+        let covered: BTreeSet<_> = examples.iter().map(|(line, _)| *line).collect();
+        assert_eq!(documented, covered);
+
+        for (line, args) in examples {
+            Cli::try_parse_from(std::iter::once("tk").chain(args.iter().copied()))
+                .unwrap_or_else(|error| panic!("{line} does not parse:\n{error}"));
+        }
+    }
 
     #[test]
     fn broken_pipe_write_error_is_success() {
