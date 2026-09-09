@@ -1212,9 +1212,6 @@ fn grep_count_prints_matching_item_total() {
     tk!(p, "grep auth -c", @"2");
 }
 
-/// `-l` and `--list` print one plain identity-and-title line per matching Item.
-/// Matching stays whole-store and per Item: repeated title/body hits print once,
-/// creation order is kept, and an ambient Scope does not hide Epic or done hits.
 #[test]
 fn grep_list_prints_matching_items_in_creation_order_and_ignores_scope() {
     let p = Repo::new("project");
@@ -1237,8 +1234,6 @@ fn grep_list_prints_matching_items_in_creation_order_and_ignores_scope() {
     ");
 }
 
-/// The list form keeps grep's silent no-match predicate: empty stdout and
-/// stderr with exit 1.
 #[test]
 fn grep_list_no_match_is_silent() {
     let p = Repo::new("project");
@@ -1263,12 +1258,9 @@ fn grep_list_prints_single_title_only_and_body_only_matches() {
     tk!(p, "grep token --list", @"project-1: Title needle");
 }
 
-/// `-c` and `-q` are mutually exclusive (tk-121): one prints a count, the other
-/// suppresses all output, so clap rejects the combination as a usage error
-/// before any store work. This guard is load-bearing — without it, `-q -c` would
-/// break on the first match without counting, then print a bogus `0`.
+/// Reject conflicting output modes rather than let branch order pick one.
 #[test]
-fn grep_count_and_quiet_conflict() {
+fn grep_output_modes_conflict() {
     let p = Repo::new("project");
     p.run("init");
     p.run("add -m 'Add middleware' -m 'the auth token'"); // project-1

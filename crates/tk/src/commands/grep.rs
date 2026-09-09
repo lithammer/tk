@@ -19,8 +19,7 @@ use crate::store::repository::grep::{self, GrepItem, ScanError};
 
 /// Flags for `tk grep`.
 ///
-/// Each flag is an independent clap field. The allow mirrors `tk list`'s Args
-/// for the same parser-layer reason.
+/// Clap needs a separate field for each flag.
 #[derive(Debug, Default, ClapArgs)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Args {
@@ -987,26 +986,9 @@ mod tests {
 
     #[test]
     fn list_matches_raw_title_then_sanitizes_the_line() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "t1",
-                display: "tk-1",
-                title: "Raw\r\nTitle\t\u{1b}[31m café",
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        drop(conn);
-
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
-        let code = run_rendered(
-            &mut h,
+        let (code, out) = grep_one_args(
+            "Raw\r\nTitle\t\u{1b}[31m café",
+            "",
             Args {
                 pattern: "\\r".to_owned(),
                 list: true,
@@ -1014,10 +996,7 @@ mod tests {
             },
         );
         assert_eq!(code, Exit::Ok);
-        assert_eq!(
-            String::from_utf8(h.stdout).unwrap(),
-            "tk-1: Raw  Title \\x1b[31m café\n"
-        );
+        assert_eq!(out, "tk-1: Raw  Title \\x1b[31m café\n");
     }
 
     #[test]
