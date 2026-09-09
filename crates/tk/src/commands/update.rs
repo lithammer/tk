@@ -39,7 +39,8 @@ pub struct Args {
     pub no_parent: bool,
 }
 
-/// Apply explicit field edits and their Mutation intent atomically (ADR-0051).
+/// Commit field edits and their Mutations together in the Repository Store
+/// (ADR-0051).
 pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     let has_parent_op = args.parent.is_some() || args.no_parent;
     if args.title.is_none()
@@ -164,7 +165,8 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     }
 }
 
-/// Enforce ADR-0051's single-line title contract without message parsing.
+/// Validate a title and return it with outer ASCII spaces and tabs trimmed
+/// (ADR-0051).
 fn validate_title(title: &str) -> Result<&str, CommandError> {
     if title.contains('\0') {
         return Err(CommandError::failure("title contains a NUL byte"));
