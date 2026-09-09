@@ -2,7 +2,7 @@
 source: crates/tk/tests/scenarios.rs
 expression: "p.run(&format!(\"{command} --help\"))"
 ---
-Search title and body text for a regular expression, with match context
+Search title and body text for a regular expression; show context by default
 
 Usage: tk grep [OPTIONS] <PATTERN>
 
@@ -17,4 +17,5 @@ Options:
   -B, --before-context <N>  Show N lines of context before each match (overrides -C)
   -q, --quiet               Suppress all output and exit on the first match
   -c, --count               Print the count of matching items instead of the match blocks
+  -l, --list                Print each match as `<display-id>: <title>`
   -h, --help                Print help

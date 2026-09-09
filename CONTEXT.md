@@ -157,9 +157,10 @@ _Avoid_: Grep, Full-text search
 
 **Grep**:
 The **`tk`** command intent for finding *where* a pattern appears in the title
-or body text of **Tickets** and **Epics**, rendering each match in context as a
-**`tk show`**-style block rather than as a list of items. Where **Search**
-answers "which item is it?", **Grep** answers "where does this text appear?".
+or body text of **Tickets** and **Epics**, rendering each match by default in
+context as a **`tk show`**-style block rather than as a list of items. Where
+**Search** answers "which item is it?", **Grep** answers "where does this text
+appear?".
 _Avoid_: Search, Full-text search, Fuzzy search
 
 **Repository Store**:
@@ -877,7 +878,11 @@ _Avoid_: ticket, tickets
   this change, whatever the **Mutation Log** is doing. What the reader loses is
   telling an unsent edit of their own from someone else's failure blocking the
   queue; **`tk list`** or **`tk sync log`** answers that.
-- **`tk grep`** finds **Tickets** and **Epics** whose title or body text matches a regular expression, rendering each match as a **`tk show`**-style block with the body collapsed to the matching lines plus surrounding context.
+- **`tk grep`** finds **Tickets** and **Epics** whose title or body text matches
+  a regular expression. By default it renders each match as a **`tk
+  show`**-style block with the body collapsed to the matching lines plus
+  surrounding context; `--list` instead renders one `<display-id>: <title>`
+  line per matching **Item**.
 - **`tk grep`** covers the whole **Repository Store** and every **Item Status**; like **`tk search`** it ignores **Scope** and is never narrowed by `TK_SCOPE`, because a lookup must not be silently narrowed.
 - **`tk grep`** matches title and body text; it is content search, distinct from **`tk search`** (title-only item lookup) and **`tk show`** (exact identifier lookup).
 - **`tk grep`** is case-sensitive by default, where **`tk search`** is case-insensitive; the divergence is deliberate, matching the `grep` namesake.
@@ -1037,7 +1042,7 @@ _Avoid_: ticket, tickets
 - Comment, label, and assignee mutations were considered for v1 — resolved: Comments are deferred to gh-43; **tk** models neither labels nor assignees, and a **Backend Adapter** encodes a typed field through a **Reserved Representation** instead (ADR-0049).
 - A **Backend**-visible representation of **Work State** — a reserved label, a GitHub Projects status, a Jira transition — was considered (gh-68) — resolved: **Work State** stays a **Local Field** on every **Backend**, because it states what this **Repository Store** is doing while a **Backend**'s in-progress state says what someone is doing (ADR-0049).
 - Event sourcing was considered for current state — resolved: the **Repository Store** stores current state, and the **Mutation Log** acts as an outbox for backend replay.
-- Searching body text in **`tk search`**, by default or behind a `--body` flag, was considered (tk-79) — resolved: **`tk search`** matches title text only; body/content search is a separate, deferred **`tk grep`** that renders **`tk show`**-style match context. A body-only hit has no provenance slot in a reused **`tk list`** row and would read as a false positive (ADR-0025).
+- Searching body text in **`tk search`**, by default or behind a `--body` flag, was considered (tk-79) — resolved: **`tk search`** matches title text only; body/content search is a separate, deferred **`tk grep`** whose default output renders **`tk show`**-style match context. A body-only hit has no provenance slot in a reused **`tk list`** row and would read as a false positive (ADR-0025).
 - Matching **Display IDs** and **Aliases** in **`tk search`** (exact + prefix, the original tk-79 framing) was considered — resolved: dropped. Exact-identifier lookup duplicates **`tk show`** and prefix recall is thin against short sequential **Display IDs**; search's distinct value is fuzzy title recall (ADR-0025).
 - Honouring `TK_SCOPE` in **`tk search`** was considered — resolved: search is a whole-**Repository Store** lookup; silently narrowing it to an ambient Epic would hide the searched-for item, the hidden-state smell ADR-0022 rejected.
 - The **`tk grep`** matching model — literal substring, regular expression, FTS5 full-text, or Levenshtein/fuzzy — was considered (tk-113) — resolved: **regular expression** by default. Literal is a trap (the default cannot be flipped to regex later without changing the meaning of `.`/`*`/`(`/`|`); regex is a strict superset that degrades to literal for metacharacter-free patterns. FTS5 and fuzzy produce ranked/scored output that cannot inhabit **`tk grep`**'s deterministic line-context block, so both are reserved for future ranked **`tk search`** recall modes (ADR-0026).

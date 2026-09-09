@@ -1,5 +1,5 @@
 //! `tk grep` — regex content search over title and body, rendered as
-//! `tk show`-style match context (ADR-0026).
+//! `tk show`-style match context by default (ADR-0026).
 
 use std::borrow::Cow;
 use std::io::Write;
@@ -13,15 +13,14 @@ use crate::commands::item_header::{self, Header};
 use crate::commands::resolver;
 use crate::render::highlight;
 use crate::render::palette;
+use crate::render::sanitize;
 use crate::render::styler::SubStyler;
 use crate::store::repository::grep::{self, GrepItem, ScanError};
 
 /// Flags for `tk grep`.
 ///
-/// Four `bool`s exceed pedantic's `struct_excessive_bools` cap, but each is an
-/// independent grep flag clap's derive must own as its own field; only `-c` and
-/// `-q` conflict, leaving the rest freely composable. The allow mirrors
-/// `tk list`'s Args for the same parser-layer reason.
+/// Each flag is an independent clap field. The allow mirrors `tk list`'s Args
+/// for the same parser-layer reason.
 #[derive(Debug, Default, ClapArgs)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Args {
@@ -56,6 +55,14 @@ pub struct Args {
     /// Print the count of matching items instead of the match blocks.
     #[arg(short = 'c', long = "count", conflicts_with = "quiet")]
     pub count: bool,
+
+    /// Print each match as `<display-id>: <title>`.
+    #[arg(
+        short = 'l',
+        long = "list",
+        conflicts_with_all = ["quiet", "count"]
+    )]
+    pub list: bool,
 }
 
 /// Compile the search pattern into a matcher, applying the literal-match and
@@ -131,6 +138,16 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
             }
             return Ok(ControlFlow::Continue(()));
         }
+        if args.list {
+            if item_matches(&item, &re) {
+                matched = true;
+                sanitize::write_sanitized_line(stdout, item.display_id.as_bytes())?;
+                stdout.write_all(b": ")?;
+                sanitize::write_sanitized_line(stdout, item.title.as_bytes())?;
+                stdout.write_all(b"\n")?;
+            }
+            return Ok(ControlFlow::Continue(()));
+        }
         if render_match(stdout, &item, &re, matched, before, after, styler)? {
             matched = true;
         }
@@ -139,10 +156,9 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     match scan {
         Ok(()) => {}
         Err(ScanError::Sql(err)) => return Err(resolver::storage_error(&err)),
-        // A write only happens after a block has started, so a broken pipe
-        // (`tk grep … | head`) means matches WERE found and piped: the shared
-        // policy reports Ok for that and a diagnosed Failure for any other write
-        // error (so its exit `1` is never misread as a no-match).
+        // Both output forms write only after finding a match. A broken pipe
+        // therefore reports Ok; any other write error is a diagnosed Failure,
+        // whose exit `1` cannot be mistaken for a no-match.
         Err(ScanError::Write(err)) => return cli::write_error(&err),
     }
 
@@ -285,7 +301,10 @@ mod tests {
     use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
     use crate::proc::{FakeRunner, RunOutput};
     use crate::render::Styler;
-    use crate::store::testing::{FixtureItem, TmpStore, insert_dependency, insert_fixture_item};
+    use crate::store::testing::{
+        FixtureItem, FixtureMutation, TmpStore, insert_dependency, insert_fixture_item,
+        insert_fixture_mutation,
+    };
     use rand::SeedableRng;
     use rand::rngs::StdRng;
 
@@ -855,6 +874,257 @@ mod tests {
     }
 
     #[test]
+    fn list_prints_one_line_for_an_item_with_repeated_title_and_body_hits() {
+        let (code, out) = grep_one_args(
+            "MATCH in the MATCH title",
+            "MATCH first\nMATCH second",
+            Args {
+                pattern: "MATCH".to_owned(),
+                list: true,
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        assert_eq!(out, "tk-1: MATCH in the MATCH title\n");
+    }
+
+    #[test]
+    fn list_streams_epics_and_done_items_in_creation_order() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        for fixture in [
+            FixtureItem {
+                id: "done",
+                display: "tk-1",
+                title: "Done MATCH",
+                status: "done",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+            FixtureItem {
+                id: "epic",
+                display: "tk-2",
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                title: "Epic subject",
+                body: "body MATCH",
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        ] {
+            insert_fixture_item(&conn, fixture).unwrap();
+        }
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run_rendered(
+            &mut h,
+            Args {
+                pattern: "MATCH".to_owned(),
+                list: true,
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        assert_eq!(
+            String::from_utf8(h.stdout).unwrap(),
+            "tk-1: Done MATCH\ntk-2: Epic subject\n"
+        );
+    }
+
+    #[test]
+    fn list_no_match_is_silent_and_exits_one() {
+        let (code, out) = grep_one_args(
+            "Subject",
+            "body",
+            Args {
+                pattern: "absent".to_owned(),
+                list: true,
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::NoMatch);
+        assert!(out.is_empty(), "out={out:?}");
+    }
+
+    #[test]
+    fn list_composes_unicode_case_folding_with_literal_matching() {
+        let (code, out) = grep_one_args(
+            "Café (draft)",
+            "body",
+            Args {
+                pattern: "CAFÉ (".to_owned(),
+                ignore_case: true,
+                fixed: true,
+                list: true,
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        assert_eq!(out, "tk-1: Café (draft)\n");
+    }
+
+    #[test]
+    fn list_accepts_and_ignores_context_flags() {
+        let (code, out) = grep_one_args(
+            "Subject",
+            "MATCH",
+            Args {
+                pattern: "MATCH".to_owned(),
+                context: Some(9),
+                before_context: Some(1),
+                after_context: Some(2),
+                list: true,
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        assert_eq!(out, "tk-1: Subject\n");
+    }
+
+    #[test]
+    fn list_matches_raw_title_then_sanitizes_the_line() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Raw\r\nTitle\t\u{1b}[31m café",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run_rendered(
+            &mut h,
+            Args {
+                pattern: "\\r".to_owned(),
+                list: true,
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        assert_eq!(
+            String::from_utf8(h.stdout).unwrap(),
+            "tk-1: Raw  Title \\x1b[31m café\n"
+        );
+    }
+
+    #[test]
+    fn list_is_plain_when_color_is_forced() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "MATCH title",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path);
+        expect_git(&h, &store);
+        let code = run_rendered_with(
+            &mut h,
+            Styler::always(),
+            Args {
+                pattern: "MATCH".to_owned(),
+                list: true,
+                ..Args::default()
+            },
+        );
+        assert_eq!(code, Exit::Ok);
+        assert_eq!(String::from_utf8(h.stdout).unwrap(), "tk-1: MATCH title\n");
+    }
+
+    #[test]
+    fn list_omits_pending_promotion_metadata_in_each_unresolved_state() {
+        for state in ["pending", "failed", "applying"] {
+            let store = TmpStore::new("repo");
+            let conn = seed_store(&store);
+            insert_fixture_item(
+                &conn,
+                FixtureItem {
+                    id: "t1",
+                    display: "tk-1",
+                    title: "MATCH title",
+                    created_seq: 1,
+                    ..FixtureItem::default()
+                },
+            )
+            .unwrap();
+            insert_fixture_mutation(
+                &conn,
+                FixtureMutation {
+                    sequence: 1,
+                    mutation_type: "promote_ticket",
+                    item_id: "t1",
+                    item_class: "ticket",
+                    state,
+                    failure_json: (state == "failed").then_some(r#"{"detail":"prior"}"#),
+                    ..FixtureMutation::default()
+                },
+            )
+            .unwrap();
+            drop(conn);
+
+            let cwd_path = cwd();
+            let mut h = Harness::new(&cwd_path);
+            expect_git(&h, &store);
+            let code = run_rendered(
+                &mut h,
+                Args {
+                    pattern: "MATCH".to_owned(),
+                    list: true,
+                    ..Args::default()
+                },
+            );
+            assert_eq!(code, Exit::Ok, "state={state}");
+            assert_eq!(
+                String::from_utf8(h.stdout).unwrap(),
+                "tk-1: MATCH title\n",
+                "state={state}"
+            );
+        }
+    }
+
+    #[test]
+    fn list_keeps_body_line_anchor_and_empty_body_semantics() {
+        for (body, pattern, expected) in [
+            ("", "^$", Exit::NoMatch),
+            ("raw\rbody", "\\r", Exit::Ok),
+            ("alpha\nMATCH\nomega", "^MATCH$", Exit::Ok),
+            ("alpha\n", "^$", Exit::Ok),
+        ] {
+            let (code, _) = grep_one_args(
+                "Subject",
+                body,
+                Args {
+                    pattern: pattern.to_owned(),
+                    list: true,
+                    ..Args::default()
+                },
+            );
+            assert_eq!(code, expected, "body={body:?}, pattern={pattern:?}");
+        }
+    }
+
+    #[test]
     fn title_only_match_renders_label_and_facet_without_a_body_hunk() {
         // ADR-0026: a title hit renders the label + facet (the highlighted title
         // is the cue) but produces no body hunk, since nothing in the body matched.
@@ -988,6 +1258,7 @@ mod tests {
             &mut h,
             Args {
                 pattern: "a(".to_owned(),
+                list: true,
                 ..Args::default()
             },
         );
@@ -1011,6 +1282,7 @@ mod tests {
             &mut h,
             Args {
                 pattern: String::new(),
+                list: true,
                 ..Args::default()
             },
         );
@@ -1260,11 +1532,9 @@ mod tests {
         }
     }
 
-    /// Drive `tk grep PIPEWORD` against one matching Ticket with a stdout that
-    /// fails every write with `kind`, returning the framed exit and whatever
-    /// reached stderr. That pair is what separates a match piped away from a
-    /// real write failure.
-    fn grep_with_failing_stdout(kind: std::io::ErrorKind) -> (Exit, String) {
+    /// Drive `tk grep PIPEWORD` against one matching Ticket with default or
+    /// list output and a stdout whose first write fails with `kind`.
+    fn grep_with_failing_stdout(kind: std::io::ErrorKind, list: bool) -> (Exit, String) {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_item(
@@ -1310,6 +1580,7 @@ mod tests {
             &mut deps,
             Args {
                 pattern: "PIPEWORD".to_owned(),
+                list,
                 ..Args::default()
             },
         ) {
@@ -1324,21 +1595,14 @@ mod tests {
     }
 
     #[test]
-    fn broken_pipe_mid_stream_is_a_match_not_a_no_match_or_failure() {
-        // `tk grep PATTERN | head` closes stdout after a block; the next write
-        // fails BrokenPipe. A write only happens after a block has started, so
-        // matches WERE found — exit must be Ok (match), never 1 (which a script
-        // would read as "no match" since stderr is empty) and never a Failure.
-        let (code, stderr) = grep_with_failing_stdout(std::io::ErrorKind::BrokenPipe);
-        assert_eq!(
-            code,
-            Exit::Ok,
-            "broken pipe mid-stream means a match was found and piped"
-        );
-        assert!(
-            stderr.is_empty(),
-            "a broken pipe writes no diagnostic: {stderr:?}"
-        );
+    fn broken_pipe_after_a_match_is_success_for_default_and_list_output() {
+        // Both renderers test the Item before their first write. A BrokenPipe
+        // therefore means a match was found even when no bytes reached stdout.
+        for list in [false, true] {
+            let (code, stderr) = grep_with_failing_stdout(std::io::ErrorKind::BrokenPipe, list);
+            assert_eq!(code, Exit::Ok, "list={list}");
+            assert!(stderr.is_empty(), "list={list}, stderr={stderr:?}");
+        }
     }
 
     #[test]
@@ -1347,12 +1611,14 @@ mod tests {
         // `tk grep X > file`) must NOT collapse to the empty-stderr exit 1 of
         // NoMatch: it writes a diagnostic (so stderr is non-empty, distinct from
         // a no-match) and returns Failure, honouring Exit::Failure's contract.
-        let (code, stderr) = grep_with_failing_stdout(std::io::ErrorKind::StorageFull);
-        assert_eq!(code, Exit::Failure);
-        assert!(
-            stderr.contains("tk grep: failed to write output"),
-            "a non-broken-pipe write error must write a diagnostic: {stderr:?}"
-        );
+        for list in [false, true] {
+            let (code, stderr) = grep_with_failing_stdout(std::io::ErrorKind::StorageFull, list);
+            assert_eq!(code, Exit::Failure, "list={list}");
+            assert!(
+                stderr.contains("tk grep: failed to write output"),
+                "list={list}, stderr={stderr:?}"
+            );
+        }
     }
 
     #[test]

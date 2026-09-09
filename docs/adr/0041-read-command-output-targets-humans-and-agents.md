@@ -109,3 +109,8 @@ different snapshots across its root and related-Item reads during concurrent
 writes; this change does not promise a single snapshot for the whole command.
 
 `tk next --quiet` keeps its bare Display ID output.
+
+`tk grep --list` is also an explicit exception. Its one-line
+`<display-id>: <title>` form omits all metadata, including Pending Promotion
+labels and Binding rows for `pending`, `failed`, and `applying` Promotions.
+Default `tk grep` output keeps the Binding row described above.

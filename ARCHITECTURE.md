@@ -56,8 +56,9 @@ small boundary module after the second caller proves the shape.
   store/worktree/git/remote/sync helpers. It also writes its own blank
   lines: one separates adjacent blocks, none before the first or after the
   last, and every read command ends in a single newline. Which side writes
-  it differs — `tk show` before each section header, `tk grep` before each
-  item block but the first, `tk plan` after each section's rows, `tk list`
+  it differs — `tk show` before each section header, default `tk grep` before
+  each item block but the first (`tk grep --list` writes one line per Item),
+  `tk plan` after each section's rows, `tk list`
   after its banner block, between its totals line and its legend, and before
   its `Mutation Log:` trailer on both the tree path (below the legend) and
   the empty-view path (below that line, where no legend or totals line

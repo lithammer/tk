@@ -10,8 +10,8 @@ search body text. Body and content search are deferred to a separate future
 
 Two read commands earn two verbs only because they return different things.
 **`tk search`** answers *"which item is it?"* and returns items (list rows).
-**`tk grep`** answers *"where does this text appear?"* and returns matches in
-context — a **`tk show`** block with the body collapsed to the matching lines
+By default, **`tk grep`** answers *"where does this text appear?"* and returns
+matches in context — a **`tk show`** block with the body collapsed to the matching lines
 plus `grep -C`-style surrounding context. If the two differed only by which
 fields they scan, the names would be colliding synonyms: someone hunting body
 text through **`tk search`** would silently get "no matches" and wrongly
@@ -24,8 +24,8 @@ second verb.
   Rejected: a body-only hit renders as a reused **`tk list`** row whose visible
   title does not contain the query, so it reads as a false positive — the row
   has no slot for match provenance. Showing *where* the text matched needs
-  `grep -C`-style snippets, which is exactly **`tk grep`**'s output, not a flag
-  on a list-row renderer.
+  `grep -C`-style snippets, which is exactly **`tk grep`**'s default output,
+  not a flag on a list-row renderer.
 - **Match Display IDs and Aliases (exact + prefix), the original tk-79
   framing.** Rejected: exact-identifier lookup duplicates **`tk show`**, and the
   only non-redundant case — partial/prefix recall — is thin against short
