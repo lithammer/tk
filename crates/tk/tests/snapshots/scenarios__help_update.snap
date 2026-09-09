@@ -10,8 +10,9 @@ Arguments:
   <ID>  Display ID or Alias of the Ticket or Epic to update
 
 Options:
-  -m, --message <MESSAGE>    Message paragraph; repeatable. Conflicts with -F
-  -F, --file <PATH>          Read the message from a file, or '-' for stdin
+  -t, --title <TITLE>        Replace the title with one nonblank line; trim outer spaces and tabs
+  -b, --body <BODY>          Replace the body with literal text; an empty value clears it
+      --body-file <PATH>     Replace the body from a UTF-8 file, or '-' for stdin; empty input clears it
   -p, --priority <PRIORITY>  Set Priority (P0..P4). Tickets only
   -P, --parent <EPIC>        Set the containing Epic by Display ID or Alias. Tickets only
       --no-parent            Remove the Ticket from its current Epic. Tickets only

@@ -1,17 +1,13 @@
 //! `tk update` — update title, body, priority, or parent of a Ticket or
 //! Epic.
 //!
-//! All field flags are individually optional; at least one must be set.
-//! `-m` / `-F` are mutually exclusive (they specify the title+body
-//! message); `-P <epic>` and `--no-parent` are mutually exclusive
-//! (they specify the parent operation). Epics reject `--priority`,
-//! `-P`, and `--no-parent` since they have no Priority and no parent
-//! column.
+//! ADR-0051: omitted fields keep their Repository Store values; an explicit
+//! body replaces the field, including empty input. Requested fields and their
+//! Mutations commit together. Epics reject Priority and parent edits.
 
 use clap::Args as ClapArgs;
 
 use crate::cli::{CommandError, Deps, Exit};
-use crate::commands::message::{self, Input as MessageInput};
 use crate::commands::resolver;
 use crate::domain::item_class::ItemClass;
 use crate::domain::priority::Priority;
@@ -23,17 +19,15 @@ pub struct Args {
     /// Display ID or Alias of the Ticket or Epic to update.
     #[arg(value_name = "ID")]
     pub id: String,
-    /// Message paragraph; repeatable. Conflicts with -F.
-    #[arg(
-        short = 'm',
-        long = "message",
-        value_name = "MESSAGE",
-        conflicts_with = "file"
-    )]
-    pub message: Vec<String>,
-    /// Read the message from a file, or '-' for stdin.
-    #[arg(short = 'F', long = "file", value_name = "PATH")]
-    pub file: Option<String>,
+    /// Replace the title with one nonblank line; trim outer spaces and tabs.
+    #[arg(short = 't', long)]
+    pub title: Option<String>,
+    /// Replace the body with literal text; an empty value clears it.
+    #[arg(short = 'b', long, conflicts_with = "body_file")]
+    pub body: Option<String>,
+    /// Replace the body from a UTF-8 file, or '-' for stdin; empty input clears it.
+    #[arg(long, value_name = "PATH")]
+    pub body_file: Option<String>,
     /// Set Priority (P0..P4). Tickets only.
     #[arg(short = 'p', long, value_name = "PRIORITY")]
     pub priority: Option<Priority>,
@@ -45,25 +39,40 @@ pub struct Args {
     pub no_parent: bool,
 }
 
+/// Commit field edits and their Mutations together in the Repository Store
+/// (ADR-0051).
 pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
-    let input = if args.message.is_empty() {
-        args.file.as_deref().map(MessageInput::File)
-    } else {
-        Some(MessageInput::Paragraphs(&args.message))
-    };
     let has_parent_op = args.parent.is_some() || args.no_parent;
-
-    if input.is_none() && args.priority.is_none() && !has_parent_op {
+    if args.title.is_none()
+        && args.body.is_none()
+        && args.body_file.is_none()
+        && args.priority.is_none()
+        && !has_parent_op
+    {
         return Err(CommandError::usage(
             "no changes requested; supply at least one of \
-             -m / -F / -p / -P / --no-parent",
+             --title / --body / --body-file / --priority / --parent / --no-parent",
         ));
     }
 
-    let parsed_msg = input
-        .map(|input| message::read_input(input, deps.cwd, &mut *deps.stdin))
-        .transpose()
-        .map_err(|err| message::read_error(&err))?;
+    let title = args.title.as_deref().map(validate_title).transpose()?;
+    let body = match args.body_file.as_deref() {
+        Some("-") => {
+            let mut body = String::new();
+            deps.stdin.read_to_string(&mut body).map_err(|err| {
+                CommandError::failure(format!("failed to read body from stdin: {err}"))
+            })?;
+            Some(body)
+        }
+        Some(path) => Some(
+            std::fs::read_to_string(deps.cwd.join(path))
+                .map_err(|err| CommandError::failure(format!("failed to read '{path}': {err}")))?,
+        ),
+        None => args.body,
+    };
+    if body.as_deref().is_some_and(|body| body.contains('\0')) {
+        return Err(CommandError::failure("body contains a NUL byte"));
+    }
 
     let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
         .map_err(|err| resolver::open_error(&err))?;
@@ -120,8 +129,8 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     let req = UpdateRequest {
         id: &resolved.id,
         item_class: resolved.item_class,
-        title: parsed_msg.as_ref().map(|m| m.title.as_str()),
-        body: parsed_msg.as_ref().map(|m| m.body.as_str()),
+        title,
+        body: body.as_deref(),
         priority: args.priority,
         parent: parent_op,
     };
@@ -156,12 +165,281 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     }
 }
 
+/// Validate a title and return it with outer ASCII spaces and tabs trimmed
+/// (ADR-0051).
+fn validate_title(title: &str) -> Result<&str, CommandError> {
+    if title.contains('\0') {
+        return Err(CommandError::failure("title contains a NUL byte"));
+    }
+    if title.contains([
+        '\n', '\u{b}', '\u{c}', '\r', '\u{85}', '\u{2028}', '\u{2029}',
+    ]) {
+        return Err(CommandError::failure("title must be a single line"));
+    }
+    let title = title.trim_matches([' ', '\t']);
+    if title.chars().all(char::is_whitespace) {
+        return Err(CommandError::failure(
+            "title must contain a non-whitespace character",
+        ));
+    }
+    Ok(title)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
     use crate::store::testing::{FixtureItem, TmpStore, insert_fixture_item};
     use rusqlite::Connection;
+
+    #[test]
+    fn cli_rejects_removed_options_and_conflicting_body_sources() {
+        for options in [
+            vec!["-m", "Title"],
+            vec!["--message", "Title"],
+            vec!["-F", "-"],
+            vec!["--file", "-"],
+            vec!["--body", "Text", "--body-file", "-"],
+            vec!["--body-file", "-", "-b", "Text"],
+        ] {
+            let cwd_path = cwd();
+            let mut h = Harness::new(&cwd_path);
+            h.stdin = std::io::Cursor::new(b"Must not be consumed".to_vec());
+            let argv: Vec<_> = ["update", "tk-1"]
+                .into_iter()
+                .chain(options)
+                .map(String::from)
+                .collect();
+            assert_eq!(crate::cli::run_argv(h.deps(), &argv).unwrap(), Exit::Usage);
+            assert!(h.out().is_empty());
+            assert_eq!(h.stdin.position(), 0);
+        }
+    }
+
+    #[test]
+    fn bad_body_input_leaves_all_fields_and_mutations_unchanged() {
+        let fixture = TmpStore::new("repo");
+        let conn = seed_store(&fixture);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "gh-1",
+                title: "Original",
+                body: "Keep body",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("1"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+        for (source, bytes, error) in [
+            ("inline", b"a\0b".as_slice(), "body contains a NUL byte"),
+            ("file", b"a\0b".as_slice(), "body contains a NUL byte"),
+            ("stdin", b"a\0b".as_slice(), "body contains a NUL byte"),
+            ("file", b"a\xff".as_slice(), "failed to read 'body.txt':"),
+            (
+                "stdin",
+                b"a\xff".as_slice(),
+                "failed to read body from stdin:",
+            ),
+            ("missing", b"".as_slice(), "failed to read 'missing.txt':"),
+        ] {
+            let mut h = Harness::new(&fixture.toplevel);
+            let input = match source {
+                "inline" => ["--body", std::str::from_utf8(bytes).unwrap()],
+                "file" => {
+                    std::fs::write(fixture.toplevel.join("body.txt"), bytes).unwrap();
+                    ["--body-file", "body.txt"]
+                }
+                "stdin" => {
+                    h.stdin = std::io::Cursor::new(bytes.to_vec());
+                    ["--body-file", "-"]
+                }
+                "missing" => ["--body-file", "missing.txt"],
+                _ => unreachable!(),
+            };
+            let argv = [
+                "update", "gh-1", "-t", "Changed", "-p", "P0", input[0], input[1],
+            ]
+            .map(String::from);
+            assert_eq!(
+                crate::cli::run_argv(h.deps(), &argv).unwrap(),
+                Exit::Failure
+            );
+            assert!(
+                h.err().starts_with(&format!("tk update: {error}")),
+                "{}",
+                h.err()
+            );
+            expect_git(&h, &fixture);
+            let store = resolver::open_for_command(&h.runner, &fixture.toplevel, &h.clock).unwrap();
+            let item = crate::store::repository::show::show_item(&store, "gh-1")
+                .unwrap()
+                .unwrap();
+            assert_eq!(item.title, "Original");
+            assert_eq!(item.body, "Keep body");
+            assert_eq!(item.priority, Some(Priority::P2));
+            assert!(crate::store::sync::mutation_log_is_empty(&store.conn).unwrap());
+        }
+    }
+
+    #[test]
+    fn title_validation_rejects_blank_and_line_breaks_without_partial_edits() {
+        let fixture = TmpStore::new("repo");
+        let conn = seed_store(&fixture);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "tk-1",
+                title: "Original",
+                body: "Keep body",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+        for title in [
+            "",
+            " \t",
+            "\u{a0}\u{2003}",
+            "A\0B",
+            "A\nB",
+            "A\rB",
+            "A\r\nB",
+            "A\u{b}B",
+            "A\u{c}B",
+            "A\u{85}B",
+            "A\u{2028}B",
+            "A\u{2029}B",
+        ] {
+            let mut h = Harness::new(&fixture.toplevel);
+            let argv = [
+                "update", "tk-1", "--title", title, "-b", "Changed", "-p", "P0",
+            ]
+            .map(String::from);
+            assert_eq!(
+                crate::cli::run_argv(h.deps(), &argv).unwrap(),
+                Exit::Failure,
+                "{title:?}"
+            );
+            assert!(h.err().starts_with("tk update: title "), "{}", h.err());
+            expect_git(&h, &fixture);
+            let store = resolver::open_for_command(&h.runner, &fixture.toplevel, &h.clock).unwrap();
+            let item = crate::store::repository::show::show_item(&store, "tk-1")
+                .unwrap()
+                .unwrap();
+            assert_eq!(item.title, "Original");
+            assert_eq!(item.body, "Keep body");
+            assert_eq!(item.priority, Some(Priority::P2));
+        }
+        let mut h = Harness::new(&fixture.toplevel);
+        expect_git(&h, &fixture);
+        let argv = ["update", "tk-1", "--title", " \tA\t\u{a0}B\u{a0} \t"].map(String::from);
+        assert_eq!(crate::cli::run_argv(h.deps(), &argv).unwrap(), Exit::Ok);
+        expect_git(&h, &fixture);
+        let store = resolver::open_for_command(&h.runner, &fixture.toplevel, &h.clock).unwrap();
+        let item = crate::store::repository::show::show_item(&store, "tk-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(item.title, "A\t\u{a0}B\u{a0}");
+    }
+
+    #[test]
+    fn body_sources_replace_literal_text_and_clear_without_changing_title() {
+        for item_class in ["ticket", "epic"] {
+            for source in ["inline", "file", "stdin"] {
+                let fixture = TmpStore::new("repo");
+                let conn = seed_store(&fixture);
+                insert_fixture_item(
+                    &conn,
+                    FixtureItem {
+                        id: "i1",
+                        display: "tk-1",
+                        item_class,
+                        ticket_kind: (item_class == "ticket").then_some("task"),
+                        priority: (item_class == "ticket").then_some("P2"),
+                        title: "Keep title",
+                        body: "Old body",
+                        created_seq: 1,
+                        ..FixtureItem::default()
+                    },
+                )
+                .unwrap();
+                drop(conn);
+                for body in ["@notes.md\r\n\n  Keep spaces\t\r\n", " \t\n", ""] {
+                    let mut h = Harness::new(&fixture.toplevel);
+                    let input = match source {
+                        "inline" => ["-b", body],
+                        "file" => {
+                            std::fs::write(fixture.toplevel.join("body.txt"), body).unwrap();
+                            ["--body-file", "body.txt"]
+                        }
+                        "stdin" => {
+                            h.stdin = std::io::Cursor::new(body.as_bytes().to_vec());
+                            ["--body-file", "-"]
+                        }
+                        _ => unreachable!(),
+                    };
+                    let argv = ["update", "tk-1", input[0], input[1]].map(String::from);
+                    expect_git(&h, &fixture);
+                    assert_eq!(crate::cli::run_argv(h.deps(), &argv).unwrap(), Exit::Ok);
+                    expect_git(&h, &fixture);
+                    let store =
+                        resolver::open_for_command(&h.runner, &fixture.toplevel, &h.clock).unwrap();
+                    let item = crate::store::repository::show::show_item(&store, "tk-1")
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(item.title, "Keep title");
+                    assert_eq!(item.body, body, "{item_class} via {source}");
+                    assert!(crate::store::sync::mutation_log_is_empty(&store.conn).unwrap());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn title_only_cli_edit_preserves_body_in_store_and_mutation() {
+        let fixture = TmpStore::new("repo");
+        let conn = seed_store(&fixture);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t1",
+                display: "gh-1",
+                title: "Original",
+                body: "Steps and context\r\n",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("1"),
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        drop(conn);
+        let mut h = Harness::new(&fixture.toplevel);
+        expect_git(&h, &fixture);
+        let argv = ["update", "gh-1", "-t", "Corrected title"].map(String::from);
+        assert_eq!(crate::cli::run_argv(h.deps(), &argv).unwrap(), Exit::Ok);
+        expect_git(&h, &fixture);
+        let store = resolver::open_for_command(&h.runner, &fixture.toplevel, &h.clock).unwrap();
+        let item = crate::store::repository::show::show_item(&store, "gh-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(item.title, "Corrected title");
+        assert_eq!(item.body, "Steps and context\r\n");
+        let mutation = crate::store::sync::show_mutation_log(&store.conn, 1).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&mutation.payload_json).unwrap(),
+            serde_json::json!({"title": "Corrected title", "body": "Steps and context\r\n"})
+        );
+    }
 
     /// Drive `run` and frame any returned error as the dispatch seam does
     /// (ADR-0032: `tk update: <body>`), so a test asserts the framed bytes.
@@ -180,8 +458,9 @@ mod tests {
     fn args(id: &str) -> Args {
         Args {
             id: id.to_owned(),
-            message: Vec::new(),
-            file: None,
+            title: None,
+            body: None,
+            body_file: None,
             priority: None,
             parent: None,
             no_parent: false,
@@ -237,40 +516,64 @@ mod tests {
     }
 
     #[test]
-    fn updates_title_and_body_via_message_flag() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
+    fn field_edits_compose_with_priority_and_parent() {
+        let fixture = TmpStore::new("repo");
+        let conn = seed_store(&fixture);
         insert_fixture_item(
             &conn,
             FixtureItem {
                 id: "t1",
                 display: "tk-1",
                 title: "Original",
+                body: "Old body",
                 created_seq: 1,
                 ..FixtureItem::default()
             },
         )
         .unwrap();
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "e1",
+                display: "tk-2",
+                title: "Epic",
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
         drop(conn);
-
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
-        let mut a = args("tk-1");
-        a.message = vec!["New title".into(), "New body line".into()];
-        let code = run_rendered(&mut h, a);
-        assert_eq!(code, Exit::Ok);
-        let stdout = String::from_utf8(h.stdout).unwrap();
-        assert!(stdout.contains("Updated Ticket: tk-1 - New title"));
-
-        let conn = Connection::open(store.db_path()).unwrap();
-        let (title, body): (String, String) = conn
-            .query_row("select title, body from items", [], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
+        let mut h = Harness::new(&fixture.toplevel);
+        h.stdin = std::io::Cursor::new(b"New body\n".to_vec());
+        expect_git(&h, &fixture);
+        let argv = [
+            "update",
+            "tk-1",
+            "--title",
+            "New title",
+            "--body-file",
+            "-",
+            "--priority",
+            "P0",
+            "--parent",
+            "tk-2",
+        ]
+        .map(String::from);
+        assert_eq!(crate::cli::run_argv(h.deps(), &argv).unwrap(), Exit::Ok);
+        assert_eq!(h.out(), "Updated Ticket: tk-1 - New title\n");
+        expect_git(&h, &fixture);
+        let store = resolver::open_for_command(&h.runner, &fixture.toplevel, &h.clock).unwrap();
+        let item = crate::store::repository::show::show_item(&store, "tk-1")
+            .unwrap()
             .unwrap();
-        assert_eq!(title, "New title");
-        assert_eq!(body, "New body line");
+        assert_eq!(item.title, "New title");
+        assert_eq!(item.body, "New body\n");
+        assert_eq!(item.priority, Some(Priority::P0));
+        assert_eq!(item.parent.unwrap().display_id, "tk-2");
+        assert!(crate::store::sync::mutation_log_is_empty(&store.conn).unwrap());
     }
 
     #[test]
@@ -378,7 +681,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path);
         expect_git(&h, &store);
         let mut a = args("tk-9999");
-        a.message = vec!["X".into()];
+        a.title = Some("X".into());
         let code = run_rendered(&mut h, a);
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
