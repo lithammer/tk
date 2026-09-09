@@ -1252,6 +1252,17 @@ fn grep_list_no_match_is_silent() {
     ");
 }
 
+#[test]
+fn grep_list_prints_single_title_only_and_body_only_matches() {
+    let p = Repo::new("project");
+    p.run("init");
+    p.run("add -m 'Title needle' -m 'Body token'");
+    p.run("add -m 'Unrelated chore'");
+
+    tk!(p, "grep needle -l", @"project-1: Title needle");
+    tk!(p, "grep token --list", @"project-1: Title needle");
+}
+
 /// `-c` and `-q` are mutually exclusive (tk-121): one prints a count, the other
 /// suppresses all output, so clap rejects the combination as a usage error
 /// before any store work. This guard is load-bearing — without it, `-q -c` would
