@@ -338,26 +338,19 @@ pub(crate) fn transition(
     };
 
     let changed = match column {
-        FailureColumn::Preserve => conn.execute(
-            PRESERVING,
-            params![req.sequence, req.from.text(), req.to.text(), req.now],
-        )?,
+        FailureColumn::Preserve => {
+            conn.execute(PRESERVING, params![req.sequence, req.from, req.to, req.now])?
+        }
         FailureColumn::Clear => conn.execute(
             OVERWRITING,
-            params![
-                req.sequence,
-                req.from.text(),
-                req.to.text(),
-                req.now,
-                None::<String>
-            ],
+            params![req.sequence, req.from, req.to, req.now, None::<String>],
         )?,
         FailureColumn::Record(failure) => conn.execute(
             OVERWRITING,
             params![
                 req.sequence,
-                req.from.text(),
-                req.to.text(),
+                req.from,
+                req.to,
                 req.now,
                 serde_json::to_string(failure).expect("Failure serializes infallibly")
             ],
