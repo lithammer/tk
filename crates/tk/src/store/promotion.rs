@@ -546,11 +546,7 @@ pub fn recoverable_promotion(
             )),
         };
     };
-    if !matches!(
-        (row.mutation_type, row.item_class),
-        (MutationType::PromoteTicket, ItemClass::Ticket)
-            | (MutationType::PromoteEpic, ItemClass::Epic)
-    ) {
+    if row.mutation_type != row.item_class.promotion_mutation_type() {
         return Err(RecoveryPromotionError::WrongMutationShape {
             sequence: row.sequence,
             mutation_type: row.mutation_type,
@@ -1925,10 +1921,7 @@ mod tests {
                 failure_json: (state == "failed" || state == "applying" || state == "abandoned")
                     .then_some(r#"{"detail":"prior"}"#),
                 promotion_operation_id: operation_id,
-                ..FixtureMutation::of(match item_class {
-                    ItemClass::Ticket => MutationType::PromoteTicket,
-                    ItemClass::Epic => MutationType::PromoteEpic,
-                })
+                ..FixtureMutation::of(item_class.promotion_mutation_type())
             },
         )
         .unwrap();

@@ -277,10 +277,7 @@ fn promotion(
             state,
             payload_json: r#"{"backend_kind":"github","title":"Work","body":""}"#,
             failure_json: (state == "failed").then_some(r#"{"detail":"rejected"}"#),
-            ..FixtureMutation::of(match item_class {
-                ItemClass::Ticket => MutationType::PromoteTicket,
-                ItemClass::Epic => MutationType::PromoteEpic,
-            })
+            ..FixtureMutation::of(item_class.promotion_mutation_type())
         },
     )
     .unwrap();
