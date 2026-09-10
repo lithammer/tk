@@ -114,6 +114,12 @@ _Avoid_: Parent
 The **Ticket** or **Epic** waiting on a **Blocking Item**.
 _Avoid_: Child
 
+**Git Common Directory**:
+The Git metadata directory shared by every linked **Workspace** of one
+version-control repository. Its filesystem-canonical path and the
+repository-local **Store ID** jointly establish a **Store Association**.
+_Avoid_: Git Directory, Repository Root, Workspace
+
 **Workspace**:
 A local checkout of the repository, usually a git worktree, that shares the **Repository Store** with every other checkout of the same repository.
 _Avoid_: Worktree
@@ -164,8 +170,34 @@ appear?".
 _Avoid_: Search, Full-text search, Fuzzy search
 
 **Repository Store**:
-The shared SQLite-backed local state for **tk** within one version-control repository.
+The user-owned local data associated with one version-control repository and
+shared by all its **Workspaces**. It remains until the user explicitly deletes
+it.
 _Avoid_: Workspace Store, Global Store
+
+**Store ID**:
+The opaque identity **`tk`** assigns to a **Repository Store**. Git paths,
+**Remotes**, and repository history may locate or corroborate a Store, but do
+not define its identity.
+_Avoid_: Repository ID, Path ID, Remote ID
+
+**Store Association**:
+The exclusive association between a **Repository Store** and at most one live
+version-control repository. Old Git paths, **Remotes**, and repository history
+are evidence for reattachment, not active associations.
+_Avoid_: Repository Binding (conflicts with **Backend Binding**), Locator
+
+**Association Evidence**:
+Observed Git paths, Git remotes, Backend repository identities, or repository
+history used to rank **Repository Stores** for explicit reattachment. It never
+authorizes access to a non-vacant Store.
+_Avoid_: Store Identity, Store Association, Confidence
+
+**Vacant Store**:
+A **Repository Store** with no **Tickets**, **Epics**, **Remote**, **Mutations**,
+**Plan** membership, or other user-owned data. Any **Store Backups** are likewise
+vacant.
+_Avoid_: Empty Store, Unused Store
 
 **Store Backup**:
 A compacted copy of the **Repository Store** written before a schema migration runs, kept beside the store and pruned to the most recent few. A **Store Backup** is readable evidence of what the store held before an upgrade, not an undo: restoring one leaves it to be migrated forward again.
