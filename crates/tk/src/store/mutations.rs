@@ -483,13 +483,80 @@ mod tests {
         FixtureItem, FixtureMutation, FixtureRemote, insert_fixture_item, insert_fixture_mutation,
         insert_fixture_remote,
     };
+    use regex::Regex;
     use rusqlite::Connection;
+    use std::collections::BTreeSet;
 
     fn open_seeded() -> Connection {
         let mut conn = Connection::open_in_memory().expect("open :memory:");
         conn.execute_batch("pragma foreign_keys = on").unwrap();
         migrations::apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
         conn
+    }
+
+    /// The spellings a column's `in (...)` CHECK admits, read out of the live
+    /// schema.
+    ///
+    /// A value the Repository Store cannot hold is not in the set, so the CHECK
+    /// is the authority an `ALL` list answers to. Pinning to the enum instead is
+    /// not on offer: stable Rust cannot enumerate variants, which is why `ALL`
+    /// is hand-written and can drift in the first place.
+    fn admitted_spellings(conn: &Connection, table: &str, column: &str) -> BTreeSet<String> {
+        let schema: String = conn
+            .query_row(
+                "select sql from sqlite_master where type = 'table' and name = ?1",
+                params![table],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|err| panic!("read `{table}`'s schema SQL: {err}"));
+        let column_check = Regex::new(&format!(
+            r"(?s){column}\s+text\s+not\s+null\s+check\(\s*{column}\s+in\s+\((.*?)\)\s*\)"
+        ))
+        .expect("well-formed CHECK pattern");
+        let literals = column_check
+            .captures(&schema)
+            .unwrap_or_else(|| panic!("no `{column} in (...)` CHECK on `{table}`"))
+            .get(1)
+            .expect("the CHECK's spelling list")
+            .as_str();
+        Regex::new("'([^']*)'")
+            .expect("well-formed literal pattern")
+            .captures_iter(literals)
+            .map(|caps| caps[1].to_string())
+            .collect()
+    }
+
+    #[test]
+    fn mutation_state_all_covers_every_spelling_the_schema_admits() {
+        // Nothing makes `MutationState::ALL` complete: `[Self; 7]` still compiles
+        // once the enum gains an eighth variant, and
+        // `all_lists_every_variant_exactly_once` iterates `ALL` to check `ALL`.
+        // A state the schema admits but `ALL` omits leaves every `ALL`-driven
+        // audit silently covering less than it claims.
+        let conn = open_seeded();
+        let all_spellings: BTreeSet<String> = MutationState::ALL
+            .iter()
+            .map(|state| state.text().to_string())
+            .collect();
+        assert_eq!(
+            admitted_spellings(&conn, "mutations", "state"),
+            all_spellings
+        );
+    }
+
+    #[test]
+    fn mutation_type_all_covers_every_spelling_the_schema_admits() {
+        // The same pin for the same reason: `MutationType::ALL` is `[Self; 11]`
+        // and equally unguarded against a kind the schema admits.
+        let conn = open_seeded();
+        let all_spellings: BTreeSet<String> = MutationType::ALL
+            .iter()
+            .map(|mutation_type| mutation_type.text().to_string())
+            .collect();
+        assert_eq!(
+            admitted_spellings(&conn, "mutations", "mutation_type"),
+            all_spellings
+        );
     }
 
     fn seed_backend_ticket(conn: &Connection, id: &str, display: &str, created_seq: i64) {
