@@ -40,9 +40,11 @@ impl ItemClass {
 
     /// The Mutation kind that promotes this Item Class to a Backend (ADR-0036).
     ///
-    /// The `mutations(item_id, item_class)` composite foreign key pins a
-    /// Promotion's `item_class` to its target Item's own class, so this
-    /// pairing is a schema fact rather than a caller's choice.
+    /// The Repository Store enforces this pairing only for a Promotion already
+    /// in flight: the cross-field CHECK names it under `applying` and
+    /// `abandoned` alone, so a `pending` `promote_ticket` against an Epic
+    /// inserts happily. It is a domain rule the Store cannot be relied on to
+    /// catch, which is why one answer lives here rather than at each caller.
     #[must_use]
     pub fn promotion_mutation_type(self) -> MutationType {
         match self {
