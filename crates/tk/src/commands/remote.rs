@@ -140,6 +140,7 @@ fn run_show(deps: &mut Deps<'_>) -> Result<Exit, CommandError> {
 mod tests {
     use super::*;
     use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
+    use crate::domain::mutation_type::MutationType;
     use crate::store::testing::{
         FixtureItem, FixtureMutation, TmpStore, insert_fixture_item, insert_fixture_mutation,
     };
@@ -383,11 +384,10 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                mutation_type: "update_ticket",
                 item_id: "t1",
                 payload_json: r#"{"title":"A","body":""}"#,
                 state: "pending",
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::UpdateTicket)
             },
         )
         .unwrap();
@@ -443,13 +443,12 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                mutation_type: "promote_ticket",
                 item_id: "t1",
                 payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
                 state: "failed",
                 failure_json: Some(r#"{"detail":"rejected"}"#),
                 promotion_operation_id: Some("op-1"),
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::PromoteTicket)
             },
         )
         .unwrap();

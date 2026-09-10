@@ -20,7 +20,9 @@ use rusqlite::{Connection, params};
 use tempfile::TempDir;
 
 use crate::domain::backend_operation::BackendItemIdentity;
+use crate::domain::item_class::ItemClass;
 use crate::domain::lifecycle::Lifecycle;
+use crate::domain::mutation_type::MutationType;
 use crate::domain::work_state::WorkState;
 use crate::store::migrations;
 
@@ -385,18 +387,29 @@ pub fn commit_promotion(conn: &mut Connection, id: &str) {
 
 /// Raw Mutation Log fixture for sync engine and read-side outbox tests.
 ///
-/// Bypasses production `mutations::append` so tests can seed `failed`,
-/// `skipped`, and `applied` Mutations before the sync command surface
-/// exists. The caller picks `sequence` directly; this helper does NOT
-/// touch the `mutation_seq` counter, so tests that mix fixture inserts
-/// with live appends must advance the counter themselves.
+/// Bypasses production `mutations::append`, which cannot seed what these
+/// tests need. The caller picks `sequence` directly and this helper never
+/// touches the `mutation_seq` counter, so tests mixing fixture inserts with
+/// live appends must advance it themselves. `append` also spells `'pending'`
+/// as a SQL literal, so every other Mutation State reaches a row only through
+/// this fixture or through `transition`.
+///
+/// It does not reach pre-007 column lists: this fixture writes the post-007
+/// ten-column list, which is why the v6-shaped migration seeds spell their own
+/// `insert` by hand.
 #[derive(Debug, Clone, Copy)]
 pub struct FixtureMutation<'a> {
     pub sequence: i64,
-    pub mutation_type: &'a str,
+    pub mutation_type: MutationType,
     pub item_id: &'a str,
-    pub item_class: &'a str,
+    pub item_class: ItemClass,
     pub payload_json: &'a str,
+    /// Stored `mutations.state` spelling, raw where the two fields above are
+    /// typed. Nothing checks it before SQLite does, so a misspelling fails the
+    /// CHECK at insert instead of failing the build. Whether it should be a
+    /// [`MutationState`] is still open.
+    ///
+    /// [`MutationState`]: crate::domain::mutation_state::MutationState
     pub state: &'a str,
     pub failure_json: Option<&'a str>,
     pub created_at: &'a str,
@@ -407,13 +420,21 @@ pub struct FixtureMutation<'a> {
     pub promotion_operation_id: Option<&'a str>,
 }
 
-impl Default for FixtureMutation<'_> {
-    fn default() -> Self {
+impl FixtureMutation<'_> {
+    /// A `pending` Mutation of `mutation_type` against a Ticket, with every
+    /// other field defaulted.
+    ///
+    /// Takes the Mutation Type rather than deriving `Default`: no spelling in
+    /// the `mutations.mutation_type` CHECK is a sensible default, so the
+    /// caller has to name one. `sequence` starts at 1, the first Mutation a
+    /// freshly seeded store can hold.
+    #[must_use]
+    pub fn of(mutation_type: MutationType) -> Self {
         Self {
             sequence: 1,
-            mutation_type: "",
+            mutation_type,
             item_id: "",
-            item_class: "ticket",
+            item_class: ItemClass::Ticket,
             payload_json: "{}",
             state: "pending",
             failure_json: None,

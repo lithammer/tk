@@ -75,9 +75,9 @@ pub fn append(conn: &Connection, req: AppendRequest<'_>) -> Result<i64, AppendEr
          ) values (?1, ?2, ?3, ?4, ?5, 'pending', null, ?6, ?6, ?7)",
         params![
             sequence,
-            req.mutation_type.text(),
+            req.mutation_type,
             req.item_id,
-            req.item_class.text(),
+            req.item_class,
             payload_json,
             req.now_iso,
             req.promotion_operation_id,
@@ -905,13 +905,12 @@ mod tests {
         insert_fixture_mutation(
             conn,
             FixtureMutation {
-                mutation_type: "promote_ticket",
                 item_id,
                 payload_json: &payload,
                 state,
                 failure_json: (state == "failed").then_some(r#"{"detail":"boom"}"#),
                 promotion_operation_id: Some("promo-1"),
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::PromoteTicket)
             },
         )
         .unwrap();
@@ -1020,10 +1019,9 @@ mod tests {
         insert_fixture_mutation(
             &conn,
             FixtureMutation {
-                mutation_type: "update_ticket",
                 item_id: "t1",
                 payload_json: r#"{"title":"T","body":""}"#,
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::UpdateTicket)
             },
         )
         .unwrap();
@@ -1068,17 +1066,16 @@ mod tests {
             // The `mutations` composite foreign key pins item_class to the
             // Item's own class, so each Promotion kind needs its own target.
             let (item_id, item_class) = match mutation_type {
-                MutationType::PromoteEpic => ("e1", "epic"),
-                _ => ("t1", "ticket"),
+                MutationType::PromoteEpic => ("e1", ItemClass::Epic),
+                _ => ("t1", ItemClass::Ticket),
             };
             insert_fixture_mutation(
                 &conn,
                 FixtureMutation {
-                    mutation_type: mutation_type.text(),
                     item_id,
                     item_class,
                     payload_json: &payload,
-                    ..FixtureMutation::default()
+                    ..FixtureMutation::of(mutation_type)
                 },
             )
             .unwrap();
@@ -1100,10 +1097,9 @@ mod tests {
         insert_fixture_mutation(
             &conn,
             FixtureMutation {
-                mutation_type: "promote_ticket",
                 item_id: "t1",
                 payload_json: r#"{"title":"T"}"#,
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::PromoteTicket)
             },
         )
         .unwrap();
@@ -1146,13 +1142,12 @@ mod tests {
         insert_fixture_mutation(
             conn,
             FixtureMutation {
-                mutation_type: mutation_type.text(),
                 item_id: "t1",
                 payload_json: &payload,
                 state: state.text(),
                 failure_json,
                 promotion_operation_id: mutation_type.is_promotion().then_some("promo-1"),
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(mutation_type)
             },
         )
         .unwrap();
@@ -1513,10 +1508,9 @@ mod tests {
                 &conn,
                 FixtureMutation {
                     sequence,
-                    mutation_type: "update_ticket",
                     item_id: "t1",
                     payload_json: r#"{"title":"T","body":""}"#,
-                    ..FixtureMutation::default()
+                    ..FixtureMutation::of(MutationType::UpdateTicket)
                 },
             )
             .unwrap();

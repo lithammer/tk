@@ -1137,6 +1137,7 @@ mod tests {
     };
     use crate::domain::lifecycle::Lifecycle;
     use crate::domain::mutation_state::MutationState;
+    use crate::domain::mutation_type::MutationType;
     use crate::domain::promotion_capability::PromotionCapabilities;
     use crate::domain::ticket_kind::TicketKind;
     use crate::proc::RunOutput;
@@ -2185,10 +2186,9 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 9,
-                mutation_type: "add_ticket_to_epic",
                 item_id: "backend",
                 payload_json: r#"{"epic_id":"e1"}"#,
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::AddTicketToEpic)
             },
         )
         .unwrap();
@@ -3060,13 +3060,12 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                mutation_type: "promote_ticket",
                 item_id: "t0",
                 payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
                 state: "applying",
                 failure_json: Some(r#"{"detail":"gh timed out"}"#),
                 promotion_operation_id: Some("op-old"),
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::PromoteTicket)
             },
         )
         .unwrap();
@@ -3174,12 +3173,11 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                mutation_type: "update_ticket",
                 item_id: "adopted",
                 payload_json: r#"{"title":"Edited","body":""}"#,
                 state: "failed",
                 failure_json: Some(r#"{"detail":"HTTP 403"}"#),
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::UpdateTicket)
             },
         )
         .unwrap();

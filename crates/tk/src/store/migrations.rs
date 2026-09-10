@@ -764,12 +764,11 @@ mod tests {
                 &conn,
                 FixtureMutation {
                     sequence: 1,
-                    mutation_type: mutation_type.text(),
                     item_id,
                     payload_json: r#"{"status":"done"}"#,
                     state: state.text(),
                     failure_json,
-                    ..FixtureMutation::default()
+                    ..FixtureMutation::of(mutation_type)
                 },
             )
             .unwrap_or_else(|err| panic!("seed a {state} Mutation on the done Item: {err}"));
@@ -809,12 +808,11 @@ mod tests {
                 &conn,
                 FixtureMutation {
                     sequence: 1,
-                    mutation_type: mutation_type.text(),
                     item_id,
                     payload_json: r#"{"status":"done"}"#,
                     state: "failed",
                     failure_json: Some(r#"{"detail":"rejected"}"#),
-                    ..FixtureMutation::default()
+                    ..FixtureMutation::of(mutation_type)
                 },
             )
             .unwrap_or_else(|err| panic!("seed a failed {mutation_type} Mutation: {err}"));
@@ -856,13 +854,12 @@ mod tests {
                 &conn,
                 FixtureMutation {
                     sequence: 1,
-                    mutation_type: "set_item_status",
                     item_id,
-                    item_class: class.text(),
+                    item_class: class,
                     payload_json: r#"{"status":"done"}"#,
                     state: "failed",
                     failure_json: Some(r#"{"detail":"rejected"}"#),
-                    ..FixtureMutation::default()
+                    ..FixtureMutation::of(MutationType::SetItemStatus)
                 },
             )
             .unwrap_or_else(|err| panic!("seed a failed close on a {class}: {err}"));
@@ -900,12 +897,11 @@ mod tests {
                 &conn,
                 FixtureMutation {
                     sequence: 1,
-                    mutation_type: "set_item_status",
                     item_id,
                     payload_json: &payload,
                     state: "failed",
                     failure_json: Some(r#"{"detail":"rejected"}"#),
-                    ..FixtureMutation::default()
+                    ..FixtureMutation::of(MutationType::SetItemStatus)
                 },
             )
             .unwrap_or_else(|err| panic!("seed a failed {} Mutation: {err}", target.text()));
@@ -947,13 +943,12 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                mutation_type: "set_item_status",
                 item_id,
                 payload_json: r#"{"status":"active"}"#,
                 state: "failed",
                 failure_json: Some(r#"{"detail":"rejected"}"#),
                 promotion_operation_id: Some("op-1"),
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::SetItemStatus)
             },
         )
         .unwrap();
@@ -990,12 +985,11 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                mutation_type: "set_item_status",
                 item_id: "t2",
                 payload_json: r#"{"status":"done"}"#,
                 state: "failed",
                 failure_json: Some(r#"{"detail":"rejected"}"#),
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::SetItemStatus)
             },
         )
         .unwrap();
@@ -1017,12 +1011,11 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                mutation_type: "set_item_status",
                 item_id,
                 payload_json: r#"{"status":"done"}"#,
                 state: "failed",
                 failure_json: Some(r#"{"detail":"rejected"}"#),
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::SetItemStatus)
             },
         )
         .unwrap();
@@ -1814,10 +1807,9 @@ mod tests {
         insert_fixture_mutation(
             &conn,
             FixtureMutation {
-                mutation_type: "update_ticket",
                 item_id: "t1",
                 promotion_operation_id: Some("promo-1"),
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::UpdateTicket)
             },
         )
         .unwrap();
@@ -1916,11 +1908,10 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 4,
-                mutation_type: "promote_ticket",
                 item_id: "t1",
                 payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
                 promotion_operation_id: Some("op-1"),
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::PromoteTicket)
             },
         )
         .unwrap();
@@ -2053,13 +2044,12 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 4,
-                mutation_type: "promote_ticket",
                 item_id: "t1",
                 payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
                 state: "failed",
                 failure_json: Some(r#"{"detail":"rejected"}"#),
                 promotion_operation_id: Some("op-1"),
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::PromoteTicket)
             },
         )
         .unwrap();
@@ -2403,33 +2393,74 @@ mod tests {
 
         let seeded = [
             // (sequence, mutation_type, payload, state, failure, operation)
-            (1, "set_item_status", TO_OPEN, "pending", None, None),
+            (
+                1,
+                MutationType::SetItemStatus,
+                TO_OPEN,
+                "pending",
+                None,
+                None,
+            ),
             (
                 2,
-                "set_item_status",
+                MutationType::SetItemStatus,
                 TO_ACTIVE,
                 "failed",
                 Some(REJECTION),
                 None,
             ),
-            (3, "set_item_status", TO_DONE, "pending", None, None),
-            (4, "set_item_status", TO_OPEN, "applied", None, None),
-            (5, "set_item_status", TO_OPEN, "skipped", None, None),
-            (6, "set_item_status", TO_OPEN, "pending", None, Some("op-1")),
-            (7, "update_ticket", AN_EDIT, "pending", None, None),
+            (
+                3,
+                MutationType::SetItemStatus,
+                TO_DONE,
+                "pending",
+                None,
+                None,
+            ),
+            (
+                4,
+                MutationType::SetItemStatus,
+                TO_OPEN,
+                "applied",
+                None,
+                None,
+            ),
+            (
+                5,
+                MutationType::SetItemStatus,
+                TO_OPEN,
+                "skipped",
+                None,
+                None,
+            ),
+            (
+                6,
+                MutationType::SetItemStatus,
+                TO_OPEN,
+                "pending",
+                None,
+                Some("op-1"),
+            ),
+            (
+                7,
+                MutationType::UpdateTicket,
+                AN_EDIT,
+                "pending",
+                None,
+                None,
+            ),
         ];
         for (sequence, mutation_type, payload_json, state, failure_json, operation) in seeded {
             insert_fixture_mutation(
                 &conn,
                 FixtureMutation {
                     sequence,
-                    mutation_type,
                     item_id: "t1",
                     payload_json,
                     state,
                     failure_json,
                     promotion_operation_id: operation,
-                    ..FixtureMutation::default()
+                    ..FixtureMutation::of(mutation_type)
                 },
             )
             .unwrap();

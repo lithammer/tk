@@ -324,6 +324,7 @@ mod tests {
     use crate::domain::backend_operation::BackendItemIdentity;
     use crate::domain::item_class::ItemClass;
     use crate::domain::lifecycle::Lifecycle;
+    use crate::domain::mutation_type::MutationType;
     use crate::domain::work_state::WorkState;
     use crate::proc::{ProcError, RunOutput};
     use crate::store::testing::{
@@ -442,12 +443,11 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 9,
-                mutation_type: "promote_ticket",
                 item_id: "t1",
                 payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
                 state: "applying",
                 promotion_operation_id: Some("op-1"),
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::PromoteTicket)
             },
         )
         .unwrap();
@@ -1281,11 +1281,10 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 3,
-                mutation_type: "add_dependency",
                 item_id: "stable",
                 payload_json: r#"{"blocking_id":"blocker"}"#,
                 state: "applied",
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::AddDependency)
             },
         )
         .unwrap();
@@ -1293,11 +1292,10 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 4,
-                mutation_type: "add_dependency",
                 item_id: "stable",
                 payload_json: r#"{"blocking_id":"blocker"}"#,
                 state: "pending",
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::AddDependency)
             },
         )
         .unwrap();
@@ -1862,12 +1860,11 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 4,
-                mutation_type: "promote_ticket",
                 item_id: "stable",
                 payload_json: r#"{"title":"Local title","body":"Local body","backend_kind":"github"}"#,
                 state: "pending",
                 promotion_operation_id: Some("op-1"),
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::PromoteTicket)
             },
         )
         .unwrap();

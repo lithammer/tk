@@ -376,6 +376,8 @@ fn empty_message(options: ListOptions<'_>) -> &'static str {
 mod tests {
     use super::*;
     use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
+    use crate::domain::item_class::ItemClass;
+    use crate::domain::mutation_type::MutationType;
     use crate::render::Styler;
     use crate::store::testing::{
         FixtureItem, FixtureMutation, TmpStore, commit_promotion, insert_dependency,
@@ -390,20 +392,19 @@ mod tests {
         conn: &Connection,
         sequence: i64,
         item_id: &str,
-        item_class: &str,
-        mutation_type: &str,
+        item_class: ItemClass,
+        mutation_type: MutationType,
         state: &str,
     ) {
         insert_fixture_mutation(
             conn,
             FixtureMutation {
                 sequence,
-                mutation_type,
                 item_id,
                 item_class,
                 state,
                 failure_json: (state == "failed").then_some(r#"{"detail":"prior"}"#),
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(mutation_type)
             },
         )
         .unwrap();
@@ -932,7 +933,14 @@ mod tests {
             },
         )
         .unwrap();
-        seed_mutation(&conn, 1, "child", "ticket", "update_ticket", "pending");
+        seed_mutation(
+            &conn,
+            1,
+            "child",
+            ItemClass::Ticket,
+            MutationType::UpdateTicket,
+            "pending",
+        );
         drop(conn);
 
         let cwd_path = cwd();
@@ -1013,13 +1021,34 @@ mod tests {
             &conn,
             1,
             "row-pending",
-            "ticket",
-            "update_ticket",
+            ItemClass::Ticket,
+            MutationType::UpdateTicket,
             "pending",
         );
-        seed_mutation(&conn, 2, "row-failed", "ticket", "update_ticket", "failed");
-        seed_mutation(&conn, 3, "row-both", "ticket", "update_ticket", "pending");
-        seed_mutation(&conn, 4, "row-both", "ticket", "set_item_status", "failed");
+        seed_mutation(
+            &conn,
+            2,
+            "row-failed",
+            ItemClass::Ticket,
+            MutationType::UpdateTicket,
+            "failed",
+        );
+        seed_mutation(
+            &conn,
+            3,
+            "row-both",
+            ItemClass::Ticket,
+            MutationType::UpdateTicket,
+            "pending",
+        );
+        seed_mutation(
+            &conn,
+            4,
+            "row-both",
+            ItemClass::Ticket,
+            MutationType::SetItemStatus,
+            "failed",
+        );
         drop(conn);
 
         let cwd_path = cwd();
@@ -1091,7 +1120,14 @@ mod tests {
             },
         )
         .unwrap();
-        seed_mutation(&conn, 1, "t1", "ticket", "update_ticket", "pending");
+        seed_mutation(
+            &conn,
+            1,
+            "t1",
+            ItemClass::Ticket,
+            MutationType::UpdateTicket,
+            "pending",
+        );
         drop(conn);
 
         let cwd_path = cwd();
@@ -1128,7 +1164,14 @@ mod tests {
             },
         )
         .unwrap();
-        seed_mutation(&conn, 1, "e1", "epic", "update_epic", "failed");
+        seed_mutation(
+            &conn,
+            1,
+            "e1",
+            ItemClass::Epic,
+            MutationType::UpdateEpic,
+            "failed",
+        );
         drop(conn);
 
         let cwd_path = cwd();
@@ -1176,8 +1219,22 @@ mod tests {
         )
         .unwrap();
         insert_dependency(&conn, "blocker", "blocked").unwrap();
-        seed_mutation(&conn, 1, "blocked", "ticket", "update_ticket", "pending");
-        seed_mutation(&conn, 2, "blocked", "ticket", "set_item_status", "failed");
+        seed_mutation(
+            &conn,
+            1,
+            "blocked",
+            ItemClass::Ticket,
+            MutationType::UpdateTicket,
+            "pending",
+        );
+        seed_mutation(
+            &conn,
+            2,
+            "blocked",
+            ItemClass::Ticket,
+            MutationType::SetItemStatus,
+            "failed",
+        );
         drop(conn);
 
         let cwd_path = cwd();
@@ -1245,7 +1302,14 @@ mod tests {
         // the fixture edit below must sequence after both.
         commit_promotion(&mut conn, "promoted");
         commit_promotion(&mut conn, "promotion_only");
-        seed_mutation(&conn, 3, "promoted", "ticket", "update_ticket", "pending");
+        seed_mutation(
+            &conn,
+            3,
+            "promoted",
+            ItemClass::Ticket,
+            MutationType::UpdateTicket,
+            "pending",
+        );
         drop(conn);
 
         let cwd_path = cwd();
@@ -1313,7 +1377,14 @@ mod tests {
             },
         )
         .unwrap();
-        seed_mutation(&conn, 1, "child", "ticket", "update_ticket", "pending");
+        seed_mutation(
+            &conn,
+            1,
+            "child",
+            ItemClass::Ticket,
+            MutationType::UpdateTicket,
+            "pending",
+        );
         drop(conn);
 
         let cwd_path = cwd();
@@ -1350,7 +1421,14 @@ mod tests {
             },
         )
         .unwrap();
-        seed_mutation(&conn, 1, "t1", "ticket", "update_ticket", "failed");
+        seed_mutation(
+            &conn,
+            1,
+            "t1",
+            ItemClass::Ticket,
+            MutationType::UpdateTicket,
+            "failed",
+        );
         drop(conn);
 
         let cwd_path = cwd();
@@ -1372,8 +1450,8 @@ mod tests {
     #[test]
     fn sync_banner_styles_the_state_token() {
         for (state, mutation_type, sgr) in [
-            ("failed", "update_ticket", "91"),
-            ("applying", "promote_ticket", "33"),
+            ("failed", MutationType::UpdateTicket, "91"),
+            ("applying", MutationType::PromoteTicket, "33"),
         ] {
             let store = TmpStore::new("repo");
             let conn = seed_store(&store);
@@ -1388,7 +1466,7 @@ mod tests {
                 },
             )
             .unwrap();
-            seed_mutation(&conn, 1, "t1", "ticket", mutation_type, state);
+            seed_mutation(&conn, 1, "t1", ItemClass::Ticket, mutation_type, state);
             drop(conn);
 
             let cwd_path = cwd();
@@ -1424,7 +1502,14 @@ mod tests {
         .unwrap();
         // `applying` is confined to promote_ticket/promote_epic with a
         // matching item_class (migration 010's CHECK constraint).
-        seed_mutation(&conn, 1, "t1", "ticket", "promote_ticket", "applying");
+        seed_mutation(
+            &conn,
+            1,
+            "t1",
+            ItemClass::Ticket,
+            MutationType::PromoteTicket,
+            "applying",
+        );
         drop(conn);
 
         let cwd_path = cwd();
@@ -1454,7 +1539,14 @@ mod tests {
             },
         )
         .unwrap();
-        seed_mutation(&conn, 1, "t1", "ticket", "promote_ticket", "failed");
+        seed_mutation(
+            &conn,
+            1,
+            "t1",
+            ItemClass::Ticket,
+            MutationType::PromoteTicket,
+            "failed",
+        );
         drop(conn);
 
         let cwd_path = cwd();
@@ -1494,7 +1586,14 @@ mod tests {
             },
         )
         .unwrap();
-        seed_mutation(&conn, 1, "t1", "ticket", "update_ticket", "pending");
+        seed_mutation(
+            &conn,
+            1,
+            "t1",
+            ItemClass::Ticket,
+            MutationType::UpdateTicket,
+            "pending",
+        );
         drop(conn);
 
         let cwd_path = cwd();
@@ -1552,7 +1651,14 @@ mod tests {
             },
         )
         .unwrap();
-        seed_mutation(&conn, 1, "d1", "ticket", "update_ticket", "failed");
+        seed_mutation(
+            &conn,
+            1,
+            "d1",
+            ItemClass::Ticket,
+            MutationType::UpdateTicket,
+            "failed",
+        );
         drop(conn);
 
         let cwd_path = cwd();
@@ -1603,7 +1709,14 @@ mod tests {
             },
         )
         .unwrap();
-        seed_mutation(&conn, 1, "d1", "ticket", "update_ticket", "pending");
+        seed_mutation(
+            &conn,
+            1,
+            "d1",
+            ItemClass::Ticket,
+            MutationType::UpdateTicket,
+            "pending",
+        );
         drop(conn);
 
         let cwd_path = cwd();
@@ -1728,7 +1841,14 @@ Mutation Log: 1 pending
             },
         )
         .unwrap();
-        seed_mutation(&conn, 1, "loose", "ticket", "update_ticket", "failed");
+        seed_mutation(
+            &conn,
+            1,
+            "loose",
+            ItemClass::Ticket,
+            MutationType::UpdateTicket,
+            "failed",
+        );
         drop(conn);
 
         let cwd_path = cwd();

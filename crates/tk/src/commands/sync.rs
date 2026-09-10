@@ -545,11 +545,10 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                mutation_type: "update_ticket",
                 item_id: "t1",
                 payload_json: r#"{"title":"A","body":""}"#,
                 state: "pending",
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::UpdateTicket)
             },
         )
         .unwrap();
@@ -557,12 +556,11 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 2,
-                mutation_type: "set_item_status",
                 item_id: "t2",
                 payload_json: r#"{"status":"done"}"#,
                 state: "failed",
                 failure_json: Some(failure_json),
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::SetItemStatus)
             },
         )
         .unwrap();
@@ -578,12 +576,11 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 7,
-                mutation_type: "set_item_status",
                 item_id: "t1",
                 payload_json,
                 state: "failed",
                 failure_json: Some(failure_json),
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::SetItemStatus)
             },
         )
         .unwrap();
@@ -698,12 +695,11 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                mutation_type: "promote_ticket",
                 item_id: "t1",
                 payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
                 state: "pending",
                 promotion_operation_id: Some("op-1"),
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::PromoteTicket)
             },
         )
         .unwrap();
@@ -770,11 +766,10 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                mutation_type: "update_ticket",
                 item_id: "t1",
                 payload_json: r#"{"title":"New Title","body":""}"#,
                 state: "pending",
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::UpdateTicket)
             },
         )
         .unwrap();
@@ -824,12 +819,11 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                mutation_type: "update_ticket",
                 item_id: "t1",
                 payload_json: r#"{"title":"A","body":""}"#,
                 state: "failed",
                 failure_json: Some(r#"{"detail":"rejected"}"#),
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::UpdateTicket)
             },
         )
         .unwrap();
@@ -887,12 +881,11 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                mutation_type: "set_item_status",
                 item_id: "t1",
                 payload_json: r#"{"status":"done"}"#,
                 state: "failed",
                 failure_json: Some(r#"{"detail":"rejected"}"#),
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::SetItemStatus)
             },
         )
         .unwrap();
@@ -954,12 +947,11 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                mutation_type: "set_item_status",
                 item_id: "t1",
                 payload_json: r#"{"status":"done"}"#,
                 state: "failed",
                 failure_json: Some(r#"{"detail":"rejected"}"#),
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::SetItemStatus)
             },
         )
         .unwrap();
@@ -1020,12 +1012,11 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                mutation_type: "update_ticket",
                 item_id: "t1",
                 payload_json: r#"{"title":"A","body":""}"#,
                 state: "failed",
                 failure_json: Some(r#"{"detail":"rejected"}"#),
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::UpdateTicket)
             },
         )
         .unwrap();
@@ -1089,12 +1080,11 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                mutation_type: "promote_ticket",
                 item_id: "t1",
                 payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
                 state: "failed",
                 failure_json: Some(r#"{"detail":"boom"}"#),
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::PromoteTicket)
             },
         )
         .unwrap();
@@ -1136,11 +1126,10 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                mutation_type: "update_ticket",
                 item_id: "t1",
                 payload_json: r#"{"title":"A","body":""}"#,
                 state: "pending",
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::UpdateTicket)
             },
         )
         .unwrap();
@@ -1195,10 +1184,9 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                mutation_type: "update_ticket",
                 item_id: "t1",
                 state: "applied",
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::UpdateTicket)
             },
         )
         .unwrap();
@@ -1398,12 +1386,11 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                mutation_type: "set_item_status",
                 item_id: "t1",
                 payload_json: r#"{"status":"done"}"#,
                 state: "failed",
                 failure_json: Some(r#"{"detail":"HTTP 401: Bad credentials","class":"auth"}"#),
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::SetItemStatus)
             },
         )
         .unwrap();
@@ -1430,14 +1417,13 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 3,
-                mutation_type: "set_item_status",
                 item_id: "t1",
                 payload_json: r#"{"status":"done"}"#,
                 state: "failed",
                 failure_json: Some(
                     r#"{"detail":"HTTP 422: Validation Failed","class":"validation"}"#,
                 ),
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::SetItemStatus)
             },
         )
         .unwrap();

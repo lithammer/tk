@@ -74,6 +74,7 @@ pub fn search_rows(store: &Store, query: &str) -> Result<Vec<ListRow>, rusqlite:
 mod tests {
     use super::super::list::{ListOptions, list_rows};
     use super::*;
+    use crate::domain::mutation_type::MutationType;
     use crate::domain::status::ItemStatus;
     use crate::store::migrations;
     use crate::store::testing::{
@@ -128,19 +129,17 @@ mod tests {
         store: &Store,
         sequence: i64,
         item_id: &str,
-        mutation_type: &str,
+        mutation_type: MutationType,
         state: &str,
     ) {
         insert_fixture_mutation(
             &store.conn,
             FixtureMutation {
                 sequence,
-                mutation_type,
                 item_id,
-                item_class: "ticket",
                 state,
                 failure_json: (state == "failed").then_some(r#"{"detail":"prior"}"#),
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(mutation_type)
             },
         )
         .unwrap();
@@ -288,11 +287,9 @@ mod tests {
             &store.conn,
             FixtureMutation {
                 sequence: 1,
-                mutation_type: "set_item_status",
                 item_id: "t1",
-                item_class: "ticket",
                 state: "pending",
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::SetItemStatus)
             },
         )
         .unwrap();
@@ -314,10 +311,34 @@ mod tests {
         seed_ticket(&store, "pending-edit", "tk-1", "Auth pending", "open", 1);
         seed_ticket(&store, "failed-edit", "tk-2", "Auth failed", "open", 2);
         seed_ticket(&store, "promo-only", "tk-3", "Auth promoted", "open", 3);
-        seed_mutation(&store, 1, "pending-edit", "update_ticket", "pending");
-        seed_mutation(&store, 2, "failed-edit", "update_ticket", "failed");
-        seed_mutation(&store, 3, "promo-only", "promote_ticket", "pending");
-        seed_mutation(&store, 4, "promo-only", "promote_ticket", "failed");
+        seed_mutation(
+            &store,
+            1,
+            "pending-edit",
+            MutationType::UpdateTicket,
+            "pending",
+        );
+        seed_mutation(
+            &store,
+            2,
+            "failed-edit",
+            MutationType::UpdateTicket,
+            "failed",
+        );
+        seed_mutation(
+            &store,
+            3,
+            "promo-only",
+            MutationType::PromoteTicket,
+            "pending",
+        );
+        seed_mutation(
+            &store,
+            4,
+            "promo-only",
+            MutationType::PromoteTicket,
+            "failed",
+        );
 
         let search = search_rows(&store, "auth").unwrap();
         let list = list_rows(&store, ListOptions::default()).unwrap();

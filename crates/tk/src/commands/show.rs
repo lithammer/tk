@@ -310,6 +310,7 @@ mod tests {
     use super::*;
     use crate::clock::FakeClock;
     use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
+    use crate::domain::mutation_type::MutationType;
     use crate::proc::{FakeRunner, RunOutput};
     use crate::render::Styler;
     use crate::store::repository::show::FormerBackendIdentity;
@@ -959,12 +960,10 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 7,
-                mutation_type: "update_ticket",
                 item_id: "t1",
-                item_class: "ticket",
                 state: "failed",
                 failure_json: Some(r#"{"detail":"boom"}"#),
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::UpdateTicket)
             },
         )
         .unwrap();
@@ -972,11 +971,9 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 4,
-                mutation_type: "add_dependency",
                 item_id: "t1",
-                item_class: "ticket",
                 state: "skipped",
-                ..FixtureMutation::default()
+                ..FixtureMutation::of(MutationType::AddDependency)
             },
         )
         .unwrap();
