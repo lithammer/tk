@@ -444,9 +444,13 @@ pub(crate) fn apply_through(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::item_class::ItemClass;
+    use crate::domain::lifecycle::Lifecycle;
+    use crate::domain::mutation_state::MutationState;
+    use crate::domain::mutation_type::MutationType;
     use crate::store::testing::{
-        FixtureFormerIdentity, FixtureItem, insert_alias, insert_fixture_former_identity,
-        insert_fixture_item,
+        FixtureFormerIdentity, FixtureItem, FixtureMutation, insert_alias,
+        insert_fixture_former_identity, insert_fixture_item, insert_fixture_mutation,
     };
     use rusqlite::params;
 
@@ -553,23 +557,6 @@ mod tests {
         tx.commit()
     }
 
-    /// Assert the done-terminal trigger is what refused a `done` -> `open`
-    /// write, not some other constraint.
-    ///
-    /// `is_err()` alone cannot tell the two apart: these fixtures carry a
-    /// Closing Reason, and an UPDATE that clears `status` without clearing it
-    /// trips the `closing_reason` CHECK too. Dropping a trigger conjunct then
-    /// leaves every negative test passing for the wrong reason.
-    fn assert_trigger_refused(result: rusqlite::Result<usize>, why: &str) {
-        match result {
-            Err(err) => assert!(
-                err.to_string().contains("cannot leave done state"),
-                "{why}; refused, but by {err} rather than the trigger"
-            ),
-            Ok(_) => panic!("{why}"),
-        }
-    }
-
     #[test]
     fn readopt_may_import_an_open_lifecycle_onto_a_done_item() {
         let mut conn = open_memory();
@@ -615,14 +602,23 @@ mod tests {
         );
     }
 
-    /// Seed a plain `done` Ticket carrying a Closing Reason: the ordinary Sync
-    /// Skip population, with no Former Backend Identity in play.
-    fn insert_done_ticket(conn: &Connection) {
+    /// Seed a plain `done` Item of `class` carrying a Closing Reason: the
+    /// ordinary Sync Skip population, with no Former Backend Identity in play.
+    /// Returns the Item id the reopen targets.
+    fn insert_done_item(conn: &Connection, class: ItemClass) -> &'static str {
+        let (id, display, ticket_kind, priority) = match class {
+            ItemClass::Ticket => ("t1", "tk-1", Some("task"), Some("P2")),
+            // The `items` CHECK confines both columns to Tickets.
+            ItemClass::Epic => ("e1", "tk-2", None, None),
+        };
         insert_fixture_item(
             conn,
             FixtureItem {
-                id: "t1",
-                display: "tk-1",
+                id,
+                display,
+                item_class: class.text(),
+                ticket_kind,
+                priority,
                 title: "Closed by tk done",
                 status: "done",
                 closing_reason: Some("Shipped"),
@@ -631,118 +627,335 @@ mod tests {
             },
         )
         .unwrap();
+        id
+    }
+
+    /// What the done-terminal trigger does with one Mutation shape: ADR-0006
+    /// refuses every `done` -> `open` write, and ADR-0046's exception readmits
+    /// the Item whose own closing Mutation failed.
+    #[derive(Clone, Copy)]
+    enum Reopen {
+        Authorized,
+        Refused,
+    }
+
+    /// Try Sync Skip's `done` -> `open` write on `item_id` and hold the
+    /// trigger to `expected`, reporting `why` when it disagrees.
+    ///
+    /// The UPDATE clears the Closing Reason along with the status because the
+    /// `closing_reason` CHECK confines a reason to a `done` row. After an
+    /// authorized write it reads the row back to confirm both landed.
+    ///
+    /// A refusal must carry the trigger's own message. `is_err()` alone cannot
+    /// tell the trigger apart from the other constraints these fixtures trip,
+    /// so dropping a conjunct would leave every refused row passing for the
+    /// wrong reason.
+    fn assert_reopen(conn: &Connection, item_id: &str, expected: Reopen, why: &str) {
+        let write = conn.execute(
+            "update items set status = 'open', closing_reason = null where id = ?1",
+            params![item_id],
+        );
+        match expected {
+            Reopen::Authorized => {
+                write.unwrap_or_else(|err| panic!("{why}; refused by {err}"));
+                let landed: (String, Option<String>) = conn
+                    .query_row(
+                        "select status, closing_reason from items where id = ?1",
+                        params![item_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    (landed.0.as_str(), landed.1.as_deref()),
+                    ("open", None),
+                    "{why}"
+                );
+            }
+            Reopen::Refused => match write {
+                Err(err) => assert!(
+                    err.to_string().contains("cannot leave done state"),
+                    "{why}; refused, but by {err} rather than the trigger"
+                ),
+                Ok(_) => panic!("{why}"),
+            },
+        }
     }
 
     #[test]
-    fn sync_skip_may_reopen_a_done_item_with_its_failed_closing_mutation() {
-        use crate::store::testing::{FixtureMutation, insert_fixture_mutation};
-        const TO_DONE: &str = r#"{"status":"done"}"#;
-        const REJECTION: &str = r#"{"detail":"rejected"}"#;
+    fn every_variant_of_each_reopen_conjunct_declares_a_verdict() {
+        // The five conjuncts of migration 016's reopen exception are an audit
+        // surface: a Mutation state, a Mutation Type, or an Item Class added
+        // later needs an answer here. Four of the five are domain enums, so
+        // each loop below varies one conjunct across its whole set and holds
+        // the others at the authorizing shape — the Item's own `failed`
+        // `set_item_status` row targeting `done`.
+        //
+        // The wildcard-free `match` inside each loop enforces that, not the
+        // iteration: the `match` is over the loop variable's type, so a new
+        // variant stops this file compiling until someone declares its verdict.
+        // `MutationState::ALL` and the written-out `ItemClass` and `Lifecycle`
+        // arrays only fix the iteration order — `pub const ALL: [Self; 7]`
+        // keeps compiling when the enum grows an eighth variant.
+        // `store/mutations.rs` pins both `ALL` lists to the `mutations` CHECK,
+        // but that is a test rather than a compile error, so it does not make
+        // the iteration exhaustive.
+        //
+        // Declaring a verdict and running it are therefore separate: `ItemClass`
+        // and `Lifecycle` have no `ALL`, so a variant added to either must join
+        // its array here as well as its `match` arm, or the trigger never sees
+        // the verdict the compiler forced someone to write.
+        //
+        // The fifth conjunct, `m.item_id = new.id`, is not an enum: "another
+        // Item's failed close does not authorize this one" is a scenario, and
+        // it stays its own test below.
 
-        let mut conn = open_memory();
-        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        insert_done_ticket(&conn);
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 1,
-                mutation_type: "set_item_status",
-                item_id: "t1",
-                payload_json: TO_DONE,
-                state: "failed",
-                failure_json: Some(REJECTION),
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
+        // `state`: only `failed` authorizes. Each arm also names the Mutation
+        // Type and failure evidence that state admits, because not every state
+        // is reachable on a closing Mutation: migration 010's CHECK requires
+        // evidence of `failed` and forbids it on `pending` and `applied`, and
+        // `skipped` and `cancelled` are the two edges out of `failed` that
+        // preserve what it recorded (`MutationState`'s transition table).
+        for state in MutationState::ALL {
+            let (mutation_type, failure_json, verdict, why) = match state {
+                MutationState::Failed => (
+                    MutationType::SetItemStatus,
+                    Some(r#"{"detail":"rejected"}"#),
+                    Reopen::Authorized,
+                    "a failed closing Mutation authorizes Sync Skip's reopen (ADR-0046)",
+                ),
+                // `tk done` on a Backend-bound Item leaves exactly this shape —
+                // a `done` row plus a `pending` closing Mutation — until the
+                // next `tk sync`. It is the most common live state in the
+                // Store, so the exception must not admit it.
+                MutationState::Pending => (
+                    MutationType::SetItemStatus,
+                    None,
+                    Reopen::Refused,
+                    "a closing Mutation still queued must not authorize a done -> open write",
+                ),
+                // The ordinary state of every successfully closed
+                // Backend-bound Item is a `done` row plus an `applied` closing
+                // Mutation. If the exception did not test the Mutation's
+                // state, that shape alone would authorize a reopen — which is
+                // the whole of ADR-0006's backstop, not an edge case.
+                MutationState::Applied => (
+                    MutationType::SetItemStatus,
+                    None,
+                    Reopen::Refused,
+                    "an applied closing Mutation must not authorize a done -> open write (ADR-0006)",
+                ),
+                MutationState::Skipped => (
+                    MutationType::SetItemStatus,
+                    Some(r#"{"detail":"rejected"}"#),
+                    Reopen::Refused,
+                    "nothing admits the write once the closing Mutation has left `failed` (ADR-0046)",
+                ),
+                MutationState::Cancelled => (
+                    MutationType::SetItemStatus,
+                    Some(r#"{"detail":"rejected"}"#),
+                    Reopen::Refused,
+                    "a withdrawn close never took effect on the Backend and must not authorize a reopen",
+                ),
+                // No closing Mutation can hold either state: migration 010's
+                // CHECK confines `applying` and `abandoned` to a Promotion of
+                // the Item's own class. A Promotion is the only shape the
+                // Store admits here, so these two rows cover the state
+                // conjunct jointly with the Mutation Type one, not alone.
+                MutationState::Applying => (
+                    MutationType::PromoteTicket,
+                    None,
+                    Reopen::Refused,
+                    "a Promotion whose Backend creation is still in flight has no verdict yet and must not authorize a reopen",
+                ),
+                MutationState::Abandoned => (
+                    MutationType::PromoteTicket,
+                    None,
+                    Reopen::Refused,
+                    "an abandoned Promotion, whose Backend outcome tk never observed, must not authorize a reopen",
+                ),
+            };
 
-        conn.execute(
-            "update items set status = 'open', closing_reason = null where id = 't1'",
-            [],
-        )
-        .expect("a failed closing Mutation authorizes Sync Skip's reopen (ADR-0046)");
-
-        let (status, closing_reason): (String, Option<String>) = conn
-            .query_row(
-                "select status, closing_reason from items where id = 't1'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+            let mut conn = open_memory();
+            apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+            let item_id = insert_done_item(&conn, ItemClass::Ticket);
+            insert_fixture_mutation(
+                &conn,
+                FixtureMutation {
+                    sequence: 1,
+                    mutation_type: mutation_type.text(),
+                    item_id,
+                    payload_json: r#"{"status":"done"}"#,
+                    state: state.text(),
+                    failure_json,
+                    ..FixtureMutation::default()
+                },
             )
-            .unwrap();
-        assert_eq!((status.as_str(), closing_reason), ("open", None));
-    }
+            .unwrap_or_else(|err| panic!("seed a {state} Mutation on the done Item: {err}"));
 
-    #[test]
-    fn the_reopen_exception_admits_an_epic_on_the_same_terms() {
-        use crate::store::testing::{FixtureMutation, insert_fixture_mutation};
+            assert_reopen(&conn, item_id, verdict, &format!("state {state}: {why}"));
+        }
 
-        // ADR-0046: "The rule is identical for Tickets and Epics." The
-        // trigger reaches a Mutation through `(item_id, item_class)`, the pair
-        // ADR-0010 addresses Mutations by, so an Epic has to be reachable
-        // through the same conjunct a Ticket is.
-        let mut conn = open_memory();
-        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "e1",
-                display: "tk-1",
-                item_class: "epic",
-                ticket_kind: None,
-                priority: None,
-                title: "Closed Epic",
-                status: "done",
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 1,
-                mutation_type: "set_item_status",
-                item_id: "e1",
-                item_class: "epic",
-                payload_json: r#"{"status":"done"}"#,
-                state: "failed",
-                failure_json: Some(r#"{"detail":"rejected"}"#),
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
+        // `mutation_type`: only `set_item_status` carries a Lifecycle change,
+        // so only it can be the close whose failure the exception recognises.
+        // Every kind is seedable as `failed` against the same Item, so this
+        // axis varies alone.
+        for mutation_type in MutationType::ALL {
+            let (verdict, why) = match mutation_type {
+                MutationType::SetItemStatus => (
+                    Reopen::Authorized,
+                    "a failed closing Mutation authorizes Sync Skip's reopen (ADR-0046)",
+                ),
+                MutationType::UpdateTicket
+                | MutationType::UpdateEpic
+                | MutationType::AddTicketToEpic
+                | MutationType::RemoveTicketFromEpic
+                | MutationType::AddDependency
+                | MutationType::RemoveDependency
+                | MutationType::AddExternalBlocker
+                | MutationType::ResolveExternalBlocker
+                | MutationType::PromoteTicket
+                | MutationType::PromoteEpic => (
+                    Reopen::Refused,
+                    "a failed Mutation that changes no Lifecycle is not a close and must not authorize a reopen",
+                ),
+            };
 
-        conn.execute("update items set status = 'open' where id = 'e1'", [])
-            .expect("a failed closing Mutation authorizes the reopen for an Epic too (ADR-0046)");
+            let mut conn = open_memory();
+            apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+            let item_id = insert_done_item(&conn, ItemClass::Ticket);
+            insert_fixture_mutation(
+                &conn,
+                FixtureMutation {
+                    sequence: 1,
+                    mutation_type: mutation_type.text(),
+                    item_id,
+                    payload_json: r#"{"status":"done"}"#,
+                    state: "failed",
+                    failure_json: Some(r#"{"detail":"rejected"}"#),
+                    ..FixtureMutation::default()
+                },
+            )
+            .unwrap_or_else(|err| panic!("seed a failed {mutation_type} Mutation: {err}"));
 
-        let status: String = conn
-            .query_row("select status from items where id = 'e1'", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(status, "open");
+            assert_reopen(
+                &conn,
+                item_id,
+                verdict,
+                &format!("mutation_type {mutation_type}: {why}"),
+            );
+        }
+
+        // `item_class`: ADR-0046 — "The rule is identical for Tickets and
+        // Epics." The trigger reaches a Mutation through `(item_id,
+        // item_class)`, the pair ADR-0010 addresses Mutations by, so an Epic
+        // has to be reachable through the same conjunct a Ticket is.
+        //
+        // This loop shows both classes are admitted, not that the conjunct is
+        // load-bearing: `mutations`' composite foreign key into
+        // `items(id, item_class)` makes a Mutation's class a function of its
+        // `item_id`, so no fixture can make the pair disagree. Only
+        // `every_trigger_body_is_pinned` catches a change to it.
+        for class in [ItemClass::Ticket, ItemClass::Epic] {
+            let (verdict, why) = match class {
+                ItemClass::Ticket => (
+                    Reopen::Authorized,
+                    "a Ticket's own failed closing Mutation authorizes its reopen (ADR-0046)",
+                ),
+                ItemClass::Epic => (
+                    Reopen::Authorized,
+                    "an Epic's failed closing Mutation authorizes its reopen on the same terms (ADR-0046)",
+                ),
+            };
+
+            let mut conn = open_memory();
+            apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+            let item_id = insert_done_item(&conn, class);
+            insert_fixture_mutation(
+                &conn,
+                FixtureMutation {
+                    sequence: 1,
+                    mutation_type: "set_item_status",
+                    item_id,
+                    item_class: class.text(),
+                    payload_json: r#"{"status":"done"}"#,
+                    state: "failed",
+                    failure_json: Some(r#"{"detail":"rejected"}"#),
+                    ..FixtureMutation::default()
+                },
+            )
+            .unwrap_or_else(|err| panic!("seed a failed close on a {class}: {err}"));
+
+            assert_reopen(
+                &conn,
+                item_id,
+                verdict,
+                &format!("item_class {class}: {why}"),
+            );
+        }
+
+        // payload `$.status`: the Lifecycle the failed Mutation was trying to
+        // write. Only a close authorizes; a failed reopen is not one. The axis
+        // is wider than `Lifecycle`, though: ADR-0043 narrowed `items.status`
+        // to open/done, so `{"status":"active"}` is not a Lifecycle value to
+        // iterate, and that departed spelling stays a hand-written row below.
+        for target in [Lifecycle::Open, Lifecycle::Done] {
+            let (verdict, why) = match target {
+                Lifecycle::Done => (
+                    Reopen::Authorized,
+                    "a failed closing Mutation authorizes Sync Skip's reopen (ADR-0046)",
+                ),
+                Lifecycle::Open => (
+                    Reopen::Refused,
+                    "a failed Mutation targeting `open` is a reopen, not a close, and must not authorize another",
+                ),
+            };
+
+            let mut conn = open_memory();
+            apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
+            let item_id = insert_done_item(&conn, ItemClass::Ticket);
+            let payload = format!(r#"{{"status":"{}"}}"#, target.text());
+            insert_fixture_mutation(
+                &conn,
+                FixtureMutation {
+                    sequence: 1,
+                    mutation_type: "set_item_status",
+                    item_id,
+                    payload_json: &payload,
+                    state: "failed",
+                    failure_json: Some(r#"{"detail":"rejected"}"#),
+                    ..FixtureMutation::default()
+                },
+            )
+            .unwrap_or_else(|err| panic!("seed a failed {} Mutation: {err}", target.text()));
+
+            assert_reopen(
+                &conn,
+                item_id,
+                verdict,
+                &format!("payload status {}: {why}", target.text()),
+            );
+        }
     }
 
     #[test]
     fn a_done_item_with_no_failed_closing_mutation_stays_refused() {
         let mut conn = open_memory();
         apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        insert_done_ticket(&conn);
+        let item_id = insert_done_item(&conn, ItemClass::Ticket);
 
-        let reopen = conn.execute("update items set status = 'open' where id = 't1'", []);
-        assert_trigger_refused(
-            reopen,
+        assert_reopen(
+            &conn,
+            item_id,
+            Reopen::Refused,
             "no failed closing Mutation exists, so the done-terminal rule still applies (ADR-0006)",
         );
     }
 
     #[test]
     fn a_failed_non_closing_status_mutation_does_not_authorize_reopen() {
-        use crate::store::testing::{FixtureMutation, insert_fixture_mutation};
-        const TO_ACTIVE: &str = r#"{"status":"active"}"#;
-        const REJECTION: &str = r#"{"detail":"rejected"}"#;
-
         let mut conn = open_memory();
         apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        insert_done_ticket(&conn);
+        let item_id = insert_done_item(&conn, ItemClass::Ticket);
         // Migration 011 spares exactly this shape from its cancellation sweep —
         // a failed, non-`done` `set_item_status` row belonging to a Promotion
         // Operation (011_split_work_state.sql:132-135) — so it is a real
@@ -753,66 +966,32 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 mutation_type: "set_item_status",
-                item_id: "t1",
-                payload_json: TO_ACTIVE,
+                item_id,
+                payload_json: r#"{"status":"active"}"#,
                 state: "failed",
-                failure_json: Some(REJECTION),
+                failure_json: Some(r#"{"detail":"rejected"}"#),
                 promotion_operation_id: Some("op-1"),
                 ..FixtureMutation::default()
             },
         )
         .unwrap();
 
-        let reopen = conn.execute("update items set status = 'open' where id = 't1'", []);
-        assert_trigger_refused(
-            reopen,
+        assert_reopen(
+            &conn,
+            item_id,
+            Reopen::Refused,
             "a failed non-closing status Mutation must not authorize a done -> open write",
         );
     }
 
     #[test]
-    fn a_pending_closing_mutation_does_not_authorize_reopen() {
-        use crate::store::testing::{FixtureMutation, insert_fixture_mutation};
-
-        // `tk done` on a Backend-bound Item leaves exactly this shape — a
-        // `done` row plus a `pending` closing Mutation — until the next
-        // `tk sync`. It is the most common live state in the Store, so the
-        // exception must not admit it.
-        let mut conn = open_memory();
-        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        insert_done_ticket(&conn);
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 1,
-                mutation_type: "set_item_status",
-                item_id: "t1",
-                payload_json: r#"{"status":"done"}"#,
-                state: "pending",
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
-
-        assert_trigger_refused(
-            conn.execute(
-                "update items set status = 'open', closing_reason = null where id = 't1'",
-                [],
-            ),
-            "a closing Mutation still queued must not authorize a done -> open write",
-        );
-    }
-
-    #[test]
     fn a_failed_close_on_another_item_does_not_authorize_this_one() {
-        use crate::store::testing::{FixtureMutation, insert_fixture_mutation};
-
         // The exception is reserved to the Item its own failed closing
         // Mutation names. Without that, one failed close anywhere in the Store
         // would authorize reopening every `done` Item.
         let mut conn = open_memory();
         apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        insert_done_ticket(&conn);
+        let item_id = insert_done_item(&conn, ItemClass::Ticket);
         insert_fixture_item(
             &conn,
             FixtureItem {
@@ -839,88 +1018,50 @@ mod tests {
         )
         .unwrap();
 
-        assert_trigger_refused(
-            conn.execute(
-                "update items set status = 'open', closing_reason = null where id = 't1'",
-                [],
-            ),
+        assert_reopen(
+            &conn,
+            item_id,
+            Reopen::Refused,
             "another Item's failed close must not authorize this one's reopen",
         );
     }
 
     #[test]
-    fn an_applied_closing_mutation_does_not_authorize_reopen() {
-        use crate::store::testing::{FixtureMutation, insert_fixture_mutation};
-
-        // The ordinary state of every successfully closed Backend-bound Item
-        // is a `done` row plus an `applied` closing Mutation. If the trigger
-        // exception did not test the Mutation's state, that shape alone would
-        // authorize a reopen — which is the whole of ADR-0006's backstop, not
-        // an edge case.
-        let mut conn = open_memory();
-        apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        insert_done_ticket(&conn);
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 1,
-                mutation_type: "set_item_status",
-                item_id: "t1",
-                payload_json: r#"{"status":"done"}"#,
-                state: "applied",
-                ..FixtureMutation::default()
-            },
-        )
-        .unwrap();
-
-        assert_trigger_refused(
-            conn.execute(
-                "update items set status = 'open', closing_reason = null where id = 't1'",
-                [],
-            ),
-            "an applied closing Mutation must not authorize a done -> open write (ADR-0006)",
-        );
-    }
-
-    #[test]
     fn a_later_done_to_open_is_refused_once_the_mutation_moves_to_skipped() {
-        use crate::store::testing::{FixtureMutation, insert_fixture_mutation};
-        const TO_DONE: &str = r#"{"status":"done"}"#;
-        const REJECTION: &str = r#"{"detail":"rejected"}"#;
-
         let mut conn = open_memory();
         apply_all(&mut conn, "2026-05-09T00:00:00.000Z").unwrap();
-        insert_done_ticket(&conn);
+        let item_id = insert_done_item(&conn, ItemClass::Ticket);
         insert_fixture_mutation(
             &conn,
             FixtureMutation {
                 sequence: 1,
                 mutation_type: "set_item_status",
-                item_id: "t1",
-                payload_json: TO_DONE,
+                item_id,
+                payload_json: r#"{"status":"done"}"#,
                 state: "failed",
-                failure_json: Some(REJECTION),
+                failure_json: Some(r#"{"detail":"rejected"}"#),
                 ..FixtureMutation::default()
             },
         )
         .unwrap();
 
-        // The exception is live while the row is `failed` — this is the same
-        // reopen as the first test above, replayed here as the setup for the
-        // cycle below.
-        conn.execute(
-            "update items set status = 'open', closing_reason = null where id = 't1'",
-            [],
-        )
-        .expect("the failed closing Mutation authorizes this reopen");
+        // The `failed` and `skipped` rows are each a row of the state loop
+        // above; the cycle between them is not. Sync Skip's real transaction
+        // reopens the Item and moves this same row to `skipped` together, so
+        // the reopen here is the setup, not the assertion.
+        assert_reopen(
+            &conn,
+            item_id,
+            Reopen::Authorized,
+            "the failed closing Mutation authorizes this reopen",
+        );
 
-        // The Item closes again (open -> done is unrestricted), and Sync
-        // Skip's real transaction would reopen it and move this same row to
-        // `skipped` together. Simulating just the state move shows the
-        // authorization does not survive past that row leaving `failed`.
+        // The Item closes again (open -> done is unrestricted). Simulating
+        // just the state move shows the authorization does not survive past
+        // this row leaving `failed`.
         conn.execute(
-            "update items set status = 'done', closing_reason = 'Shipped again' where id = 't1'",
-            [],
+            "update items set status = 'done', closing_reason = 'Shipped again' where id = ?1",
+            params![item_id],
         )
         .unwrap();
         conn.execute(
@@ -929,9 +1070,10 @@ mod tests {
         )
         .unwrap();
 
-        let later_reopen = conn.execute("update items set status = 'open' where id = 't1'", []);
-        assert_trigger_refused(
-            later_reopen,
+        assert_reopen(
+            &conn,
+            item_id,
+            Reopen::Refused,
             "once the closing Mutation is no longer failed, a later done -> open write is refused again (ADR-0046)",
         );
     }
