@@ -687,13 +687,17 @@ create a second Backend object, because the first outcome was never observed.
 .SS Agent briefing
 .TP
 .B tk prime
-Print static agent workflow guidance to standard output when the current
-directory has an initialized Repository Store.
+Print current work and project-aware workflow guidance to standard output.
+Show Scope, the next Ticket, active Items, and the whole Plan. A populated Plan
+narrows selection like \fBtk next \-\-plan\fR, intersecting any
+\fBTK_SCOPE\fR. With a configured Remote, also show Mutation counts and
+Remote workflow commands. No Backend access occurs.
 .PP
 .B tk prime
-exits successfully with no output when there is no initialized Repository
-Store, including outside a git repository, so a global agent hook can run it
-in any directory.
+exits successfully with no output when the Repository Store cannot be opened,
+including outside a git repository, so a global agent hook can run it anywhere.
+A read failure after opening exits nonzero with a diagnostic on standard error
+and no briefing on standard output.
 .SH EXIT STATUS
 .TP
 .B 0

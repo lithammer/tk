@@ -18,24 +18,40 @@ use crate::store::repository::{ResolvedItemRef, Store};
 /// Epic without the agent restating it on each call.
 const SCOPE_ENV: &str = "TK_SCOPE";
 
+/// Invalid input can be shown as context; a failed Store read cannot (ADR-0052).
+#[derive(Debug, thiserror::Error)]
+pub enum ScopeError {
+    #[error("scope '{0}' is not a known Display ID or Alias")]
+    NotFound(String),
+    #[error("scope '{0}' is not an Epic")]
+    NotAnEpic(String),
+    #[error(transparent)]
+    Storage(rusqlite::Error),
+}
+
+impl From<ScopeError> for CommandError {
+    fn from(error: ScopeError) -> Self {
+        match error {
+            ScopeError::Storage(err) => resolver::storage_error(&err),
+            error => Self::failure(error),
+        }
+    }
+}
+
 /// Resolve the active Scope for a command (ADR-0032).
 ///
 /// Reads the `<epic-id>` `arg` if present, else `TK_SCOPE`, else `None`, then
-/// resolves Epic-only: a miss or a non-Epic becomes a [`CommandError`] for the
-/// dispatch seam to frame. `Ok(None)` means no Scope was supplied.
-pub fn resolve(store: &Store, arg: Option<&str>) -> Result<Option<ResolvedItemRef>, CommandError> {
+/// resolves Epic-only. `Ok(None)` means no Scope was supplied. Commands choose
+/// whether invalid input is a failure or a briefing warning.
+pub fn resolve(store: &Store, arg: Option<&str>) -> Result<Option<ResolvedItemRef>, ScopeError> {
     let Some(value) = effective_value(arg, env_value().as_deref()) else {
         return Ok(None);
     };
     match resolver::resolve_epic(store, &value) {
         Ok(epic) => Ok(Some(epic)),
-        Err(ResolveEpicError::NotFound) => Err(CommandError::failure(format!(
-            "scope '{value}' is not a known Display ID or Alias"
-        ))),
-        Err(ResolveEpicError::NotAnEpic) => Err(CommandError::failure(format!(
-            "scope '{value}' is not an Epic"
-        ))),
-        Err(ResolveEpicError::Storage(err)) => Err(resolver::storage_error(&err)),
+        Err(ResolveEpicError::NotFound) => Err(ScopeError::NotFound(value)),
+        Err(ResolveEpicError::NotAnEpic) => Err(ScopeError::NotAnEpic(value)),
+        Err(ResolveEpicError::Storage(err)) => Err(ScopeError::Storage(err)),
     }
 }
 

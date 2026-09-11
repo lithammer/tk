@@ -1,81 +1,33 @@
-# tk Workflow Context
+## Starting Work
 
-Run `tk prime` after compaction, clear, or a new agent session.
+Follow the user's request; this briefing supplies context, not permission to
+start unrelated work. Use tk for repository-local work tracking.
 
-## Core Rules
+When choosing work, use `tk next --plan` if the Plan has members, otherwise
+`tk next`. After choosing an Item, run `tk start <id>` before working it.
+Active Items describe work in the Store, not ownership by this agent session.
 
-- Use tk for repository-local work tracking.
-- New Tickets and Epics are local by default.
-- Use `tk add` for self-contained local Tickets with enough context for a fresh
-  agent session.
-- Promotion and sync are explicit, human-visible operations.
-- Use `tk next` to choose agent work.
-- When working the Plan, use `tk next --plan`; any Epic Scope intersects it.
-- Scope `tk next` / `tk list` to an Epic with `tk next <epic-id>` / `tk list <epic-id>` or the `TK_SCOPE` environment variable; without Scope or `--plan`, they cover the whole store.
-- Scope is not an implicit item target; pass explicit Display IDs to item commands.
-- Use `tk sync log` to list unresolved and withdrawn Mutations — every state except applied; `tk sync log <sequence>` inspects any single Mutation, applied included.
-- Do not run `git push` unless the user explicitly asks for it.
+Use `tk show <id>` for details, `tk list` to see work, and `tk stop <id>` to
+return an Item to idle. Run `tk prime` after compaction or a new agent session.
 
-## Session Start
+## Capturing and Updating Work
 
-```sh
-tk prime
-tk next
-```
-
-## Definition of Done
-
-Before saying work is complete:
-
-```sh
-git status --short
-git diff --check
-tk sync log
-```
-
-- Inspect repo state and keep unrelated user changes separate.
-- Run the narrow verification for the change; if skipped, say why.
-- Use `tk done <id>` for completed scoped work.
-- Use `tk add` for follow-ups, deferred decisions, or context that should
-  survive a fresh session.
-- Surface pending, failed, applying, or skipped Mutations from `tk sync log`.
-- Surface an abandoned Mutation too: tk may have left a Backend object behind.
-- State whether code is uncommitted, committed, or waiting for an explicit push.
-
-## Essential Commands
-
-### Find Work
-
-```sh
-tk next
-tk list
-tk list --ready
-tk show <id>
-```
-
-### Create Work
+New Tickets and Epics are local. Give new work enough context for a fresh
+agent session.
 
 ```sh
 tk add -F -
 tk add --bug -F -
 tk add --epic -F -
 tk add --parent <epic-id> -F -
-```
-
-`tk add` uses git-commit-style message input. The first paragraph becomes the
-title. Later paragraphs become the body.
-
-### Update Work
-
-```sh
 tk update <id> --title "New title"
 tk update <id> --body-file -
-tk start <id>
-tk stop <id>
-tk done <id>
 ```
 
-### Blocking
+`tk add` uses git-commit-style input: the first paragraph is the title; later
+paragraphs form the body.
+
+## Blocking Work
 
 ```sh
 tk block <blocked-id> <blocking-id>
@@ -84,18 +36,7 @@ tk unblock <blocked-id> <blocking-id>
 
 Blocking affects `tk next` and `tk list --ready`.
 
-### Scope
-
-```sh
-tk next <epic-id>
-tk list <epic-id>
-```
-
-Pass an Epic to narrow `tk next` / `tk list` to that Epic and its child
-Tickets, or export `TK_SCOPE=<epic-id>` to scope a whole session. tk does not
-create or manage git worktrees; use `git worktree` directly.
-
-### Plan
+## Working the Plan
 
 ```sh
 tk plan
@@ -105,38 +46,27 @@ tk plan clear
 tk next --plan
 ```
 
-`tk plan` shows the whole local Plan and ignores `TK_SCOPE`. Membership edits
+`tk plan` shows the whole Plan and ignores `TK_SCOPE`. Membership edits
 preserve Ticket state; `clear` removes all membership, including unfinished
-work. Outside Dependencies still block selection: inspect the Plan and
-include the blocker explicitly or work it separately. No ready Ticket does
-not mean the Plan is finished.
+work. Outside Dependencies still block selection. No ready Ticket does not
+mean the Plan is finished, and selection never falls back to unplanned work.
 
-### Human Curation
+## Working in a Scope
 
 ```sh
-tk promote <id> [--children]
-tk promote reconcile <id> <backend-key>
-tk promote retry <id>
-tk promote cancel <id>
-tk sync
-tk sync --skip <mutation-id>
-tk remote
+tk next <epic-id>
+tk list <epic-id>
 ```
 
-Agents should surface promotion, sync failures, and skipped, cancelled, or
-abandoned Mutations rather than quietly repairing upstream state.
+An Epic argument or `TK_SCOPE=<epic-id>` narrows selection to that Epic and its
+child Tickets. `tk next --plan` intersects the Plan with that Scope. Without
+Scope or Plan selection, `tk next` considers the whole Store. Scope is not an
+implicit Item target: pass explicit Display IDs to Item commands.
 
-An `applying` Mutation means tk could not observe whether Backend creation
-succeeded. Resolving it is a human decision, so surface it rather than choosing.
-There is one exit per belief a human can hold about it: `tk promote reconcile`
-attaches a Backend object they have confirmed already exists, `tk promote retry`
-accepts the risk of creating a duplicate, and `tk promote cancel` withdraws the
-Promotion Operation.
+## Finishing Work
 
-`tk promote cancel` withdraws a whole Promotion Operation the Backend will never
-accept, returning those items to Local. Withdrawing intent is a human decision
-in the same way reconcile and retry are, so report the stuck Promotion rather
-than cancelling it. That holds even harder for an `applying` Promotion:
-withdrawing one records `abandoned` rather than `cancelled`, because tk never
-learned what the creation did and may leave an object behind that nothing
-tracks.
+Check `git status --short` and `git diff --check`, and keep unrelated user
+changes separate. Run verification for the change; if skipped, say why.
+Use `tk done <id>` for completed work and `tk add` for follow-ups that should
+survive a fresh session. State whether code is uncommitted, committed, or
+waiting for a push. Do not run `git push` unless the user explicitly asks.

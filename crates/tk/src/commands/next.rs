@@ -101,21 +101,9 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     }
 }
 
-/// Render the default `tk next` line: a styled Display ID, an unstyled
-/// `: ` separator, then the sanitized title. `tk next` only ever selects
-/// Tickets, so the Display ID always takes the Ticket [`palette::id_style`].
-/// The title is user/Remote-controlled text at an output boundary, so it
-/// runs through [`sanitize::write_sanitized_line`] rather than a raw
-/// `write!`; it renders plain (not `palette::HEADER`) — this is a row, not
-/// a detail header.
-///
-/// `show::render_sub_row` writes the same `<styled-id>: <sanitized-title>`
-/// core and is the closest analogue, but it is not shared: it also carries a
-/// caller-supplied glyph, a status glyph, a conditional `(Epic)` badge, and a
-/// trailing `● P_`, none of which a selection line wants. `item_row` and
-/// `item_header` were extracted for two callers emitting identical bytes;
-/// this would parameterise four optionals for one caller that wants none.
-fn render_selection<W: Write + ?Sized>(
+/// Selected Ticket row for Next and Prime: Ticket-styled Display ID, Pending
+/// Promotion label when owed, and sanitized title (ADR-0041, ADR-0052).
+pub(crate) fn render_selection<W: Write + ?Sized>(
     stdout: &mut W,
     ticket: &NextTicket,
     styler: SubStyler,

@@ -140,7 +140,12 @@ impl PlanTicket {
 pub fn read(store: &Store) -> Result<Vec<PlanTicket>, PlanError> {
     // One read snapshot keeps membership, waiting reasons and footer counts consistent.
     let tx = store.conn.unchecked_transaction()?;
-    let mut stmt = tx.prepare(
+    Ok(read_snapshot(&tx)?)
+}
+
+/// Read the whole Plan inside the caller's snapshot (ADR-0052).
+pub(crate) fn read_snapshot(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<PlanTicket>> {
+    let mut stmt = conn.prepare(
         concat!("select i.display_value, i.title, i.priority, i.status, i.work_state, i.selection_state, i.id, i.ticket_kind, ", pending_promotion_sql!("i"), " \
          from plan_members p join items i on i.id = p.item_id order by i.created_seq"),
     )?;
@@ -166,7 +171,7 @@ pub fn read(store: &Store) -> Result<Vec<PlanTicket>, PlanError> {
         indices.insert(id, tickets.len());
         tickets.push(ticket);
     }
-    let mut dependencies = tx.prepare(
+    let mut dependencies = conn.prepare(
         "select d.blocked_id, b.display_value, \
                 not exists (select 1 from plan_members where item_id = b.id) \
          from dependencies d join plan_members p on p.item_id = d.blocked_id \
@@ -185,7 +190,7 @@ pub fn read(store: &Store) -> Result<Vec<PlanTicket>, PlanError> {
         let (id, blocker) = row?;
         tickets[indices[&id]].blockers.push(blocker);
     }
-    let mut external = tx.prepare(
+    let mut external = conn.prepare(
         "select eb.item_id, eb.reason from external_blockers eb \
          join plan_members p on p.item_id = eb.item_id \
          where eb.resolved_at is null order by eb.created_at, eb.id",

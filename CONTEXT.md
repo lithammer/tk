@@ -153,7 +153,8 @@ The **`tk`** command intent for moving a **Ticket** from `parked` **Selection St
 _Avoid_: Resume, Unhold, Restore
 
 **Prime**:
-The **`tk`** command intent for generating scope-aware agent briefing output.
+The **`tk`** command intent for generating a project-aware agent briefing whose
+workflow guidance reflects the current **Repository Store**.
 _Avoid_: Memory Dump
 
 **Search**:
@@ -576,8 +577,13 @@ _Avoid_: ticket, tickets
   detached first. It lists each canonical identity once by its latest Detach
   and omits an identity while it is the current **Backend Binding**. List,
   next, and search views do not surface that history.
-- **Prime** provides agent workflow guidance, essential commands, and close-out reminders.
-- v1 **Prime** prints static command-owned Markdown embedded from `crates/tk/src/commands/prime.md` via Rust `include_str!`.
+- **Prime** reports current **Repository Store** state before a fixed,
+  project-aware workflow handbook (ADR-0052).
+- **Prime** uses a valid inherited `TK_SCOPE` for current-work selection while
+  showing the whole **Plan**. A populated **Plan** further narrows selection as
+  **`tk next --plan`** does.
+- **Prime** reports active **Items** as Store context, not as work owned by the
+  current agent or **Workspace**.
 - **Prime** prints its briefing only when a **Repository Store** is initialized and openable in the current directory; in every other case — no store, outside a git repository, or any store-open failure — it exits 0 with empty stdout and empty stderr so a global agent hook can run it in any directory without noise.
 - A **Repository Store** is shared by all **Workspaces** for the same version-control repository.
 - A **Repository Store** is untracked local state by default.
@@ -1050,8 +1056,9 @@ _Avoid_: ticket, tickets
 - Inferring **Scope** from branch names was considered, and shipped against the frozen oracle — resolved: removed; branch names target a single **Ticket**, so inference produced a useless narrowing and could not be turned off (ADR-0022).
 - A `tk/<display-id>-<slug>` **Ticket Branch** contract was considered — resolved: kept only as an optional convention; **`tk`** neither creates nor requires it.
 - Combining status changes and worktree creation in **Start** was considered — resolved: **Start** marks work active; **`tk`** does not create worktrees, leaving `git worktree` to the harness (ADR-0022).
-- Static agent workflow dumps were considered — resolved: v1 **Prime** prints reviewed project-specific workflow guidance.
-- Dynamic **Prime** output was considered for v1 — resolved: v1 prints static command-owned Markdown from `src/commands/prime.md`.
+- Static agent workflow dumps were considered — resolved: **Prime** composes a
+  project-aware briefing whose sections reflect the current **Repository
+  Store** (ADR-0052).
 - Configurable worktree root and layout were considered for v1 (ADR-0007) — superseded: **`tk`** no longer creates worktrees (ADR-0022).
 - Naming the **Epic**-narrowing concept **Filter** was considered — resolved: **Scope** is the term, because it bounds **Effective Priority** propagation and changes which **Ticket** **`tk next`** picks, not merely which rows **`tk list`** shows; "filter" is the verb **`tk list`** performs (ADR-0022).
 - Defaulting item commands from **Scope** was considered — resolved: **Scope** is not an implicit item target; commands that inspect, update, or promote a specific item require an explicit **Display ID** in v1.
