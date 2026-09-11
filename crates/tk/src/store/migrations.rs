@@ -683,31 +683,19 @@ mod tests {
 
     #[test]
     fn every_variant_of_each_reopen_conjunct_declares_a_verdict() {
-        // The five conjuncts of migration 016's reopen exception are an audit
-        // surface: a Mutation state, a Mutation Type, or an Item Class added
-        // later needs an answer here. Four of the five are domain enums, so
-        // each loop below varies one conjunct across its whole set and holds
-        // the others at the authorizing shape — the Item's own `failed`
-        // `set_item_status` row targeting `done`.
+        // Each loop varies one conjunct of migration 016's reopen exception
+        // across its whole set and holds the rest at the authorizing shape:
+        // the Item's own `failed` `set_item_status` row targeting `done`.
         //
-        // The wildcard-free `match` inside each loop enforces that, not the
-        // iteration: the `match` is over the loop variable's type, so a new
-        // variant stops this file compiling until someone declares its verdict.
-        // `MutationState::ALL` and the written-out `ItemClass` and `Lifecycle`
-        // arrays only fix the iteration order — `pub const ALL: [Self; 7]`
-        // keeps compiling when the enum grows an eighth variant.
-        // `store/mutations.rs` pins both `ALL` lists to the `mutations` CHECK,
-        // but that is a test rather than a compile error, so it does not make
-        // the iteration exhaustive.
+        // The wildcard-free `match` in each loop is the guard, not the
+        // iteration. It is over the loop variable's type, so a new variant
+        // stops this file compiling until someone declares its verdict; the
+        // arrays only fix the order. A new `ItemClass` or `Lifecycle` variant
+        // must therefore join its array here as well as its `match` arm, or
+        // the verdict is declared and never run.
         //
-        // Declaring a verdict and running it are therefore separate: `ItemClass`
-        // and `Lifecycle` have no `ALL`, so a variant added to either must join
-        // its array here as well as its `match` arm, or the trigger never sees
-        // the verdict the compiler forced someone to write.
-        //
-        // The fifth conjunct, `m.item_id = new.id`, is not an enum: "another
-        // Item's failed close does not authorize this one" is a scenario, and
-        // it stays its own test below.
+        // The fifth conjunct, `m.item_id = new.id`, is a scenario rather than
+        // a value and stays its own test below.
 
         // `state`: only `failed` authorizes. Each arm also names the Mutation
         // Type and failure evidence that state admits, because not every state
