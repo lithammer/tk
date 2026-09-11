@@ -133,6 +133,8 @@ mod tests {
     use crate::commands::sync as sync_command;
     use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
     use crate::domain::backend_operation::BackendItemIdentity;
+    use crate::domain::item_class::ItemClass;
+    use crate::domain::mutation_type::MutationType;
     use crate::store::testing::{
         FixtureItem, FixtureMutation, FixtureRemote, TmpStore, apply_promotion_receipt,
         commit_promotion, insert_dependency, insert_external_blocker, insert_fixture_item,
@@ -588,10 +590,8 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                mutation_type: "update_ticket",
-                item_id: "target",
                 state: "pending",
-                ..FixtureMutation::default()
+                ..FixtureMutation::new(MutationType::UpdateTicket, "target")
             },
         )
         .unwrap();
@@ -799,50 +799,38 @@ mod tests {
         for mutation in [
             FixtureMutation {
                 sequence: 1,
-                mutation_type: "update_ticket",
-                item_id: "target",
                 state: "applied",
-                ..FixtureMutation::default()
+                ..FixtureMutation::new(MutationType::UpdateTicket, "target")
             },
             FixtureMutation {
                 sequence: 2,
-                mutation_type: "update_ticket",
-                item_id: "target",
                 state: "pending",
-                ..FixtureMutation::default()
+                ..FixtureMutation::new(MutationType::UpdateTicket, "target")
             },
             FixtureMutation {
                 sequence: 3,
-                mutation_type: "set_item_status",
-                item_id: "target",
                 state: "failed",
                 failure_json: Some(r#"{"detail":"HTTP 422: rejected"}"#),
-                ..FixtureMutation::default()
+                ..FixtureMutation::new(MutationType::SetItemStatus, "target")
             },
             // The local edge is already gone, which is why the Mutation exists:
             // the withdrawal loses the intent to remove it upstream.
             FixtureMutation {
                 sequence: 4,
-                mutation_type: "remove_dependency",
-                item_id: "blocked",
                 payload_json: r#"{"blocking_id":"target"}"#,
                 state: "pending",
-                ..FixtureMutation::default()
+                ..FixtureMutation::new(MutationType::RemoveDependency, "blocked")
             },
             FixtureMutation {
                 sequence: 5,
-                mutation_type: "set_item_status",
-                item_id: "target",
                 state: "skipped",
                 failure_json: Some(r#"{"detail":"backend said no"}"#),
-                ..FixtureMutation::default()
+                ..FixtureMutation::new(MutationType::SetItemStatus, "target")
             },
             FixtureMutation {
                 sequence: 6,
-                mutation_type: "update_ticket",
-                item_id: "target",
                 state: "cancelled",
-                ..FixtureMutation::default()
+                ..FixtureMutation::new(MutationType::UpdateTicket, "target")
             },
         ] {
             insert_fixture_mutation(&conn, mutation).unwrap();
@@ -922,12 +910,10 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                mutation_type: "promote_epic",
-                item_id: "target",
-                item_class: "epic",
+                item_class: ItemClass::Epic,
                 state: "applied",
                 promotion_operation_id: Some("op-1"),
-                ..FixtureMutation::default()
+                ..FixtureMutation::new(MutationType::PromoteEpic, "target")
             },
         )
         .unwrap();
@@ -937,11 +923,9 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 2,
-                mutation_type: "promote_ticket",
-                item_id: "member",
                 state: "cancelled",
                 promotion_operation_id: Some("op-1"),
-                ..FixtureMutation::default()
+                ..FixtureMutation::new(MutationType::PromoteTicket, "member")
             },
         )
         .unwrap();
@@ -949,13 +933,11 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 3,
-                mutation_type: "add_ticket_to_epic",
-                item_id: "member",
                 payload_json: r#"{"epic_id":"target"}"#,
                 state: "failed",
                 failure_json: Some(r#"{"detail":"sub-issues unavailable"}"#),
                 promotion_operation_id: Some("op-1"),
-                ..FixtureMutation::default()
+                ..FixtureMutation::new(MutationType::AddTicketToEpic, "member")
             },
         )
         .unwrap();
@@ -1033,11 +1015,9 @@ mod tests {
                 &conn,
                 FixtureMutation {
                     sequence: 1,
-                    mutation_type: "promote_ticket",
-                    item_id: "child",
                     state,
                     promotion_operation_id: Some("op-1"),
-                    ..FixtureMutation::default()
+                    ..FixtureMutation::new(MutationType::PromoteTicket, "child")
                 },
             )
             .unwrap();
@@ -1045,12 +1025,10 @@ mod tests {
                 &conn,
                 FixtureMutation {
                     sequence: 2,
-                    mutation_type: "add_ticket_to_epic",
-                    item_id: "child",
                     payload_json: r#"{"epic_id":"target"}"#,
                     state: "pending",
                     promotion_operation_id: Some("op-1"),
-                    ..FixtureMutation::default()
+                    ..FixtureMutation::new(MutationType::AddTicketToEpic, "child")
                 },
             )
             .unwrap();
@@ -1107,12 +1085,10 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                mutation_type: "promote_ticket",
-                item_id: "other",
                 state: "applying",
                 failure_json: Some(r#"{"detail":"timed out"}"#),
                 promotion_operation_id: Some("op-1"),
-                ..FixtureMutation::default()
+                ..FixtureMutation::new(MutationType::PromoteTicket, "other")
             },
         )
         .unwrap();
@@ -1120,10 +1096,8 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 2,
-                mutation_type: "update_ticket",
-                item_id: "target",
                 state: "pending",
-                ..FixtureMutation::default()
+                ..FixtureMutation::new(MutationType::UpdateTicket, "target")
             },
         )
         .unwrap();

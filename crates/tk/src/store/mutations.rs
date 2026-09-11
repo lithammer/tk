@@ -75,9 +75,9 @@ pub fn append(conn: &Connection, req: AppendRequest<'_>) -> Result<i64, AppendEr
          ) values (?1, ?2, ?3, ?4, ?5, 'pending', null, ?6, ?6, ?7)",
         params![
             sequence,
-            req.mutation_type.text(),
+            req.mutation_type,
             req.item_id,
-            req.item_class.text(),
+            req.item_class,
             payload_json,
             req.now_iso,
             req.promotion_operation_id,
@@ -338,26 +338,19 @@ pub(crate) fn transition(
     };
 
     let changed = match column {
-        FailureColumn::Preserve => conn.execute(
-            PRESERVING,
-            params![req.sequence, req.from.text(), req.to.text(), req.now],
-        )?,
+        FailureColumn::Preserve => {
+            conn.execute(PRESERVING, params![req.sequence, req.from, req.to, req.now])?
+        }
         FailureColumn::Clear => conn.execute(
             OVERWRITING,
-            params![
-                req.sequence,
-                req.from.text(),
-                req.to.text(),
-                req.now,
-                None::<String>
-            ],
+            params![req.sequence, req.from, req.to, req.now, None::<String>],
         )?,
         FailureColumn::Record(failure) => conn.execute(
             OVERWRITING,
             params![
                 req.sequence,
-                req.from.text(),
-                req.to.text(),
+                req.from,
+                req.to,
                 req.now,
                 serde_json::to_string(failure).expect("Failure serializes infallibly")
             ],
@@ -905,13 +898,11 @@ mod tests {
         insert_fixture_mutation(
             conn,
             FixtureMutation {
-                mutation_type: "promote_ticket",
-                item_id,
                 payload_json: &payload,
                 state,
                 failure_json: (state == "failed").then_some(r#"{"detail":"boom"}"#),
                 promotion_operation_id: Some("promo-1"),
-                ..FixtureMutation::default()
+                ..FixtureMutation::new(MutationType::PromoteTicket, item_id)
             },
         )
         .unwrap();
@@ -1020,10 +1011,8 @@ mod tests {
         insert_fixture_mutation(
             &conn,
             FixtureMutation {
-                mutation_type: "update_ticket",
-                item_id: "t1",
                 payload_json: r#"{"title":"T","body":""}"#,
-                ..FixtureMutation::default()
+                ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
             },
         )
         .unwrap();
@@ -1068,17 +1057,15 @@ mod tests {
             // The `mutations` composite foreign key pins item_class to the
             // Item's own class, so each Promotion kind needs its own target.
             let (item_id, item_class) = match mutation_type {
-                MutationType::PromoteEpic => ("e1", "epic"),
-                _ => ("t1", "ticket"),
+                MutationType::PromoteEpic => ("e1", ItemClass::Epic),
+                _ => ("t1", ItemClass::Ticket),
             };
             insert_fixture_mutation(
                 &conn,
                 FixtureMutation {
-                    mutation_type: mutation_type.text(),
-                    item_id,
                     item_class,
                     payload_json: &payload,
-                    ..FixtureMutation::default()
+                    ..FixtureMutation::new(mutation_type, item_id)
                 },
             )
             .unwrap();
@@ -1100,10 +1087,8 @@ mod tests {
         insert_fixture_mutation(
             &conn,
             FixtureMutation {
-                mutation_type: "promote_ticket",
-                item_id: "t1",
                 payload_json: r#"{"title":"T"}"#,
-                ..FixtureMutation::default()
+                ..FixtureMutation::new(MutationType::PromoteTicket, "t1")
             },
         )
         .unwrap();
@@ -1146,13 +1131,11 @@ mod tests {
         insert_fixture_mutation(
             conn,
             FixtureMutation {
-                mutation_type: mutation_type.text(),
-                item_id: "t1",
                 payload_json: &payload,
                 state: state.text(),
                 failure_json,
                 promotion_operation_id: mutation_type.is_promotion().then_some("promo-1"),
-                ..FixtureMutation::default()
+                ..FixtureMutation::new(mutation_type, "t1")
             },
         )
         .unwrap();
@@ -1513,10 +1496,8 @@ mod tests {
                 &conn,
                 FixtureMutation {
                     sequence,
-                    mutation_type: "update_ticket",
-                    item_id: "t1",
                     payload_json: r#"{"title":"T","body":""}"#,
-                    ..FixtureMutation::default()
+                    ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
                 },
             )
             .unwrap();

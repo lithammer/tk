@@ -2,6 +2,8 @@
 
 use crate::cli::{self, Exit};
 use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
+use crate::domain::item_class::ItemClass;
+use crate::domain::mutation_type::MutationType;
 use crate::store::testing::{
     FixtureItem, FixtureMutation, TmpStore, insert_fixture_item, insert_fixture_mutation,
 };
@@ -21,7 +23,7 @@ fn show_identifies_pending_promotion_in_header() {
         },
     )
     .unwrap();
-    promotion(&conn, "work", "ticket", 1, "pending");
+    promotion(&conn, "work", ItemClass::Ticket, 1, "pending");
     drop(conn);
     let output = run(&store, &["show", "tk-1"]);
     assert!(
@@ -47,7 +49,7 @@ fn grep_identifies_pending_promotion_without_changing_content_matches() {
         },
     )
     .unwrap();
-    promotion(&conn, "work", "ticket", 1, "applying");
+    promotion(&conn, "work", ItemClass::Ticket, 1, "applying");
     drop(conn);
     let output = run(&store, &["grep", "needle"]);
     assert!(
@@ -73,7 +75,7 @@ fn next_identifies_pending_promotion_but_quiet_keeps_the_bare_id() {
         },
     )
     .unwrap();
-    promotion(&conn, "work", "ticket", 1, "failed");
+    promotion(&conn, "work", ItemClass::Ticket, 1, "failed");
     drop(conn);
     assert_eq!(run(&store, &["next"]), "tk-1: [pending promotion] Work\n");
     assert_eq!(run(&store, &["next", "--quiet"]), "tk-1\n");
@@ -95,7 +97,7 @@ fn plan_identifies_pending_promotion_even_when_the_ticket_is_done() {
         },
     )
     .unwrap();
-    promotion(&conn, "work", "ticket", 1, "pending");
+    promotion(&conn, "work", ItemClass::Ticket, 1, "pending");
     drop(conn);
     run(&store, &["plan", "add", "tk-1"]);
     let output = run(&store, &["plan"]);
@@ -142,10 +144,10 @@ fn show_labels_each_related_items_own_pending_promotion() {
         )
         .unwrap();
     }
-    promotion(&conn, "epic", "epic", 1, "pending");
-    promotion(&conn, "work", "ticket", 2, "pending");
-    promotion(&conn, "before", "ticket", 3, "failed");
-    promotion(&conn, "after", "ticket", 4, "applying");
+    promotion(&conn, "epic", ItemClass::Epic, 1, "pending");
+    promotion(&conn, "work", ItemClass::Ticket, 2, "pending");
+    promotion(&conn, "before", ItemClass::Ticket, 3, "failed");
+    promotion(&conn, "after", ItemClass::Ticket, 4, "applying");
     crate::store::testing::insert_dependency(&conn, "before", "work").unwrap();
     crate::store::testing::insert_dependency(&conn, "work", "after").unwrap();
     drop(conn);
@@ -213,14 +215,12 @@ fn recorded_identity_removes_binding_label_while_queued_edits_stay_visible() {
         },
     )
     .unwrap();
-    promotion(&conn, "work", "ticket", 1, "applying");
+    promotion(&conn, "work", ItemClass::Ticket, 1, "applying");
     insert_fixture_mutation(
         &conn,
         FixtureMutation {
             sequence: 2,
-            item_id: "work",
-            mutation_type: "update_ticket",
-            ..FixtureMutation::default()
+            ..FixtureMutation::new(MutationType::UpdateTicket, "work")
         },
     )
     .unwrap();
@@ -263,7 +263,7 @@ fn run(store: &TmpStore, args: &[&str]) -> String {
 fn promotion(
     conn: &rusqlite::Connection,
     item_id: &str,
-    item_class: &str,
+    item_class: ItemClass,
     sequence: i64,
     state: &str,
 ) {
@@ -271,17 +271,11 @@ fn promotion(
         conn,
         FixtureMutation {
             sequence,
-            item_id,
             item_class,
-            mutation_type: if item_class == "epic" {
-                "promote_epic"
-            } else {
-                "promote_ticket"
-            },
             state,
             payload_json: r#"{"backend_kind":"github","title":"Work","body":""}"#,
             failure_json: (state == "failed").then_some(r#"{"detail":"rejected"}"#),
-            ..FixtureMutation::default()
+            ..FixtureMutation::new(item_class.promotion_mutation_type(), item_id)
         },
     )
     .unwrap();

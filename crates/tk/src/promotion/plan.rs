@@ -284,10 +284,7 @@ fn collect_item_findings(
 
 fn promotion_draft(item: &GraphItem, backend: BackendKind) -> MutationDraft {
     MutationDraft {
-        mutation_type: match item.item_class {
-            ItemClass::Ticket => MutationType::PromoteTicket,
-            ItemClass::Epic => MutationType::PromoteEpic,
-        },
+        mutation_type: item.item_class.promotion_mutation_type(),
         item_id: item.id.clone(),
         item_class: item.item_class,
         payload: MutationPayload::Promotion(Promotion {

@@ -570,10 +570,7 @@ mod tests {
                 &store.conn,
                 FixtureMutation {
                     sequence,
-                    mutation_type: "update_ticket",
-                    item_id: "t",
-                    item_class: "ticket",
-                    ..FixtureMutation::default()
+                    ..FixtureMutation::new(MutationType::UpdateTicket, "t")
                 },
             )
             .unwrap();
@@ -596,11 +593,8 @@ mod tests {
             &store.conn,
             FixtureMutation {
                 sequence: 1,
-                mutation_type: "update_ticket",
-                item_id: "t",
-                item_class: "ticket",
                 state: "applied",
-                ..FixtureMutation::default()
+                ..FixtureMutation::new(MutationType::UpdateTicket, "t")
             },
         )
         .unwrap();
@@ -621,11 +615,8 @@ mod tests {
             &store.conn,
             FixtureMutation {
                 sequence: 1,
-                mutation_type: "promote_ticket",
-                item_id: "t",
-                item_class: "ticket",
                 state: "pending",
-                ..FixtureMutation::default()
+                ..FixtureMutation::new(MutationType::PromoteTicket, "t")
             },
         )
         .unwrap();

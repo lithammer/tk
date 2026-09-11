@@ -298,6 +298,7 @@ mod tests {
     use super::*;
     use crate::clock::FakeClock;
     use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
+    use crate::domain::mutation_type::MutationType;
     use crate::proc::{FakeRunner, RunOutput};
     use crate::render::Styler;
     use crate::store::testing::{
@@ -1051,12 +1052,9 @@ mod tests {
                 &conn,
                 FixtureMutation {
                     sequence: 1,
-                    mutation_type: "promote_ticket",
-                    item_id: "t1",
-                    item_class: "ticket",
                     state,
                     failure_json: (state == "failed").then_some(r#"{"detail":"prior"}"#),
-                    ..FixtureMutation::default()
+                    ..FixtureMutation::new(MutationType::PromoteTicket, "t1")
                 },
             )
             .unwrap();

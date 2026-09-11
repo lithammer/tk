@@ -330,20 +330,18 @@ mod tests {
         store: &Store,
         sequence: i64,
         item_id: &str,
-        item_class: &str,
-        mutation_type: &str,
+        item_class: ItemClass,
+        mutation_type: MutationType,
         state: &str,
     ) {
         insert_fixture_mutation(
             &store.conn,
             FixtureMutation {
                 sequence,
-                mutation_type,
-                item_id,
                 item_class,
                 state,
                 failure_json: (state == "failed").then_some(r#"{"detail":"prior"}"#),
-                ..FixtureMutation::default()
+                ..FixtureMutation::new(mutation_type, item_id)
             },
         )
         .unwrap();
@@ -382,12 +380,10 @@ mod tests {
                 insert_fixture_mutation(
                     &store.conn,
                     FixtureMutation {
-                        item_id: "work",
-                        mutation_type: "promote_ticket",
                         state,
                         payload_json: r#"{"backend_kind":"github","title":"Work","body":""}"#,
                         failure_json: (state == "failed").then_some(r#"{"detail":"rejected"}"#),
-                        ..FixtureMutation::default()
+                        ..FixtureMutation::new(MutationType::PromoteTicket, "work")
                     },
                 )
                 .unwrap();
@@ -991,18 +987,25 @@ mod tests {
         for (i, state) in MutationState::ALL.into_iter().enumerate() {
             let seq = i64::try_from(i).unwrap() + 1;
             let (mutation_type, expect_pending, expect_failed) = match state {
-                MutationState::Pending => ("update_ticket", true, false),
-                MutationState::Failed => ("update_ticket", false, true),
+                MutationState::Pending => (MutationType::UpdateTicket, true, false),
+                MutationState::Failed => (MutationType::UpdateTicket, false, true),
                 MutationState::Applied | MutationState::Skipped | MutationState::Cancelled => {
-                    ("update_ticket", false, false)
+                    (MutationType::UpdateTicket, false, false)
                 }
                 MutationState::Applying | MutationState::Abandoned => {
-                    ("promote_ticket", false, false)
+                    (MutationType::PromoteTicket, false, false)
                 }
             };
             let item_id = state.text();
             seed_ticket(&store, item_id, &format!("tk-{seq}"), "open", seq);
-            seed_mutation(&store, seq, item_id, "ticket", mutation_type, state.text());
+            seed_mutation(
+                &store,
+                seq,
+                item_id,
+                ItemClass::Ticket,
+                mutation_type,
+                state.text(),
+            );
             expected.push((state, mutation_type, expect_pending, expect_failed));
         }
 
@@ -1043,8 +1046,8 @@ mod tests {
         for mutation_type in promotions {
             // The composite foreign key pins item_class to the target's class.
             let (item_id, item_class) = match mutation_type {
-                MutationType::PromoteTicket => ("t", "ticket"),
-                MutationType::PromoteEpic => ("e", "epic"),
+                MutationType::PromoteTicket => ("t", ItemClass::Ticket),
+                MutationType::PromoteEpic => ("e", ItemClass::Epic),
                 other => panic!(
                     "new Promotion type {} needs a fixture target Item here",
                     other.text()
@@ -1052,14 +1055,7 @@ mod tests {
             };
             for state in ["pending", "failed"] {
                 seq += 1;
-                seed_mutation(
-                    &store,
-                    seq,
-                    item_id,
-                    item_class,
-                    mutation_type.text(),
-                    state,
-                );
+                seed_mutation(&store, seq, item_id, item_class, mutation_type, state);
             }
         }
 
@@ -1080,8 +1076,22 @@ mod tests {
         // exactly as pending as one queued behind a Backend Item.
         let store = open_seeded();
         seed_ticket(&store, "t1", "tk-1", "open", 1);
-        seed_mutation(&store, 1, "t1", "ticket", "promote_ticket", "pending");
-        seed_mutation(&store, 2, "t1", "ticket", "set_item_status", "pending");
+        seed_mutation(
+            &store,
+            1,
+            "t1",
+            ItemClass::Ticket,
+            MutationType::PromoteTicket,
+            "pending",
+        );
+        seed_mutation(
+            &store,
+            2,
+            "t1",
+            ItemClass::Ticket,
+            MutationType::SetItemStatus,
+            "pending",
+        );
         let rows = list_rows(&store, ListOptions::default()).unwrap();
         assert_eq!(rows.len(), 1);
         assert!(rows[0].has_pending_mutation);
@@ -1092,7 +1102,14 @@ mod tests {
     fn epic_with_its_own_failed_mutation_reports_failed() {
         let store = open_seeded();
         seed_epic(&store, "e1", "tk-1", "open", 1);
-        seed_mutation(&store, 1, "e1", "epic", "update_epic", "failed");
+        seed_mutation(
+            &store,
+            1,
+            "e1",
+            ItemClass::Epic,
+            MutationType::UpdateEpic,
+            "failed",
+        );
         let rows = list_rows(&store, ListOptions::default()).unwrap();
         assert_eq!(rows.len(), 1);
         assert!(rows[0].has_failed_mutation);
@@ -1117,7 +1134,14 @@ mod tests {
             },
         )
         .unwrap();
-        seed_mutation(&store, 1, "child", "ticket", "update_ticket", "pending");
+        seed_mutation(
+            &store,
+            1,
+            "child",
+            ItemClass::Ticket,
+            MutationType::UpdateTicket,
+            "pending",
+        );
         let rows = list_rows(&store, ListOptions::default()).unwrap();
         let epic_row = rows.iter().find(|r| r.id == "epic").unwrap();
         assert!(!epic_row.has_pending_mutation);
