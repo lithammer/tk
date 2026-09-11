@@ -608,7 +608,7 @@ mod tests {
     fn insert_done_item(conn: &Connection, class: ItemClass) -> &'static str {
         let (id, display, ticket_kind, priority) = match class {
             ItemClass::Ticket => ("t1", "tk-1", Some("task"), Some("P2")),
-            // The `items` CHECK confines both columns to Tickets.
+            // The `items` CHECK confines `ticket_kind` and `priority` to Tickets.
             ItemClass::Epic => ("e1", "tk-2", None, None),
         };
         insert_fixture_item(
@@ -797,8 +797,8 @@ mod tests {
 
         // `mutation_type`: only `set_item_status` carries a Lifecycle change,
         // so only it can be the close whose failure the exception recognises.
-        // Every kind is seedable as `failed` against the same Item, so this
-        // axis varies alone.
+        // No CHECK forces a second conjunct to move with it, so this axis
+        // varies alone — unlike `state` above.
         for mutation_type in MutationType::ALL {
             let (verdict, why) = match mutation_type {
                 MutationType::SetItemStatus => (
