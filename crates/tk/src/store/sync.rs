@@ -1345,11 +1345,35 @@ pub fn mark_mutation_skipped(
         .optional()?;
     let (prior, mutation_type, target_status, item_id) =
         row.ok_or(MarkSkippedError::MutationNotFound(sequence))?;
+    // Ahead of the state gate on purpose: migration 010's CHECK makes
+    // `applying` and `abandoned` Promotion-only, so asking the Mutation Type
+    // first is what gets such a row the refusal that names `tk promote
+    // cancel`, not the blunter "not failed" one.
     if mutation_type.is_promotion() {
         return Err(MarkSkippedError::CannotSkipPromotion(sequence));
     }
-    if prior != MutationState::Failed {
-        return Err(MarkSkippedError::MutationNotFailed(sequence));
+    // Exhaustive by name, like the Mutation Type match below: a Mutation state
+    // added later has to answer whether Sync Skip may curate it, instead of
+    // landing in a blanket "not failed" refusal nobody decided on.
+    //
+    // `failed`-only is ADR-0038's rule. `mutations::transition` refuses every
+    // other edge into `skipped` on its own, so this gate is not what holds the
+    // edge; it is what names the refusal. A row that reached `transition`
+    // instead comes back as `MarkSkippedError::Transition`, which the operator
+    // sees through the Ticket-bug frame (ADR-0043) rather than as a refusal
+    // they can act on.
+    match prior {
+        MutationState::Failed => {}
+        MutationState::Pending
+        | MutationState::Skipped
+        | MutationState::Cancelled
+        | MutationState::Applied
+        // Unreachable past the Promotion refusal above; named for the same
+        // reason the Mutation Type match names its own Promotion arms.
+        | MutationState::Applying
+        | MutationState::Abandoned => {
+            return Err(MarkSkippedError::MutationNotFailed(sequence));
+        }
     }
 
     // Exhaustive by name, following `MutationType::is_promotion`: a Mutation
@@ -2379,6 +2403,65 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    /// Seed one Mutation per `(sequence, state)`.
+    ///
+    /// The `mutations` CHECK pairs `applying` and `abandoned` with
+    /// `promote_ticket` / `promote_epic` and a matching `item_class`, so those
+    /// rows are seeded as Promotions; they target a Local Ticket awaiting
+    /// Promotion because that is what a Promotion addresses, not because the
+    /// CHECK inspects Origin. The rest are edits to a backend-bound Ticket.
+    fn seed_states(conn: &Connection, states: &[(i64, MutationState)]) {
+        backend_ticket(conn, "t1", "gh-1", "1", 1);
+        insert_fixture_item(
+            conn,
+            FixtureItem {
+                id: "t2",
+                display: "tk-2",
+                title: "Local work",
+                origin: "local",
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+
+        for (sequence, state) in states {
+            // Exhaustive so a state added later has to say which shape holds
+            // it, rather than defaulting into the edit branch.
+            let (mutation_type, item_id, payload_json) = match state {
+                MutationState::Applying | MutationState::Abandoned => (
+                    MutationType::PromoteTicket,
+                    "t2",
+                    r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
+                ),
+                MutationState::Pending
+                | MutationState::Failed
+                | MutationState::Skipped
+                | MutationState::Cancelled
+                | MutationState::Applied => (
+                    MutationType::UpdateTicket,
+                    "t1",
+                    r#"{"title":"X","body":""}"#,
+                ),
+            };
+            insert_fixture_mutation(
+                conn,
+                FixtureMutation {
+                    sequence: *sequence,
+                    payload_json,
+                    state: state.text(),
+                    failure_json: if *state == MutationState::Failed {
+                        Some(r#"{"detail":"x"}"#)
+                    } else {
+                        None
+                    },
+                    ..FixtureMutation::new(mutation_type, item_id)
+                },
+            )
+            .unwrap();
+        }
     }
 
     // ---- merge ----------------------------------------------------------
@@ -4476,14 +4559,70 @@ mod tests {
         assert_eq!(status, "open", "Bypassed leaves the Item untouched");
     }
 
+    /// What `mark_mutation_skipped` does with one seeded Mutation state.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum SkipVerdict {
+        /// Moved to `skipped`, touching no Item.
+        Bypassed,
+        /// Refused by the state gate.
+        NotFailed,
+        /// Refused by the Mutation Type gate, which runs first.
+        Promotion,
+    }
+
     #[test]
-    fn mark_skipped_refuses_non_failed() {
-        let mut conn = open_seeded();
-        seed_pending(&conn, 1);
-        let workflow = RemoteWorkflowGuard::for_test();
-        match mark_mutation_skipped(&mut conn, &workflow, 1, "2026-05-19T00:00:00Z").unwrap_err() {
-            MarkSkippedError::MutationNotFailed(1) => {}
-            other => panic!("expected MutationNotFailed, got {other:?}"),
+    fn mark_skipped_declares_a_verdict_for_every_mutation_state() {
+        // The wildcard-free `match` is the guard, not the loop: it is over
+        // `MutationState`, so a state added later stops this file compiling
+        // until someone declares what Sync Skip does with it. Running that
+        // verdict still depends on the variant joining `MutationState::ALL`,
+        // whose doc carries that obligation.
+        for state in MutationState::ALL {
+            let (verdict, why) = match state {
+                MutationState::Failed => (
+                    SkipVerdict::Bypassed,
+                    "a certified rejection is the one state Sync Skip curates (ADR-0038)",
+                ),
+                MutationState::Pending => (
+                    SkipVerdict::NotFailed,
+                    "a queued Mutation has not been rejected, so there is no failure to bypass",
+                ),
+                MutationState::Skipped | MutationState::Cancelled | MutationState::Applied => (
+                    SkipVerdict::NotFailed,
+                    "a terminal Mutation has settled and cannot take the `failed -> skipped` edge",
+                ),
+                MutationState::Applying | MutationState::Abandoned => (
+                    SkipVerdict::Promotion,
+                    "withdrawing a Promotion is Promotion Cancellation's job (ADR-0038)",
+                ),
+            };
+
+            let mut conn = open_seeded();
+            seed_states(&conn, &[(1, state)]);
+
+            let workflow = RemoteWorkflowGuard::for_test();
+            let observed =
+                match mark_mutation_skipped(&mut conn, &workflow, 1, "2026-05-19T00:00:00Z") {
+                    Ok(SkipOutcome::Bypassed) => SkipVerdict::Bypassed,
+                    Err(MarkSkippedError::MutationNotFailed(1)) => SkipVerdict::NotFailed,
+                    Err(MarkSkippedError::CannotSkipPromotion(1)) => SkipVerdict::Promotion,
+                    other => panic!("state {state}: unexpected outcome {other:?}"),
+                };
+            assert_eq!(observed, verdict, "state {state}: {why}");
+
+            // A refusal must also leave the row as it found it: an error
+            // return that still committed the transition would skip the
+            // Mutation while telling the operator it had not.
+            let after: String = conn
+                .query_row("select state from mutations where sequence = 1", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            let expected = match verdict {
+                SkipVerdict::Bypassed => MutationState::Skipped,
+                SkipVerdict::NotFailed | SkipVerdict::Promotion => state,
+            };
+            assert_eq!(after, expected.text(), "state {state}: {why}");
         }
     }
 
@@ -4944,61 +5083,6 @@ mod tests {
 
     // ---- unresolved counts ----------------------------------------------
 
-    /// Seed one Mutation per `(sequence, state)`.
-    ///
-    /// The `mutations` CHECK pairs `applying` and `abandoned` with
-    /// `promote_ticket` / `promote_epic` and a matching `item_class`, so those
-    /// rows are seeded as Promotions; they target a Local Ticket awaiting
-    /// Promotion because that is what a Promotion addresses, not because the
-    /// CHECK inspects Origin. The rest are edits to a backend-bound Ticket.
-    fn seed_states(conn: &Connection, states: &[(i64, &str)]) {
-        backend_ticket(conn, "t1", "gh-1", "1", 1);
-        insert_fixture_item(
-            conn,
-            FixtureItem {
-                id: "t2",
-                display: "tk-2",
-                title: "Local work",
-                origin: "local",
-                created_seq: 2,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-
-        for (sequence, state) in states {
-            let (mutation_type, item_id, payload_json) =
-                if matches!(*state, "applying" | "abandoned") {
-                    (
-                        MutationType::PromoteTicket,
-                        "t2",
-                        r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
-                    )
-                } else {
-                    (
-                        MutationType::UpdateTicket,
-                        "t1",
-                        r#"{"title":"X","body":""}"#,
-                    )
-                };
-            insert_fixture_mutation(
-                conn,
-                FixtureMutation {
-                    sequence: *sequence,
-                    payload_json,
-                    state,
-                    failure_json: if *state == "failed" {
-                        Some(r#"{"detail":"x"}"#)
-                    } else {
-                        None
-                    },
-                    ..FixtureMutation::new(mutation_type, item_id)
-                },
-            )
-            .unwrap();
-        }
-    }
-
     #[test]
     fn unresolved_counts_split_by_state_and_ignore_terminal_rows() {
         // Pins the membership of Unresolved Mutation (CONTEXT.md): pending,
@@ -5009,14 +5093,14 @@ mod tests {
         seed_states(
             &conn,
             &[
-                (1, "pending"),
-                (2, "pending"),
-                (3, "failed"),
-                (4, "applying"),
-                (5, "applied"),
-                (6, "skipped"),
-                (7, "cancelled"),
-                (8, "abandoned"),
+                (1, MutationState::Pending),
+                (2, MutationState::Pending),
+                (3, MutationState::Failed),
+                (4, MutationState::Applying),
+                (5, MutationState::Applied),
+                (6, MutationState::Skipped),
+                (7, MutationState::Cancelled),
+                (8, MutationState::Abandoned),
             ],
         );
 
