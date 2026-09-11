@@ -1,15 +1,8 @@
-At completion, report any Mutations remaining in `tk sync log`.
-
 ## Remote Work
 
-Promotion and sync are explicit, human-visible operations.
-
-```sh
-tk remote
-tk promote <id> [--children]
-tk sync
-tk sync log
-```
-
-`tk sync log` lists non-applied Mutations; append a sequence to inspect one,
-including applied Mutations.
+- `tk remote` - Show the configured Remote.
+- `tk promote <id> [--children]` - Create Backend objects for local Items;
+  `--children` includes an Epic's children.
+- `tk sync` - Pull Backend changes and apply queued Mutations.
+- `tk sync log` - List non-applied Mutations.
+- `tk sync log <sequence>` - Inspect one Mutation, including applied ones.

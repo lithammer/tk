@@ -1,67 +1,44 @@
 ## Starting Work
 
-Follow the user's request. Track work in tk. Active Items do not identify
-who owns the work.
-
-Choose with `tk next --plan` when the Plan has members, otherwise `tk next`.
-Run `tk start <id>` before working the chosen Item.
-
-Inspect with `tk show <id>` or `tk list`; pause with `tk stop <id>`.
-Run `tk prime` after compaction or a new agent session.
+- `tk next` - Show the next ready Ticket.
+- `tk show <id>` - Show Item details.
+- `tk list` - List open and active Items.
+- `tk list --ready` - List ready Tickets.
+- `tk start <id>` - Mark chosen work active before starting.
+- `tk stop <id>` - Return an Item to idle.
+- `tk prime` - Refresh this briefing.
 
 ## Capturing and Updating Work
 
-Capture local work with enough context for a fresh session.
-
-```sh
-tk add -F -
-tk add --bug -F -
-tk add --epic -F -
-tk add --parent <epic-id> -F -
-tk update <id> --title "New title"
-tk update <id> --body-file -
-```
-
-For `tk add`, the first paragraph is the title; the rest is the body.
+- `tk add -F -` - Create a local Ticket from stdin: first paragraph is the
+  title, the rest is the body.
+- `tk add --bug -F -` - Create a local Bug Ticket.
+- `tk add --epic -F -` - Create a local Epic.
+- `tk add --parent <epic-id> -F -` - Create a Ticket under an Epic.
+- `tk update <id> --title "New title"` - Change the title.
+- `tk update <id> --body-file -` - Replace the body from stdin.
 
 ## Blocking Work
 
-```sh
-tk block <blocked-id> <blocking-id>
-tk unblock <blocked-id> <blocking-id>
-```
-
-Blocking affects `tk next` and `tk list --ready`.
+- `tk block <blocked-id> <blocking-id>` - Add a Dependency.
+- `tk unblock <blocked-id> <blocking-id>` - Remove a Dependency.
 
 ## Working the Plan
 
-```sh
-tk plan
-tk plan add <id> [<id>...]
-tk plan remove <id> [<id>...]
-tk plan clear
-tk next --plan
-```
-
-`tk plan` shows all members, ignoring `TK_SCOPE`. Edits preserve Ticket state;
-`clear` removes even unfinished members. Outside Dependencies still block
-selection. No ready Ticket does not mean finished; selection never falls back
-to unplanned work.
+- `tk plan` - Show the whole Plan, including done Tickets.
+- `tk plan add <id> [<id>...]` - Add Tickets to the Plan.
+- `tk plan remove <id> [<id>...]` - Remove Tickets from the Plan.
+- `tk plan clear` - Remove all Plan membership without closing Tickets.
+- `tk next --plan` - Show the next ready Ticket in the Plan and current Scope.
 
 ## Working in a Scope
 
-```sh
-tk next <epic-id>
-tk list <epic-id>
-```
-
-An Epic argument or `TK_SCOPE=<epic-id>` limits work to the Epic and its child
-Tickets. `tk next --plan` intersects that Scope. Item commands need explicit
-IDs.
+- `tk next <epic-id>` - Show the next ready Ticket under an Epic.
+- `tk list <epic-id>` - List an Epic and its child Tickets.
+- `TK_SCOPE=<epic-id> tk next` - Set Scope through the environment.
 
 ## Finishing Work
 
-Check `git status --short` and `git diff --check`; preserve unrelated changes.
-Verify the change or explain skipped checks. Close with `tk done <id>`;
-capture follow-ups with `tk add`. Report commit/push status. Push only when
-the user asks.
+- `tk done <id>` - Mark an Item complete.
+- `git status --short` - Show changed files.
+- `git diff --check` - Check the diff for whitespace errors.

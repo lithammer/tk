@@ -39,9 +39,12 @@ recovery commands, and their help.
 The handbook keeps one order and describes work as an agent performs it:
 starting, capturing and updating, blocking, working the Plan, working in a
 Scope, finishing, and Remote work when a Remote is configured. State changes
-the immediate guidance, but does not hide an available core workflow. The
-Starting Work guidance tells an agent to run `tk start <id>` after choosing an
-Item.
+the immediate guidance, but does not hide an available core workflow.
+
+Each section lists commands with short inline descriptions. The handbook
+explains what commands do rather than prescribing agent habits or repeating
+selection rules. The `tk start <id>` entry marks chosen work active before
+starting. Detailed semantics belong in command help and the full reference.
 
 Every briefing says it is contextual rather than complete and points to
 `tk --help`, `tk <command> --help`, and `man tk` for the full command
