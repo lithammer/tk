@@ -123,16 +123,10 @@ impl Briefing {
                 writeln!(out, "\nMutation Log: clean")?;
             } else {
                 write!(out, "\nMutation Log: ")?;
-                for (index, state) in [
-                    MutationState::Pending,
-                    MutationState::Failed,
-                    MutationState::Applying,
-                    MutationState::Skipped,
-                    MutationState::Cancelled,
-                    MutationState::Abandoned,
-                ]
-                .iter()
-                .enumerate()
+                for (index, state) in MutationState::ALL
+                    .iter()
+                    .filter(|state| **state != MutationState::Applied)
+                    .enumerate()
                 {
                     if index != 0 {
                         write!(out, " · ")?;
