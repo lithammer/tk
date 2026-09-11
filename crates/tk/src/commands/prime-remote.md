@@ -1,5 +1,4 @@
-At completion, check `tk sync log` for unresolved or withdrawn Mutations and
-report any that remain.
+At completion, report any Mutations remaining in `tk sync log`.
 
 ## Remote Work
 
@@ -12,6 +11,5 @@ tk sync
 tk sync log
 ```
 
-`tk promote` creates Backend objects for local Items. `tk sync` pulls Backend
-changes and applies queued Mutations. `tk sync log` lists every non-applied
-Mutation; `tk sync log <sequence>` inspects any Mutation, applied included.
+`tk sync log` lists non-applied Mutations; append a sequence to inspect one,
+including applied Mutations.

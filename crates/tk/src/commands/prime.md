@@ -1,19 +1,17 @@
 ## Starting Work
 
-Follow the user's request; this briefing supplies context, not permission to
-start unrelated work. Use tk for repository-local work tracking.
+Follow the user's request. Track work in tk. Active Items do not identify
+who owns the work.
 
-When choosing work, use `tk next --plan` if the Plan has members, otherwise
-`tk next`. After choosing an Item, run `tk start <id>` before working it.
-Active Items describe work in the Store, not ownership by this agent session.
+Choose with `tk next --plan` when the Plan has members, otherwise `tk next`.
+Run `tk start <id>` before working the chosen Item.
 
-Use `tk show <id>` for details, `tk list` to see work, and `tk stop <id>` to
-return an Item to idle. Run `tk prime` after compaction or a new agent session.
+Inspect with `tk show <id>` or `tk list`; pause with `tk stop <id>`.
+Run `tk prime` after compaction or a new agent session.
 
 ## Capturing and Updating Work
 
-New Tickets and Epics are local. Give new work enough context for a fresh
-agent session.
+Capture local work with enough context for a fresh session.
 
 ```sh
 tk add -F -
@@ -24,8 +22,7 @@ tk update <id> --title "New title"
 tk update <id> --body-file -
 ```
 
-`tk add` uses git-commit-style input: the first paragraph is the title; later
-paragraphs form the body.
+For `tk add`, the first paragraph is the title; the rest is the body.
 
 ## Blocking Work
 
@@ -46,10 +43,10 @@ tk plan clear
 tk next --plan
 ```
 
-`tk plan` shows the whole Plan and ignores `TK_SCOPE`. Membership edits
-preserve Ticket state; `clear` removes all membership, including unfinished
-work. Outside Dependencies still block selection. No ready Ticket does not
-mean the Plan is finished, and selection never falls back to unplanned work.
+`tk plan` shows all members, ignoring `TK_SCOPE`. Edits preserve Ticket state;
+`clear` removes even unfinished members. Outside Dependencies still block
+selection. No ready Ticket does not mean finished; selection never falls back
+to unplanned work.
 
 ## Working in a Scope
 
@@ -58,15 +55,13 @@ tk next <epic-id>
 tk list <epic-id>
 ```
 
-An Epic argument or `TK_SCOPE=<epic-id>` narrows selection to that Epic and its
-child Tickets. `tk next --plan` intersects the Plan with that Scope. Without
-Scope or Plan selection, `tk next` considers the whole Store. Scope is not an
-implicit Item target: pass explicit Display IDs to Item commands.
+An Epic argument or `TK_SCOPE=<epic-id>` limits work to the Epic and its child
+Tickets. `tk next --plan` intersects that Scope. Item commands need explicit
+IDs.
 
 ## Finishing Work
 
-Check `git status --short` and `git diff --check`, and keep unrelated user
-changes separate. Run verification for the change; if skipped, say why.
-Use `tk done <id>` for completed work and `tk add` for follow-ups that should
-survive a fresh session. State whether code is uncommitted, committed, or
-waiting for a push. Do not run `git push` unless the user explicitly asks.
+Check `git status --short` and `git diff --check`; preserve unrelated changes.
+Verify the change or explain skipped checks. Close with `tk done <id>`;
+capture follow-ups with `tk add`. Report commit/push status. Push only when
+the user asks.

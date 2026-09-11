@@ -146,7 +146,8 @@ impl Briefing {
         }
         writeln!(
             out,
-            "\nThis briefing is contextual, not complete. Use `tk --help`, `tk <command> --help`, or `man tk` for the full command reference."
+            "\nThis briefing is contextual, not complete. Use `tk --help`,\n\
+             `tk <command> --help`, or `man tk` for the full command reference."
         )
     }
 }
