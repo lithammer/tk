@@ -12,9 +12,9 @@ use crate::render::{sanitize, styler::SubStyler};
 use crate::store::repository::{ResolvedItemRef, Store, list, next, plan};
 use crate::store::sync;
 
-/// Core workflows remain available even when the Store has no work yet.
+/// Core commands remain available even when the Store has no work yet.
 const PRIME_RAW: &str = include_str!("prime.md");
-/// Finishing and Remote guidance requires a configured Remote.
+/// Remote commands require a configured Remote.
 const REMOTE_RAW: &str = include_str!("prime-remote.md");
 
 /// Prime takes no arguments; current Scope comes from `TK_SCOPE`.
@@ -110,7 +110,7 @@ impl Briefing {
     }
 
     fn render(&self, out: &mut dyn Write, styler: SubStyler) -> std::io::Result<()> {
-        writeln!(out, "# tk Workflow Context\n\n## Current Work\n")?;
+        writeln!(out, "# tk Context\n\n## Current Work\n")?;
         self.work.render(out, !self.plan.is_empty(), styler)?;
         if self.plan.is_empty() {
             writeln!(out, "\nPlan: empty")?;
@@ -248,7 +248,7 @@ mod tests {
         assert!(
             String::from_utf8(stdout)
                 .unwrap()
-                .starts_with("# tk Workflow Context")
+                .starts_with("# tk Context")
         );
 
         let conn = Connection::open(store.db_path()).unwrap();

@@ -153,8 +153,8 @@ The **`tk`** command intent for moving a **Ticket** from `parked` **Selection St
 _Avoid_: Resume, Unhold, Restore
 
 **Prime**:
-The **`tk`** command intent for generating a project-aware agent briefing whose
-workflow guidance reflects the current **Repository Store**.
+The **`tk`** command intent for showing current **Repository Store** context
+and a condensed command reference for typical work.
 _Avoid_: Memory Dump
 
 **Search**:
@@ -577,8 +577,8 @@ _Avoid_: ticket, tickets
   detached first. It lists each canonical identity once by its latest Detach
   and omits an identity while it is the current **Backend Binding**. List,
   next, and search views do not surface that history.
-- **Prime** reports current **Repository Store** state before a fixed,
-  project-aware workflow handbook (ADR-0052).
+- **Prime** reports current **Repository Store** state before a condensed,
+  project-aware command reference (ADR-0052).
 - **Prime** uses a valid inherited `TK_SCOPE` for current-work selection while
   showing the whole **Plan**. A populated **Plan** further narrows selection as
   **`tk next --plan`** does.

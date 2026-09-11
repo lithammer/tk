@@ -1,8 +1,8 @@
 # Prime composes a project-aware briefing
 
-`tk prime` reports current Repository Store state before a fixed, task-based
-workflow handbook. It selects handbook sections whose prerequisites exist so,
-for example, a Store without a Remote gets no Remote workflow. This replaces
+`tk prime` reports current Repository Store state before a condensed command
+reference for typical work. It selects sections whose prerequisites exist so,
+for example, a Store without a Remote gets no Remote commands. This replaces
 the static handbook, whose unconditional sections could not stay relevant to
 each project.
 
@@ -34,17 +34,16 @@ Mutation state. The counts are context only: Prime does not tell the agent to
 inspect or resolve them. Recovery remains with `tk sync log`, the dedicated
 recovery commands, and their help.
 
-## Workflow handbook
+## Command reference
 
-The handbook keeps one order and describes work as an agent performs it:
-starting, capturing and updating, blocking, working the Plan, working in a
-Scope, finishing, and Remote work when a Remote is configured. State changes
-the immediate guidance, but does not hide an available core workflow.
+The reference groups commands by purpose: finding work, creating and updating,
+Dependencies, Plan, Scope, and Remote commands when a Remote is configured.
+Empty state does not hide an available command.
 
-Each section lists commands with short inline descriptions. The handbook
-explains what commands do rather than prescribing agent habits or repeating
-selection rules. The `tk start <id>` entry marks chosen work active before
-starting. Detailed semantics belong in command help and the full reference.
+Each section lists commands with short inline descriptions. Prime supplies
+context, not a way of working: it does not prescribe agent habits, Git
+housekeeping, or when to run commands. Detailed semantics belong in command
+help and the full reference.
 
 Every briefing says it is contextual rather than complete and points to
 `tk --help`, `tk <command> --help`, and `man tk` for the full command

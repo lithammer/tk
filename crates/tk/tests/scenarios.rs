@@ -893,20 +893,20 @@ fn manpage_uses_no_retired_vocabulary() {
 }
 
 #[test]
-fn prime_emits_workflow_briefing() {
+fn prime_emits_context_and_commands() {
     let p = Repo::new("repo");
     p.run("init");
     let output = p.run("prime");
     assert!(
-        output.starts_with("# tk Workflow Context\n\n## Current Work\n"),
+        output.starts_with("# tk Context\n\n## Current Work\n"),
         "{output}"
     );
     assert!(output.contains("Next: no ready Tickets\n"));
     assert!(output.contains("Active: none\n"));
     assert!(output.contains("Plan: empty\n"));
-    assert!(output.contains("## Starting Work\n"));
+    assert!(output.contains("## Finding Work\n"));
     assert!(output.contains("tk start <id>"));
-    assert!(output.contains("## Working the Plan\n"));
+    assert!(output.contains("## Plan\n"));
     assert!(output.contains("tk --help"));
     assert!(output.contains("man tk"));
     for absent in ["tk sync", "tk promote", "Remote", "Backend", "Recovery"] {
@@ -932,7 +932,7 @@ fn prime_selects_from_the_plan_and_shows_all_progress() {
     p.run("done repo-6");
     p.run("plan add repo-1 repo-2 repo-5 repo-6");
     let output = p.run("prime");
-    let current = output.split("## Starting Work").next().unwrap();
+    let current = output.split("## Finding Work").next().unwrap();
     assert!(
         current.contains("Next in Plan: repo-2: Urgent ready\n"),
         "{current}"
@@ -991,7 +991,7 @@ fn prime_scope_limits_current_work_but_keeps_the_whole_plan() {
         ("repo-2", "not an Epic"),
     ] {
         let output = p.run_env("prime", &[("TK_SCOPE", scope)]);
-        let current = output.split("## Starting Work").next().unwrap();
+        let current = output.split("## Finding Work").next().unwrap();
         assert!(
             current.contains(&format!("Warning: scope '{scope}' is {reason}")),
             "{current}"
@@ -1022,12 +1022,11 @@ fn prime_remote_counts_are_facts_without_recovery_instructions() {
         headings,
         [
             "## Current Work",
-            "## Starting Work",
-            "## Capturing and Updating Work",
-            "## Blocking Work",
-            "## Working the Plan",
-            "## Working in a Scope",
-            "## Finishing Work",
+            "## Finding Work",
+            "## Creating and Updating",
+            "## Dependencies",
+            "## Plan",
+            "## Scope",
             "## Remote Work"
         ]
     );
@@ -1052,14 +1051,14 @@ fn prime_remote_counts_are_facts_without_recovery_instructions() {
         ).unwrap();
     }
     let output = p.run("prime");
-    let current = output.split("## Starting Work").next().unwrap();
+    let current = output.split("## Finding Work").next().unwrap();
     assert!(current.contains("Mutation Log: 1 pending · 1 failed · 1 applying · 1 skipped · 1 cancelled · 1 abandoned\n"), "{current}");
     for instruction in ["tk sync", "tk promote", "Inspect", "Recovery"] {
         assert!(!current.contains(instruction), "{current}");
     }
     assert_eq!(
-        output.split("## Starting Work").nth(1),
-        clean.split("## Starting Work").nth(1)
+        output.split("## Finding Work").nth(1),
+        clean.split("## Finding Work").nth(1)
     );
     conn.execute(
         "update mutations set state = 'applied', failure_json = null",
@@ -1136,7 +1135,7 @@ fn prime_read_failure_reports_only_a_diagnostic() {
             ),
             "{table}: {output}"
         );
-        assert!(!output.contains("# tk Workflow Context"));
+        assert!(!output.contains("# tk Context"));
     }
 }
 
