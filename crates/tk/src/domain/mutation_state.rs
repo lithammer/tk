@@ -67,6 +67,14 @@ impl MutationState {
     /// a stored spelling, or walking the transition table above — reads this
     /// list instead of maintaining its own.
     ///
+    /// **Adding a variant does not break this list.** Its length is written by
+    /// hand, and no test can catch a state that never joined, because a test
+    /// can only ask this list what the states are. What a new variant does
+    /// break is every wildcard-free `match` over [`MutationState`] — `text`
+    /// below, `store::mutations::transition`, and Sync Skip's state gate among
+    /// them. Treat those compile errors as the reminder to add it here too:
+    /// anything that walks `ALL` silently skips a state that never joined.
+    ///
     /// [`text`]: MutationState::text
     pub const ALL: [Self; 7] = [
         Self::Pending,
@@ -127,9 +135,10 @@ mod tests {
     }
 
     #[test]
-    fn all_lists_every_variant_exactly_once() {
-        // A missing or duplicated entry here means ALL has silently drifted
-        // from the enum, defeating its purpose as the caller's whole-set view.
+    fn all_lists_no_variant_twice() {
+        // Catches a repeated entry only: it asks `ALL` what the states are, so
+        // a state that never joined is invisible to it. `ALL`'s doc carries
+        // that half, because no test can.
         let mut texts: Vec<&str> = MutationState::ALL.iter().map(|s| s.text()).collect();
         texts.sort_unstable();
         texts.dedup();
