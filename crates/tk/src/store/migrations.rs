@@ -646,10 +646,8 @@ mod tests {
     /// `closing_reason` CHECK confines a reason to a `done` row. After an
     /// authorized write it reads the row back to confirm both landed.
     ///
-    /// A refusal must carry the trigger's own message. `is_err()` alone cannot
-    /// tell the trigger apart from the other constraints these fixtures trip,
-    /// so dropping a conjunct would leave every refused row passing for the
-    /// wrong reason.
+    /// A refusal must carry the trigger's own message: these fixtures can trip
+    /// the `closing_reason` CHECK too, and `is_err()` cannot tell them apart.
     fn assert_reopen(conn: &Connection, item_id: &str, expected: Reopen, why: &str) {
         let write = conn.execute(
             "update items set status = 'open', closing_reason = null where id = ?1",
@@ -698,11 +696,8 @@ mod tests {
         // a value and stays its own test below.
 
         // `state`: only `failed` authorizes. Each arm also names the Mutation
-        // Type and failure evidence that state admits, because not every state
-        // is reachable on a closing Mutation: migration 010's CHECK requires
-        // evidence of `failed` and forbids it on `pending` and `applied`, and
-        // `skipped` and `cancelled` are the two edges out of `failed` that
-        // preserve what it recorded (`MutationState`'s transition table).
+        // Type and failure evidence migration 010's CHECK admits for that
+        // state, because not every state is reachable on a closing Mutation.
         for state in MutationState::ALL {
             let (mutation_type, failure_json, verdict, why) = match state {
                 MutationState::Failed => (
@@ -746,8 +741,7 @@ mod tests {
                 ),
                 // No closing Mutation can hold either state: migration 010's
                 // CHECK confines `applying` and `abandoned` to a Promotion of
-                // the Item's own class. A Promotion is the only shape the
-                // Store admits here, so these two rows cover the state
+                // the Item's own class, so these two rows cover the state
                 // conjunct jointly with the Mutation Type one, not alone.
                 MutationState::Applying => (
                     MutationType::PromoteTicket,
