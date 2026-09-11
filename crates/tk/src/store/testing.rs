@@ -420,20 +420,21 @@ pub struct FixtureMutation<'a> {
     pub promotion_operation_id: Option<&'a str>,
 }
 
-impl FixtureMutation<'_> {
-    /// A `pending` Mutation of `mutation_type` against a Ticket, with every
-    /// other field defaulted.
+impl<'a> FixtureMutation<'a> {
+    /// A `pending` Mutation of `mutation_type` against Ticket `item_id`, with
+    /// every other field defaulted.
     ///
-    /// Takes the Mutation Type rather than deriving `Default`: no spelling in
-    /// the `mutations.mutation_type` CHECK is a sensible default, so the
-    /// caller has to name one. `sequence` starts at 1, the first Mutation a
-    /// freshly seeded store can hold.
+    /// These two are arguments rather than defaults because neither has a
+    /// defensible one: no spelling in the `mutations.mutation_type` CHECK is a
+    /// sensible Mutation Type, and the empty string is not an Item any
+    /// composite foreign key will accept. `sequence` starts at 1, the first
+    /// Mutation a freshly seeded store can hold.
     #[must_use]
-    pub fn of(mutation_type: MutationType) -> Self {
+    pub fn new(mutation_type: MutationType, item_id: &'a str) -> Self {
         Self {
             sequence: 1,
             mutation_type,
-            item_id: "",
+            item_id,
             item_class: ItemClass::Ticket,
             payload_json: "{}",
             state: "pending",

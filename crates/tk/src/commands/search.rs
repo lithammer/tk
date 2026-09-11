@@ -364,9 +364,8 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "done",
                 state: "pending",
-                ..FixtureMutation::of(MutationType::SetItemStatus)
+                ..FixtureMutation::new(MutationType::SetItemStatus, "done")
             },
         )
         .unwrap();

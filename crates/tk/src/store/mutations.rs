@@ -898,12 +898,11 @@ mod tests {
         insert_fixture_mutation(
             conn,
             FixtureMutation {
-                item_id,
                 payload_json: &payload,
                 state,
                 failure_json: (state == "failed").then_some(r#"{"detail":"boom"}"#),
                 promotion_operation_id: Some("promo-1"),
-                ..FixtureMutation::of(MutationType::PromoteTicket)
+                ..FixtureMutation::new(MutationType::PromoteTicket, item_id)
             },
         )
         .unwrap();
@@ -1012,9 +1011,8 @@ mod tests {
         insert_fixture_mutation(
             &conn,
             FixtureMutation {
-                item_id: "t1",
                 payload_json: r#"{"title":"T","body":""}"#,
-                ..FixtureMutation::of(MutationType::UpdateTicket)
+                ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
             },
         )
         .unwrap();
@@ -1065,10 +1063,9 @@ mod tests {
             insert_fixture_mutation(
                 &conn,
                 FixtureMutation {
-                    item_id,
                     item_class,
                     payload_json: &payload,
-                    ..FixtureMutation::of(mutation_type)
+                    ..FixtureMutation::new(mutation_type, item_id)
                 },
             )
             .unwrap();
@@ -1090,9 +1087,8 @@ mod tests {
         insert_fixture_mutation(
             &conn,
             FixtureMutation {
-                item_id: "t1",
                 payload_json: r#"{"title":"T"}"#,
-                ..FixtureMutation::of(MutationType::PromoteTicket)
+                ..FixtureMutation::new(MutationType::PromoteTicket, "t1")
             },
         )
         .unwrap();
@@ -1135,12 +1131,11 @@ mod tests {
         insert_fixture_mutation(
             conn,
             FixtureMutation {
-                item_id: "t1",
                 payload_json: &payload,
                 state: state.text(),
                 failure_json,
                 promotion_operation_id: mutation_type.is_promotion().then_some("promo-1"),
-                ..FixtureMutation::of(mutation_type)
+                ..FixtureMutation::new(mutation_type, "t1")
             },
         )
         .unwrap();
@@ -1501,9 +1496,8 @@ mod tests {
                 &conn,
                 FixtureMutation {
                     sequence,
-                    item_id: "t1",
                     payload_json: r#"{"title":"T","body":""}"#,
-                    ..FixtureMutation::of(MutationType::UpdateTicket)
+                    ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
                 },
             )
             .unwrap();

@@ -136,10 +136,9 @@ mod tests {
             &store.conn,
             FixtureMutation {
                 sequence,
-                item_id,
                 state,
                 failure_json: (state == "failed").then_some(r#"{"detail":"prior"}"#),
-                ..FixtureMutation::of(mutation_type)
+                ..FixtureMutation::new(mutation_type, item_id)
             },
         )
         .unwrap();
@@ -287,9 +286,8 @@ mod tests {
             &store.conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "t1",
                 state: "pending",
-                ..FixtureMutation::of(MutationType::SetItemStatus)
+                ..FixtureMutation::new(MutationType::SetItemStatus, "t1")
             },
         )
         .unwrap();

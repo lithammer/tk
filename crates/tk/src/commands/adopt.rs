@@ -443,11 +443,10 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 9,
-                item_id: "t1",
                 payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
                 state: "applying",
                 promotion_operation_id: Some("op-1"),
-                ..FixtureMutation::of(MutationType::PromoteTicket)
+                ..FixtureMutation::new(MutationType::PromoteTicket, "t1")
             },
         )
         .unwrap();
@@ -1281,10 +1280,9 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 3,
-                item_id: "stable",
                 payload_json: r#"{"blocking_id":"blocker"}"#,
                 state: "applied",
-                ..FixtureMutation::of(MutationType::AddDependency)
+                ..FixtureMutation::new(MutationType::AddDependency, "stable")
             },
         )
         .unwrap();
@@ -1292,10 +1290,9 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 4,
-                item_id: "stable",
                 payload_json: r#"{"blocking_id":"blocker"}"#,
                 state: "pending",
-                ..FixtureMutation::of(MutationType::AddDependency)
+                ..FixtureMutation::new(MutationType::AddDependency, "stable")
             },
         )
         .unwrap();
@@ -1860,11 +1857,10 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 4,
-                item_id: "stable",
                 payload_json: r#"{"title":"Local title","body":"Local body","backend_kind":"github"}"#,
                 state: "pending",
                 promotion_operation_id: Some("op-1"),
-                ..FixtureMutation::of(MutationType::PromoteTicket)
+                ..FixtureMutation::new(MutationType::PromoteTicket, "stable")
             },
         )
         .unwrap();

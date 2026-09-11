@@ -1052,10 +1052,9 @@ mod tests {
                 &conn,
                 FixtureMutation {
                     sequence: 1,
-                    item_id: "t1",
                     state,
                     failure_json: (state == "failed").then_some(r#"{"detail":"prior"}"#),
-                    ..FixtureMutation::of(MutationType::PromoteTicket)
+                    ..FixtureMutation::new(MutationType::PromoteTicket, "t1")
                 },
             )
             .unwrap();

@@ -2193,10 +2193,9 @@ mod tests {
                 &conn,
                 FixtureMutation {
                     sequence,
-                    item_id: "t1",
                     payload_json: r#"{"title":"T","body":""}"#,
                     state,
-                    ..FixtureMutation::of(MutationType::UpdateTicket)
+                    ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
                 },
             )
             .unwrap();
@@ -2225,11 +2224,10 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "older",
                 payload_json: r#"{"title":"T","body":""}"#,
                 state: "failed",
                 failure_json: Some(r#"{"detail":"boom"}"#),
-                ..FixtureMutation::of(MutationType::UpdateTicket)
+                ..FixtureMutation::new(MutationType::UpdateTicket, "older")
             },
         )
         .unwrap();
@@ -2237,10 +2235,9 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 2,
-                item_id: "t2",
                 payload_json: r#"{"title":"T","body":""}"#,
                 promotion_operation_id: Some("op-1"),
-                ..FixtureMutation::of(MutationType::UpdateTicket)
+                ..FixtureMutation::new(MutationType::UpdateTicket, "t2")
             },
         )
         .unwrap();
@@ -2274,12 +2271,11 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 3,
-                item_id: "t1",
                 payload_json: r#"{"title":"Original title","body":"Original body","backend_kind":"github"}"#,
                 state: "applying",
                 failure_json: Some(r#"{"detail":"prior"}"#),
                 promotion_operation_id: Some("op-1"),
-                ..FixtureMutation::of(MutationType::PromoteTicket)
+                ..FixtureMutation::new(MutationType::PromoteTicket, "t1")
             },
         )
         .unwrap();
@@ -2313,11 +2309,10 @@ mod tests {
                 &conn,
                 FixtureMutation {
                     sequence,
-                    item_id: "t1",
                     payload_json: r#"{"title":"T","body":""}"#,
                     state,
                     promotion_operation_id: Some("op-1"),
-                    ..FixtureMutation::of(MutationType::UpdateTicket)
+                    ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
                 },
             )
             .unwrap();
@@ -2470,11 +2465,10 @@ mod tests {
                 &conn,
                 FixtureMutation {
                     sequence: 1,
-                    item_id: "t1",
                     payload_json: r#"{"title":"Local title","body":"Local body"}"#,
                     state,
                     failure_json: (state == "failed").then_some(r#"{"detail":"prior"}"#),
-                    ..FixtureMutation::of(MutationType::UpdateTicket)
+                    ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
                 },
             )
             .unwrap();
@@ -2526,10 +2520,9 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "t1",
                 payload_json: r#"{"blocking_id":"other"}"#,
                 state: "pending",
-                ..FixtureMutation::of(MutationType::AddDependency)
+                ..FixtureMutation::new(MutationType::AddDependency, "t1")
             },
         )
         .unwrap();
@@ -2537,10 +2530,9 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 2,
-                item_id: "t1",
                 payload_json: r#"{"title":"Local title","body":"Local body"}"#,
                 state: "pending",
-                ..FixtureMutation::of(MutationType::UpdateTicket)
+                ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
             },
         )
         .unwrap();
@@ -2548,10 +2540,9 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 3,
-                item_id: "t1",
                 payload_json: r#"{"blocking_id":"later"}"#,
                 state: "pending",
-                ..FixtureMutation::of(MutationType::AddDependency)
+                ..FixtureMutation::new(MutationType::AddDependency, "t1")
             },
         )
         .unwrap();
@@ -2603,9 +2594,8 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "t1",
                 payload_json: r#"{"title":"Local title","body":"Local body"}"#,
-                ..FixtureMutation::of(MutationType::UpdateTicket)
+                ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
             },
         )
         .unwrap();
@@ -2649,10 +2639,9 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "t1",
                 payload_json: r#"{"title":"Local title","body":"Local body"}"#,
                 state: "pending",
-                ..FixtureMutation::of(MutationType::UpdateTicket)
+                ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
             },
         )
         .unwrap();
@@ -2726,11 +2715,10 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "t1",
                 payload_json: r#"{"blocking_id":"other"}"#,
                 state: "failed",
                 failure_json: Some(r#"{"detail":"prior"}"#),
-                ..FixtureMutation::of(MutationType::AddDependency)
+                ..FixtureMutation::new(MutationType::AddDependency, "t1")
             },
         )
         .unwrap();
@@ -2764,10 +2752,9 @@ mod tests {
                 &conn,
                 FixtureMutation {
                     sequence: 1,
-                    item_id: "t1",
                     payload_json: r#"{"title":"Local title","body":"Local body"}"#,
                     state,
-                    ..FixtureMutation::of(MutationType::UpdateTicket)
+                    ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
                 },
             )
             .unwrap();
@@ -2803,10 +2790,9 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "t1",
                 payload_json: r#"{"title":"Local title","body":""}"#,
                 state: "pending",
-                ..FixtureMutation::of(MutationType::UpdateTicket)
+                ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
             },
         )
         .unwrap();
@@ -2869,11 +2855,10 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "e1",
                 item_class: ItemClass::Epic,
                 payload_json: r#"{"title":"Local epic title","body":"Local epic body"}"#,
                 state: "pending",
-                ..FixtureMutation::of(MutationType::UpdateEpic)
+                ..FixtureMutation::new(MutationType::UpdateEpic, "e1")
             },
         )
         .unwrap();
@@ -2935,10 +2920,9 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "t1",
                 payload_json: r#"{"status":"done"}"#,
                 state: "pending",
-                ..FixtureMutation::of(MutationType::SetItemStatus)
+                ..FixtureMutation::new(MutationType::SetItemStatus, "t1")
             },
         )
         .unwrap();
@@ -3385,7 +3369,6 @@ mod tests {
                 &conn,
                 FixtureMutation {
                     sequence: seq,
-                    item_id: "t1",
                     payload_json: r#"{"title":"X","body":""}"#,
                     state,
                     failure_json: if state == "failed" {
@@ -3393,7 +3376,7 @@ mod tests {
                     } else {
                         None
                     },
-                    ..FixtureMutation::of(MutationType::UpdateTicket)
+                    ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
                 },
             )
             .unwrap();
@@ -3412,10 +3395,9 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "t1",
                 payload_json: r#"{"status":"done"}"#,
                 state: "pending",
-                ..FixtureMutation::of(MutationType::SetItemStatus)
+                ..FixtureMutation::new(MutationType::SetItemStatus, "t1")
             },
         )
         .unwrap();
@@ -3438,10 +3420,9 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "t1",
                 payload_json: r#"{"status":"done"}"#,
                 state: "pending",
-                ..FixtureMutation::of(MutationType::SetItemStatus)
+                ..FixtureMutation::new(MutationType::SetItemStatus, "t1")
             },
         )
         .unwrap();
@@ -3478,10 +3459,9 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "t1",
                 payload_json: r#"{"title":"T","body":"B","backend_kind":"github"}"#,
                 state: "pending",
-                ..FixtureMutation::of(MutationType::PromoteTicket)
+                ..FixtureMutation::new(MutationType::PromoteTicket, "t1")
             },
         )
         .unwrap();
@@ -3522,10 +3502,9 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "t1",
                 payload_json: r#"{"title":"T","body":"B","backend_kind":"github"}"#,
                 state: "pending",
-                ..FixtureMutation::of(MutationType::PromoteTicket)
+                ..FixtureMutation::new(MutationType::PromoteTicket, "t1")
             },
         )
         .unwrap();
@@ -3550,10 +3529,9 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "blocked",
                 payload_json: r#"{"blocking_id":"blocking"}"#,
                 state: "pending",
-                ..FixtureMutation::of(MutationType::AddDependency)
+                ..FixtureMutation::new(MutationType::AddDependency, "blocked")
             },
         )
         .unwrap();
@@ -3598,9 +3576,8 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "ticket",
                 payload_json: r#"{"epic_id":"epic"}"#,
-                ..FixtureMutation::of(MutationType::AddTicketToEpic)
+                ..FixtureMutation::new(MutationType::AddTicketToEpic, "ticket")
             },
         )
         .unwrap();
@@ -3642,9 +3619,8 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "ticket",
                 payload_json: r#"{"epic_id":"epic"}"#,
-                ..FixtureMutation::of(MutationType::RemoveTicketFromEpic)
+                ..FixtureMutation::new(MutationType::RemoveTicketFromEpic, "ticket")
             },
         )
         .unwrap();
@@ -3669,9 +3645,8 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "ticket",
                 payload_json: r#"{"epic_id":"not-epic"}"#,
-                ..FixtureMutation::of(MutationType::AddTicketToEpic)
+                ..FixtureMutation::new(MutationType::AddTicketToEpic, "ticket")
             },
         )
         .unwrap();
@@ -3747,10 +3722,9 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "blocked",
                 payload_json: r#"{"blocking_id":"blocking"}"#,
                 state: "pending",
-                ..FixtureMutation::of(MutationType::AddDependency)
+                ..FixtureMutation::new(MutationType::AddDependency, "blocked")
             },
         )
         .unwrap();
@@ -3785,10 +3759,9 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 2,
-                item_id: "t1",
                 payload_json: r#"{"status":"done"}"#,
                 state: "pending",
-                ..FixtureMutation::of(MutationType::SetItemStatus)
+                ..FixtureMutation::new(MutationType::SetItemStatus, "t1")
             },
         )
         .unwrap();
@@ -3826,10 +3799,9 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "t1",
                 payload_json: "{}",
                 state: "pending",
-                ..FixtureMutation::of(MutationType::AddExternalBlocker)
+                ..FixtureMutation::new(MutationType::AddExternalBlocker, "t1")
             },
         )
         .unwrap();
@@ -3853,10 +3825,9 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "t1",
                 payload_json: r#"{"status":"active"}"#,
                 state: "pending",
-                ..FixtureMutation::of(MutationType::SetItemStatus)
+                ..FixtureMutation::new(MutationType::SetItemStatus, "t1")
             },
         )
         .unwrap();
@@ -3885,10 +3856,9 @@ mod tests {
                 &conn,
                 FixtureMutation {
                     sequence: seq,
-                    item_id: "t1",
                     payload_json: r#"{"title":"T","body":"B","backend_kind":"github"}"#,
                     state: "pending",
-                    ..FixtureMutation::of(mutation_type)
+                    ..FixtureMutation::new(mutation_type, "t1")
                 },
             )
             .unwrap();
@@ -3920,10 +3890,9 @@ mod tests {
             conn,
             FixtureMutation {
                 sequence,
-                item_id: "t1",
                 payload_json: r#"{"title":"New","body":""}"#,
                 state: "pending",
-                ..FixtureMutation::of(MutationType::UpdateTicket)
+                ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
             },
         )
         .unwrap();
@@ -3997,11 +3966,10 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 3,
-                item_id: "t1",
                 payload_json: r#"{"title":"A","body":""}"#,
                 state: "failed",
                 failure_json: Some(r#"{"detail":"prior"}"#),
-                ..FixtureMutation::of(MutationType::UpdateTicket)
+                ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
             },
         )
         .unwrap();
@@ -4034,11 +4002,10 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 2,
-                item_id: "t1",
                 payload_json: r#"{"title":"A","body":""}"#,
                 state: "failed",
                 failure_json: Some(r#"{"detail":"old reason"}"#),
-                ..FixtureMutation::of(MutationType::UpdateTicket)
+                ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
             },
         )
         .unwrap();
@@ -4089,10 +4056,9 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 7,
-                item_id: "t1",
                 payload_json: r#"{"title":"A","body":""}"#,
                 state: "applied",
-                ..FixtureMutation::of(MutationType::UpdateTicket)
+                ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
             },
         )
         .unwrap();
@@ -4128,11 +4094,10 @@ mod tests {
             conn,
             FixtureMutation {
                 sequence,
-                item_id: "t1",
                 payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
                 state: "pending",
                 promotion_operation_id: Some("op-1"),
-                ..FixtureMutation::of(MutationType::PromoteTicket)
+                ..FixtureMutation::new(MutationType::PromoteTicket, "t1")
             },
         )
         .unwrap();
@@ -4482,11 +4447,10 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "t1",
                 payload_json: r#"{"title":"A","body":""}"#,
                 state: "failed",
                 failure_json: Some(r#"{"detail":"rejected"}"#),
-                ..FixtureMutation::of(MutationType::UpdateTicket)
+                ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
             },
         )
         .unwrap();
@@ -4563,12 +4527,11 @@ mod tests {
                     &conn,
                     FixtureMutation {
                         sequence: 1,
-                        item_id: "t1",
                         item_class,
                         payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
                         state: prior_state,
                         failure_json: Some(r#"{"detail":"boom"}"#),
-                        ..FixtureMutation::of(mutation_type)
+                        ..FixtureMutation::new(mutation_type, "t1")
                     },
                 )
                 .unwrap();
@@ -4620,12 +4583,11 @@ mod tests {
             conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "t1",
                 item_class,
                 payload_json: r#"{"status":"done"}"#,
                 state: "failed",
                 failure_json: Some(r#"{"detail":"rejected"}"#),
-                ..FixtureMutation::of(MutationType::SetItemStatus)
+                ..FixtureMutation::new(MutationType::SetItemStatus, "t1")
             },
         )
         .unwrap();
@@ -4724,11 +4686,10 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "t1",
                 payload_json: r#"{"status":"done"}"#,
                 state: "failed",
                 failure_json: Some(r#"{"detail":"rejected"}"#),
-                ..FixtureMutation::of(MutationType::SetItemStatus)
+                ..FixtureMutation::new(MutationType::SetItemStatus, "t1")
             },
         )
         .unwrap();
@@ -4795,11 +4756,10 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "t1",
                 payload_json: r#"{"status":"done"}"#,
                 state: "failed",
                 failure_json: Some(r#"{"detail":"rejected"}"#),
-                ..FixtureMutation::of(MutationType::SetItemStatus)
+                ..FixtureMutation::new(MutationType::SetItemStatus, "t1")
             },
         )
         .unwrap();
@@ -4843,11 +4803,10 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "t1",
                 payload_json: r#"{"status":"active"}"#,
                 state: "failed",
                 failure_json: Some(r#"{"detail":"stale, non-closing"}"#),
-                ..FixtureMutation::of(MutationType::SetItemStatus)
+                ..FixtureMutation::new(MutationType::SetItemStatus, "t1")
             },
         )
         .unwrap();
@@ -4855,11 +4814,10 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 2,
-                item_id: "t1",
                 payload_json: r#"{"status":"done"}"#,
                 state: "failed",
                 failure_json: Some(r#"{"detail":"the real close"}"#),
-                ..FixtureMutation::of(MutationType::SetItemStatus)
+                ..FixtureMutation::new(MutationType::SetItemStatus, "t1")
             },
         )
         .unwrap();
@@ -4901,11 +4859,10 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "t1",
                 payload_json: r#"{"status":"done"}"#,
                 state: "failed",
                 failure_json: Some(r#"{"detail":"rejected"}"#),
-                ..FixtureMutation::of(MutationType::SetItemStatus)
+                ..FixtureMutation::new(MutationType::SetItemStatus, "t1")
             },
         )
         .unwrap();
@@ -4963,11 +4920,10 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "t1",
                 payload_json: r#"{"status":"done"}"#,
                 state: "failed",
                 failure_json: Some(r#"{"detail":"rejected"}"#),
-                ..FixtureMutation::of(MutationType::SetItemStatus)
+                ..FixtureMutation::new(MutationType::SetItemStatus, "t1")
             },
         )
         .unwrap();
@@ -5029,7 +4985,6 @@ mod tests {
                 conn,
                 FixtureMutation {
                     sequence: *sequence,
-                    item_id,
                     payload_json,
                     state,
                     failure_json: if *state == "failed" {
@@ -5037,7 +4992,7 @@ mod tests {
                     } else {
                         None
                     },
-                    ..FixtureMutation::of(mutation_type)
+                    ..FixtureMutation::new(mutation_type, item_id)
                 },
             )
             .unwrap();
@@ -5183,10 +5138,9 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "t2",
                 payload_json: r#"{"title":"Local","body":"","backend_kind":"jira"}"#,
                 state: "pending",
-                ..FixtureMutation::of(MutationType::PromoteTicket)
+                ..FixtureMutation::new(MutationType::PromoteTicket, "t2")
             },
         )
         .unwrap();
@@ -5217,10 +5171,9 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "t1",
                 payload_json: r#"{"title":"Local","body":"","backend_kind":"gitlab"}"#,
                 state: "pending",
-                ..FixtureMutation::of(MutationType::PromoteTicket)
+                ..FixtureMutation::new(MutationType::PromoteTicket, "t1")
             },
         )
         .unwrap();
@@ -5288,11 +5241,10 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "t1",
                 payload_json: r#"{"title":"A","body":""}"#,
                 state: "failed",
                 failure_json: Some(r#"{"detail":"x"}"#),
-                ..FixtureMutation::of(MutationType::UpdateTicket)
+                ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
             },
         )
         .unwrap();
@@ -5324,11 +5276,10 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 3,
-                item_id: "t1",
                 payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
                 state: "applying",
                 promotion_operation_id: Some("op-1"),
-                ..FixtureMutation::of(MutationType::PromoteTicket)
+                ..FixtureMutation::new(MutationType::PromoteTicket, "t1")
             },
         )
         .unwrap();
@@ -5372,10 +5323,9 @@ mod tests {
             conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "t1",
                 payload_json: r#"{"title":"A","body":""}"#,
                 state: "pending",
-                ..FixtureMutation::of(MutationType::UpdateTicket)
+                ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
             },
         )
         .unwrap();
@@ -5383,12 +5333,11 @@ mod tests {
             conn,
             FixtureMutation {
                 sequence: 4,
-                item_id: "t4",
                 payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
                 state: "applying",
                 failure_json: Some(r#"{"detail":"unknown effect"}"#),
                 promotion_operation_id: Some("op-1"),
-                ..FixtureMutation::of(MutationType::PromoteTicket)
+                ..FixtureMutation::new(MutationType::PromoteTicket, "t4")
             },
         )
         .unwrap();
@@ -5396,11 +5345,10 @@ mod tests {
             conn,
             FixtureMutation {
                 sequence: 2,
-                item_id: "t2",
                 payload_json: r#"{"status":"done"}"#,
                 state: "failed",
                 failure_json: Some(r#"{"detail":"HTTP 422: rejected"}"#),
-                ..FixtureMutation::of(MutationType::SetItemStatus)
+                ..FixtureMutation::new(MutationType::SetItemStatus, "t2")
             },
         )
         .unwrap();
@@ -5408,10 +5356,9 @@ mod tests {
             conn,
             FixtureMutation {
                 sequence: 3,
-                item_id: "t3",
                 payload_json: r#"{"title":"C","body":""}"#,
                 state: "skipped",
-                ..FixtureMutation::of(MutationType::UpdateTicket)
+                ..FixtureMutation::new(MutationType::UpdateTicket, "t3")
             },
         )
         .unwrap();
@@ -5419,10 +5366,9 @@ mod tests {
             conn,
             FixtureMutation {
                 sequence: 5,
-                item_id: "t3",
                 payload_json: r#"{"title":"D","body":""}"#,
                 state: "cancelled",
-                ..FixtureMutation::of(MutationType::UpdateTicket)
+                ..FixtureMutation::new(MutationType::UpdateTicket, "t3")
             },
         )
         .unwrap();
@@ -5430,12 +5376,11 @@ mod tests {
             conn,
             FixtureMutation {
                 sequence: 6,
-                item_id: "t5",
                 payload_json: r#"{"title":"Withdrawn work","body":"","backend_kind":"github"}"#,
                 state: "abandoned",
                 failure_json: Some(r#"{"detail":"unknown effect"}"#),
                 promotion_operation_id: Some("op-2"),
-                ..FixtureMutation::of(MutationType::PromoteTicket)
+                ..FixtureMutation::new(MutationType::PromoteTicket, "t5")
             },
         )
         .unwrap();
@@ -5447,10 +5392,9 @@ mod tests {
             conn,
             FixtureMutation {
                 sequence: 7,
-                item_id: "t3",
                 payload_json: r#"{"title":"Landed","body":""}"#,
                 state: "applied",
-                ..FixtureMutation::of(MutationType::UpdateTicket)
+                ..FixtureMutation::new(MutationType::UpdateTicket, "t3")
             },
         )
         .unwrap();

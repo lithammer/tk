@@ -2186,9 +2186,8 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 9,
-                item_id: "backend",
                 payload_json: r#"{"epic_id":"e1"}"#,
-                ..FixtureMutation::of(MutationType::AddTicketToEpic)
+                ..FixtureMutation::new(MutationType::AddTicketToEpic, "backend")
             },
         )
         .unwrap();
@@ -3060,12 +3059,11 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "t0",
                 payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
                 state: "applying",
                 failure_json: Some(r#"{"detail":"gh timed out"}"#),
                 promotion_operation_id: Some("op-old"),
-                ..FixtureMutation::of(MutationType::PromoteTicket)
+                ..FixtureMutation::new(MutationType::PromoteTicket, "t0")
             },
         )
         .unwrap();
@@ -3173,11 +3171,10 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "adopted",
                 payload_json: r#"{"title":"Edited","body":""}"#,
                 state: "failed",
                 failure_json: Some(r#"{"detail":"HTTP 403"}"#),
-                ..FixtureMutation::of(MutationType::UpdateTicket)
+                ..FixtureMutation::new(MutationType::UpdateTicket, "adopted")
             },
         )
         .unwrap();

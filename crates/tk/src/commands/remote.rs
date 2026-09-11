@@ -384,10 +384,9 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "t1",
                 payload_json: r#"{"title":"A","body":""}"#,
                 state: "pending",
-                ..FixtureMutation::of(MutationType::UpdateTicket)
+                ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
             },
         )
         .unwrap();
@@ -443,12 +442,11 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "t1",
                 payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
                 state: "failed",
                 failure_json: Some(r#"{"detail":"rejected"}"#),
                 promotion_operation_id: Some("op-1"),
-                ..FixtureMutation::of(MutationType::PromoteTicket)
+                ..FixtureMutation::new(MutationType::PromoteTicket, "t1")
             },
         )
         .unwrap();

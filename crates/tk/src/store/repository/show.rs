@@ -570,8 +570,7 @@ mod tests {
                 &store.conn,
                 FixtureMutation {
                     sequence,
-                    item_id: "t",
-                    ..FixtureMutation::of(MutationType::UpdateTicket)
+                    ..FixtureMutation::new(MutationType::UpdateTicket, "t")
                 },
             )
             .unwrap();
@@ -594,9 +593,8 @@ mod tests {
             &store.conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "t",
                 state: "applied",
-                ..FixtureMutation::of(MutationType::UpdateTicket)
+                ..FixtureMutation::new(MutationType::UpdateTicket, "t")
             },
         )
         .unwrap();
@@ -617,9 +615,8 @@ mod tests {
             &store.conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "t",
                 state: "pending",
-                ..FixtureMutation::of(MutationType::PromoteTicket)
+                ..FixtureMutation::new(MutationType::PromoteTicket, "t")
             },
         )
         .unwrap();

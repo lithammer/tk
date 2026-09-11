@@ -400,11 +400,10 @@ mod tests {
             conn,
             FixtureMutation {
                 sequence,
-                item_id,
                 item_class,
                 state,
                 failure_json: (state == "failed").then_some(r#"{"detail":"prior"}"#),
-                ..FixtureMutation::of(mutation_type)
+                ..FixtureMutation::new(mutation_type, item_id)
             },
         )
         .unwrap();

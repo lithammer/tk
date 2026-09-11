@@ -338,11 +338,10 @@ mod tests {
             &store.conn,
             FixtureMutation {
                 sequence,
-                item_id,
                 item_class,
                 state,
                 failure_json: (state == "failed").then_some(r#"{"detail":"prior"}"#),
-                ..FixtureMutation::of(mutation_type)
+                ..FixtureMutation::new(mutation_type, item_id)
             },
         )
         .unwrap();
@@ -381,11 +380,10 @@ mod tests {
                 insert_fixture_mutation(
                     &store.conn,
                     FixtureMutation {
-                        item_id: "work",
                         state,
                         payload_json: r#"{"backend_kind":"github","title":"Work","body":""}"#,
                         failure_json: (state == "failed").then_some(r#"{"detail":"rejected"}"#),
-                        ..FixtureMutation::of(MutationType::PromoteTicket)
+                        ..FixtureMutation::new(MutationType::PromoteTicket, "work")
                     },
                 )
                 .unwrap();

@@ -1784,14 +1784,13 @@ mod tests {
         insert_fixture_mutation(
             &conn,
             FixtureMutation {
-                item_id: "pending",
                 payload_json: &MutationPayload::Promotion(Promotion {
                     title: "Child".into(),
                     body: String::new(),
                     backend_kind: "github".into(),
                 })
                 .to_json_string(),
-                ..FixtureMutation::of(MutationType::PromoteTicket)
+                ..FixtureMutation::new(MutationType::PromoteTicket, "pending")
             },
         )
         .unwrap();
@@ -1914,14 +1913,13 @@ mod tests {
             conn,
             FixtureMutation {
                 sequence,
-                item_id,
                 item_class,
                 payload_json: r#"{"title":"Original title","body":"Original body","backend_kind":"github"}"#,
                 state,
                 failure_json: (state == "failed" || state == "applying" || state == "abandoned")
                     .then_some(r#"{"detail":"prior"}"#),
                 promotion_operation_id: operation_id,
-                ..FixtureMutation::of(item_class.promotion_mutation_type())
+                ..FixtureMutation::new(item_class.promotion_mutation_type(), item_id)
             },
         )
         .unwrap();
@@ -1984,11 +1982,10 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 5,
-                item_id: "t1",
                 payload_json: r#"{"title":"T","body":"","backend_kind":"github"}"#,
                 state: "pending",
                 promotion_operation_id: Some("op-2"),
-                ..FixtureMutation::of(MutationType::PromoteTicket)
+                ..FixtureMutation::new(MutationType::PromoteTicket, "t1")
             },
         )
         .unwrap();
@@ -2681,10 +2678,9 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "t1",
                 payload_json: r#"{"title":"T","body":"","backend_kind":"jira"}"#,
                 state: "pending",
-                ..FixtureMutation::of(MutationType::PromoteTicket)
+                ..FixtureMutation::new(MutationType::PromoteTicket, "t1")
             },
         )
         .unwrap();
@@ -2755,11 +2751,10 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "t1",
                 payload_json: r#"{"title":"T","body":"","backend_kind":"github"}"#,
                 state: "applying",
                 promotion_operation_id: Some("op-1"),
-                ..FixtureMutation::of(MutationType::PromoteTicket)
+                ..FixtureMutation::new(MutationType::PromoteTicket, "t1")
             },
         )
         .unwrap();
@@ -2973,12 +2968,11 @@ mod tests {
             conn,
             FixtureMutation {
                 sequence,
-                item_id,
                 payload_json: r#"{"title":"T","body":""}"#,
                 state,
                 failure_json: (state == "failed").then_some(r#"{"detail":"boom"}"#),
                 promotion_operation_id: op,
-                ..FixtureMutation::of(MutationType::UpdateTicket)
+                ..FixtureMutation::new(MutationType::UpdateTicket, item_id)
             },
         )
         .unwrap();
@@ -3053,10 +3047,9 @@ mod tests {
             conn,
             FixtureMutation {
                 sequence,
-                item_id,
                 payload_json: &payload,
                 promotion_operation_id: op,
-                ..FixtureMutation::of(mutation_type)
+                ..FixtureMutation::new(mutation_type, item_id)
             },
         )
         .unwrap();
@@ -3673,10 +3666,9 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 2,
-                item_id: "t1",
                 payload_json: r#"{"title":"T","body":"","backend_kind":"github"}"#,
                 promotion_operation_id: Some("op-2"),
-                ..FixtureMutation::of(MutationType::PromoteTicket)
+                ..FixtureMutation::new(MutationType::PromoteTicket, "t1")
             },
         )
         .unwrap();

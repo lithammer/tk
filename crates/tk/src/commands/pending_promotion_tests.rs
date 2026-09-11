@@ -220,8 +220,7 @@ fn recorded_identity_removes_binding_label_while_queued_edits_stay_visible() {
         &conn,
         FixtureMutation {
             sequence: 2,
-            item_id: "work",
-            ..FixtureMutation::of(MutationType::UpdateTicket)
+            ..FixtureMutation::new(MutationType::UpdateTicket, "work")
         },
     )
     .unwrap();
@@ -272,12 +271,11 @@ fn promotion(
         conn,
         FixtureMutation {
             sequence,
-            item_id,
             item_class,
             state,
             payload_json: r#"{"backend_kind":"github","title":"Work","body":""}"#,
             failure_json: (state == "failed").then_some(r#"{"detail":"rejected"}"#),
-            ..FixtureMutation::of(item_class.promotion_mutation_type())
+            ..FixtureMutation::new(item_class.promotion_mutation_type(), item_id)
         },
     )
     .unwrap();

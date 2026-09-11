@@ -960,10 +960,9 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 7,
-                item_id: "t1",
                 state: "failed",
                 failure_json: Some(r#"{"detail":"boom"}"#),
-                ..FixtureMutation::of(MutationType::UpdateTicket)
+                ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
             },
         )
         .unwrap();
@@ -971,9 +970,8 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 4,
-                item_id: "t1",
                 state: "skipped",
-                ..FixtureMutation::of(MutationType::AddDependency)
+                ..FixtureMutation::new(MutationType::AddDependency, "t1")
             },
         )
         .unwrap();

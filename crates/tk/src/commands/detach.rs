@@ -590,9 +590,8 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "target",
                 state: "pending",
-                ..FixtureMutation::of(MutationType::UpdateTicket)
+                ..FixtureMutation::new(MutationType::UpdateTicket, "target")
             },
         )
         .unwrap();
@@ -800,44 +799,38 @@ mod tests {
         for mutation in [
             FixtureMutation {
                 sequence: 1,
-                item_id: "target",
                 state: "applied",
-                ..FixtureMutation::of(MutationType::UpdateTicket)
+                ..FixtureMutation::new(MutationType::UpdateTicket, "target")
             },
             FixtureMutation {
                 sequence: 2,
-                item_id: "target",
                 state: "pending",
-                ..FixtureMutation::of(MutationType::UpdateTicket)
+                ..FixtureMutation::new(MutationType::UpdateTicket, "target")
             },
             FixtureMutation {
                 sequence: 3,
-                item_id: "target",
                 state: "failed",
                 failure_json: Some(r#"{"detail":"HTTP 422: rejected"}"#),
-                ..FixtureMutation::of(MutationType::SetItemStatus)
+                ..FixtureMutation::new(MutationType::SetItemStatus, "target")
             },
             // The local edge is already gone, which is why the Mutation exists:
             // the withdrawal loses the intent to remove it upstream.
             FixtureMutation {
                 sequence: 4,
-                item_id: "blocked",
                 payload_json: r#"{"blocking_id":"target"}"#,
                 state: "pending",
-                ..FixtureMutation::of(MutationType::RemoveDependency)
+                ..FixtureMutation::new(MutationType::RemoveDependency, "blocked")
             },
             FixtureMutation {
                 sequence: 5,
-                item_id: "target",
                 state: "skipped",
                 failure_json: Some(r#"{"detail":"backend said no"}"#),
-                ..FixtureMutation::of(MutationType::SetItemStatus)
+                ..FixtureMutation::new(MutationType::SetItemStatus, "target")
             },
             FixtureMutation {
                 sequence: 6,
-                item_id: "target",
                 state: "cancelled",
-                ..FixtureMutation::of(MutationType::UpdateTicket)
+                ..FixtureMutation::new(MutationType::UpdateTicket, "target")
             },
         ] {
             insert_fixture_mutation(&conn, mutation).unwrap();
@@ -917,11 +910,10 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "target",
                 item_class: ItemClass::Epic,
                 state: "applied",
                 promotion_operation_id: Some("op-1"),
-                ..FixtureMutation::of(MutationType::PromoteEpic)
+                ..FixtureMutation::new(MutationType::PromoteEpic, "target")
             },
         )
         .unwrap();
@@ -931,10 +923,9 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 2,
-                item_id: "member",
                 state: "cancelled",
                 promotion_operation_id: Some("op-1"),
-                ..FixtureMutation::of(MutationType::PromoteTicket)
+                ..FixtureMutation::new(MutationType::PromoteTicket, "member")
             },
         )
         .unwrap();
@@ -942,12 +933,11 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 3,
-                item_id: "member",
                 payload_json: r#"{"epic_id":"target"}"#,
                 state: "failed",
                 failure_json: Some(r#"{"detail":"sub-issues unavailable"}"#),
                 promotion_operation_id: Some("op-1"),
-                ..FixtureMutation::of(MutationType::AddTicketToEpic)
+                ..FixtureMutation::new(MutationType::AddTicketToEpic, "member")
             },
         )
         .unwrap();
@@ -1025,10 +1015,9 @@ mod tests {
                 &conn,
                 FixtureMutation {
                     sequence: 1,
-                    item_id: "child",
                     state,
                     promotion_operation_id: Some("op-1"),
-                    ..FixtureMutation::of(MutationType::PromoteTicket)
+                    ..FixtureMutation::new(MutationType::PromoteTicket, "child")
                 },
             )
             .unwrap();
@@ -1036,11 +1025,10 @@ mod tests {
                 &conn,
                 FixtureMutation {
                     sequence: 2,
-                    item_id: "child",
                     payload_json: r#"{"epic_id":"target"}"#,
                     state: "pending",
                     promotion_operation_id: Some("op-1"),
-                    ..FixtureMutation::of(MutationType::AddTicketToEpic)
+                    ..FixtureMutation::new(MutationType::AddTicketToEpic, "child")
                 },
             )
             .unwrap();
@@ -1097,11 +1085,10 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                item_id: "other",
                 state: "applying",
                 failure_json: Some(r#"{"detail":"timed out"}"#),
                 promotion_operation_id: Some("op-1"),
-                ..FixtureMutation::of(MutationType::PromoteTicket)
+                ..FixtureMutation::new(MutationType::PromoteTicket, "other")
             },
         )
         .unwrap();
@@ -1109,9 +1096,8 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 2,
-                item_id: "target",
                 state: "pending",
-                ..FixtureMutation::of(MutationType::UpdateTicket)
+                ..FixtureMutation::new(MutationType::UpdateTicket, "target")
             },
         )
         .unwrap();
