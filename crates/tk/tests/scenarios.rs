@@ -1075,8 +1075,12 @@ fn prime_does_not_cap_active_items_or_plan_members() {
     for i in 1..=25 {
         p.run(&format!("add -m 'Work {i}'"));
         p.run(&format!("start repo-{i}"));
-        p.run(&format!("plan add repo-{i}"));
     }
+    let members = (1..=25)
+        .map(|i| format!("repo-{i}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    p.run(&format!("plan add {members}"));
     let output = p.run("prime");
     let active = output
         .split("Active (Store context):\n")
