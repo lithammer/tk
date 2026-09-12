@@ -96,7 +96,12 @@ fn plan_error(err: PlanError) -> CommandError {
     }
 }
 
-fn render(out: &mut dyn Write, tickets: &[PlanTicket], styler: SubStyler) -> std::io::Result<()> {
+/// Whole-Plan progress, shared with Prime; the caller owns surrounding sections.
+pub(crate) fn render(
+    out: &mut dyn Write,
+    tickets: &[PlanTicket],
+    styler: SubStyler,
+) -> std::io::Result<()> {
     if tickets.is_empty() {
         writeln!(out, "No Tickets in Plan.\n")?;
     }

@@ -5,8 +5,7 @@
 //!
 //! - Behavioural scenarios use inline [`insta`] snapshots via the [`tk!`] macro
 //!   (write `@""`, run `cargo insta test --accept`, review the diff).
-//! - `tk manpage` / `tk prime` assert their output equals the embedded
-//!   source-of-truth files, so the snapshot does not duplicate them.
+//! - `tk manpage` asserts its output equals the embedded source file.
 //! - The clap-generated `--help` output is captured as file snapshots: a
 //!   change is surfaced for review, not asserted as a hand-authored contract.
 //!
@@ -894,13 +893,275 @@ fn manpage_uses_no_retired_vocabulary() {
 }
 
 #[test]
-fn prime_emits_workflow_briefing() {
+fn prime_emits_context_and_commands() {
     let p = Repo::new("repo");
     p.run("init");
-    let expected =
-        fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/commands/prime.md"))
-            .expect("read prime.md");
-    assert_eq!(p.run("prime"), expected);
+    let output = p.run("prime");
+    assert!(
+        output.starts_with("# tk Context\n\n## Current Work\n"),
+        "{output}"
+    );
+    assert!(output.contains("Next: no ready Tickets\n"));
+    assert!(output.contains("Active: none\n"));
+    assert!(output.contains("Plan: empty\n"));
+    assert!(output.contains("## Finding Work\n"));
+    assert!(output.contains("tk start <id>"));
+    assert!(output.contains("## Plan\n"));
+    assert!(output.contains("tk --help"));
+    assert!(output.contains("man tk"));
+    for absent in ["tk sync", "tk promote", "Remote", "Backend", "Recovery"] {
+        assert!(!output.contains(absent), "unexpected {absent}: {output}");
+    }
+    assert!(output.ends_with('\n'));
+    assert!(!output.ends_with("\n\n"));
+    assert!(!output.contains('\r'));
+}
+
+#[test]
+fn prime_selects_from_the_plan_and_shows_all_progress() {
+    let p = Repo::new("repo");
+    p.run("init");
+    p.run("add -m 'First ready' -p P3");
+    p.run("add -m 'Urgent ready' -p P1");
+    p.run("add -m 'Unplanned' -p P0");
+    p.run("add --epic -m 'Active Epic'");
+    p.run("add --parent repo-4 -m 'Active child'");
+    p.run("add -m 'Finished'");
+    p.run("start repo-4");
+    p.run("start repo-5");
+    p.run("done repo-6");
+    p.run("plan add repo-1 repo-2 repo-5 repo-6");
+    let output = p.run("prime");
+    let current = output.split("## Finding Work").next().unwrap();
+    assert!(
+        current.contains("Next in Plan: repo-2: Urgent ready\n"),
+        "{current}"
+    );
+    assert!(current.contains("`tk start repo-2`"));
+    assert!(current.contains("◐ repo-4 [epic] Active Epic"));
+    assert!(current.contains("◐ repo-5 ● P2 Active child"));
+    assert!(current.contains(&p.run("plan")));
+    assert!(!current.contains("Unplanned"));
+    p.run("block repo-1 repo-3");
+    p.run("block repo-2 repo-3");
+    let output = p.run("prime");
+    assert!(output.contains("Next in Plan: no ready Tickets\n"));
+    assert!(!output.contains("`tk start repo-3`"));
+    p.run("plan clear");
+    assert!(p.run("prime").contains("Next: repo-3: Unplanned\n"));
+    p.run("plan add repo-6");
+    let output = p.run("prime");
+    assert!(output.contains("Next in Plan: no ready Tickets\n"));
+    assert!(output.contains("0 remaining · 1/1 done\n"));
+}
+
+#[test]
+fn prime_scope_limits_current_work_but_keeps_the_whole_plan() {
+    let p = Repo::new("repo");
+    p.run("init");
+    p.run("add --epic -m 'Feature'");
+    p.run("add --parent repo-1 -m 'Child' -p P2");
+    p.run("add -m 'Outside' -p P0");
+    p.run("add --parent repo-1 -m 'Busy child'");
+    p.run("add -m 'Busy outside'");
+    p.run("start repo-4");
+    p.run("start repo-5");
+    p.run("plan add repo-2 repo-3");
+    let output = p.run_env("prime", &[("TK_SCOPE", "repo-1")]);
+    assert!(
+        output.contains("Scope: repo-1 (Epic + child Tickets)\n"),
+        "{output}"
+    );
+    assert!(output.contains("Next in Plan within Scope repo-1: repo-2: Child\n"));
+    assert!(output.contains("◐ repo-4 ● P2 Busy child"));
+    assert!(!output.contains("Busy outside"));
+    assert!(output.contains(&p.run("plan")));
+    p.run("plan clear");
+    assert!(
+        p.run_env("prime", &[("TK_SCOPE", "repo-1")])
+            .contains("Next within Scope repo-1: repo-2: Child\n")
+    );
+    p.run("plan add repo-3");
+    assert!(
+        p.run_env("prime", &[("TK_SCOPE", "repo-1")])
+            .contains("Next in Plan within Scope repo-1: no ready Tickets\n")
+    );
+    for (scope, reason) in [
+        ("missing", "not a known Display ID or Alias"),
+        ("repo-2", "not an Epic"),
+    ] {
+        let output = p.run_env("prime", &[("TK_SCOPE", scope)]);
+        let current = output.split("## Finding Work").next().unwrap();
+        assert!(
+            current.contains(&format!("Warning: scope '{scope}' is {reason}")),
+            "{current}"
+        );
+        assert!(!current.contains("Next"));
+        assert!(!current.contains("Active"));
+        assert!(current.contains(&p.run("plan")));
+    }
+}
+
+#[test]
+fn prime_remote_counts_are_facts_without_recovery_instructions() {
+    let p = Repo::new("repo");
+    p.run("init");
+    p.run("remote set github");
+    p.run("add -m 'Work'");
+    let clean = p.run("prime");
+    assert!(clean.contains("Mutation Log: clean\n"), "{clean}");
+    assert!(clean.contains("## Remote Work\n"));
+    assert!(clean.contains("tk sync log"));
+    assert!(!clean.contains('\r'));
+    assert!(clean.ends_with('\n') && !clean.ends_with("\n\n"));
+    let headings: Vec<_> = clean
+        .lines()
+        .filter(|line| line.starts_with("## "))
+        .collect();
+    assert_eq!(
+        headings,
+        [
+            "## Current Work",
+            "## Finding Work",
+            "## Creating and Updating",
+            "## Dependencies",
+            "## Plan",
+            "## Scope",
+            "## Remote Work"
+        ]
+    );
+    p.seed_mutation("repo-1", "pending", None);
+    let conn = rusqlite::Connection::open(p.cwd.join(".git/tk/tk.db")).unwrap();
+    for (sequence, state, kind, failure) in [
+        (
+            2,
+            "failed",
+            "update_ticket",
+            Some(r#"{"detail":"refused"}"#),
+        ),
+        (3, "applying", "promote_ticket", None),
+        (4, "skipped", "update_ticket", None),
+        (5, "cancelled", "update_ticket", None),
+        (6, "abandoned", "promote_ticket", None),
+    ] {
+        conn.execute(
+            "insert into mutations(sequence, mutation_type, item_id, item_class, payload_json, state, failure_json, created_at, state_changed_at)
+             select ?1, ?2, item_id, item_class, payload_json, ?3, ?4, created_at, state_changed_at from mutations where sequence = 1",
+            rusqlite::params![sequence, kind, state, failure],
+        ).unwrap();
+    }
+    let output = p.run("prime");
+    let current = output.split("## Finding Work").next().unwrap();
+    assert!(current.contains("Mutation Log: 1 pending · 1 failed · 1 applying · 1 skipped · 1 cancelled · 1 abandoned\n"), "{current}");
+    for instruction in ["tk sync", "tk promote", "Inspect", "Recovery"] {
+        assert!(!current.contains(instruction), "{current}");
+    }
+    assert_eq!(
+        output.split("## Finding Work").nth(1),
+        clean.split("## Finding Work").nth(1)
+    );
+    conn.execute(
+        "update mutations set state = 'applied', failure_json = null",
+        [],
+    )
+    .unwrap();
+    assert!(p.run("prime").contains("Mutation Log: clean\n"));
+}
+
+#[test]
+fn prime_does_not_cap_active_items_or_plan_members() {
+    let p = Repo::new("repo");
+    p.run("init");
+    for i in 1..=25 {
+        p.run(&format!("add -m 'Work {i}'"));
+        p.run(&format!("start repo-{i}"));
+    }
+    let members = (1..=25)
+        .map(|i| format!("repo-{i}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    p.run(&format!("plan add {members}"));
+    let output = p.run("prime");
+    let active = output
+        .split("Active (Store context):\n")
+        .nth(1)
+        .unwrap()
+        .split("Plan (whole Store):")
+        .next()
+        .unwrap();
+    assert_eq!(
+        active
+            .lines()
+            .filter(|line| line.contains("◐ repo-"))
+            .count(),
+        25
+    );
+    assert!(output.contains(&p.run("plan")));
+    assert!(output.contains("25 remaining · 0/25 done"));
+}
+
+#[test]
+fn prime_sanitizes_current_work_and_scope_warnings() {
+    let p = Repo::new("repo");
+    p.run("init");
+    p.run("add -m 'Work'");
+    let conn = rusqlite::Connection::open(p.cwd.join(".git/tk/tk.db")).unwrap();
+    conn.execute("update items set title = ?1", ["Title\r\nnext\x1b[31m"])
+        .unwrap();
+    p.run("plan add repo-1");
+    for started in [false, true] {
+        if started {
+            p.run("start repo-1");
+        }
+        let output = p.run("prime");
+        assert!(!output.contains('\r'));
+        assert!(!output.contains('\x1b'));
+        assert!(output.contains("Title  next\\x1b[31m"), "{output}");
+    }
+    let output = p.run_env("prime", &[("TK_SCOPE", "bad\nScope\x07")]);
+    assert!(
+        output.contains("Warning: scope 'bad Scope\\x07'"),
+        "{output}"
+    );
+}
+
+#[test]
+fn prime_read_failure_reports_only_a_diagnostic() {
+    for table in ["plan_members", "item_ids", "remotes"] {
+        let p = Repo::new("repo");
+        p.run("init");
+        let conn = rusqlite::Connection::open(p.cwd.join(".git/tk/tk.db")).unwrap();
+        conn.execute(&format!("drop table {table}"), []).unwrap();
+        let output = p.run_env("prime", &[("TK_SCOPE", "missing")]);
+        assert!(
+            output.starts_with(
+                "exit 1\n-- stdout --\n-- stderr --\ntk prime: failed to read Repository Store\n"
+            ),
+            "{table}: {output}"
+        );
+        assert!(!output.contains("# tk Context"));
+    }
+}
+
+#[test]
+fn prime_is_silent_for_unopenable_stores() {
+    for fault in ["foreign", "future", "corrupt"] {
+        let p = Repo::new("repo");
+        p.run("init");
+        let path = p.cwd.join(".git/tk/tk.db");
+        if fault == "corrupt" {
+            fs::write(path, "not a SQLite database").unwrap();
+        } else {
+            let conn = rusqlite::Connection::open(path).unwrap();
+            let sql = if fault == "foreign" {
+                "pragma application_id = 0"
+            } else {
+                "insert into schema_migrations(version, applied_at) values (999999, '2026-09-11T00:00:00.000Z'); pragma user_version = 999999"
+            };
+            conn.execute_batch(sql).unwrap();
+        }
+        assert_eq!(p.run("prime"), "", "{fault}");
+    }
 }
 
 #[test]

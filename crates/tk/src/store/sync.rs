@@ -1595,6 +1595,17 @@ pub fn unresolved_mutation_counts(conn: &Connection) -> rusqlite::Result<Unresol
     )
 }
 
+/// Count every non-applied Mutation state, including withdrawn intent (ADR-0052).
+/// Absent states have no row; an empty result means the Mutation Log is clean.
+pub(crate) fn mutation_state_counts(
+    conn: &Connection,
+) -> rusqlite::Result<Vec<(MutationState, i64)>> {
+    let mut stmt = conn
+        .prepare("select state, count(*) from mutations where state <> 'applied' group by state")?;
+    stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect()
+}
+
 /// Return the Adopted working set's Backend keys after checking that the
 /// Store's Backend kind matches the Adapter.
 pub fn working_set_keys(
