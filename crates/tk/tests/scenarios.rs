@@ -1,32 +1,14 @@
-//! CLI scenario tests for the `tk` binary.
+//! Real-Git CLI scenarios through the command dependency seam (ADR-0053).
 //!
-//! Each scenario drives the built `tk` binary through a real git repo inside a
-//! `$TESTROOT` scratch directory and asserts the rendered stdout/stderr/exit:
-//!
-//! - Behavioural scenarios use inline [`insta`] snapshots via the [`tk!`] macro
-//!   (write `@""`, run `cargo insta test --accept`, review the diff).
-//! - `tk manpage` asserts its output equals the embedded source file.
-//! - The clap-generated `--help` output is captured as file snapshots: a
-//!   change is surfaced for review, not asserted as a hand-authored contract.
-//!
-//! Isolation: every `tk` runs as its own subprocess, so the per-child env set
-//! here is never the test process's global state and scenarios run in parallel
-//! safely. The colour-policy env (`NO_COLOR` / `CLICOLOR_FORCE`) is scrubbed so
-//! a developer's shell cannot tint the output. The binary reads no determinism
-//! env knobs (tk-105), so nothing else needs pinning: the random `items.id`
-//! never appears in output and OS entropy keeps it distinct across a scenario's
-//! `tk add` calls; and the two values that do vary — the `Created:` date in
-//! `tk grep` and `tk show` output and git's refusal stderr — are pinned with
-//! insta redaction filters.
-//! `GIT_CEILING_DIRECTORIES` pins git discovery to the scratch tree so a
-//! `$TESTROOT` under an ambient repo cannot make a refusal scenario pass
-//! spuriously.
+//! Each command runs in a child test process with an isolated data root.
+//! Environment changes stay per-child; Store IDs and dates are redacted only
+//! where their values are outside the rendered contract.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use assert_cmd::cargo::CommandCargoExt;
+mod support;
 use tempfile::TempDir;
 
 #[test]
@@ -237,26 +219,31 @@ impl Repo {
     /// used to exercise the `TK_SCOPE` Scope channel (ADR-0022).
     fn run_env(&self, cmd: &str, env: &[(&str, &str)]) -> String {
         let args = shlex::split(cmd).expect("command must shell-split");
-        let mut command = Command::cargo_bin("tk").expect("cargo bin tk");
-        command
-            .args(&args)
-            .current_dir(&self.cwd)
-            .env("GIT_CEILING_DIRECTORIES", &self.root)
-            // Scrub the colour-policy env (per-child, never the test process's
-            // global state) so a developer's shell cannot tint the output, and
-            // the ambient `TK_SCOPE` so an inherited Scope (ADR-0022) cannot
-            // narrow or reject a scenario's `tk list` / `tk next`; the `env`
-            // argument re-adds it for the scenario that exercises that
-            // channel. The binary reads no determinism env knobs (tk-105), so
-            // nothing else needs scrubbing.
-            .env_remove("NO_COLOR")
-            .env_remove("CLICOLOR_FORCE")
-            .env_remove("TK_SCOPE");
-        for (key, value) in env {
-            command.env(key, value);
-        }
-        let out = command.output().expect("run tk");
+        let out = support::run(&self.cwd, &self.root, &args, env);
         render(&out, &self.root)
+    }
+
+    fn git(&self, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(&self.cwd)
+            .env("GIT_CONFIG_GLOBAL", self.root.join("global.gitconfig"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    fn db_path(&self) -> PathBuf {
+        self.root
+            .join("data/tk/stores")
+            .join(self.git(&["config", "--local", "--get", "tk.storeId"]))
+            .join("tk.db")
     }
 
     /// Write one Mutation straight into this repo's Mutation Log.
@@ -267,7 +254,7 @@ impl Repo {
     /// out of reach otherwise. Keeps the `mutations` column list in one place,
     /// so a migration adding a column breaks one literal.
     fn seed_mutation(&self, display_value: &str, state: &str, failure_json: Option<&str>) {
-        let conn = rusqlite::Connection::open(self.cwd.join(".git/tk/tk.db")).unwrap();
+        let conn = rusqlite::Connection::open(self.db_path()).unwrap();
         let item_id: String = conn
             .query_row(
                 "select id from items where display_value = ?1",
@@ -292,8 +279,18 @@ impl Repo {
 /// Render a command result with `$TESTROOT` redacted: bare stdout on the happy
 /// path, and a framed block exposing exit/stderr only when they are non-trivial.
 fn render(out: &Output, root: &Path) -> String {
+    static STORE_PATH: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"\$TESTROOT[/\\]data[/\\]tk[/\\]stores[/\\][0-9a-f]{32}[/\\]tk\.db")
+            .unwrap()
+    });
     let redact = |bytes: &[u8]| {
-        String::from_utf8_lossy(bytes).replace(root.to_str().expect("utf-8 root"), "$TESTROOT")
+        STORE_PATH
+            .replace_all(
+                &String::from_utf8_lossy(bytes)
+                    .replace(root.to_str().expect("utf-8 root"), "$TESTROOT"),
+                "$$TESTROOT/data/tk/stores/[STORE_ID]/tk.db",
+            )
+            .to_string()
     };
     let code = out.status.code().unwrap_or(-1);
     let stdout = redact(&out.stdout);
@@ -328,22 +325,375 @@ macro_rules! tk {
 }
 
 #[test]
+fn durable_store_survives_checkout_and_has_a_valid_association() {
+    let p = Repo::new("repo");
+    let out = p.run("init");
+    assert!(out.starts_with("Initialized Repository Store at "), "{out}");
+    let id = p.git(&["config", "--local", "--get", "tk.storeId"]);
+    assert_eq!(id.len(), 32, "init must install a Store ID");
+    assert!(
+        id.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    );
+}
+
+#[test]
+fn durable_store_reopens_and_healthy_init_preserves_metadata() {
+    let p = Repo::new("repo");
+    p.run("init");
+    let db = p.db_path();
+    let manifest = db.with_file_name("store.json");
+    let before = fs::read(&manifest).unwrap();
+    let config = fs::read(p.cwd.join(".git/config")).unwrap();
+    assert!(p.run("add -m 'Keep me'").contains("repo-1"));
+    assert!(
+        p.run("init")
+            .starts_with("Repository Store already initialized at ")
+    );
+    assert!(p.run("show repo-1").contains("Keep me"));
+    assert_eq!(fs::read(&manifest).unwrap(), before);
+    assert_eq!(fs::read(p.cwd.join(".git/config")).unwrap(), config);
+    let value: serde_json::Value = serde_json::from_slice(&before).unwrap();
+    assert_eq!(value["version"], 1);
+    assert_eq!(
+        value["association"]["git_common_dir"],
+        fs::canonicalize(p.cwd.join(".git"))
+            .unwrap()
+            .to_str()
+            .unwrap()
+    );
+    assert!(db.with_file_name("backups").is_dir());
+    fs::remove_dir_all(&p.cwd).unwrap();
+    assert!(db.is_file());
+    assert_eq!(fs::read(&manifest).unwrap(), before);
+}
+
+#[test]
+fn durable_store_linked_workspaces_share_but_copied_pointers_refuse() {
+    let mut p = Repo::new("repo");
+    p.run("init");
+    p.run("add -m 'Shared work'");
+    p.git(&[
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "initial",
+    ]);
+    let linked = p.root.join("linked");
+    p.git(&["worktree", "add", "-b", "linked", linked.to_str().unwrap()]);
+    let id = p.git(&["config", "--local", "--get", "tk.storeId"]);
+    p.cwd = linked;
+    assert!(p.run("show repo-1").contains("Shared work"));
+    assert!(
+        p.run("init")
+            .starts_with("Repository Store already initialized at ")
+    );
+    let clone = p.root.join("independent");
+    fs::create_dir(&clone).unwrap();
+    p.cwd = clone;
+    p.git(&["init", "-q"]);
+    p.git(&["config", "--local", "tk.storeId", &id]);
+    for command in ["list", "init"] {
+        let out = p.run(command);
+        assert!(out.contains("another Git Common Directory"), "{out}");
+    }
+    assert_eq!(p.run("prime"), "");
+}
+
+#[cfg(unix)]
+#[test]
+fn durable_store_canonical_alias_reopens() {
+    let mut p = Repo::new("repo");
+    p.run("init");
+    p.run("add -m 'Shared through alias'");
+    let alias = p.root.join("alias");
+    std::os::unix::fs::symlink(&p.cwd, &alias).unwrap();
+    p.cwd = alias;
+    assert!(p.run("show repo-1").contains("Shared through alias"));
+    assert!(
+        p.run("init")
+            .starts_with("Repository Store already initialized at ")
+    );
+}
+
+#[test]
+fn durable_store_pointer_scope_and_duplicates() {
+    let p = Repo::new("repo");
+    fs::write(
+        p.root.join("global.gitconfig"),
+        "[tk]\nstoreId = invalid-global\n",
+    )
+    .unwrap();
+    let include = p.root.join("included.config");
+    fs::write(&include, "[tk]\nstoreId = invalid-include\n").unwrap();
+    p.git(&[
+        "config",
+        "--local",
+        "include.path",
+        include.to_str().unwrap(),
+    ]);
+    p.git(&["config", "--local", "extensions.worktreeConfig", "true"]);
+    p.git(&["config", "--worktree", "tk.storeId", "invalid-worktree"]);
+    assert!(
+        p.run("init")
+            .starts_with("Initialized Repository Store at ")
+    );
+    assert!(p.run("add -m 'Local authority'").contains("repo-1"));
+    let id = p.git(&["config", "--local", "--get", "tk.storeId"]);
+    p.git(&["config", "--local", "--add", "tk.storeId", &id]);
+    for command in ["list", "init"] {
+        assert!(p.run(command).contains("multiple repository-local"));
+    }
+    assert_eq!(p.run("prime"), "");
+    p.git(&["config", "--local", "--replace-all", "tk.storeId", "../bad"]);
+    assert!(p.run("list").contains("32 lowercase hexadecimal"));
+    assert!(p.run("init").contains("32 lowercase hexadecimal"));
+}
+
+#[test]
+fn durable_store_refuses_corrupt_future_or_mismatched_manifests() {
+    for fault in ["corrupt", "future", "identity", "relative", "missing"] {
+        let p = Repo::new("repo");
+        p.run("init");
+        let db = p.db_path();
+        let path = db.with_file_name("store.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        match fault {
+            "corrupt" => fs::write(&path, "{").unwrap(),
+            "missing" => fs::remove_file(&path).unwrap(),
+            _ => {
+                match fault {
+                    "future" => manifest["version"] = 2.into(),
+                    "identity" => manifest["store_id"] = "ffffffffffffffffffffffffffffffff".into(),
+                    "relative" => manifest["association"]["git_common_dir"] = "relative".into(),
+                    _ => unreachable!(),
+                }
+                fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+            }
+        }
+        let before = fs::read(&db).unwrap();
+        for command in ["list", "init"] {
+            assert!(p.run(command).starts_with("exit 1\n"), "{fault}");
+        }
+        assert_eq!(p.run("prime"), "");
+        assert_eq!(fs::read(&db).unwrap(), before);
+    }
+}
+
+#[test]
+fn durable_store_refuses_legacy_and_lost_pointers() {
+    let p = Repo::new("repo");
+    let legacy = p.cwd.join(".git/tk");
+    fs::create_dir(&legacy).unwrap();
+    fs::write(legacy.join("tk.db"), "retained legacy data").unwrap();
+    for command in ["init", "list"] {
+        assert!(
+            p.run(command)
+                .contains("legacy Repository Store data exists")
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(legacy.join("tk.db")).unwrap(),
+        "retained legacy data"
+    );
+    assert!(!p.root.join("data").exists());
+    fs::remove_dir_all(legacy).unwrap();
+    p.run("init");
+    p.run("add -m 'Keep this Store'");
+    let db = p.db_path();
+    p.git(&["config", "--local", "--unset", "tk.storeId"]);
+    assert!(p.run("init").contains("Store evidence requires recovery"));
+    assert!(p.run("list").contains("Repository Store not initialized"));
+    assert!(db.is_file());
+    assert_eq!(
+        fs::read_dir(p.root.join("data/tk/stores")).unwrap().count(),
+        1
+    );
+}
+
+#[test]
+fn durable_store_root_failures_never_choose_a_fallback() {
+    let p = Repo::new("repo");
+    for root in ["missing", "relative"] {
+        assert!(
+            p.run_env("init", &[("TK_TEST_DATA_ROOT", root)])
+                .contains("data directory is unavailable or is not absolute")
+        );
+        assert_eq!(p.run_env("prime", &[("TK_TEST_DATA_ROOT", root)]), "");
+    }
+    fs::write(p.root.join("data"), "not a directory").unwrap();
+    assert!(p.run("init").contains("filesystem error"));
+    assert_eq!(
+        fs::read_to_string(p.root.join("data")).unwrap(),
+        "not a directory"
+    );
+    assert!(!p.cwd.join(".git/tk").exists());
+}
+
+#[test]
+fn durable_store_collision_preserves_an_unrelated_store() {
+    let mut p = Repo::new("repo");
+    assert!(
+        p.run_env("init", &[("TK_TEST_SEED", "42")])
+            .starts_with("Initialized")
+    );
+    let db = p.db_path();
+    let before = fs::read(&db).unwrap();
+    let other = p.root.join("other");
+    fs::create_dir(&other).unwrap();
+    p.cwd = other;
+    p.git(&["init", "-q"]);
+    assert!(
+        p.run_env("init", &[("TK_TEST_SEED", "42")])
+            .contains("Store ID collision")
+    );
+    assert_eq!(fs::read(&db).unwrap(), before);
+    assert_eq!(
+        fs::read_dir(p.root.join("data/tk/stores")).unwrap().count(),
+        1
+    );
+}
+
+#[test]
+fn durable_store_publication_failure_retains_recoverable_data() {
+    let p = Repo::new("repo");
+    fs::write(p.cwd.join(".git/config.lock"), "held by another writer").unwrap();
+    assert!(
+        p.run("init")
+            .contains("failed to install repository-local Store config")
+    );
+    fs::remove_file(p.cwd.join(".git/config.lock")).unwrap();
+    let stores = p.root.join("data/tk/stores");
+    let dir = fs::read_dir(&stores)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert!(dir.join("tk.db").is_file());
+    assert!(dir.join("store.json").is_file());
+    assert!(p.run("init").contains("Store evidence requires recovery"));
+    assert_eq!(fs::read_dir(stores).unwrap().count(), 1);
+}
+
+#[test]
+fn durable_store_evidence_is_exact_sorted_and_omits_credentials() {
+    let p = Repo::new("repo");
+    for (name, url) in [
+        ("z", "https://example.invalid/z.git"),
+        ("a", "https://example.invalid/a.git"),
+        ("duplicate", "https://example.invalid/z.git"),
+        ("userinfo", "https://user:secret@example.invalid/r.git"),
+        ("query", "https://example.invalid/r.git?token=secret"),
+        ("local", "/secret/path"),
+        ("helper", "ext::secret command"),
+    ] {
+        p.git(&["config", "--local", &format!("remote.{name}.url"), url]);
+    }
+    p.run("init");
+    let bytes = fs::read(p.db_path().with_file_name("store.json")).unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains("secret"));
+    let manifest: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        manifest["evidence"]["git_remote_urls"],
+        serde_json::json!([
+            "https://example.invalid/a.git",
+            "https://example.invalid/z.git"
+        ])
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn durable_store_tightens_only_new_directories() {
+    use std::os::unix::fs::PermissionsExt;
+    let p = Repo::new("repo");
+    let data = p.root.join("data");
+    fs::create_dir(&data).unwrap();
+    fs::set_permissions(&data, fs::Permissions::from_mode(0o755)).unwrap();
+    p.run("init");
+    assert_eq!(
+        fs::metadata(&data).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+    let db = p.db_path();
+    for dir in [
+        data.join("tk"),
+        data.join("tk/stores"),
+        db.parent().unwrap().to_path_buf(),
+        db.with_file_name("backups"),
+    ] {
+        assert_eq!(
+            fs::metadata(dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+    let store_dir = db.parent().unwrap();
+    fs::set_permissions(store_dir, fs::Permissions::from_mode(0o750)).unwrap();
+    p.run("init");
+    assert_eq!(
+        fs::metadata(store_dir).unwrap().permissions().mode() & 0o777,
+        0o750
+    );
+}
+
+#[test]
+fn durable_store_incomplete_publication_blocks_fresh_init() {
+    let p = Repo::new("repo");
+    let orphan = p
+        .root
+        .join("data/tk/stores/00000000000000000000000000000000");
+    fs::create_dir_all(&orphan).unwrap();
+    fs::write(orphan.join("tk.db"), "interrupted data").unwrap();
+    assert!(p.run("init").contains("Store evidence requires recovery"));
+    assert_eq!(
+        fs::read_to_string(orphan.join("tk.db")).unwrap(),
+        "interrupted data"
+    );
+    assert_eq!(fs::read_dir(orphan.parent().unwrap()).unwrap().count(), 1);
+}
+
+#[test]
+fn durable_store_init_refuses_foreign_and_future_databases_unchanged() {
+    for sql in [
+        "pragma application_id = 1",
+        "insert into schema_migrations(version, applied_at) values (9999, '2099-01-01T00:00:00.000Z')",
+    ] {
+        let p = Repo::new("repo");
+        p.run("init");
+        let db = p.db_path();
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(sql).unwrap();
+        conn.execute_batch("pragma journal_mode=delete").unwrap();
+        drop(conn);
+        let before = fs::read(&db).unwrap();
+        assert!(p.run("init").starts_with("exit 1\n"));
+        assert_eq!(fs::read(&db).unwrap(), before);
+    }
+}
+
+#[test]
 fn init_fresh() {
     let p = Repo::new("repo");
-    tk!(p, "init", @"Initialized Repository Store at $TESTROOT/repo/.git/tk/tk.db");
+    tk!(p, "init", @"Initialized Repository Store at $TESTROOT/data/tk/stores/[STORE_ID]/tk.db");
 }
 
 #[test]
 fn init_idempotent() {
     let p = Repo::new("repo");
-    tk!(p, "init", @"Initialized Repository Store at $TESTROOT/repo/.git/tk/tk.db");
-    tk!(p, "init", @"Repository Store already initialized at $TESTROOT/repo/.git/tk/tk.db");
+    tk!(p, "init", @"Initialized Repository Store at $TESTROOT/data/tk/stores/[STORE_ID]/tk.db");
+    tk!(p, "init", @"Repository Store already initialized at $TESTROOT/data/tk/stores/[STORE_ID]/tk.db");
 }
 
 #[test]
 fn create_epic_child() {
     let p = Repo::new("project");
-    tk!(p, "init", @"Initialized Repository Store at $TESTROOT/project/.git/tk/tk.db");
+    tk!(p, "init", @"Initialized Repository Store at $TESTROOT/data/tk/stores/[STORE_ID]/tk.db");
     tk!(p, "add --epic -m 'Feature Epic'", @r"
     Created Epic: project-1 - Feature Epic
     Status: open
@@ -1031,7 +1381,7 @@ fn prime_remote_counts_are_facts_without_recovery_instructions() {
         ]
     );
     p.seed_mutation("repo-1", "pending", None);
-    let conn = rusqlite::Connection::open(p.cwd.join(".git/tk/tk.db")).unwrap();
+    let conn = rusqlite::Connection::open(p.db_path()).unwrap();
     for (sequence, state, kind, failure) in [
         (
             2,
@@ -1105,7 +1455,7 @@ fn prime_sanitizes_current_work_and_scope_warnings() {
     let p = Repo::new("repo");
     p.run("init");
     p.run("add -m 'Work'");
-    let conn = rusqlite::Connection::open(p.cwd.join(".git/tk/tk.db")).unwrap();
+    let conn = rusqlite::Connection::open(p.db_path()).unwrap();
     conn.execute("update items set title = ?1", ["Title\r\nnext\x1b[31m"])
         .unwrap();
     p.run("plan add repo-1");
@@ -1130,7 +1480,7 @@ fn prime_read_failure_reports_only_a_diagnostic() {
     for table in ["plan_members", "item_ids", "remotes"] {
         let p = Repo::new("repo");
         p.run("init");
-        let conn = rusqlite::Connection::open(p.cwd.join(".git/tk/tk.db")).unwrap();
+        let conn = rusqlite::Connection::open(p.db_path()).unwrap();
         conn.execute(&format!("drop table {table}"), []).unwrap();
         let output = p.run_env("prime", &[("TK_SCOPE", "missing")]);
         assert!(
@@ -1148,7 +1498,7 @@ fn prime_is_silent_for_unopenable_stores() {
     for fault in ["foreign", "future", "corrupt"] {
         let p = Repo::new("repo");
         p.run("init");
-        let path = p.cwd.join(".git/tk/tk.db");
+        let path = p.db_path();
         if fault == "corrupt" {
             fs::write(path, "not a SQLite database").unwrap();
         } else {
@@ -1227,7 +1577,7 @@ fn command_help_snapshots() {
 fn detach_adopted_ticket_through_cli_dispatch() {
     let p = Repo::new("project");
     p.run("init");
-    let db_path = p.cwd.join(".git/tk/tk.db");
+    let db_path = p.db_path();
     {
         let conn = rusqlite::Connection::open(&db_path).unwrap();
         conn.execute_batch("pragma foreign_keys = on").unwrap();

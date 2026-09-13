@@ -4,7 +4,7 @@ tk's read commands — `tk list`, `tk show`, `tk search`, `tk grep`, `tk next`,
 `tk sync log` — render text for a person at a terminal or for an AI agent
 reading that same text. tk ships no structured serialization of that output:
 no `--json`, no `--porcelain`. Programmatic access to work items is the
-**Repository Store** itself, the SQLite database at `.git/tk/tk.db`.
+**Repository Store** itself, the SQLite database at `<local data>/tk/stores/<Store ID>/tk.db` (ADR-0053).
 
 ## Why not a machine format
 

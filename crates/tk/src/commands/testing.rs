@@ -1,9 +1,7 @@
 //! Shared unit-test scaffolding for the command modules.
 //!
-//! Every command test runs the same prologue: a [`Deps`] over in-memory
-//! writers, a Repository Store seeded inside a temp directory, and a queued
-//! `git rev-parse` discovery call for the runner to answer. This module owns
-//! that prologue so the command modules only carry what is specific to them.
+//! Command tests share in-memory writers, an isolated Repository Store, and
+//! queued Git discovery and Store pointer reads.
 //!
 //! Available to crate tests only — `mod testing` is gated on `#[cfg(test)]` in
 //! `commands/mod.rs`, mirroring `store/mod.rs`.
@@ -23,8 +21,7 @@ use crate::proc::{FakeRunner, RunOutput};
 use crate::render::Styler;
 use crate::store::testing::TmpStore;
 
-/// Fixed wall clock for command tests. Timestamps and the ULIDs derived from
-/// them appear verbatim in assertions, so this value is load-bearing.
+/// Fixed wall clock for timestamps asserted verbatim in command tests.
 pub(crate) const CLOCK_MS: i64 = 1_778_284_800_000;
 
 /// The command cwd tests run against. Discovery is answered by [`expect_git`],
@@ -37,8 +34,8 @@ pub(crate) fn cwd() -> PathBuf {
 ///
 /// `stdout` / `stderr` / `stdin` / `runner` / `clock` are public because tests
 /// move the buffers out (`String::from_utf8(h.stdout)`) and queue subprocess
-/// expectations directly (`h.runner.expect(...)`). `rng` and `cwd` are only
-/// ever handed to [`Deps`], so they stay private.
+/// expectations directly (`h.runner.expect(...)`). `rng`, `cwd`, and `data_root`
+/// are only handed to [`Deps`], so they stay private.
 pub(crate) struct Harness<'a> {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
@@ -46,18 +43,19 @@ pub(crate) struct Harness<'a> {
     pub runner: FakeRunner,
     pub clock: FakeClock,
     rng: StdRng,
+    data_root: PathBuf,
     cwd: &'a Path,
 }
 
 impl<'a> Harness<'a> {
-    /// Harness seeded at RNG seed 0 and [`CLOCK_MS`].
-    pub fn new(cwd: &'a Path) -> Self {
-        Self::with_seed(cwd, 0)
+    /// Use the fixture's isolated data root, RNG seed 0, and [`CLOCK_MS`].
+    pub fn new(cwd: &'a Path, store: &TmpStore) -> Self {
+        Self::with_seed(cwd, store, 0)
     }
 
-    /// Harness at an explicit RNG seed. Commands that mint identifiers assert
-    /// the exact ULIDs a seed produces, so each module pins its own.
-    pub fn with_seed(cwd: &'a Path, seed: u64) -> Self {
+    /// Use the fixture's isolated data root and an explicit RNG seed.
+    /// Tests pin the seed when they assert exact generated IDs.
+    pub fn with_seed(cwd: &'a Path, store: &TmpStore, seed: u64) -> Self {
         Self {
             stdout: Vec::new(),
             stderr: Vec::new(),
@@ -65,15 +63,9 @@ impl<'a> Harness<'a> {
             runner: FakeRunner::new(),
             clock: FakeClock::new(CLOCK_MS),
             rng: StdRng::seed_from_u64(seed),
+            data_root: store.data_root.clone(),
             cwd,
         }
-    }
-
-    /// Override the fake clock for a module whose assertions pin a different
-    /// stamp than [`CLOCK_MS`].
-    pub fn with_clock_ms(mut self, millis: i64) -> Self {
-        self.clock = FakeClock::new(millis);
-        self
     }
 
     /// `Deps` with colour off.
@@ -88,6 +80,7 @@ impl<'a> Harness<'a> {
     /// exercise the coloured path.
     pub fn deps_with(&mut self, styler: Styler) -> Deps<'_> {
         Deps {
+            data_root: Some(&self.data_root),
             stdout: &mut self.stdout,
             stderr: &mut self.stderr,
             stdin: &mut self.stdin,
@@ -108,8 +101,8 @@ impl<'a> Harness<'a> {
     }
 }
 
-/// Queue the `git rev-parse` discovery call `open_for_command` makes. FIFO, so
-/// this must precede any `gh` expectation.
+/// Queue Git discovery and pointer reads for the fixture.
+/// These expectations must precede any Backend calls.
 pub(crate) fn expect_git(h: &Harness<'_>, store: &TmpStore) {
     h.runner.expect(
         &["git", "rev-parse"],
@@ -119,6 +112,7 @@ pub(crate) fn expect_git(h: &Harness<'_>, store: &TmpStore) {
             stderr: Vec::new(),
         },
     );
+    crate::store::testing::expect_pointer(&h.runner);
 }
 
 /// Queue one exact GraphQL Pull request and its matching Issue response.

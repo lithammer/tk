@@ -37,7 +37,7 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         return Err(CommandError::failure("query must not be empty"));
     }
 
-    let store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
+    let store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock, deps.data_root)
         .map_err(|err| resolver::open_error(&err))?;
 
     let rows =
@@ -124,7 +124,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run_rendered(
             &mut h,
@@ -161,7 +161,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run_rendered(
             &mut h,
@@ -224,7 +224,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run_rendered(
             &mut h,
@@ -256,7 +256,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         // No git expectation: a truly-empty query is rejected before discovery
         // (ADR-0026, amended) — an empty `instr` substring matches every row.
         let code = run_rendered(
@@ -306,7 +306,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run_rendered(
             &mut h,
@@ -324,7 +324,7 @@ mod tests {
     fn missing_store_renders_init_diagnostic() {
         let store = TmpStore::new("repo");
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run_rendered(
             &mut h,
@@ -372,7 +372,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run_rendered(
             &mut h,

@@ -160,6 +160,8 @@ pub struct Deps<'a> {
     pub runner: &'a dyn ProcRunner,
     pub clock: &'a dyn Clock,
     pub rng: &'a mut dyn Rng,
+    /// Platform-local data root; tests supply an isolated absolute path.
+    pub data_root: Option<&'a Path>,
     pub cwd: &'a Path,
     /// Resolved per-stream colour choice (ADR-0014). Commands emitting
     /// styled output reach for `deps.styler.for_stdout()` /

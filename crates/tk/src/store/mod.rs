@@ -12,8 +12,10 @@
 //! post-sync Mutation Log read that says whether the operation resolved), and
 //! the `sql_value` SQLite value mapping for the domain enums.
 
+pub mod association;
 pub mod backup;
 pub mod display_prefix;
+pub mod initialize;
 pub mod migrations;
 pub mod mutations;
 pub mod promotion;

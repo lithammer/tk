@@ -116,7 +116,7 @@ Promotion commit, and Remote clear. Local Repository Store edits remain
 available. Reconcile and explicit-risk retry are separate recovery work.
 
 Every remote-changing workflow holds the repository-scoped
-`<git-common-dir>/tk/remote.lock` file lock across its Backend and Store
+`<local data>/tk/stores/<Store ID>/remote.lock` (ADR-0053) file lock across its Backend and Store
 effects. Promotion acquires it before preflight and passes the same owning
 guard into its nested sync. The stable file is opened in place and never
 deleted or replaced; dropping the guard, including process termination,

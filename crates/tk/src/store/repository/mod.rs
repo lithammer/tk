@@ -182,10 +182,13 @@ impl Store {
 /// arg-free renderer can print it directly.
 #[derive(Debug, Error)]
 pub enum OpenError {
+    /// Store identity and association were refused before SQLite access.
+    #[error(transparent)]
+    Association(#[from] super::association::Error),
     /// `git rev-parse` failed; the inner error's `Display` is the message.
     #[error(transparent)]
     DiscoveryFailed(#[from] discovery::DiscoveryError),
-    /// `<git-common-dir>/tk/tk.db` does not exist — `tk init` has not run here.
+    /// No local Store pointer or no database exists at its validated location.
     #[error("Repository Store not initialized; run 'tk init'")]
     StoreMissing,
     /// A SQLite file exists at the Repository Store path but its
@@ -219,8 +222,8 @@ pub enum OpenError {
 
 /// Open the Repository Store for the Git repository containing `cwd`.
 ///
-/// The `git rev-parse` step locates `<git-common-dir>/tk/tk.db` so a worktree
-/// shares the store with its main checkout. `application_id` and
+/// The local Store pointer and canonical association select the Store shared
+/// by linked Workspaces (ADR-0053). `application_id` and
 /// `schema_migrations.version` are inspected before any pragma mutation so
 /// foreign files are refused without rewriting their headers.
 ///
@@ -234,16 +237,25 @@ pub fn open_existing<R: ProcRunner + ?Sized>(
     runner: &R,
     cwd: &Path,
     clock: &dyn Clock,
+    data_root: Option<&Path>,
 ) -> Result<Store, OpenError> {
     let paths = discovery::discover_paths(runner, cwd)?;
-    let db_path = paths.git_common_dir.join("tk").join("tk.db");
+    let root = super::association::stores_root(data_root)?;
+    let common = super::association::canonical_common(&paths)?;
+    super::association::refuse_legacy(&common)?;
+    let id = super::association::pointer(runner, cwd)?.ok_or(OpenError::StoreMissing)?;
+    let db_path = super::association::validate(&root, &id, &common)?;
+    open_database(&db_path, clock)
+}
 
+/// Open a validated Store database, preserving the migration and backup contracts.
+pub(super) fn open_database(db_path: &Path, clock: &dyn Clock) -> Result<Store, OpenError> {
     if !db_path.exists() {
         return Err(OpenError::StoreMissing);
     }
 
     let mut conn = Connection::open_with_flags(
-        &db_path,
+        db_path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
@@ -267,7 +279,7 @@ pub fn open_existing<R: ProcRunner + ?Sized>(
 
     Ok(Store {
         conn,
-        tk_dir: paths.git_common_dir.join("tk"),
+        tk_dir: db_path.parent().unwrap().to_path_buf(),
     })
 }
 
@@ -573,6 +585,7 @@ mod tests {
                 stderr: Vec::new(),
             },
         );
+        crate::store::testing::expect_pointer(&runner);
         runner
     }
 
@@ -599,7 +612,7 @@ mod tests {
         let store = TmpStore::new("repo");
         let runner = fake_runner_for(&store);
         assert!(matches!(
-            open_existing(&runner, &cwd(), &fixed_clock()),
+            open_existing(&runner, &cwd(), &fixed_clock(), Some(&store.data_root)),
             Err(OpenError::StoreMissing)
         ));
     }
@@ -618,7 +631,7 @@ mod tests {
 
         let runner = fake_runner_for(&store);
         assert!(matches!(
-            open_existing(&runner, &cwd(), &fixed_clock()),
+            open_existing(&runner, &cwd(), &fixed_clock(), Some(&store.data_root)),
             Err(OpenError::NotRepositoryStore)
         ));
     }
@@ -638,7 +651,7 @@ mod tests {
 
         let runner = fake_runner_for(&store);
         assert!(matches!(
-            open_existing(&runner, &cwd(), &fixed_clock()),
+            open_existing(&runner, &cwd(), &fixed_clock(), Some(&store.data_root)),
             Err(OpenError::FromFutureVersion)
         ));
     }
@@ -648,7 +661,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_tk_db(&store);
         let runner = fake_runner_for(&store);
-        let opened = match open_existing(&runner, &cwd(), &fixed_clock()) {
+        let opened = match open_existing(&runner, &cwd(), &fixed_clock(), Some(&store.data_root)) {
             Ok(s) => s,
             Err(e) => panic!("expected Ok, got {e:?}"),
         };
@@ -665,7 +678,8 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_tk_db(&store);
         let runner = fake_runner_for(&store);
-        let opened = open_existing(&runner, &cwd(), &fixed_clock()).unwrap();
+        let opened =
+            open_existing(&runner, &cwd(), &fixed_clock(), Some(&store.data_root)).unwrap();
         let guard = opened.lock_remote_workflow().unwrap();
         let lock_path = store.tk_dir().join("remote.lock");
         let contender = OpenOptions::new()
@@ -685,8 +699,20 @@ mod tests {
     fn remote_workflow_lock_reports_contention_and_succeeds_after_drop() {
         let store = TmpStore::new("repo");
         seed_tk_db(&store);
-        let first = open_existing(&fake_runner_for(&store), &cwd(), &fixed_clock()).unwrap();
-        let second = open_existing(&fake_runner_for(&store), &cwd(), &fixed_clock()).unwrap();
+        let first = open_existing(
+            &fake_runner_for(&store),
+            &cwd(),
+            &fixed_clock(),
+            Some(&store.data_root),
+        )
+        .unwrap();
+        let second = open_existing(
+            &fake_runner_for(&store),
+            &cwd(),
+            &fixed_clock(),
+            Some(&store.data_root),
+        )
+        .unwrap();
         let first_guard = first.lock_remote_workflow().unwrap();
         assert!(matches!(
             second.lock_remote_workflow(),
@@ -701,7 +727,13 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_tk_db(&store);
         std::fs::create_dir(store.tk_dir().join("remote.lock")).unwrap();
-        let opened = open_existing(&fake_runner_for(&store), &cwd(), &fixed_clock()).unwrap();
+        let opened = open_existing(
+            &fake_runner_for(&store),
+            &cwd(),
+            &fixed_clock(),
+            Some(&store.data_root),
+        )
+        .unwrap();
 
         assert!(matches!(
             opened.lock_remote_workflow(),
@@ -720,7 +752,7 @@ mod tests {
         let runner = fake_runner_for(&store);
         let clock = fixed_clock();
 
-        let opened = match open_existing(&runner, &cwd(), &clock) {
+        let opened = match open_existing(&runner, &cwd(), &clock, Some(&store.data_root)) {
             Ok(s) => s,
             Err(e) => panic!("expected Ok, got {e:?}"),
         };
@@ -745,7 +777,7 @@ mod tests {
 
         let runner = fake_runner_for(&store);
         assert!(matches!(
-            open_existing(&runner, &cwd(), &fixed_clock()),
+            open_existing(&runner, &cwd(), &fixed_clock(), Some(&store.data_root)),
             Err(OpenError::MigrationFailed(_))
         ));
     }
@@ -764,7 +796,7 @@ mod tests {
             },
         );
         assert!(matches!(
-            open_existing(&runner, &cwd(), &fixed_clock()),
+            open_existing(&runner, &cwd(), &fixed_clock(), None),
             Err(OpenError::DiscoveryFailed(_))
         ));
     }

@@ -18,7 +18,7 @@ rows a migration test seeds are not the rows a real store holds.
 applying any pending migration, when the store already has a schema:
 
 ```
-vacuum into '<git-common-dir>/tk/backups/<timestamp>-v<version>.db'
+vacuum into '<local data>/tk/stores/<Store ID>/backups/<timestamp>-v<version>.db'
 ```
 
 `VACUUM INTO`, not a file copy: it produces a consistent image from the live
@@ -82,7 +82,7 @@ filename, so it is replaced and the milliseconds are kept.
 ## Considered Options
 
 **Copy the file instead of `VACUUM INTO`.** Rejected: the store is WAL
-(`commands/init.rs` sets `journal_mode`, which persists in the header), and a
+(`store/initialize.rs` sets `journal_mode`, which persists in the header), and a
 copy taken while a writer is mid-transaction can tear. The three hand-made
 `.bak` files in the one Repository Store that exists all pass `pragma
 integrity_check`, so the hazard is real in principle and unobserved in the
@@ -132,9 +132,9 @@ store holding real work.
 `tk prime` stays silent on that failure, as it already does for every other
 open failure (ADR-0020).
 
-**`<git-common-dir>/tk/backups/` is store-owned state.** It is created at
-`0700`, matching `tk init`'s treatment of `tk/`. It is inside `.git` and
-therefore untracked (ADR-0001). Pruning only considers files matching the
+**`<local data>/tk/stores/<Store ID>/backups/` is store-owned state.** It is created at
+`0700`, matching `tk init`'s treatment of `tk/`. It is outside the repository and
+therefore untracked (ADR-0053). Pruning only considers files matching the
 generated shape, so hand-made backups beside `tk.db` are never deleted.
 
 **Recovery needs `sqlite3`, which tk does not ship.** tk is a single static

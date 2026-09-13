@@ -40,19 +40,17 @@ pub fn apply_promotion_receipt(
     Ok(tx.commit()?)
 }
 
-/// On-disk scaffolding for a fake Git repository plus its `git rev-parse`
-/// stdout payload. The `tk init` discovery layer expects two newline-
-/// separated absolute paths (git-common-dir, top-level); planting the same
-/// shape via the fake subprocess runner lets `Store::open_existing` exercise
-/// the production discovery flow.
+/// Isolated Git paths and a Store manifest for tests of the shared opener.
+/// The database is seeded separately so tests can choose its schema and contents.
 pub struct TmpStore {
     _tmp: TempDir,
     pub common_dir: PathBuf,
+    pub data_root: PathBuf,
     pub toplevel: PathBuf,
 }
 
 impl TmpStore {
-    /// Create a temporary `<basename>/.git` skeleton under a fresh tempdir.
+    /// Create Git paths and a valid Store Association under a fresh tempdir.
     ///
     /// `basename` chooses the toplevel directory name — the seed prefix the
     /// store derives from it pins downstream Display IDs (e.g. picking
@@ -62,7 +60,21 @@ impl TmpStore {
         let toplevel = tmp.path().join(basename);
         let common_dir = toplevel.join(".git");
         std::fs::create_dir_all(&common_dir).expect("create .git skeleton");
+        let data_root = tmp.path().join("data");
+        let dir = data_root.join("tk/stores/00000000000000000000000000000000");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("store.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1, "store_id": "00000000000000000000000000000000",
+                "association": {"git_common_dir": std::fs::canonicalize(&common_dir).unwrap()},
+                "evidence": {"previous_git_common_dirs": [], "git_remote_urls": []}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         Self {
+            data_root,
             _tmp: tmp,
             common_dir,
             toplevel,
@@ -72,13 +84,14 @@ impl TmpStore {
     /// Concrete path the store opens for this fake repository.
     #[must_use]
     pub fn db_path(&self) -> PathBuf {
-        self.common_dir.join("tk").join("tk.db")
+        self.tk_dir().join("tk.db")
     }
 
-    /// Path to the `tk/` directory the store would create on `tk init`.
+    /// Store ID directory holding this fixture's manifest and database.
     #[must_use]
     pub fn tk_dir(&self) -> PathBuf {
-        self.common_dir.join("tk")
+        self.data_root
+            .join("tk/stores/00000000000000000000000000000000")
     }
 
     /// Build the `git rev-parse --git-common-dir --show-toplevel` stdout
@@ -93,6 +106,25 @@ impl TmpStore {
         )
         .into_bytes()
     }
+}
+
+/// Queue the local Store pointer used by the isolated `TmpStore` fixture.
+pub(crate) fn expect_pointer(runner: &crate::proc::FakeRunner) {
+    runner.expect(
+        &[
+            "git",
+            "config",
+            "--local",
+            "--no-includes",
+            "--null",
+            "--get-all",
+        ],
+        crate::proc::RunOutput {
+            exit_code: 0,
+            stdout: b"00000000000000000000000000000000\0".to_vec(),
+            stderr: Vec::new(),
+        },
+    );
 }
 
 /// Raw Repository Store item fixture used by read-side tests.

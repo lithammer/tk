@@ -2,3 +2,5 @@
 //! this module so commands don't reach for `Command::new("git")` directly.
 
 pub mod discovery;
+
+pub mod association;

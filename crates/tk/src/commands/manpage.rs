@@ -128,6 +128,7 @@ mod tests {
         let clock = FakeClock::new(0);
         let mut rng = StdRng::seed_from_u64(0);
         let mut deps = Deps {
+            data_root: None,
             stdout: &mut stdout,
             stderr: &mut stderr,
             stdin: &mut stdin,

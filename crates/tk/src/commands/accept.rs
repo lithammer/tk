@@ -27,7 +27,7 @@ pub struct Args {
 }
 
 pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
-    let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
+    let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock, deps.data_root)
         .map_err(|err| resolver::open_error(&err))?;
 
     let resolved = match resolver::resolve(&store, &args.id) {
@@ -131,7 +131,7 @@ mod tests {
         seed_ticket(&conn, "t1", "tk-1", "triage", None);
         drop(conn);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run_rendered(
             &mut h,
@@ -153,7 +153,7 @@ mod tests {
         seed_ticket(&conn, "t1", "tk-1", "triage", None);
         drop(conn);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run_rendered(
             &mut h,
@@ -177,7 +177,7 @@ mod tests {
         seed_ticket(&conn, "t1", "tk-1", "accepted", Some("P2"));
         drop(conn);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run_rendered(
             &mut h,
@@ -198,7 +198,7 @@ mod tests {
         seed_ticket(&conn, "t1", "tk-1", "accepted", Some("P2"));
         drop(conn);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run_rendered(
             &mut h,
@@ -222,7 +222,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run_rendered(
             &mut h,

@@ -40,7 +40,8 @@ enum CurrentWork {
 
 /// Open errors stay silent for hooks; later read errors leave stdout empty.
 pub fn run(deps: &mut Deps<'_>, _args: Args) -> Result<Exit, CommandError> {
-    let Ok(store) = resolver::open_for_command(deps.runner, deps.cwd, deps.clock) else {
+    let Ok(store) = resolver::open_for_command(deps.runner, deps.cwd, deps.clock, deps.data_root)
+    else {
         return Ok(Exit::Ok);
     };
     let briefing = Briefing::read(&store)?;
@@ -228,12 +229,14 @@ mod tests {
                 stderr: Vec::new(),
             },
         );
+        crate::store::testing::expect_pointer(&runner);
         let clock = FakeClock::new(1_778_284_800_000);
         let mut rng = StdRng::seed_from_u64(0);
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let mut stdin = std::io::Cursor::new(Vec::new());
         let mut deps = Deps {
+            data_root: Some(&store.data_root),
             stdout: &mut stdout,
             stderr: &mut stderr,
             stdin: &mut stdin,

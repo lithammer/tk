@@ -35,7 +35,7 @@ remote-changing workflows until explicit recovery resolves it.
 Remote-changing commands additionally hold an exclusive repository-scoped OS
 file lock from before their availability check through Backend access and
 Repository Store persistence. The stable lock path is
-`<git-common-dir>/tk/remote.lock`; tk never deletes or replaces it, and process
+`<local data>/tk/stores/<Store ID>/remote.lock` (ADR-0053); tk never deletes or replaces it, and process
 termination releases it. This closes the live-process check-then-act window;
 `applying` remains necessary because a file lock cannot record an ambiguous
 creation across a crash. Contention returns a retryable command failure rather

@@ -22,11 +22,12 @@ pub fn resolve<R: ProcRunner + ?Sized>(
     runner: &R,
     cwd: &Path,
     clock: &dyn Clock,
+    data_root: Option<&Path>,
     blocked_arg: &str,
     blocking_arg: &str,
 ) -> Result<(Store, ResolvedItemRef, ResolvedItemRef), CommandError> {
-    let store =
-        resolver::open_for_command(runner, cwd, clock).map_err(|err| resolver::open_error(&err))?;
+    let store = resolver::open_for_command(runner, cwd, clock, data_root)
+        .map_err(|err| resolver::open_error(&err))?;
 
     let blocked = match resolver::resolve(&store, blocked_arg) {
         Ok(r) => r,

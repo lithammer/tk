@@ -1,5 +1,8 @@
 # Keep user-visible message constants verbatim, not generated
 
+> Amended by [ADR-0053](./0053-repository-stores-live-in-durable-user-data.md)
+> for durable Store ownership, initialization, and test isolation.
+
 > **Amended by ADR-0032.** The grep-able unit narrowed from the full line to the
 > message *body*: the `tk <command>:` frame is now synthesized once at the
 > dispatch seam, and the verbatim literal lives in each typed error's

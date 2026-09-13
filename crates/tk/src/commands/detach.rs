@@ -19,7 +19,7 @@ pub struct Args {
 
 /// Run `tk detach <id>` without opening a Backend Adapter.
 pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
-    let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
+    let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock, deps.data_root)
         .map_err(|err| resolver::open_error(&err))?;
     let _workflow = store
         .lock_remote_workflow()
@@ -223,7 +223,7 @@ mod tests {
         insert_external_blocker(&conn, "external", "target", None).unwrap();
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
         let exit = run_rendered(&mut h, "gh-42");
@@ -339,7 +339,7 @@ mod tests {
             .unwrap();
         assert_eq!((dependencies, blockers), (1, 1));
 
-        let mut show_h = Harness::new(&cwd_path);
+        let mut show_h = Harness::new(&cwd_path, &store);
         expect_git(&show_h, &store);
         assert_eq!(run_show_rendered(&mut show_h, "tk-1"), Exit::Ok);
         assert!(
@@ -351,7 +351,7 @@ mod tests {
         );
 
         insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
-        let mut sync_h = Harness::new(&cwd_path);
+        let mut sync_h = Harness::new(&cwd_path, &store);
         expect_git(&sync_h, &store);
         let sync_exit = sync_command::run(
             sync_h.deps(),
@@ -385,7 +385,7 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
         assert_eq!(run_rendered(&mut h, "gh-7"), Exit::Ok);
@@ -429,7 +429,7 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
         assert_eq!(run_rendered(&mut h, "gh-53"), Exit::Ok, "{}", h.err());
@@ -500,7 +500,7 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
         assert_eq!(run_rendered(&mut h, "gh-9"), Exit::Ok, "{}", h.err());
@@ -596,7 +596,7 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
         assert_eq!(run_rendered(&mut h, "gh-42"), Exit::Failure);
@@ -641,7 +641,7 @@ mod tests {
         commit_promotion(&mut conn, "pending");
         let cwd_path = cwd();
 
-        let mut local_h = Harness::new(&cwd_path);
+        let mut local_h = Harness::new(&cwd_path, &store);
         expect_git(&local_h, &store);
         assert_eq!(run_rendered(&mut local_h, "tk-1"), Exit::Failure);
         assert_eq!(
@@ -649,7 +649,7 @@ mod tests {
             "tk detach: 'tk-1' is already a Local Item; only Backend Items can be detached\n"
         );
 
-        let mut pending_h = Harness::new(&cwd_path);
+        let mut pending_h = Harness::new(&cwd_path, &store);
         expect_git(&pending_h, &store);
         assert_eq!(run_rendered(&mut pending_h, "tk-2"), Exit::Failure);
         assert_eq!(
@@ -682,7 +682,7 @@ mod tests {
             .unwrap();
         lock_file.lock().unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
         assert_eq!(run_rendered(&mut h, "gh-42"), Exit::Failure);
@@ -837,7 +837,7 @@ mod tests {
         }
         let before = mutation_rows(&conn);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
         assert_eq!(run_rendered(&mut h, "gh-42"), Exit::Ok, "{}", h.err());
@@ -942,7 +942,7 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
         assert_eq!(run_rendered(&mut h, "gh-9"), Exit::Ok, "{}", h.err());
@@ -1033,7 +1033,7 @@ mod tests {
             )
             .unwrap();
             let cwd_path = cwd();
-            let mut h = Harness::new(&cwd_path);
+            let mut h = Harness::new(&cwd_path, &store);
             expect_git(&h, &store);
 
             assert_eq!(run_rendered(&mut h, "gh-9"), Exit::Failure);
@@ -1102,7 +1102,7 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
         assert_eq!(run_rendered(&mut h, "gh-42"), Exit::Ok, "{}", h.err());
@@ -1131,7 +1131,7 @@ mod tests {
         }
         insert_dependency(&conn, "blocking", "blocked").unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
         assert_eq!(run_rendered(&mut h, "gh-42"), Exit::Failure);

@@ -57,7 +57,7 @@ pub struct Args {
 /// seam to frame as `tk show:` (ADR-0032); on success returns the process
 /// [`Exit`].
 pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
-    let store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
+    let store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock, deps.data_root)
         .map_err(|err| resolver::open_error(&err))?;
 
     let detail = match show::show_item(&store, &args.id) {
@@ -409,12 +409,14 @@ mod tests {
                 stderr: Vec::new(),
             },
         );
+        crate::store::testing::expect_pointer(&runner);
         let clock = FakeClock::new(1_778_284_800_000);
         let mut rng = StdRng::seed_from_u64(0);
         let mut stdout = BrokenPipe;
         let mut stderr: Vec<u8> = Vec::new();
         let mut stdin = std::io::Cursor::new(Vec::new());
         let mut deps = Deps {
+            data_root: Some(&store.data_root),
             stdout: &mut stdout,
             stderr: &mut stderr,
             stdin: &mut stdin,
@@ -437,7 +439,7 @@ mod tests {
     fn missing_store_renders_init_diagnostic() {
         let store = TmpStore::new("repo");
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Failure);
@@ -453,7 +455,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run_rendered(
             &mut h,
@@ -484,7 +486,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Ok);
@@ -526,7 +528,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Ok);
@@ -563,7 +565,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Ok);
@@ -608,7 +610,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Ok);
@@ -650,7 +652,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Ok);
@@ -686,7 +688,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Ok);
@@ -716,7 +718,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let _ = run_rendered(&mut h, Args { id: "tk-1".into() });
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -871,7 +873,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let _ = run_rendered(&mut h, Args { id: "tk-1".into() });
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -978,7 +980,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Ok);

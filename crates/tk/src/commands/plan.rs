@@ -43,7 +43,7 @@ pub enum Command {
 
 /// Execute a local Plan operation without opening a Backend Adapter.
 pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
-    let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
+    let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock, deps.data_root)
         .map_err(|err| resolver::open_error(&err))?;
     let result = match args.command {
         Some(Command::Add { ids }) => {
@@ -230,7 +230,7 @@ mod tests {
         let mut store = crate::store::repository::Store::for_test(conn);
         plan::edit_membership(&mut store, &["tk-1".into()], MembershipEdit::Add).unwrap();
         let path = cwd();
-        let mut h = Harness::new(&path);
+        let mut h = Harness::new(&path, &tmp);
         expect_git(&h, &tmp);
         run(&mut h.deps(), Args { command: None }).unwrap();
         insta::assert_snapshot!(h.out(), @r"

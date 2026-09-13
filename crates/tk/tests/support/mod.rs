@@ -1,0 +1,79 @@
+//! Run the command seam in a child process with real Git and an isolated data root.
+use std::path::Path;
+use std::process::{Command, Output};
+
+/// Dispatch with real Git in an isolated child; return CLI streams and exit status.
+pub fn run(cwd: &Path, root: &Path, args: &[String], env: &[(&str, &str)]) -> Output {
+    let capture = tempfile::tempdir().unwrap();
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", "support::cli_child", "--ignored"])
+        .current_dir(cwd)
+        .env("TK_TEST_ARGS", serde_json::to_string(args).unwrap())
+        .env("TK_TEST_ROOT", root)
+        .env("TK_TEST_CAPTURE", capture.path())
+        .env("GIT_CONFIG_GLOBAL", root.join("global.gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CEILING_DIRECTORIES", root)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("TK_TEST_DATA_ROOT")
+        .env_remove("TK_TEST_SEED")
+        .env_remove("GIT_CONFIG_COUNT")
+        .env_remove("GIT_CONFIG_PARAMETERS")
+        .env_remove("TK_SCOPE")
+        .env_remove("NO_COLOR")
+        .env_remove("CLICOLOR_FORCE");
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let output = command.output().unwrap();
+    Output {
+        status: output.status,
+        stdout: std::fs::read(capture.path().join("stdout")).expect("child must finish dispatch"),
+        stderr: std::fs::read(capture.path().join("stderr")).unwrap(),
+    }
+}
+
+#[test]
+#[ignore = "subprocess entry point for the real-Git command seam"]
+fn cli_child() {
+    use rand::SeedableRng;
+    let Ok(args) = std::env::var("TK_TEST_ARGS") else {
+        return;
+    };
+    let args: Vec<String> = serde_json::from_str(&args).unwrap();
+    let root = std::path::PathBuf::from(std::env::var_os("TK_TEST_ROOT").unwrap());
+    let capture = std::path::PathBuf::from(std::env::var_os("TK_TEST_CAPTURE").unwrap());
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut stdin = std::io::empty();
+    let runner = tk::proc::RealRunner::new();
+    let clock = tk::clock::RealClock::new();
+    let mut rng = rand::rngs::StdRng::try_from_rng(&mut rand::rngs::SysRng).unwrap();
+    if let Ok(seed) = std::env::var("TK_TEST_SEED") {
+        rng = rand::rngs::StdRng::seed_from_u64(seed.parse().unwrap());
+    }
+    let cwd = std::env::current_dir().unwrap();
+    let data_root = match std::env::var("TK_TEST_DATA_ROOT") {
+        Ok(value) if value == "missing" => None,
+        Ok(value) => Some(std::path::PathBuf::from(value)),
+        Err(_) => Some(root.join("data")),
+    };
+    let deps = tk::cli::Deps {
+        stdout: &mut stdout,
+        stderr: &mut stderr,
+        stdin: &mut stdin,
+        runner: &runner,
+        clock: &clock,
+        rng: &mut rng,
+        cwd: &cwd,
+        data_root: data_root.as_deref(),
+        styler: tk::render::resolve_styler_from_env(),
+    };
+    let exit = tk::cli::run_argv(deps, &args).unwrap();
+    std::fs::write(capture.join("stdout"), stdout).unwrap();
+    std::fs::write(capture.join("stderr"), stderr).unwrap();
+    std::process::exit(i32::from(exit.code()));
+}

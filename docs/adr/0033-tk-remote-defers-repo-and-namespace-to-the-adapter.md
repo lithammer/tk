@@ -45,7 +45,7 @@ The ticket scoped `tk remote set github [<repo>]` storing
 `config_json = {"repo":"OWNER/NAME"}`.
 
 The Repository Store is bound 1:1 to a git repository: it lives at
-`<git-common-dir>/tk/tk.db` and is shared by all Workspaces of that repository.
+`<local data>/tk/stores/<Store ID>/tk.db` (ADR-0053) and is shared by all Workspaces of that repository.
 Git remotes live in the common dir's config, so `gh` and `git` resolve the same
 GitHub repository from any Workspace. `OWNER/NAME` is therefore a stable,
 derivable property of the one git repository the store already belongs to.
