@@ -6,8 +6,8 @@ It is intentionally compact: per [ADR
 0008](./docs/adr/0008-keep-implementation-doc-compact.md), shipped slice
 checklists should not live here once code, tests, command help, `CONTEXT.md`,
 and ADRs carry the durable contracts. Onboarding pointers live in
-`README.md`; agent-facing conventions (code documentation, error handling,
-testing) live in `AGENTS.md`; domain vocabulary lives in `CONTEXT.md`; the
+`README.md`; review conventions live in `CODING_STANDARDS.md`; agent
+navigation lives in `AGENTS.md`; domain vocabulary lives in `CONTEXT.md`; the
 command reference lives in `tk --help`, `tk <command> --help`, and
 `man/tk.1`.
 
