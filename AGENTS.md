@@ -8,6 +8,7 @@
   invariants.
 - Read [docs/adr/](./docs/adr/) — recorded design decisions — before revisiting
   them.
+- Read [CODING_STANDARDS.md](./CODING_STANDARDS.md) when reviewing code changes.
 
 ## Evidence About External Tools
 
@@ -19,52 +20,3 @@ instance; the primary source settles what is possible. Read it at the tag
 matching the installed version, and say which of the two a spike, fixture, or
 classifier claim rests on. A claim that some behaviour is impossible or
 unobservable rests on the primary source.
-
-## Rust Coding Standards
-
-tk is a Rust project. The canonical implementation lives under `crates/tk/`.
-ADR-0018 records the migration method; ADR-0017 defines the verbatim
-user-facing messages that must be preserved exactly.
-
-**Always prefer idiomatic Rust.** User-facing behaviour is the contract —
-CLI bytes, exit codes, SQL schema, and the ADR-0017 verbatim messages.
-Everything else should be written in idiomatic, modern Rust.
-
-**tk is pre-v1.** One Repository Store exists and it belongs to whoever is
-changing the code, so the contracts above have no installed base to protect.
-Choose the design you would choose starting today, and reach it by
-replacement: rename the type, rewrite the migration, update every caller in
-the same change. A wide diff is the cost of the right shape, not an argument
-against it.
-
-Deliberate, not incidental. Redesigning a CLI line, a schema, or a recorded
-decision is cheap here; changing one as a side effect of something else is the
-defect it always was, and a deliberate change to a decision amends its ADR.
-
-**Lean into the type system.** Prefer enums over raw strings, traits over
-function pointers, `Result<T, E>` over flag/buffer pairs. If a SQL column
-has a CHECK constraint, the domain type is a Rust enum with a `text()`
-method returning the SQL spelling; typed values flow through the code,
-`text()` is the storage contract.
-
-**Defer evidence-determined types.** When a type's shape depends on what
-a future Backend Adapter observes rather than the schema or an existing
-ADR, follow ADR-0016's precedent and defer until the consumer ticket
-lands.
-
-**Anchor comments in the actual contract.** Reference the ADR, the
-CONTEXT.md vocabulary, or the invariant being preserved — not
-implementation history. ADR pointers stay; prose reconstructing past
-decisions does not.
-
-## Code Documentation
-
-- Add doc comments for public functions, structs, methods, constants, and
-  important private boundaries as code is introduced or changed.
-- Anchor comments in the project docs: [CONTEXT.md](./CONTEXT.md),
-  [ARCHITECTURE.md](./ARCHITECTURE.md), and [docs/adr/](./docs/adr/).
-- Use tk's domain vocabulary in comments instead of generic terms. For
-  example, prefer Repository Store, Scope, Display ID, Remote,
-  Backend Adapter, Mutation, and Mutation Log where those concepts apply.
-- Comments should explain contracts, ownership, lifetimes, invariants, and why
-  a boundary exists. Avoid comments that only restate the next line of code.
