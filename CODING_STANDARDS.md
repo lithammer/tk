@@ -6,10 +6,6 @@ Use idiomatic Rust. Prefer enums for domain states and `Result<T, E>` for
 fallible operations. When a SQL column has a CHECK constraint, represent
 its values with a Rust enum whose `text()` method owns the SQL spelling.
 
-tk is pre-v1. Replace superseded types and interfaces, update their callers,
-and remove dead code in the same change. Add compatibility behavior only
-when a documented contract requires it.
-
 When a type depends on evidence from a future Backend Adapter, defer its
 shape until that consumer exists (ADR-0016).
 

@@ -8,7 +8,14 @@
   invariants.
 - Read [docs/adr/](./docs/adr/) — recorded design decisions — before revisiting
   them.
-- Read [CODING_STANDARDS.md](./CODING_STANDARDS.md) when reviewing code changes.
+
+## Pre-v1 Development
+
+tk is pre-v1. Choose the best design, even when it breaks existing CLI
+behavior, APIs, or recorded decisions. Update callers and affected docs
+in the same change; remove superseded code. The exception is live data:
+changes that make an existing Repository Store incompatible must provide
+a migration path.
 
 ## Evidence About External Tools
 
