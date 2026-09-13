@@ -108,23 +108,25 @@ impl TmpStore {
     }
 }
 
-/// Queue the local Store pointer used by the isolated `TmpStore` fixture.
+/// Queue pointer selection and its check after the opener takes the Store lock.
 pub(crate) fn expect_pointer(runner: &crate::proc::FakeRunner) {
-    runner.expect(
-        &[
-            "git",
-            "config",
-            "--local",
-            "--no-includes",
-            "--null",
-            "--get-all",
-        ],
-        crate::proc::RunOutput {
-            exit_code: 0,
-            stdout: b"00000000000000000000000000000000\0".to_vec(),
-            stderr: Vec::new(),
-        },
-    );
+    for _ in 0..2 {
+        runner.expect(
+            &[
+                "git",
+                "config",
+                "--local",
+                "--no-includes",
+                "--null",
+                "--get-all",
+            ],
+            crate::proc::RunOutput {
+                exit_code: 0,
+                stdout: b"00000000000000000000000000000000\0".to_vec(),
+                stderr: Vec::new(),
+            },
+        );
+    }
 }
 
 /// Raw Repository Store item fixture used by read-side tests.

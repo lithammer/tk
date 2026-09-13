@@ -76,15 +76,21 @@ pub enum Error {
         "legacy Repository Store data exists; migration is not yet supported; data was preserved"
     )]
     Legacy,
-    #[error("Store evidence requires recovery; recovery is not yet supported; data was preserved")]
+    #[error("Store evidence requires recovery; run 'tk init'; data was preserved")]
     Recovery,
-    #[error("Repository Store manifest is invalid or belongs to a newer tk version")]
+    #[error("current repository has a healthy Store Association; attach/new refused")]
+    Healthy,
+    #[error("Store ownership is live or unknown; data was preserved")]
+    Ownership,
+    #[error(
+        "Repository Store manifest is invalid or belongs to a newer tk version; restore metadata manually; data was preserved"
+    )]
     Manifest,
     #[error("Repository Store belongs to another Git Common Directory; data was preserved")]
     AssociationMismatch,
     #[error("Store ID collision; the existing directory was preserved")]
     Collision,
-    #[error("another Store initialization is running; retry when it finishes")]
+    #[error("another Store lifecycle operation is running; retry when it finishes")]
     Busy,
     #[error(transparent)]
     Git(#[from] git::ConfigError),
@@ -154,30 +160,6 @@ pub fn lock_init(root: &Path) -> Result<File, Error> {
     }
 }
 
-/// Only unrelated, valid manifests permit another fresh Store before recovery exists.
-pub fn refuse_recovery(root: &Path, common: &Path, urls: &[String]) -> Result<(), Error> {
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        let manifest = read_manifest(&entry.path()).map_err(|_| Error::Recovery)?;
-        if entry.file_name() != std::ffi::OsStr::new(manifest.store_id.text())
-            || manifest.association.git_common_dir == common
-            || manifest
-                .evidence
-                .previous_git_common_dirs
-                .iter()
-                .any(|p| p == common)
-            || manifest
-                .evidence
-                .git_remote_urls
-                .iter()
-                .any(|url| urls.contains(url))
-        {
-            return Err(Error::Recovery);
-        }
-    }
-    Ok(())
-}
-
 /// Reserve a fresh Store directory exclusively; a collision never opens its contents.
 pub fn reserve(root: &Path, id: &StoreId) -> Result<PathBuf, Error> {
     let dir = root.join(id.text());
@@ -227,13 +209,14 @@ pub fn create_private_dirs(path: &Path) -> Result<(), std::io::Error> {
 }
 
 /// Check manifest structure before comparing it with the requested association.
-fn read_manifest(dir: &Path) -> Result<Manifest, Error> {
+pub(super) fn read_manifest(dir: &Path) -> Result<Manifest, Error> {
     if !fs::symlink_metadata(dir)?.file_type().is_dir() {
         return Err(Error::Manifest);
     }
     let manifest: Manifest =
         serde_json::from_slice(&fs::read(dir.join("store.json"))?).map_err(|_| Error::Manifest)?;
-    if manifest.version != 1
+    if dir.file_name() != Some(std::ffi::OsStr::new(manifest.store_id.text()))
+        || manifest.version != 1
         || !manifest.association.git_common_dir.is_absolute()
         || manifest
             .evidence
@@ -244,4 +227,48 @@ fn read_manifest(dir: &Path) -> Result<Manifest, Error> {
         return Err(Error::Manifest);
     }
     Ok(manifest)
+}
+
+/// The guard spans association validation and every use of the database.
+pub(super) fn lock_store(dir: &Path, exclusive: bool) -> Result<File, Error> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join("association.lock"))?;
+    let result = if exclusive {
+        file.try_lock()
+    } else {
+        file.try_lock_shared()
+    };
+    match result {
+        Ok(()) => Ok(file),
+        Err(fs::TryLockError::WouldBlock) => Err(Error::Busy),
+        Err(fs::TryLockError::Error(e)) => Err(e.into()),
+    }
+}
+
+/// Replace metadata on the same filesystem before changing Git's pointer.
+pub(super) fn replace(
+    dir: &Path,
+    manifest: &Manifest,
+    rng: &mut dyn rand::Rng,
+) -> Result<(), Error> {
+    let bytes = serde_json::to_vec_pretty(manifest).map_err(|_| Error::Manifest)?;
+    let staged = dir.join(format!(
+        "store.json.{}.pending",
+        StoreId::generate(rng).text()
+    ));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(staged, dir.join("store.json"))?;
+    #[cfg(unix)]
+    File::open(dir)?.sync_all()?;
+    Ok(())
 }

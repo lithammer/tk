@@ -1,0 +1,12 @@
+---
+source: crates/tk/tests/scenarios.rs
+expression: "out.replace(&id, \"<store-id>\")"
+---
+exit 1
+-- stdout --
+-- stderr --
+tk init: Store evidence requires recovery; data was preserved
+Store "<store-id>":
+  associated current canonical path: $TESTROOT/repo/.git
+  available: tk init --attach <store-id>
+Create a distinct Store, preserving prior Stores: tk init --new

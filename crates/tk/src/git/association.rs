@@ -78,6 +78,10 @@ fn values<R: ProcRunner + ?Sized>(
     let mut args = vec!["git", "config", "--local", "--no-includes", "--null"];
     args.extend_from_slice(query);
     let output = runner.run(&args, cwd).map_err(|_| ConfigError("read"))?;
+    decode(output)
+}
+
+fn decode(output: crate::proc::RunOutput) -> Result<Vec<String>, ConfigError> {
     match output.exit_code {
         1 if output.stdout.is_empty() => Ok(Vec::new()),
         0 => {
@@ -89,4 +93,55 @@ fn values<R: ProcRunner + ?Sized>(
         }
         _ => Err(ConfigError("read")),
     }
+}
+
+/// Explicit recovery replaces all broken local values under the lifecycle lock.
+pub fn replace<R: ProcRunner + ?Sized>(
+    runner: &R,
+    cwd: &Path,
+    id: &str,
+) -> Result<(), ConfigError> {
+    let out = runner
+        .run(
+            &[
+                "git",
+                "config",
+                "--local",
+                "--no-includes",
+                "--replace-all",
+                "tk.storeId",
+                id,
+            ],
+            cwd,
+        )
+        .map_err(|_| ConfigError("replace"))?;
+    if !out.succeeded() || pointers(runner, cwd)? != [id] {
+        return Err(ConfigError("replace"));
+    }
+    Ok(())
+}
+
+/// Inspect the exact former Git Common Directory, without parent discovery.
+pub fn former_pointers<R: ProcRunner + ?Sized>(
+    runner: &R,
+    common: &Path,
+) -> Result<Vec<String>, ConfigError> {
+    let common_text = common.to_str().ok_or(ConfigError("inspect ownership of"))?;
+    let output = runner
+        .run(
+            &[
+                "git",
+                "--git-dir",
+                common_text,
+                "config",
+                "--local",
+                "--no-includes",
+                "--null",
+                "--get-all",
+                "tk.storeId",
+            ],
+            common,
+        )
+        .map_err(|_| ConfigError("inspect ownership of"))?;
+    decode(output)
 }
