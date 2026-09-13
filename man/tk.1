@@ -71,8 +71,14 @@ agree on its identity and Git Common Directory association.
 Legacy Stores under \fI<git-common-dir>/tk/\fR are preserved and refused.
 Legacy migration is not yet supported.
 .PP
-With a broken association, plain init prints ranked Store evidence and complete
-recovery commands. Use \fBtk init \-\-attach\fR \fIStore-ID\fR to attach a valid,
+With a broken association, plain init can repair a uniquely identified Vacant
+Store after confirming release of its former ownership. The candidate must match
+the referenced Store ID or current canonical Git Common Directory; Remote URLs
+and historical paths alone do not authorize repair. Its database and all retained
+Store Backups must contain no user-owned data beyond initialization defaults.
+Unreadable or incompletely inspected contents require explicit recovery.
+Otherwise plain init prints ranked Store evidence and complete recovery commands.
+Use \fBtk init \-\-attach\fR \fIStore-ID\fR to attach a valid,
 readable Store after its former repository releases ownership. Use
 \fBtk init \-\-new\fR to create a distinct Store while preserving prior Stores.
 Both options refuse healthy associations and cannot be combined. A missing

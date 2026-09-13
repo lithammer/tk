@@ -98,7 +98,27 @@ Plain `tk init` scans manifests only when the current association is not healthy
 
 `tk init --new` creates a distinct Store and preserves prior Stores, reporting a missing referenced Store as possible data loss. It never recreates a referenced ID.
 
-Both options refuse a healthy current association and cannot be combined. There is no force option. Plain init creates only with no pointer, legacy data, or plausible candidate; automatic Vacant Store reuse belongs to tk-235.
+Both options refuse a healthy current association and cannot be combined. There is no force option. Plain init creates only with no pointer, legacy data, or plausible candidate.
+It can also repair one uniquely identified Vacant Store: exactly one candidate
+must match a referenced Store ID or the current canonical Git Common Directory,
+and the local pointer must be absent or a single valid ID. Historical paths and
+Remote URLs alone never authorize repair. Unrelated Vacant Stores do not block
+fresh initialization or supply identity.
+
+Automatic repair uses the same manifest validation, ownership release checks,
+and publication path as explicit attachment. Under the exclusive Store lock,
+it checks the database and every file in `backups/` read-only, without migration.
+Every user-data table must be empty, including all Mutation states and Plan
+membership. Zeroed initialization sequences and the seeded Display ID
+prefix do not count as user data. The prefix can come from any linked
+Workspace's name; it cannot be inferred from the Git Common Directory.
+Other configuration records and advanced sequences require explicit recovery.
+
+Unreadable, corrupt, unsupported, or incompletely inspected images never count
+as vacant. Missing expected tables or inconsistent schema-version records also
+refuse repair. Older backup schemas are inspected as stored. Any refusal leaves
+the ranked recovery report and explicit commands available. Vacancy neither
+changes candidate rank nor overrides live or unknown ownership.
 
 tk permits attachment when the manifest names the current Git Common Directory, or when the former directory is readable and its local config no longer points to this Store. tk invokes `git --git-dir <former path> config --local --no-includes --null --get-all tk.storeId` so parent repository discovery cannot stand in for ownership inspection. Git 2.53.0's [`builtin/config.c`](https://github.com/git/git/blob/v2.53.0/builtin/config.c) selects repository config and refuses `--local` outside a repository. Failed Git invocations, unreadable directories, and directory symlinks leave ownership unknown.
 

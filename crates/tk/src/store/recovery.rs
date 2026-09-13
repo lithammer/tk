@@ -137,6 +137,10 @@ pub(super) fn released(
 
 /// Shortlisted databases are inspected read-only, without running migrations.
 pub(super) fn inspect_database(path: &Path) -> Result<(), super::repository::OpenError> {
+    inspect_connection(path).map(|_| ())
+}
+
+fn inspect_connection(path: &Path) -> Result<rusqlite::Connection, super::repository::OpenError> {
     use super::{migrations, repository::OpenError};
     use rusqlite::{Connection, OpenFlags};
     let conn = Connection::open_with_flags(
@@ -158,5 +162,77 @@ pub(super) fn inspect_database(path: &Path) -> Result<(), super::repository::Ope
     if check != "ok" || conn.prepare("pragma foreign_key_check")?.exists([])? {
         return Err(OpenError::NotRepositoryStore);
     }
-    Ok(())
+    Ok(conn)
+}
+
+/// Inspect every retained image without migrations while the caller holds the
+/// exclusive Store lock, which excludes supported writers and backup creation.
+pub(super) fn vacant(dir: &Path) -> Result<bool, super::repository::OpenError> {
+    if !vacant_database(&dir.join("tk.db"))? {
+        return Ok(false);
+    }
+    for entry in fs::read_dir(dir.join("backups")).map_err(Error::from)? {
+        let entry = entry.map_err(Error::from)?;
+        if !entry.file_type().map_err(Error::from)?.is_file() || !vacant_database(&entry.path())? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn vacant_database(path: &Path) -> Result<bool, super::repository::OpenError> {
+    use super::{migrations, repository::OpenError};
+    let conn = inspect_connection(path)?;
+    let version = migrations::current_version(&conn)?;
+    let mirrored: i64 = conn.query_row("pragma user_version", [], |row| row.get(0))?;
+    let recorded: i64 = conn.query_row(
+        "select count(*) from schema_migrations where version between 1 and ?1",
+        [version],
+        |row| row.get(0),
+    )?;
+    if mirrored != version || recorded != version {
+        return Err(OpenError::NotRepositoryStore);
+    }
+    let tables = conn
+        .prepare("select name from sqlite_schema where type = 'table'")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (name, since) in [
+        ("schema_migrations", 1),
+        ("sequences", 1),
+        ("store_config", 1),
+        ("items", 1),
+        ("item_ids", 1),
+        ("dependencies", 1),
+        ("external_blockers", 1),
+        ("mutations", 1),
+        ("remotes", 1),
+        ("sync_cursors", 1),
+        ("former_backend_identities", 13),
+        ("plan_members", 17),
+    ] {
+        if version >= since && !tables.iter().any(|table| table == name) {
+            return Err(OpenError::NotRepositoryStore);
+        }
+    }
+    for table in tables {
+        let predicate = match table.as_str() {
+            "schema_migrations" => "version < 1",
+            "sequences" => {
+                "value != 0 or name not in ('item_created_seq', 'display_seq', 'mutation_seq')"
+            }
+            "store_config" => "key != 'display_prefix'",
+            _ => "1",
+        };
+        let quoted = table.replace('"', "\"\"");
+        if conn
+            .prepare(&format!(
+                "select 1 from \"{quoted}\" where {predicate} limit 1"
+            ))?
+            .exists([])?
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
