@@ -4,7 +4,7 @@ use crate::git::discovery::DiscoveredPaths;
 use rusqlite::Connection;
 use std::path::PathBuf;
 
-/// Init reports whether it published a Store or opened the existing association.
+/// Init either establishes a Store Association or returns recovery evidence.
 pub enum Initialized {
     /// A new Store was published and its Git pointer installed.
     Created {

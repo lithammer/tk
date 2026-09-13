@@ -69,32 +69,6 @@ pub fn remote_urls<R: ProcRunner + ?Sized>(
     Ok(urls)
 }
 
-/// Decode NUL-terminated local config results without exposing Git diagnostics.
-fn values<R: ProcRunner + ?Sized>(
-    runner: &R,
-    cwd: &Path,
-    query: &[&str],
-) -> Result<Vec<String>, ConfigError> {
-    let mut args = vec!["git", "config", "--local", "--no-includes", "--null"];
-    args.extend_from_slice(query);
-    let output = runner.run(&args, cwd).map_err(|_| ConfigError("read"))?;
-    decode(output)
-}
-
-fn decode(output: crate::proc::RunOutput) -> Result<Vec<String>, ConfigError> {
-    match output.exit_code {
-        1 if output.stdout.is_empty() => Ok(Vec::new()),
-        0 => {
-            let text = String::from_utf8(output.stdout).map_err(|_| ConfigError("decode"))?;
-            let Some(text) = text.strip_suffix('\0') else {
-                return Err(ConfigError("decode"));
-            };
-            Ok(text.split('\0').map(str::to_owned).collect())
-        }
-        _ => Err(ConfigError("read")),
-    }
-}
-
 /// Explicit recovery replaces all broken local values under the lifecycle lock.
 pub fn replace<R: ProcRunner + ?Sized>(
     runner: &R,
@@ -144,4 +118,30 @@ pub fn former_pointers<R: ProcRunner + ?Sized>(
         )
         .map_err(|_| ConfigError("inspect ownership of"))?;
     decode(output)
+}
+
+/// Decode NUL-terminated local config results without exposing Git diagnostics.
+fn values<R: ProcRunner + ?Sized>(
+    runner: &R,
+    cwd: &Path,
+    query: &[&str],
+) -> Result<Vec<String>, ConfigError> {
+    let mut args = vec!["git", "config", "--local", "--no-includes", "--null"];
+    args.extend_from_slice(query);
+    let output = runner.run(&args, cwd).map_err(|_| ConfigError("read"))?;
+    decode(output)
+}
+
+fn decode(output: crate::proc::RunOutput) -> Result<Vec<String>, ConfigError> {
+    match output.exit_code {
+        1 if output.stdout.is_empty() => Ok(Vec::new()),
+        0 => {
+            let text = String::from_utf8(output.stdout).map_err(|_| ConfigError("decode"))?;
+            let Some(text) = text.strip_suffix('\0') else {
+                return Err(ConfigError("decode"));
+            };
+            Ok(text.split('\0').map(str::to_owned).collect())
+        }
+        _ => Err(ConfigError("read")),
+    }
 }

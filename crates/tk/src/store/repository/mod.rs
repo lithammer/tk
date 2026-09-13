@@ -72,6 +72,7 @@ pub mod work_state;
 pub struct Store {
     pub(crate) conn: Connection,
     tk_dir: PathBuf,
+    // Fields drop in order: close SQLite before releasing Store ownership.
     pub(super) association_guard: Option<File>,
 }
 

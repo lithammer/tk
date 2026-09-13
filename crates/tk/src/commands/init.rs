@@ -2,6 +2,7 @@
 use crate::cli::{CommandError, Deps, Exit};
 use crate::commands::resolver;
 use crate::git::discovery;
+use crate::store::initialize::{self, Initialized, Mode};
 use clap::Args as ClapArgs;
 
 /// Initialize the current repository's Store Association.
@@ -15,11 +16,10 @@ pub struct Args {
     pub new: bool,
 }
 
-/// Publish a fresh Store before installing its repository-local pointer.
 pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     let paths = discovery::discover_paths(deps.runner, deps.cwd)
         .map_err(|e| CommandError::failure(e.to_string()))?;
-    let result = crate::store::initialize::initialize(
+    let result = initialize::initialize(
         deps.runner,
         deps.cwd,
         deps.clock,
@@ -27,13 +27,13 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         deps.data_root,
         &paths,
         match args.attach.as_deref() {
-            Some(id) => crate::store::initialize::Mode::Attach(id),
-            None if args.new => crate::store::initialize::Mode::New,
-            None => crate::store::initialize::Mode::Plain,
+            Some(id) => Mode::Attach(id),
+            None if args.new => Mode::New,
+            None => Mode::Plain,
         },
     );
     let (path, prefix) = match result.map_err(|e| resolver::open_error(&e))? {
-        crate::store::initialize::Initialized::Created { path, missing } => {
+        Initialized::Created { path, missing } => {
             for id in missing {
                 let _ = writeln!(
                     deps.stderr,
@@ -42,15 +42,11 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
             }
             (path, "Initialized Repository Store at ")
         }
-        crate::store::initialize::Initialized::Recovery(report) => {
+        Initialized::Recovery(report) => {
             return Err(recovery_report(&report));
         }
-        crate::store::initialize::Initialized::Attached(path) => {
-            (path, "Attached Repository Store at ")
-        }
-        crate::store::initialize::Initialized::Existing(path) => {
-            (path, "Repository Store already initialized at ")
-        }
+        Initialized::Attached(path) => (path, "Attached Repository Store at "),
+        Initialized::Existing(path) => (path, "Repository Store already initialized at "),
     };
     let _ = writeln!(deps.stdout, "{prefix}{}", path.display());
     Ok(Exit::Ok)
