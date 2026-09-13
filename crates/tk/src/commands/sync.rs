@@ -96,6 +96,7 @@ pub fn run(deps: Deps<'_>, args: Args) -> Exit {
 
 fn run_sync(deps: Deps<'_>, skip: Option<i64>) -> Exit {
     let Deps {
+        data_root,
         stdout,
         stderr,
         runner,
@@ -104,7 +105,7 @@ fn run_sync(deps: Deps<'_>, skip: Option<i64>) -> Exit {
         ..
     } = deps;
 
-    let mut store = match resolver::open_for_command(runner, cwd, clock) {
+    let mut store = match resolver::open_for_command(runner, cwd, clock, data_root) {
         Ok(s) => s,
         Err(err) => {
             resolver::open_error(&err).render(stderr, COMMAND);
@@ -174,6 +175,7 @@ fn run_sync(deps: Deps<'_>, skip: Option<i64>) -> Exit {
 
 fn run_log(deps: Deps<'_>, args: LogArgs) -> Exit {
     let Deps {
+        data_root,
         stdout,
         stderr,
         runner,
@@ -184,7 +186,7 @@ fn run_log(deps: Deps<'_>, args: LogArgs) -> Exit {
     } = deps;
     let styler = styler.for_stdout();
 
-    let store = match resolver::open_for_command(runner, cwd, clock) {
+    let store = match resolver::open_for_command(runner, cwd, clock, data_root) {
         Ok(s) => s,
         Err(err) => {
             resolver::open_error(&err).render(stderr, LOG_COMMAND);
@@ -620,7 +622,7 @@ mod tests {
         seed_store(&store);
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
 
         let code = run(
             h.deps(),
@@ -656,7 +658,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store); // only git discovery; no gh call expected
+        expect_git(&mut h, &store); // only git discovery; no gh call expected
         let code = run(
             h.deps(),
             Args {
@@ -702,7 +704,7 @@ mod tests {
         drop(conn);
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         h.runner.expect_exact_error(
             &[
                 "gh",
@@ -772,7 +774,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         expect_github_pull(&h, "o", "r", 1, "Backend", "B", Lifecycle::Open);
         h.runner.expect(
             &["gh", "issue", "edit", backend_key],
@@ -825,7 +827,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         // No Remote configured: sync still exits 1 on no-remote, but the skip
         // committed first.
         let code = run(
@@ -886,7 +888,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         // No Remote configured: the skip's line is what this test cares about,
         // reported before sync fails on the missing Remote.
         let code = run(
@@ -951,7 +953,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         // The reopen lands before this Pull call, so the Item is back in the
         // open-only working set; the Backend answers with the issue closed.
         expect_github_pull(
@@ -1023,11 +1025,14 @@ mod tests {
                 stderr: Vec::new(),
             },
         );
+        crate::store::testing::expect_pointer(&holder_runner);
         let clock = FakeClock::new(1_778_284_800_000);
-        let first = resolver::open_for_command(&holder_runner, &cwd_path, &clock).unwrap();
+        let first =
+            resolver::open_for_command(&holder_runner, &cwd_path, &clock, Some(&store.data_root))
+                .unwrap();
         let first_guard = first.lock_remote_workflow().unwrap();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let exit = run(
             h.deps(),
             Args {
@@ -1082,7 +1087,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run(
             h.deps(),
             Args {
@@ -1126,7 +1131,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run(
             h.deps(),
             Args {
@@ -1150,7 +1155,7 @@ mod tests {
         seed_store(&store);
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
 
         let code = run(h.deps(), log_args(None));
         assert_eq!(code, Exit::Ok);
@@ -1180,7 +1185,7 @@ mod tests {
         .unwrap();
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
 
         let code = run(h.deps(), log_args(None));
 
@@ -1203,7 +1208,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
 
         let code = run(h.deps_with(Styler::always()), log_args(None));
 
@@ -1240,7 +1245,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
 
         let code = run(h.deps(), log_args(None));
 
@@ -1260,7 +1265,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run(h.deps(), log_args(None));
         assert_eq!(code, Exit::Ok);
         let out = String::from_utf8(h.stdout).unwrap();
@@ -1279,7 +1284,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
 
         let code = run(h.deps(), log_args(Some(7)));
 
@@ -1302,7 +1307,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
 
         let code = run(h.deps(), log_args(Some(7)));
 
@@ -1321,7 +1326,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run(h.deps(), log_args(Some(7)));
         assert_eq!(code, Exit::Ok);
         let out = String::from_utf8(h.stdout).unwrap();
@@ -1341,7 +1346,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
 
         let code = run(h.deps_with(Styler::always()), log_args(Some(7)));
 
@@ -1385,7 +1390,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run(h.deps(), log_args(None));
         assert_eq!(code, Exit::Ok);
         let out = String::from_utf8(h.stdout).unwrap();
@@ -1417,7 +1422,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run(h.deps(), log_args(Some(3)));
         assert_eq!(code, Exit::Ok);
         let out = String::from_utf8(h.stdout).unwrap();
@@ -1434,7 +1439,7 @@ mod tests {
         seed_store(&store);
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run(h.deps(), log_args(Some(99)));
         assert_eq!(code, Exit::Failure);
         assert!(

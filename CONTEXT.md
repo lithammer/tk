@@ -172,8 +172,8 @@ _Avoid_: Search, Full-text search, Fuzzy search
 
 **Repository Store**:
 The user-owned local data associated with one version-control repository and
-shared by all its **Workspaces**. It remains until the user explicitly deletes
-it.
+shared by all its **Workspaces**. It lives in user data outside the repository
+and remains until the user explicitly deletes it.
 _Avoid_: Workspace Store, Global Store
 
 **Store ID**:
@@ -641,7 +641,7 @@ _Avoid_: ticket, tickets
 - `tk sync`, `tk adopt`, `tk promote`, and Remote configuration changes hold
   the repository-scoped Remote workflow lock across their Backend and
   Repository Store effects. The stable lock file is
-  `<git-common-dir>/tk/remote.lock`; process termination releases ownership,
+  `<local data>/tk/stores/<Store ID>/remote.lock`; process termination releases ownership,
   but tk never deletes or replaces the file. Sync Skip takes the lock before
   changing the Mutation Log but still commits before opening the Backend
   Adapter. A competing command fails with a retry diagnostic instead of

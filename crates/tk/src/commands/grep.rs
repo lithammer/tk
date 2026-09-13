@@ -97,7 +97,7 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     let re = build_matcher(&args.pattern, args.ignore_case, args.fixed)
         .map_err(|err| CommandError::usage(format!("invalid pattern: {err}")))?;
 
-    let store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
+    let store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock, deps.data_root)
         .map_err(|err| resolver::open_error(&err))?;
 
     // Resolve the per-side context window: `-A`/`-B` override their side of
@@ -349,7 +349,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(
             &mut h,
             Args {
@@ -387,7 +387,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(
             &mut h,
             Args {
@@ -424,7 +424,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(
             &mut h,
             Args {
@@ -475,7 +475,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(
             &mut h,
             Args {
@@ -653,7 +653,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(&mut h, args);
         (code, String::from_utf8(h.stdout).unwrap())
     }
@@ -843,7 +843,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(
             &mut h,
             Args {
@@ -919,7 +919,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(
             &mut h,
             Args {
@@ -1018,7 +1018,7 @@ mod tests {
         drop(conn);
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered_with(
             &mut h,
             Styler::always(),
@@ -1062,7 +1062,7 @@ mod tests {
 
             let cwd_path = cwd();
             let mut h = Harness::new(&cwd_path);
-            expect_git(&h, &store);
+            expect_git(&mut h, &store);
             let code = run_rendered(
                 &mut h,
                 Args {
@@ -1155,7 +1155,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered_with(
             &mut h,
             Styler::always(),
@@ -1201,7 +1201,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(
             &mut h,
             Args {
@@ -1317,7 +1317,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(
             &mut h,
             Args {
@@ -1363,7 +1363,7 @@ mod tests {
             drop(conn);
             let cwd_path = cwd();
             let mut h = Harness::new(&cwd_path);
-            expect_git(&h, &store);
+            expect_git(&mut h, &store);
             let code = run_rendered(
                 &mut h,
                 Args {
@@ -1402,7 +1402,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let styler = Styler::always();
         let code = run_rendered_with(
             &mut h,
@@ -1468,7 +1468,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered_with(
             &mut h,
             Styler::always(),
@@ -1538,12 +1538,14 @@ mod tests {
                 stderr: Vec::new(),
             },
         );
+        crate::store::testing::expect_pointer(&runner);
         let clock = FakeClock::new(1_778_284_800_000);
         let mut rng = StdRng::seed_from_u64(0);
         let mut stdout = FailingWriter(kind);
         let mut stderr: Vec<u8> = Vec::new();
         let mut stdin = std::io::Cursor::new(Vec::new());
         let mut deps = Deps {
+            data_root: Some(&store.data_root),
             stdout: &mut stdout,
             stderr: &mut stderr,
             stdin: &mut stdin,
@@ -1624,7 +1626,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(
             &mut h,
             Args {

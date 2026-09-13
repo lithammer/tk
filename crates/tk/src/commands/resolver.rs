@@ -41,8 +41,9 @@ pub fn open_for_command<R: ProcRunner + ?Sized>(
     runner: &R,
     cwd: &Path,
     clock: &dyn Clock,
+    data_root: Option<&Path>,
 ) -> Result<Store, OpenError> {
-    repository::open_existing(runner, cwd, clock)
+    repository::open_existing(runner, cwd, clock, data_root)
 }
 
 /// Resolve a Display ID or Alias against an opened store.
@@ -79,7 +80,8 @@ pub fn open_error(err: &OpenError) -> CommandError {
         // Exhaustive on purpose: every variant left here renders as its own
         // `Display` and carries no inner cause to lose. A catch-all would let
         // the next variant that *does* carry one fall through and drop it.
-        OpenError::DiscoveryFailed(_)
+        OpenError::Association(_)
+        | OpenError::DiscoveryFailed(_)
         | OpenError::StoreMissing
         | OpenError::NotRepositoryStore
         | OpenError::FromFutureVersion

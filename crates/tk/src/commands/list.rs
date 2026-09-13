@@ -69,7 +69,7 @@ pub struct Args {
 }
 
 pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
-    let store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
+    let store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock, deps.data_root)
         .map_err(|err| resolver::open_error(&err))?;
 
     let scope_epic = scope::resolve(&store, args.epic_id.as_deref())?;
@@ -449,7 +449,7 @@ mod tests {
         seed_store(&store);
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(&mut h, default_args());
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -476,7 +476,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(&mut h, default_args());
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -505,7 +505,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(&mut h, default_args());
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -532,7 +532,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(&mut h, default_args());
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -586,7 +586,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(
             &mut h,
             Args {
@@ -634,7 +634,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(
             &mut h,
             Args {
@@ -667,7 +667,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(
             &mut h,
             Args {
@@ -701,7 +701,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(
             &mut h,
             Args {
@@ -722,7 +722,7 @@ mod tests {
         seed_store(&store);
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(
             &mut h,
             Args {
@@ -740,7 +740,7 @@ mod tests {
         let store = TmpStore::new("repo");
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(&mut h, default_args());
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
@@ -792,7 +792,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(
             &mut h,
             Args {
@@ -837,7 +837,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(
             &mut h,
             Args {
@@ -887,7 +887,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(&mut h, default_args());
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -944,7 +944,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(&mut h, default_args());
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -1052,7 +1052,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(&mut h, default_args());
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -1094,7 +1094,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(&mut h, default_args());
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -1131,7 +1131,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(&mut h, default_args());
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -1175,7 +1175,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(&mut h, default_args());
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -1238,7 +1238,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered_with(&mut h, Styler::always(), default_args());
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -1313,7 +1313,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(&mut h, default_args());
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -1388,7 +1388,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(&mut h, default_args());
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -1432,7 +1432,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(&mut h, default_args());
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -1470,7 +1470,7 @@ mod tests {
 
             let cwd_path = cwd();
             let mut h = Harness::new(&cwd_path);
-            expect_git(&h, &store);
+            expect_git(&mut h, &store);
 
             let code = run_rendered_with(&mut h, Styler::always(), default_args());
 
@@ -1513,7 +1513,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(&mut h, default_args());
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -1550,7 +1550,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(&mut h, default_args());
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -1597,7 +1597,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(&mut h, default_args());
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -1623,7 +1623,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(&mut h, default_args());
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -1662,7 +1662,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(&mut h, default_args());
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -1720,7 +1720,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(&mut h, default_args());
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -1852,7 +1852,7 @@ Mutation Log: 1 pending
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(
             &mut h,
             Args {
@@ -1907,7 +1907,7 @@ Mutation Log: 1 pending
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(
             &mut h,
             Args {

@@ -74,7 +74,7 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         return Err(CommandError::failure("body contains a NUL byte"));
     }
 
-    let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
+    let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock, deps.data_root)
         .map_err(|err| resolver::open_error(&err))?;
 
     let resolved = match resolver::resolve(&store, &args.id) {
@@ -275,8 +275,14 @@ mod tests {
                 "{}",
                 h.err()
             );
-            expect_git(&h, &fixture);
-            let store = resolver::open_for_command(&h.runner, &fixture.toplevel, &h.clock).unwrap();
+            expect_git(&mut h, &fixture);
+            let store = resolver::open_for_command(
+                &h.runner,
+                &fixture.toplevel,
+                &h.clock,
+                Some(&fixture.data_root),
+            )
+            .unwrap();
             let item = crate::store::repository::show::show_item(&store, "gh-1")
                 .unwrap()
                 .unwrap();
@@ -329,8 +335,14 @@ mod tests {
                 "{title:?}"
             );
             assert!(h.err().starts_with("tk update: title "), "{}", h.err());
-            expect_git(&h, &fixture);
-            let store = resolver::open_for_command(&h.runner, &fixture.toplevel, &h.clock).unwrap();
+            expect_git(&mut h, &fixture);
+            let store = resolver::open_for_command(
+                &h.runner,
+                &fixture.toplevel,
+                &h.clock,
+                Some(&fixture.data_root),
+            )
+            .unwrap();
             let item = crate::store::repository::show::show_item(&store, "tk-1")
                 .unwrap()
                 .unwrap();
@@ -339,11 +351,17 @@ mod tests {
             assert_eq!(item.priority, Some(Priority::P2));
         }
         let mut h = Harness::new(&fixture.toplevel);
-        expect_git(&h, &fixture);
+        expect_git(&mut h, &fixture);
         let argv = ["update", "tk-1", "--title", " \tA\t\u{a0}B\u{a0} \t"].map(String::from);
         assert_eq!(crate::cli::run_argv(h.deps(), &argv).unwrap(), Exit::Ok);
-        expect_git(&h, &fixture);
-        let store = resolver::open_for_command(&h.runner, &fixture.toplevel, &h.clock).unwrap();
+        expect_git(&mut h, &fixture);
+        let store = resolver::open_for_command(
+            &h.runner,
+            &fixture.toplevel,
+            &h.clock,
+            Some(&fixture.data_root),
+        )
+        .unwrap();
         let item = crate::store::repository::show::show_item(&store, "tk-1")
             .unwrap()
             .unwrap();
@@ -387,11 +405,16 @@ mod tests {
                         _ => unreachable!(),
                     };
                     let argv = ["update", "tk-1", input[0], input[1]].map(String::from);
-                    expect_git(&h, &fixture);
+                    expect_git(&mut h, &fixture);
                     assert_eq!(crate::cli::run_argv(h.deps(), &argv).unwrap(), Exit::Ok);
-                    expect_git(&h, &fixture);
-                    let store =
-                        resolver::open_for_command(&h.runner, &fixture.toplevel, &h.clock).unwrap();
+                    expect_git(&mut h, &fixture);
+                    let store = resolver::open_for_command(
+                        &h.runner,
+                        &fixture.toplevel,
+                        &h.clock,
+                        Some(&fixture.data_root),
+                    )
+                    .unwrap();
                     let item = crate::store::repository::show::show_item(&store, "tk-1")
                         .unwrap()
                         .unwrap();
@@ -424,11 +447,17 @@ mod tests {
         .unwrap();
         drop(conn);
         let mut h = Harness::new(&fixture.toplevel);
-        expect_git(&h, &fixture);
+        expect_git(&mut h, &fixture);
         let argv = ["update", "gh-1", "-t", "Corrected title"].map(String::from);
         assert_eq!(crate::cli::run_argv(h.deps(), &argv).unwrap(), Exit::Ok);
-        expect_git(&h, &fixture);
-        let store = resolver::open_for_command(&h.runner, &fixture.toplevel, &h.clock).unwrap();
+        expect_git(&mut h, &fixture);
+        let store = resolver::open_for_command(
+            &h.runner,
+            &fixture.toplevel,
+            &h.clock,
+            Some(&fixture.data_root),
+        )
+        .unwrap();
         let item = crate::store::repository::show::show_item(&store, "gh-1")
             .unwrap()
             .unwrap();
@@ -500,7 +529,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let mut a = args("tk-1");
         a.priority = Some(crate::domain::priority::Priority::P1);
         let code = run_rendered(&mut h, a);
@@ -548,7 +577,7 @@ mod tests {
         drop(conn);
         let mut h = Harness::new(&fixture.toplevel);
         h.stdin = std::io::Cursor::new(b"New body\n".to_vec());
-        expect_git(&h, &fixture);
+        expect_git(&mut h, &fixture);
         let argv = [
             "update",
             "tk-1",
@@ -564,8 +593,14 @@ mod tests {
         .map(String::from);
         assert_eq!(crate::cli::run_argv(h.deps(), &argv).unwrap(), Exit::Ok);
         assert_eq!(h.out(), "Updated Ticket: tk-1 - New title\n");
-        expect_git(&h, &fixture);
-        let store = resolver::open_for_command(&h.runner, &fixture.toplevel, &h.clock).unwrap();
+        expect_git(&mut h, &fixture);
+        let store = resolver::open_for_command(
+            &h.runner,
+            &fixture.toplevel,
+            &h.clock,
+            Some(&fixture.data_root),
+        )
+        .unwrap();
         let item = crate::store::repository::show::show_item(&store, "tk-1")
             .unwrap()
             .unwrap();
@@ -595,7 +630,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let mut a = args("tk-1");
         a.priority = Some(Priority::P0);
         let code = run_rendered(&mut h, a);
@@ -633,7 +668,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let mut a = args("tk-1");
         a.priority = Some(Priority::P0);
         let code = run_rendered(&mut h, a);
@@ -664,7 +699,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let mut a = args("tk-1");
         a.no_parent = true;
         let code = run_rendered(&mut h, a);
@@ -679,7 +714,7 @@ mod tests {
         seed_store(&store);
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let mut a = args("tk-9999");
         a.title = Some("X".into());
         let code = run_rendered(&mut h, a);

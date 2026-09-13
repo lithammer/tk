@@ -44,7 +44,7 @@ pub struct Args {
 }
 
 pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
-    let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
+    let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock, deps.data_root)
         .map_err(|err| resolver::open_error(&err))?;
     let now = deps.clock.now_iso();
     let _workflow = store
@@ -383,7 +383,7 @@ mod tests {
         insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
         let cwd_path = cwd();
         let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         h.runner.expect(
             &["gh", "issue", "view", "https://github.com/o/r/issues/42"],
             ok(&issue_json(
@@ -452,7 +452,7 @@ mod tests {
         .unwrap();
         let cwd_path = cwd();
         let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
 
         let code = run_rendered(&mut h, "42");
 
@@ -471,7 +471,7 @@ mod tests {
         insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
         let cwd_path = cwd();
         let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         h.runner.expect(
             &["gh", "issue", "view", "7"],
             ok(&issue_json(
@@ -515,7 +515,7 @@ mod tests {
         .unwrap();
         let cwd_path = cwd();
         let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(&mut h, "https://github.com/o/r/issues/42");
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert_eq!(code, Exit::Ok, "stderr={:?}", String::from_utf8(h.stderr));
@@ -564,7 +564,7 @@ mod tests {
         .unwrap();
         let cwd_path = cwd();
         let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         h.runner.expect_exact(
             &[
                 "gh",
@@ -597,7 +597,7 @@ mod tests {
         seed_store(&store);
         let cwd_path = cwd();
         let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
 
         let code = run_rendered(&mut h, "42");
         assert_eq!(code, Exit::Failure);
@@ -623,7 +623,7 @@ mod tests {
         .unwrap();
         let cwd_path = cwd();
         let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
 
         let code = run_rendered(&mut h, "42");
         assert_eq!(code, Exit::Failure);
@@ -643,7 +643,7 @@ mod tests {
         insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
         let cwd_path = cwd();
         let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         h.runner.expect(
             &["gh", "issue", "view", "99"],
             ok(&issue_json(
@@ -672,7 +672,7 @@ mod tests {
         let mut h = Harness::with_seed(&cwd_path, 7);
         let stderr_line = "GraphQL: Could not resolve to an issue or pull request \
                            with the number of 5. (repository.issue)";
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         h.runner
             .expect(&["gh", "issue", "view", "5"], fail(1, stderr_line));
 
@@ -705,7 +705,7 @@ mod tests {
         .unwrap();
         let cwd_path = cwd();
         let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         h.runner.expect(
             &["gh", "issue", "view", "42"],
             ok(&issue_json(
@@ -801,7 +801,7 @@ mod tests {
     /// what Detach actually writes.
     fn detach_item(store: &TmpStore, cwd_path: &Path, id: &str) {
         let mut h = Harness::new(cwd_path);
-        expect_git(&h, store);
+        expect_git(&mut h, store);
         let mut deps = h.deps();
         detach::run(&mut deps, detach::Args { id: id.to_owned() })
             .expect("detach the seeded Backend Item");
@@ -843,7 +843,7 @@ mod tests {
     /// Inspect an Item through the public `tk show` command seam.
     fn show_item(store: &TmpStore, cwd_path: &Path, id: &str) -> String {
         let mut h = Harness::new(cwd_path);
-        expect_git(&h, store);
+        expect_git(&mut h, store);
         let mut deps = h.deps();
         show::run(&mut deps, show::Args { id: id.to_owned() }).expect("show the Item");
         h.runner.assert_all_consumed();
@@ -908,7 +908,7 @@ mod tests {
         detach_item(&store, &cwd_path, "gh-42");
 
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         expect_issue_view(&h, 42, "OPEN", "Bug");
 
         let exit = run_rendered(&mut h, "42");
@@ -1040,7 +1040,7 @@ mod tests {
         detach_item(&store, &cwd_path, "gh-42");
 
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         expect_issue_view(&h, 42, "OPEN", "null");
         assert_eq!(run_rendered(&mut h, "42"), Exit::Ok, "stderr={}", h.err());
 
@@ -1089,7 +1089,7 @@ mod tests {
 
         detach_item(&store, &cwd_path, "gh-42");
         let mut promote_h = Harness::new(&cwd_path);
-        expect_git(&promote_h, &store);
+        expect_git(&mut promote_h, &store);
         promote_h.runner.expect_exact(
             &[
                 "gh",
@@ -1119,7 +1119,7 @@ mod tests {
         // Former Backend Identity is history, not retained Backend state: a
         // detached Item permits clearing and replacing the Remote.
         let mut clear_h = Harness::new(&cwd_path);
-        expect_git(&clear_h, &store);
+        expect_git(&mut clear_h, &store);
         remote::run(
             &mut clear_h.deps(),
             remote::Args {
@@ -1130,7 +1130,7 @@ mod tests {
         assert_eq!(clear_h.out(), "Cleared the configured Remote.\n");
 
         let mut set_h = Harness::new(&cwd_path);
-        expect_git(&set_h, &store);
+        expect_git(&mut set_h, &store);
         remote::run(
             &mut set_h.deps(),
             remote::Args {
@@ -1143,7 +1143,7 @@ mod tests {
         assert_eq!(set_h.out(), "Configured Remote: github\n");
 
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         expect_issue_view(&h, 42, "OPEN", "null");
         assert_eq!(run_rendered(&mut h, "42"), Exit::Ok, "stderr={}", h.err());
 
@@ -1185,7 +1185,7 @@ mod tests {
         );
 
         let mut sync_h = Harness::new(&cwd_path);
-        expect_git(&sync_h, &store);
+        expect_git(&mut sync_h, &store);
         let sync_exit = sync_command::run(
             sync_h.deps(),
             sync_command::Args {
@@ -1198,7 +1198,7 @@ mod tests {
         assert_eq!(sync_h.out(), "Sync complete: 0 pulled, 0 applied.\n");
 
         let mut list_h = Harness::new(&cwd_path);
-        expect_git(&list_h, &store);
+        expect_git(&mut list_h, &store);
         list::run(
             &mut list_h.deps(),
             list::Args {
@@ -1222,7 +1222,7 @@ mod tests {
         );
 
         let mut next_h = Harness::new(&cwd_path);
-        expect_git(&next_h, &store);
+        expect_git(&mut next_h, &store);
         next::run(
             &mut next_h.deps(),
             next::Args {
@@ -1235,7 +1235,7 @@ mod tests {
         assert_eq!(next_h.out(), "tk-1: Fix login\n");
 
         let mut search_h = Harness::new(&cwd_path);
-        expect_git(&search_h, &store);
+        expect_git(&mut search_h, &store);
         search::run(
             &mut search_h.deps(),
             search::Args {
@@ -1305,7 +1305,7 @@ mod tests {
         detach_item(&store, &cwd_path, "gh-42");
 
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         expect_issue_view(&h, 42, "OPEN", "null");
 
         let exit = run_rendered(&mut h, "42");
@@ -1348,7 +1348,7 @@ mod tests {
         detach_item(&store, &cwd_path, "gh-42");
 
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         expect_issue_view(&h, 42, "OPEN", "null");
 
         let exit = run_rendered(&mut h, "42");
@@ -1378,7 +1378,7 @@ mod tests {
         detach_item(&store, &cwd_path, "gh-42");
 
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         expect_issue_view(&h, 42, "OPEN", "null");
 
         let exit = run_rendered(&mut h, "42");
@@ -1411,7 +1411,7 @@ mod tests {
         detach_item(&store, &cwd_path, "gh-42");
 
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         expect_issue_view(&h, 42, "CLOSED", "null");
 
         let exit = run_rendered(&mut h, "42");
@@ -1441,7 +1441,7 @@ mod tests {
         detach_item(&store, &cwd_path, "gh-42");
 
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         expect_issue_view(&h, 42, "OPEN", "null");
 
         let exit = run_rendered(&mut h, "42");
@@ -1474,7 +1474,7 @@ mod tests {
         detach_item(&store, &cwd_path, "gh-42");
 
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         expect_issue_view(&h, 42, "OPEN", "null");
 
         let exit = run_rendered(&mut h, "42");
@@ -1525,7 +1525,7 @@ mod tests {
         insert_dependency(&conn, "blocker", "stable").unwrap();
 
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         expect_issue_view(&h, 42, "OPEN", "null");
 
         let exit = run_rendered(&mut h, "42");
@@ -1574,7 +1574,7 @@ mod tests {
         insert_dependency(&conn, "blocker", "stable").unwrap();
 
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         expect_issue_view(&h, 42, "OPEN", "null");
 
         let exit = run_rendered(&mut h, "42");
@@ -1672,7 +1672,7 @@ mod tests {
         insert_dependency(&conn, "stable", "blocked").unwrap();
 
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         expect_issue_view(&h, 42, "OPEN", "null");
 
         let exit = run_rendered(&mut h, "42");
@@ -1762,7 +1762,7 @@ mod tests {
             .unwrap();
 
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         expect_issue_view(&h, 42, "OPEN", "Bug");
 
         let exit = run_rendered(&mut h, "42");
@@ -1822,7 +1822,7 @@ mod tests {
         .unwrap();
 
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         expect_issue_view(&h, 42, "OPEN", "null");
 
         let exit = run_rendered(&mut h, "42");
@@ -1866,7 +1866,7 @@ mod tests {
         .unwrap();
 
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         expect_issue_view(&h, 42, "OPEN", "null");
 
         let exit = run_rendered(&mut h, "42");
@@ -1915,7 +1915,7 @@ mod tests {
         detach_item(&store, &cwd_path, "gh-5");
 
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         expect_issue_view(&h, 5, "OPEN", "null");
 
         let exit = run_rendered(&mut h, "5");
@@ -1994,7 +1994,7 @@ mod tests {
         detach_item(&store, &cwd_path, "gh-42");
 
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
 
         let exit = run_rendered(&mut h, "42");
 

@@ -22,6 +22,7 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         deps.runner,
         deps.cwd,
         deps.clock,
+        deps.data_root,
         &args.blocked,
         &args.blocking,
     )?;

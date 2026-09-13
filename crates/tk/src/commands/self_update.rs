@@ -89,6 +89,7 @@ pub struct Args {
 /// it into the by-value pipeline below.
 pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     let reborrow = Deps {
+        data_root: deps.data_root,
         stdout: &mut *deps.stdout,
         stderr: &mut *deps.stderr,
         stdin: &mut *deps.stdin,
@@ -764,6 +765,7 @@ mod tests {
         cwd: &'a Path,
     ) -> Deps<'a> {
         Deps {
+            data_root: None,
             stdout,
             stderr,
             stdin,

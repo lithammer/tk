@@ -253,7 +253,7 @@ fn recorded_identity_removes_binding_label_while_queued_edits_stay_visible() {
 fn run(store: &TmpStore, args: &[&str]) -> String {
     let cwd = cwd();
     let mut harness = Harness::new(&cwd);
-    expect_git(&harness, store);
+    expect_git(&mut harness, store);
     let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
     let exit = cli::run_argv(harness.deps(), &args).unwrap();
     assert_eq!(exit, Exit::Ok, "{}", harness.err());

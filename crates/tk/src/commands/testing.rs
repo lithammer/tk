@@ -46,6 +46,7 @@ pub(crate) struct Harness<'a> {
     pub runner: FakeRunner,
     pub clock: FakeClock,
     rng: StdRng,
+    pub data_root: Option<PathBuf>,
     cwd: &'a Path,
 }
 
@@ -65,15 +66,9 @@ impl<'a> Harness<'a> {
             runner: FakeRunner::new(),
             clock: FakeClock::new(CLOCK_MS),
             rng: StdRng::seed_from_u64(seed),
+            data_root: None,
             cwd,
         }
-    }
-
-    /// Override the fake clock for a module whose assertions pin a different
-    /// stamp than [`CLOCK_MS`].
-    pub fn with_clock_ms(mut self, millis: i64) -> Self {
-        self.clock = FakeClock::new(millis);
-        self
     }
 
     /// `Deps` with colour off.
@@ -88,6 +83,7 @@ impl<'a> Harness<'a> {
     /// exercise the coloured path.
     pub fn deps_with(&mut self, styler: Styler) -> Deps<'_> {
         Deps {
+            data_root: self.data_root.as_deref(),
             stdout: &mut self.stdout,
             stderr: &mut self.stderr,
             stdin: &mut self.stdin,
@@ -110,7 +106,7 @@ impl<'a> Harness<'a> {
 
 /// Queue the `git rev-parse` discovery call `open_for_command` makes. FIFO, so
 /// this must precede any `gh` expectation.
-pub(crate) fn expect_git(h: &Harness<'_>, store: &TmpStore) {
+pub(crate) fn expect_git(h: &mut Harness<'_>, store: &TmpStore) {
     h.runner.expect(
         &["git", "rev-parse"],
         RunOutput {
@@ -119,6 +115,8 @@ pub(crate) fn expect_git(h: &Harness<'_>, store: &TmpStore) {
             stderr: Vec::new(),
         },
     );
+    h.data_root = Some(store.data_root.clone());
+    crate::store::testing::expect_pointer(&h.runner);
 }
 
 /// Queue one exact GraphQL Pull request and its matching Issue response.

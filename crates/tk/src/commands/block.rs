@@ -22,6 +22,7 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         deps.runner,
         deps.cwd,
         deps.clock,
+        deps.data_root,
         &args.blocked,
         &args.blocking,
     )?;
@@ -122,7 +123,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(
             &mut h,
             Args {
@@ -154,7 +155,7 @@ mod tests {
 
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(
             &mut h,
             Args {

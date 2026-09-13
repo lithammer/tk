@@ -13,7 +13,7 @@
 //! to widen the timeout.
 //!
 //! Real subprocesses throughout, per ADR-0031: each writer is the built
-//! `tk` binary racing the others through the OS, exactly like concurrent
+//! command seam racing the others through the OS, exactly like concurrent
 //! agent sessions.
 
 use std::collections::HashSet;
@@ -21,7 +21,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 use std::sync::{Arc, Barrier};
 
-use assert_cmd::cargo::CommandCargoExt;
+mod support;
 use tempfile::TempDir;
 
 const WRITERS: usize = 12;
@@ -40,13 +40,12 @@ fn init_store() -> TempDir {
 }
 
 fn tk(cwd: &Path, args: &[&str]) -> Output {
-    Command::cargo_bin("tk")
-        .expect("tk binary")
-        .args(args)
-        .current_dir(cwd)
-        .env("GIT_CEILING_DIRECTORIES", cwd.parent().unwrap())
-        .output()
-        .expect("spawn tk")
+    support::run(
+        cwd,
+        cwd,
+        &args.iter().map(|s| (*s).to_string()).collect::<Vec<_>>(),
+        &[],
+    )
 }
 
 /// Run one `tk` invocation per writer, released simultaneously by a barrier,

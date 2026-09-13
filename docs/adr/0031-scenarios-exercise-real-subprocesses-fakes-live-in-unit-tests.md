@@ -1,5 +1,8 @@
 # Scenarios exercise real subprocesses; fakes live in unit tests
 
+> Amended by [ADR-0053](./0053-repository-stores-live-in-durable-user-data.md)
+> for durable Store ownership, initialization, and test isolation.
+
 tk's tests split into two levels, and the boundary between them is the
 subprocess seam:
 

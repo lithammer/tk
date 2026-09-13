@@ -70,7 +70,9 @@ fn main() -> ExitCode {
         std::process::exit(cli::Exit::Internal.code().into());
     });
 
+    let data_root = dirs::data_local_dir();
     let deps = cli::Deps {
+        data_root: data_root.as_deref(),
         stdout: &mut stdout,
         stderr: &mut stderr,
         stdin: &mut stdin,

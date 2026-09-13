@@ -1,10 +1,4 @@
-//! Git `rev-parse` path discovery used to locate the Repository Store.
-//!
-//! `tk init` (and future commands that open the store) need Git's common
-//! directory and toplevel to place or find `<git-common-dir>/tk/tk.db`.
-//! This module owns the `git rev-parse` invocation and returns the discovered
-//! paths as a typed result so callers can render diagnostics without this
-//! module reaching for stderr itself.
+//! Git path discovery for Repository Store association validation (ADR-0053).
 //!
 //! Discovery failures are a typed [`DiscoveryError`]: each variant carries its
 //! own user-visible phrasing via `#[error]` (ADR-0017 stable strings), so the
@@ -20,7 +14,7 @@ use crate::proc::{ProcError, ProcRunner};
 /// Paths reported by Git for the current repository.
 #[derive(Debug, Clone)]
 pub struct DiscoveredPaths {
-    /// Shared Git common directory; parent of the Repository Store.
+    /// Shared Git Common Directory; canonicalized for Store association checks.
     pub git_common_dir: PathBuf,
     /// Repository working-tree root; used only for display_prefix derivation.
     pub toplevel: PathBuf,

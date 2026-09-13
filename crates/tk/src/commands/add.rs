@@ -58,7 +58,7 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     let parsed = message::read_input(input, deps.cwd, deps.stdin)
         .map_err(|err| message::read_error(&err))?;
 
-    let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock)
+    let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock, deps.data_root)
         .map_err(|err| resolver::open_error(&err))?;
 
     let parent_ref = if let Some(arg) = args.parent.as_deref() {
@@ -214,7 +214,7 @@ mod tests {
         seed_store(&store);
         let cwd_path = cwd();
         let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(&mut h, args_with(vec!["Ship it".into()]));
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -230,7 +230,7 @@ mod tests {
         seed_store(&store);
         let cwd_path = cwd();
         let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let mut a = args_with(vec!["Crash on click".into()]);
         a.bug = true;
         let code = run_rendered(&mut h, a);
@@ -245,7 +245,7 @@ mod tests {
         seed_store(&store);
         let cwd_path = cwd();
         let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let mut a = args_with(vec!["Investigate flaky test".into()]);
         a.triage = true;
         a.bug = true; // a triage bug is valid (ADR-0027)
@@ -264,7 +264,7 @@ mod tests {
         seed_store(&store);
         let cwd_path = cwd();
         let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let mut a = args_with(vec!["Big work".into()]);
         a.epic = true;
         let code = run_rendered(&mut h, a);
@@ -284,7 +284,7 @@ mod tests {
         // First create an epic.
         {
             let mut h = Harness::with_seed(&cwd_path, 7);
-            expect_git(&h, &store);
+            expect_git(&mut h, &store);
             let mut a = args_with(vec!["Epic".into()]);
             a.epic = true;
             assert_eq!(run_rendered(&mut h, a), Exit::Ok);
@@ -293,7 +293,7 @@ mod tests {
         // Then a child ticket referencing it. Distinct seed so the internal
         // 128-bit id doesn't collide with the epic's.
         let mut h = Harness::with_seed(&cwd_path, 11);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let mut a = args_with(vec!["Child ticket".into()]);
         a.parent = Some("tk-1".into());
         let code = run_rendered(&mut h, a);
@@ -310,7 +310,7 @@ mod tests {
         seed_store(&store);
         let cwd_path = cwd();
         let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let mut a = args_with(vec!["Title".into()]);
         a.parent = Some("nope".into());
         let code = run_rendered(&mut h, a);
@@ -328,7 +328,7 @@ mod tests {
         // Create a ticket first.
         {
             let mut h = Harness::with_seed(&cwd_path, 7);
-            expect_git(&h, &store);
+            expect_git(&mut h, &store);
             assert_eq!(
                 run_rendered(&mut h, args_with(vec!["Standalone".into()])),
                 Exit::Ok
@@ -337,7 +337,7 @@ mod tests {
 
         // Trying to parent a new ticket under that ticket should fail.
         let mut h = Harness::with_seed(&cwd_path, 11);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let mut a = args_with(vec!["Child".into()]);
         a.parent = Some("tk-1".into());
         let code = run_rendered(&mut h, a);
@@ -352,7 +352,7 @@ mod tests {
         seed_store(&store);
         let cwd_path = cwd();
         let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let code = run_rendered(&mut h, args_with(vec!["   ".into()]));
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
@@ -378,7 +378,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::with_seed(&cwd_path, 7);
         h.stdin = std::io::Cursor::new(b"From stdin\n\nBody p".to_vec());
-        expect_git(&h, &store);
+        expect_git(&mut h, &store);
         let mut a = args_with(vec![]);
         a.file = Some("-".into());
         let code = run_rendered(&mut h, a);

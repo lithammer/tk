@@ -61,8 +61,15 @@ Print the current version.
 Initialize the Repository Store for the current git repository.
 .PP
 The Repository Store is a SQLite database at
-\fI<git-common-dir>/tk/tk.db\fR. It is shared by all git worktrees for the
-same repository and is untracked local state.
+\fI<local data>/tk/stores/<Store ID>/tk.db\fR. The local data root is the
+platform-local user data directory: XDG data home on Linux, Application Support
+on macOS, and LocalAppData on Windows. All linked Workspaces share the Store.
+It survives deletion of the repository until the user explicitly deletes it.
+The repository-local \fItk.storeId\fR and the Store's \fIstore.json\fR must
+agree on its identity and Git Common Directory association.
+.PP
+Legacy Stores under \fI<git-common-dir>/tk/\fR are preserved and refused.
+Store recovery and legacy migration are not yet supported.
 .PP
 .B tk init
 is idempotent. If the store already exists and is current, it reports the
@@ -73,7 +80,7 @@ Opening a store created by an older
 applies the pending schema migrations first. Before doing so,
 .B tk
 writes a compacted copy of the store to
-\fI<git-common-dir>/tk/backups/\fR and keeps the ten most recent. If that copy
+\fI<local data>/tk/stores/<Store ID>/backups/\fR and keeps the ten most recent. If that copy
 cannot be written, the migration is refused and the store is left untouched.
 .PP
 A backup is readable evidence, not an undo. Restoring one in place does not

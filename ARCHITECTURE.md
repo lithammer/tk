@@ -38,7 +38,7 @@ crates/tk/src/
                            Store Backup, Mutation Log, and sync helpers
   sync.rs                  sync engine orchestration
 crates/tk/tests/
-  scenarios.rs             CLI scenario harness (insta + assert_cmd)
+  scenarios.rs             real-Git command scenarios (insta, isolated child processes)
 ```
 
 Only add modules when a slice needs them. Prefer moving reusable behavior into a
@@ -76,6 +76,10 @@ small boundary module after the second caller proves the shape.
   not stream Git or Backend Adapter subprocess output directly to user writers.
 - `git/` classifies Git discovery outcomes and keeps shared Git diagnostic
   phrasing out of command modules.
+- `store/association.rs` owns Store IDs, manifests, association validation, and
+  fresh-creation publication. `store/initialize.rs` composes fresh init and
+  healthy reopen. `git/association.rs` owns local config reads/writes and the
+  credential-free URL policy (ADR-0053).
 - `store/` owns Repository Store opening, migrations, current-state reads and
   writes, Display ID / Alias resolution, sequence allocation, and Mutation Log
   persistence. `store/backup.rs` owns the Store Backup mechanism — where the
@@ -119,7 +123,7 @@ small boundary module after the second caller proves the shape.
   `tk list` compose it; tk neither stores, infers, nor manages git worktrees.
 
 `cli::Deps` carries explicit dependencies: stdout/stderr/stdin writers, cwd
-path, subprocess runner, UTC millisecond clock, random source, and a resolved
+path, subprocess runner, UTC millisecond clock, random source, platform-local data root, and a resolved
 `Styler` for colour output. Writers are borrowed for one command invocation and
 must not be retained past return. `Deps` grows additively as slices need more
 injectable boundaries.
@@ -144,8 +148,11 @@ The Repository Store is SQLite, per ADRs
 [0001](./docs/adr/0001-untracked-repository-store.md),
 [0003](./docs/adr/0003-use-current-state-store-with-mutation-outbox.md), and
 [0005](./docs/adr/0005-use-sqlite-for-the-repository-store.md). `tk init`
-creates it at `<git-common-dir>/tk/tk.db`; later commands open that store
-through the shared opener instead of duplicating discovery and validation.
+creates it at `<local data>/tk/stores/<Store ID>/tk.db` (ADR-0053). The
+repository-local `tk.storeId` points to a versioned `store.json` beside the
+database. The shared opener validates the Store ID and canonical Git Common
+Directory association before SQLite access. Legacy Git-directory Stores are
+preserved and refused until migration exists.
 
 Migration SQL files are the source of truth for exact table columns and checks.
 Important stable contracts:
@@ -153,11 +160,11 @@ Important stable contracts:
 - `schema_migrations` and `PRAGMA user_version` track migrations.
   `schema_migrations` is authoritative and `PRAGMA user_version` mirrors it;
   both are written in the migration's own transaction.
-- Directories tk creates under `<git-common-dir>/tk/` are tightened to `0700`
+- Directories tk creates under the local data root are tightened to `0700`
   where the host has Unix-style permissions. Only a directory tk created in
   that same call is tightened; one that already existed keeps the permissions
   it has, since it is the user's choice, not tk's.
-- A Store Backup is written to `<git-common-dir>/tk/backups/` before any
+- A Store Backup is written to `<local data>/tk/stores/<Store ID>/backups/` before any
   pending migration runs against a store that already has a schema, and the
   newest ten are kept ([ADR-0048](./docs/adr/0048-migrations-back-up-the-repository-store-first.md)).
   The directory is derived from the connection's path, so an in-memory store
@@ -225,7 +232,7 @@ Important stable contracts:
   object it cannot address ([ADR
   0039](./docs/adr/0039-cancellation-withdraws-an-unobserved-promotion.md)).
 - `Store::lock_remote_workflow` owns an exclusive OS lock on the stable
-  `<git-common-dir>/tk/remote.lock` file. Sync, Adopt, Promotion, and Remote
+  `<local data>/tk/stores/<Store ID>/remote.lock` file. Sync, Adopt, Promotion, and Remote
   configuration hold one guard across Backend access and Store persistence;
   nested Promotion sync reuses its caller's guard. The lock closes the live
   process check-then-act race, while the durable `applying` state remains the

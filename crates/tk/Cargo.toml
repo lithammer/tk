@@ -18,6 +18,7 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+dirs = "6" # Platform-local user data root (ADR-0053).
 # clap (derive API) owns top-level dispatch and per-command help.
 # ADR-0018 pins this as the dispatch idiom.
 clap = { version = "4", features = ["derive"] }
@@ -55,8 +56,7 @@ thiserror = "1"
 # static binary (ADR-0011 wants slim release artifacts).
 jiff = { version = "0.2", default-features = false, features = ["std"] }
 
-# RNG. tk init doesn't draw randomness; first consumers are `tk add` (internal
-# IDs), `tk self-update` / `tk manpage` (stage_name suffix), and `tk sync`.
+# RNG for Store IDs, Item IDs, Promotion Operations, and staged filenames.
 # The trait shape callers inherit is `&mut dyn Rng` (the dyn-compatible
 # low-level trait); production seeds `StdRng`
 # from OS entropy (`SysRng`) and tests inject a seeded `StdRng` via `Deps`. The
@@ -84,10 +84,8 @@ regex = { version = "1", default-features = false, features = ["std", "perf-lite
 
 [dev-dependencies]
 tempfile = "3"
-# CLI scenario harness: assert_cmd runs the built `tk` binary, insta captures
-# stdout/stderr/exit (inline for behavioural scenarios, file snapshots for the
-# clap-generated `--help` contract), and shlex splits the command strings.
-assert_cmd = "2"
+# CLI scenarios run the command seam in isolated child processes (ADR-0053).
+# insta captures stdout/stderr/exit; shlex splits command strings.
 # `filters` enables regex redaction (the init refusal surfaces git's
 # environment-variable stderr).
 insta = { version = "1", features = ["filters"] }
