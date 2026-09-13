@@ -104,7 +104,9 @@ pub fn initialize(
             return Ok(Initialized::Recovery(report));
         }
         released?;
-        super::recovery::inspect_database(&dir.join("tk.db"))?;
+        if matches!(mode, Mode::Attach(_)) {
+            super::recovery::inspect_database(&dir.join("tk.db"))?;
+        }
         if manifest.association.git_common_dir != common {
             manifest
                 .evidence
