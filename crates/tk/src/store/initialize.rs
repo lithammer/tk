@@ -1,4 +1,4 @@
-//! Repository Store creation and explicit recovery (ADR-0053).
+//! Repository Store creation and recovery (ADR-0053).
 use super::display_prefix;
 use crate::git::discovery::DiscoveredPaths;
 use rusqlite::Connection;
@@ -60,13 +60,53 @@ pub fn initialize(
         }
     }
     let urls = git::remote_urls(runner, cwd).map_err(association::Error::from)?;
-    if let Mode::Attach(id) = mode {
+    let report = if matches!(mode, Mode::Plain) {
+        super::recovery::Report {
+            candidates: super::recovery::discover(runner, &root, &pointers, &common, &urls)?,
+            pointer_error: pointer.err(),
+        }
+    } else {
+        super::recovery::Report {
+            candidates: Vec::new(),
+            pointer_error: None,
+        }
+    };
+    let automatic = if report.pointer_error.is_none() {
+        let mut identified = report.candidates.iter().filter(|candidate| {
+            candidate.facts.iter().any(|fact| {
+                matches!(
+                    fact,
+                    super::recovery::Fact::Referenced | super::recovery::Fact::CurrentPath(_)
+                )
+            })
+        });
+        match (identified.next(), identified.next()) {
+            (Some(candidate), None) if candidate.available.is_ok() => Some(candidate.id.as_str()),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let attach = match mode {
+        Mode::Attach(id) => Some(id),
+        Mode::Plain => automatic,
+        Mode::New => None,
+    };
+    if let Some(id) = attach {
         let id = association::StoreId::try_from(id.to_owned())?;
         let dir = root.join(id.text());
-        let mut manifest = association::read_manifest(&dir)?;
         let _store_guard = association::lock_store(&dir, true)?;
-        super::recovery::released(runner, &manifest, &common)?;
-        super::recovery::inspect_database(&dir.join("tk.db"))?;
+        let mut manifest = association::read_manifest(&dir)?;
+        let released = super::recovery::released(runner, &manifest, &common);
+        if matches!(mode, Mode::Plain)
+            && (released.is_err() || !super::recovery::vacant(&dir).unwrap_or(false))
+        {
+            return Ok(Initialized::Recovery(report));
+        }
+        released?;
+        if matches!(mode, Mode::Attach(_)) {
+            super::recovery::inspect_database(&dir.join("tk.db"))?;
+        }
         if manifest.association.git_common_dir != common {
             manifest
                 .evidence
@@ -84,14 +124,8 @@ pub fn initialize(
         association::validate(&root, &id, &manifest.association.git_common_dir)?;
         return Ok(Initialized::Attached(dir.join("tk.db")));
     }
-    if matches!(mode, Mode::Plain) {
-        let candidates = super::recovery::discover(runner, &root, &pointers, &common, &urls)?;
-        if !pointers.is_empty() || !candidates.is_empty() {
-            return Ok(Initialized::Recovery(super::recovery::Report {
-                candidates,
-                pointer_error: pointer.err(),
-            }));
-        }
+    if matches!(mode, Mode::Plain) && (!pointers.is_empty() || !report.candidates.is_empty()) {
+        return Ok(Initialized::Recovery(report));
     }
     let missing: Vec<_> = pointers
         .iter()

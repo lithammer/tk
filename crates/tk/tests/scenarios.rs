@@ -577,7 +577,7 @@ fn durable_store_publication_failure_retains_recoverable_data() {
         .path();
     assert!(dir.join("tk.db").is_file());
     assert!(dir.join("store.json").is_file());
-    assert!(p.run("init").contains("Store evidence requires recovery"));
+    assert!(p.run("init").starts_with("Attached Repository Store at "));
     assert_eq!(fs::read_dir(stores).unwrap().count(), 1);
 }
 
@@ -2558,4 +2558,310 @@ fn recovery_manifest_publication_failure_keeps_the_valid_manifest_for_retry() {
         p.run("show repo-1")
             .contains("Keep through manifest failure")
     );
+}
+
+#[test]
+fn vacant_recovery_repairs_a_missing_pointer_and_allows_ordinary_access() {
+    let p = Repo::new("repo");
+    p.run("init");
+    let id = p.git(&["config", "--local", "--get", "tk.storeId"]);
+    p.git(&["config", "--local", "--unset-all", "tk.storeId"]);
+    let out = p.run("init");
+    assert!(out.starts_with("Attached Repository Store at "), "{out}");
+    assert_eq!(p.git(&["config", "--local", "--get", "tk.storeId"]), id);
+    assert!(p.run("add -m 'After repair'").contains("repo-1"));
+    assert!(p.run("show repo-1").contains("After repair"));
+}
+
+#[test]
+fn vacant_recovery_preserves_each_kind_of_user_data() {
+    for category in [
+        "ticket", "epic", "remote", "plan", "sequence", "config", "other",
+    ] {
+        let p = Repo::new("repo");
+        p.run("init");
+        let db = p.db_path();
+        match category {
+            "ticket" => {
+                p.run("add -m 'Preserved'");
+            }
+            "epic" => {
+                p.run("add --epic -m 'Preserved'");
+            }
+            "plan" => {
+                p.run("add -m 'Preserved'");
+                p.run("plan add repo-1");
+            }
+            _ => {
+                let conn = rusqlite::Connection::open(&db).unwrap();
+                conn.execute_batch(match category {
+                    "remote" => "insert into remotes values ('primary', 'github', '{}', 'now', 'now')",
+                    "sequence" => "update sequences set value = 1 where name = 'display_seq'",
+                    "config" => "pragma ignore_check_constraints = on; insert into store_config values ('user_setting', 'keep')",
+                    "other" => "create table user_notes(body text); insert into user_notes values ('keep')",
+                    _ => unreachable!(),
+                }).unwrap();
+            }
+        }
+        let id = p.git(&["config", "--local", "--get", "tk.storeId"]);
+        let before = fs::read(&db).unwrap();
+        p.git(&["config", "--local", "--unset-all", "tk.storeId"]);
+        let out = p.run("init");
+        assert!(out.starts_with("exit 1\n"), "{category}: {out}");
+        assert_eq!(fs::read(&db).unwrap(), before, "{category}");
+        assert!(p.run("list").contains("Repository Store not initialized"));
+        assert!(db.parent().unwrap().join("store.json").exists());
+        assert!(out.contains(&id), "{out}");
+    }
+}
+
+#[test]
+fn vacant_recovery_preserves_every_mutation_state() {
+    use tk::domain::mutation_state::MutationState;
+    for state in MutationState::ALL {
+        let p = Repo::new("repo");
+        p.run("init");
+        p.run("add -m 'Preserved'");
+        let db = p.db_path();
+        p.seed_mutation("repo-1", "pending", None);
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "update mutations set mutation_type = ?1, state = ?2, failure_json = ?3",
+            rusqlite::params![
+                if matches!(
+                    state,
+                    MutationState::Applying | MutationState::Cancelled | MutationState::Abandoned
+                ) {
+                    "promote_ticket"
+                } else {
+                    "update_ticket"
+                },
+                state.text(),
+                if state == MutationState::Failed {
+                    Some("{}")
+                } else {
+                    None
+                }
+            ],
+        )
+        .unwrap();
+        drop(conn);
+        let before = fs::read(&db).unwrap();
+        p.git(&["config", "--local", "--unset-all", "tk.storeId"]);
+        let out = p.run("init");
+        assert!(out.starts_with("exit 1\n"), "{state:?}: {out}");
+        assert_eq!(fs::read(db).unwrap(), before);
+    }
+}
+
+#[test]
+fn vacant_recovery_inspects_every_backup_without_changing_it() {
+    for contents in [
+        "vacant",
+        "ticket",
+        "corrupt",
+        "future",
+        "missing_table",
+        "directory",
+        "old_vacant",
+    ] {
+        let p = Repo::new("repo");
+        p.run("init");
+        let db = p.db_path();
+        let backup = db.parent().unwrap().join("backups/retained.db");
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute(
+                "vacuum into ?1",
+                [backup.parent().unwrap().join("vacant.db").to_str().unwrap()],
+            )
+            .unwrap();
+        if contents == "ticket" {
+            p.run("add -m 'Only in backup'");
+        }
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute("vacuum into ?1", [backup.to_str().unwrap()])
+                .unwrap();
+            if contents == "ticket" {
+                conn.execute_batch("pragma foreign_keys = off; delete from item_ids; delete from items; update sequences set value = 0").unwrap();
+            }
+        }
+        match contents {
+            "corrupt" => fs::write(&backup, "broken backup").unwrap(),
+            "directory" => {
+                fs::remove_file(&backup).unwrap();
+                fs::create_dir(&backup).unwrap();
+            }
+            "future" | "missing_table" | "old_vacant" => {
+                let conn = rusqlite::Connection::open(&backup).unwrap();
+                conn.execute_batch(match contents {
+                    "future" => "insert into schema_migrations values (999, 'now'); pragma user_version = 999",
+                    "missing_table" => "drop table plan_members",
+                    "old_vacant" => "drop table plan_members; delete from schema_migrations where version = 17; pragma user_version = 16",
+                    _ => unreachable!(),
+                }).unwrap();
+            }
+            _ => {}
+        }
+        let before = fs::read(&backup).ok();
+        let id = p.git(&["config", "--local", "--get", "tk.storeId"]);
+        p.git(&["config", "--local", "--unset-all", "tk.storeId"]);
+        let out = p.run("init");
+        if matches!(contents, "vacant" | "old_vacant") {
+            assert!(
+                out.starts_with("Attached Repository Store at "),
+                "{contents}: {out}"
+            );
+            assert_eq!(p.git(&["config", "--local", "--get", "tk.storeId"]), id);
+        } else {
+            assert!(out.starts_with("exit 1\n"), "{contents}: {out}");
+        }
+        assert_eq!(fs::read(&backup).ok(), before, "{contents}");
+        assert_eq!(fs::read_dir(backup.parent().unwrap()).unwrap().count(), 2);
+    }
+}
+
+#[test]
+fn vacant_recovery_requires_unique_identity_and_released_ownership() {
+    for evidence in [
+        "referenced",
+        "live",
+        "unknown",
+        "remote",
+        "history",
+        "unrelated",
+        "multiple",
+        "malformed",
+    ] {
+        let mut p = Repo::new("repo");
+        p.git(&["remote", "add", "origin", "https://example.com/repo.git"]);
+        p.run("init");
+        let db = p.db_path();
+        let id = p.git(&["config", "--local", "--get", "tk.storeId"]);
+        let original = p.cwd.clone();
+        if evidence != "live" {
+            p.git(&["config", "--local", "--unset-all", "tk.storeId"]);
+        }
+        if evidence == "multiple" {
+            p.run("init --new");
+            p.git(&["config", "--local", "--unset-all", "tk.storeId"]);
+        } else if evidence == "malformed" {
+            p.git(&["config", "--local", "tk.storeId", "broken"]);
+        } else {
+            p.cwd = p.root.join("clone");
+            fs::create_dir(&p.cwd).unwrap();
+            p.git(&["init", "-q"]);
+            match evidence {
+                "referenced" | "live" | "unknown" => {
+                    p.git(&["config", "--local", "tk.storeId", &id]);
+                }
+                "remote" => {
+                    p.git(&["remote", "add", "origin", "https://example.com/repo.git"]);
+                }
+                "history" => {
+                    let path = db.parent().unwrap().join("store.json");
+                    let mut manifest: serde_json::Value =
+                        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                    manifest["evidence"]["previous_git_common_dirs"] =
+                        serde_json::json!([fs::canonicalize(p.cwd.join(".git")).unwrap()]);
+                    fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+                }
+                _ => {}
+            }
+            if evidence == "unknown" {
+                fs::rename(&original, p.root.join("moved-away")).unwrap();
+            }
+        }
+        let before = fs::read(db.parent().unwrap().join("store.json")).unwrap();
+        let out = p.run("init");
+        match evidence {
+            "referenced" => {
+                assert!(out.starts_with("Attached Repository Store at "), "{out}");
+                assert_eq!(p.git(&["config", "--local", "--get", "tk.storeId"]), id);
+                assert!(p.run("add -m 'Reused'").contains("repo-1"));
+            }
+            "unrelated" => {
+                assert!(out.starts_with("Initialized Repository Store at "), "{out}");
+                assert_ne!(p.git(&["config", "--local", "--get", "tk.storeId"]), id);
+                assert_eq!(
+                    fs::read(db.parent().unwrap().join("store.json")).unwrap(),
+                    before
+                );
+            }
+            _ => {
+                assert!(out.starts_with("exit 1\n"), "{evidence}: {out}");
+                assert_eq!(
+                    fs::read(db.parent().unwrap().join("store.json")).unwrap(),
+                    before
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn vacant_recovery_excludes_open_writers_and_rechecks_after_they_close() {
+    let p = Repo::new("repo");
+    p.run("init");
+    let store = tk::store::repository::open_existing(
+        &tk::proc::RealRunner::new(),
+        &p.cwd,
+        &tk::clock::RealClock::new(),
+        Some(&p.root.join("data")),
+    )
+    .unwrap();
+    p.git(&["config", "--local", "--unset-all", "tk.storeId"]);
+    let out = p.run("init");
+    assert!(out.contains("retry when it finishes"), "{out}");
+    store
+        .conn()
+        .execute_batch("update sequences set value = 1 where name = 'display_seq'")
+        .unwrap();
+    drop(store);
+    let out = p.run("init");
+    assert!(out.starts_with("exit 1\n"), "{out}");
+    assert!(out.contains("Store evidence requires recovery"), "{out}");
+    assert!(p.run("list").contains("Repository Store not initialized"));
+}
+
+#[cfg(unix)]
+#[test]
+fn vacant_recovery_refuses_an_unreadable_backup() {
+    use std::os::unix::fs::PermissionsExt;
+    let p = Repo::new("repo");
+    p.run("init");
+    let backup = p.db_path().parent().unwrap().join("backups/unreadable.db");
+    fs::copy(p.db_path(), &backup).unwrap();
+    fs::set_permissions(&backup, fs::Permissions::from_mode(0o000)).unwrap();
+    p.git(&["config", "--local", "--unset-all", "tk.storeId"]);
+    let out = p.run("init");
+    fs::set_permissions(&backup, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(out.starts_with("exit 1\n"), "{out}");
+    assert!(p.run("list").contains("Repository Store not initialized"));
+}
+
+#[test]
+fn vacant_recovery_accepts_defaults_seeded_from_a_linked_workspace() {
+    let mut p = Repo::new("repo");
+    p.git(&[
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "--allow-empty",
+        "-qm",
+        "Initial",
+    ]);
+    let linked = p.root.join("linked");
+    p.git(&["worktree", "add", "-qb", "linked", linked.to_str().unwrap()]);
+    p.cwd = linked;
+    p.run("init");
+    let id = p.git(&["config", "--local", "--get", "tk.storeId"]);
+    p.git(&["config", "--local", "--unset-all", "tk.storeId"]);
+    let out = p.run("init");
+    assert!(out.starts_with("Attached Repository Store at "), "{out}");
+    assert_eq!(p.git(&["config", "--local", "--get", "tk.storeId"]), id);
+    assert!(p.run("add -m 'After repair'").contains("linked-1"));
 }

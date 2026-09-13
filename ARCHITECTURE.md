@@ -78,9 +78,10 @@ small boundary module after the second caller proves the shape.
   phrasing out of command modules.
 - `store/association.rs` owns Store IDs, manifests, association validation, and
   publication. `store/initialize.rs` composes fresh init, explicit attachment,
-  and healthy reopen. `store/recovery.rs` ranks manifest evidence and inspects
-  shortlisted candidates without migration. `git/association.rs` owns local
-  config reads/writes and the credential-free URL policy (ADR-0053).
+  automatic Vacant Store repair, and healthy reopen. `store/recovery.rs` ranks
+  manifest evidence and inspects shortlisted candidates without migration.
+  `git/association.rs` owns local config reads/writes and the credential-free URL
+  policy (ADR-0053).
 - `store/` owns Repository Store opening, migrations, current-state reads and
   writes, Display ID / Alias resolution, sequence allocation, and Mutation Log
   persistence. `store/backup.rs` owns the Store Backup mechanism — where the
@@ -158,7 +159,8 @@ preserved and refused until migration exists.
 An opened `Store` retains a shared `association.lock` until its SQLite connection
 closes. Attachment requires the exclusive lock and publishes the manifest before
 replacing Git's pointer. All initializers also hold `init.lock` through pointer
-writes (ADR-0053).
+writes (ADR-0053). Automatic repair checks ownership and vacancy, including
+all retained Store Backups, under the exclusive Store lock before publication.
 
 Migration SQL files are the source of truth for exact table columns and checks.
 Important stable contracts:
