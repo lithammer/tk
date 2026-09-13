@@ -140,8 +140,8 @@ pub(super) fn inspect_database(path: &Path) -> Result<(), super::repository::Ope
     inspect_connection(path).map(|_| ())
 }
 
-/// The caller must hold the exclusive Store lock to keep writers and backup
-/// creation out until repair ends. Inspect stored images without migrations.
+/// Hold the exclusive Store lock through inspection and repair to exclude
+/// writes and new Store Backups. Read stored images without migrations.
 pub(super) fn vacant(dir: &Path) -> Result<bool, super::repository::OpenError> {
     if !vacant_database(&dir.join("tk.db"))? {
         return Ok(false);
