@@ -1,4 +1,4 @@
-//! Repository Store creation and explicit recovery (ADR-0053).
+//! Repository Store creation and recovery (ADR-0053).
 use super::display_prefix;
 use crate::git::discovery::DiscoveredPaths;
 use rusqlite::Connection;

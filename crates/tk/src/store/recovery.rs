@@ -1,4 +1,4 @@
-//! Manifest discovery and explicit Store Association recovery (ADR-0053).
+//! Manifest discovery and Store Association recovery (ADR-0053).
 use std::fs;
 use std::path::Path;
 
@@ -140,6 +140,21 @@ pub(super) fn inspect_database(path: &Path) -> Result<(), super::repository::Ope
     inspect_connection(path).map(|_| ())
 }
 
+/// The caller must hold the exclusive Store lock to keep writers and backup
+/// creation out until repair ends. Inspect stored images without migrations.
+pub(super) fn vacant(dir: &Path) -> Result<bool, super::repository::OpenError> {
+    if !vacant_database(&dir.join("tk.db"))? {
+        return Ok(false);
+    }
+    for entry in fs::read_dir(dir.join("backups")).map_err(Error::from)? {
+        let entry = entry.map_err(Error::from)?;
+        if !entry.file_type().map_err(Error::from)?.is_file() || !vacant_database(&entry.path())? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn inspect_connection(path: &Path) -> Result<rusqlite::Connection, super::repository::OpenError> {
     use super::{migrations, repository::OpenError};
     use rusqlite::{Connection, OpenFlags};
@@ -163,21 +178,6 @@ fn inspect_connection(path: &Path) -> Result<rusqlite::Connection, super::reposi
         return Err(OpenError::NotRepositoryStore);
     }
     Ok(conn)
-}
-
-/// Inspect every retained image without migrations while the caller holds the
-/// exclusive Store lock, which excludes supported writers and backup creation.
-pub(super) fn vacant(dir: &Path) -> Result<bool, super::repository::OpenError> {
-    if !vacant_database(&dir.join("tk.db"))? {
-        return Ok(false);
-    }
-    for entry in fs::read_dir(dir.join("backups")).map_err(Error::from)? {
-        let entry = entry.map_err(Error::from)?;
-        if !entry.file_type().map_err(Error::from)?.is_file() || !vacant_database(&entry.path())? {
-            return Ok(false);
-        }
-    }
-    Ok(true)
 }
 
 fn vacant_database(path: &Path) -> Result<bool, super::repository::OpenError> {
