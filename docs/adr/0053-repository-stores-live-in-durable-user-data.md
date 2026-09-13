@@ -21,6 +21,7 @@ variable. The process shim resolves the root once and passes it through `Deps`.
       store.json
       tk.db
       backups/
+      association.lock            # held while a Store is open
       remote.lock                 # created when a Remote workflow needs it
 ```
 
@@ -77,9 +78,9 @@ caller to retry. Fresh init needs neither a Remote nor commit history.
 
 Creation writes and closes the database, creates `backups/`, then writes and
 syncs the manifest. Unix also syncs the Store directory and its parent. Only
-then does tk add the Git pointer. It checks the pointer again before and after
-the write; it never replaces an existing value. A failure retains the new
-Store, including incomplete metadata. A later init refuses rather than
+then does plain init add the Git pointer. It checks the pointer again before
+and after the write; explicit `--new` can replace an existing value. A failure retains the new
+Store, including incomplete metadata. A later plain init refuses rather than
 allocating another Store over evidence of the interrupted creation.
 
 ## Evidence and the recovery boundary
@@ -91,18 +92,33 @@ and remote-helper syntax. This deliberately loses some useful evidence to keep
 credentials out of the manifest. Healthy init and ordinary opens never refresh
 that evidence. Historical paths start empty.
 
-Until the recovery slices land, a missing pointer permits fresh creation only
-when all existing entries are valid, unrelated Store manifests. A current or
-historical path match, a retained URL match, or an unreadable or incomplete
-entry refuses creation. Even an unrelated broken entry therefore needs manual
-inspection first. A same-Remote clone can require recovery or an explicit new
-Store choice, neither of which this slice supplies.
+Plain `tk init` scans manifests only when the current association is not healthy. It ranks candidates by referenced Store ID, associated current canonical path, historical canonical path, then exact safe Git remote URL overlap. Ties sort by Store ID; tk shows every matching fact. It lists invalid entries for manual restoration and inspects only shortlisted databases, read-only, without migrations. Ordinary opening reads only the selected manifest.
 
-Any legacy `<git-common-dir>/tk` entry is preserved and refused, including on
-ordinary opens. There is no legacy fallback. Candidate discovery and explicit
-reattachment belong to tk-234; Vacant Store repair belongs to tk-235; legacy
-migration belongs to tk-236. Corrupt metadata needs manual restoration. This
-slice does not expose `--attach`, `--new`, or a force option.
+`tk init --attach <Store ID>` requires a valid manifest whose Store ID matches its directory name, and a readable tk database with a supported schema and passing integrity checks. It preserves Tickets, Local Fields, Mutations, the Plan, and Store Backups.
+
+`tk init --new` creates a distinct Store and preserves prior Stores, reporting a missing referenced Store as possible data loss. It never recreates a referenced ID.
+
+Both options refuse a healthy current association and cannot be combined. There is no force option. Plain init creates only with no pointer, legacy data, or plausible candidate; automatic Vacant Store reuse belongs to tk-235.
+
+tk permits attachment when the manifest names the current Git Common Directory, or when the former directory is readable and its local config no longer points to this Store. tk invokes `git --git-dir <former path> config --local --no-includes --null --get-all tk.storeId` so parent repository discovery cannot stand in for ownership inspection. Git 2.53.0's [`builtin/config.c`](https://github.com/git/git/blob/v2.53.0/builtin/config.c) selects repository config and refuses `--local` outside a repository. Failed Git invocations, unreadable directories, and directory symlinks leave ownership unknown.
+
+An absent former Git Common Directory permits attachment only when its immediate parent is readable and a directory listing confirms that the final component is absent. A missing ancestor remains unknown: it could be an unavailable volume. After moving a whole checkout, restore access to the former Git Common Directory's parent before attachment. tk does not infer release from an absent ancestor.
+
+Path inspection cannot distinguish deletion from a volume silently unmounted beneath a still-readable parent. Restore unavailable volumes before recovery.
+
+Any legacy `<git-common-dir>/tk` entry is preserved and refused, including during attachment and explicit new creation. Legacy migration belongs to tk-236. Invalid, missing, mismatched, unsupported, or unreadable manifests need manual restoration; pending files never replace that requirement.
+
+## Lifecycle synchronization and interrupted attachment
+
+All initialization and attachment commands hold the stable data-root `init.lock` exclusively through their checks and pointer writes.
+
+Each Store has a stable `association.lock`: ordinary opening takes a shared OS lock before validating the manifest, rechecks the local pointer, and retains the lock in `Store` until its SQLite connection closes. Attachment holds that Store lock exclusively before inspecting ownership or changing metadata. Contention returns exit 1 with retry guidance. Independent Stores can remain open concurrently; initializers sharing a data root serialize. Remote workflows hold their lock while the Store remains open.
+
+This protocol prevents two supported initializers from attaching the same Store and prevents an old opener from writing after attachment changes ownership. Locks release on process exit. tk never deletes or replaces lock files. External config edits, older binaries without these locks, and moving a repository during an active command are outside this synchronization protocol.
+
+Attachment writes a uniquely named pending manifest beside `store.json`, syncs and closes it, then atomically renames it over `store.json` and syncs the directory on Unix. Only then does it replace all repository-local pointer values through Git's config lock. The manifest retains the former canonical path and merges sorted, deduplicated safe remote observations. Healthy operations never refresh evidence.
+
+A failure before the rename leaves the prior valid manifest authoritative. If directory sync fails after the rename, the new manifest is already in place. A failed pointer write retains the newly published manifest and all database contents; explicit `tk init --attach <Store ID>` can retry at the new path. If Git committed the pointer before its outcome was lost, plain `tk init` confirms the healthy association. Pending files can remain after interruption, but are never used to reconstruct missing or corrupt metadata.
 
 ## Existing contracts
 

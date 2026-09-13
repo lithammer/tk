@@ -1554,7 +1554,7 @@ fn command_help_snapshots() {
     let p = Repo::new("repo");
     insta::assert_snapshot!("help_tk", p.run("--help"));
     for command in [
-        "accept", "add", "block", "detach", "done", "grep", "list", "next", "park", "plan",
+        "accept", "add", "block", "detach", "done", "grep", "init", "list", "next", "park", "plan",
         "promote", "search", "show", "sync", "unblock", "unpark", "update",
     ] {
         insta::assert_snapshot!(
@@ -2099,4 +2099,463 @@ fn promote_recovery_subcommands_conflict_with_creation_arguments() {
 
     For more information, try '--help'.
     ");
+}
+
+#[test]
+fn recovery_explicitly_reattaches_a_moved_repository() {
+    let mut p = Repo::new("repo");
+    p.run("init");
+    p.run("add -m 'Survives move'");
+    let id = p.git(&["config", "--local", "--get", "tk.storeId"]);
+    let moved = p.root.join("moved");
+    fs::rename(&p.cwd, &moved).unwrap();
+    let original = p.cwd.clone();
+    p.cwd = moved;
+    assert!(
+        p.run(&format!("init --attach {id}"))
+            .contains("ownership is live or unknown")
+    );
+    fs::create_dir(&original).unwrap();
+    let guidance = p.run("init");
+    assert!(guidance.starts_with("exit 1\n"), "{guidance}");
+    assert!(
+        guidance.contains(&format!("tk init --attach {id}")),
+        "{guidance}"
+    );
+    let attached = p.run(&format!("init --attach {id}"));
+    assert!(
+        attached.starts_with("Attached Repository Store at "),
+        "{attached}"
+    );
+    assert!(p.run("show repo-1").contains("Survives move"));
+    assert!(p.run("init --new").contains("healthy Store Association"));
+}
+
+#[test]
+fn recovery_repairs_missing_and_multiple_pointers_explicitly() {
+    for duplicate in [false, true] {
+        let p = Repo::new("repo");
+        p.run("init");
+        p.run("add -m 'Preserved'");
+        let id = p.git(&["config", "--local", "--get", "tk.storeId"]);
+        if duplicate {
+            p.git(&["config", "--local", "--add", "tk.storeId", "broken"]);
+        } else {
+            p.git(&["config", "--local", "--unset-all", "tk.storeId"]);
+        }
+        let out = p.run("init");
+        assert!(out.starts_with("exit 1\n"), "{out}");
+        assert!(out.contains(&format!("tk init --attach {id}")), "{out}");
+        if !duplicate {
+            insta::assert_snapshot!("recovery_missing_pointer", out.replace(&id, "<store-id>"));
+        }
+        let out = p.run(&format!("init --attach {id}"));
+        assert!(out.starts_with("Attached Repository Store at "), "{out}");
+        assert!(p.run("show repo-1").contains("Preserved"));
+    }
+}
+
+#[test]
+fn recovery_new_preserves_the_prior_store_and_never_recreates_a_missing_id() {
+    let p = Repo::new("repo");
+    p.run("init");
+    p.run("add -m 'Preserved'");
+    let db = p.db_path();
+    let old = p.git(&["config", "--local", "--get", "tk.storeId"]);
+    p.git(&["config", "--local", "--unset-all", "tk.storeId"]);
+    assert!(
+        p.run("init --new")
+            .starts_with("Initialized Repository Store at ")
+    );
+    assert_ne!(p.git(&["config", "--local", "--get", "tk.storeId"]), old);
+    assert!(db.is_file());
+    p.git(&[
+        "config",
+        "--local",
+        "tk.storeId",
+        "11111111111111111111111111111111",
+    ]);
+    assert!(p.run("init").contains("possible data loss"));
+    let out = p.run("init --new");
+    assert!(
+        out.contains("Initialized Repository Store at ") && out.contains("possible data loss"),
+        "{out}"
+    );
+    assert!(
+        !p.root
+            .join("data/tk/stores/11111111111111111111111111111111")
+            .exists()
+    );
+    p.git(&["config", "--local", "--unset-all", "tk.storeId"]);
+    assert!(
+        p.run(&format!("init --attach {old}"))
+            .starts_with("Attached Repository Store at ")
+    );
+    assert!(p.run("show repo-1").contains("Preserved"));
+}
+
+#[test]
+fn recovery_live_owner_refuses_then_manual_release_allows_reclone() {
+    let mut p = Repo::new("repo");
+    p.git(&["remote", "add", "origin", "https://example.com/repo.git"]);
+    p.run("init");
+    p.run("add -m 'Shared history is not ownership'");
+    let original = p.cwd.clone();
+    let id = p.git(&["config", "--local", "--get", "tk.storeId"]);
+    p.cwd = p.root.join("clone");
+    fs::create_dir(&p.cwd).unwrap();
+    p.git(&["init", "-q"]);
+    p.git(&["remote", "add", "origin", "https://example.com/repo.git"]);
+    let out = p.run("init");
+    assert!(out.contains("exact Git remote URL"), "{out}");
+    assert!(!out.contains(&format!("tk init --attach {id}")), "{out}");
+    assert!(
+        p.run(&format!("init --attach {id}"))
+            .contains("another Git Common Directory")
+    );
+    let clone = p.cwd.clone();
+    p.cwd = original;
+    p.git(&["config", "--local", "--unset-all", "tk.storeId"]);
+    p.cwd = clone;
+    assert!(
+        p.run(&format!("init --attach {id}"))
+            .starts_with("Attached Repository Store at ")
+    );
+    assert!(
+        p.run("show repo-1")
+            .contains("Shared history is not ownership")
+    );
+}
+
+#[test]
+fn recovery_refuses_unknown_git_ownership_and_retries_interrupted_pointer_writes() {
+    for failure in ["former", "replace-before", "replace-after"] {
+        let mut p = Repo::new("repo");
+        p.run("init");
+        p.run("add -m 'Keep through interruption'");
+        let db = p.db_path();
+        let manifest = db.with_file_name("store.json");
+        let before = fs::read(&manifest).unwrap();
+        let id = p.git(&["config", "--local", "--get", "tk.storeId"]);
+        p.git(&["config", "--local", "--unset-all", "tk.storeId"]);
+        p.cwd = p.root.join("clone");
+        fs::create_dir(&p.cwd).unwrap();
+        p.git(&["init", "-q"]);
+        let command = format!("init --attach {id}");
+        let out = p.run_env(&command, &[("TK_TEST_GIT_FAILURE", failure)]);
+        assert!(out.starts_with("exit 1\n"), "{out}");
+        if failure == "former" {
+            assert_eq!(fs::read(&manifest).unwrap(), before);
+        }
+        let retry = if failure == "replace-after" {
+            "init"
+        } else {
+            &command
+        };
+        let out = p.run(retry);
+        assert!(!out.starts_with("exit "), "{out}");
+        assert!(p.run("show repo-1").contains("Keep through interruption"));
+    }
+}
+
+#[test]
+fn recovery_open_handle_blocks_ownership_transfer_until_it_closes() {
+    let mut p = Repo::new("repo");
+    p.run("init");
+    let id = p.git(&["config", "--local", "--get", "tk.storeId"]);
+    let original = p.cwd.clone();
+    let store = tk::store::repository::open_existing(
+        &tk::proc::RealRunner::new(),
+        &p.cwd,
+        &tk::clock::RealClock::new(),
+        Some(&p.root.join("data")),
+    )
+    .unwrap();
+    p.git(&["config", "--local", "--unset-all", "tk.storeId"]);
+    p.cwd = p.root.join("clone");
+    fs::create_dir(&p.cwd).unwrap();
+    p.git(&["init", "-q"]);
+    assert!(
+        p.run(&format!("init --attach {id}"))
+            .contains("retry when it finishes")
+    );
+    drop(store);
+    assert!(
+        p.run(&format!("init --attach {id}"))
+            .starts_with("Attached Repository Store at ")
+    );
+    p.cwd = original;
+    p.git(&["config", "--local", "tk.storeId", &id]);
+    assert!(p.run("add -m 'Stale owner'").starts_with("exit 1\n"));
+}
+
+#[test]
+fn recovery_two_repositories_cannot_both_attach_the_same_store() {
+    let p = Repo::new("repo");
+    p.run("init");
+    let id = p.git(&["config", "--local", "--get", "tk.storeId"]);
+    p.git(&["config", "--local", "--unset-all", "tk.storeId"]);
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let mut handles = Vec::new();
+    for name in ["first", "second"] {
+        let cwd = p.root.join(name);
+        fs::create_dir(&cwd).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&cwd)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let root = p.root.clone();
+        let id = id.clone();
+        let barrier = barrier.clone();
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            support::run(&cwd, &root, &["init".into(), "--attach".into(), id], &[])
+        }));
+    }
+    let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    assert_eq!(
+        results.iter().filter(|r| r.status.success()).count(),
+        1,
+        "{results:?}"
+    );
+    assert!(
+        results
+            .iter()
+            .filter(|r| !r.status.success())
+            .all(|r| r.status.code() == Some(1))
+    );
+}
+
+#[test]
+fn recovery_invalid_metadata_and_databases_never_offer_attachment() {
+    for fault in [
+        "missing",
+        "corrupt",
+        "identity",
+        "future",
+        "database",
+        "foreign",
+        "future-database",
+        "pending-only",
+    ] {
+        let p = Repo::new("repo");
+        p.run("init");
+        let db = p.db_path();
+        let manifest = db.with_file_name("store.json");
+        let id = p.git(&["config", "--local", "--get", "tk.storeId"]);
+        let original = fs::read(&manifest).unwrap();
+        match fault {
+            "missing" => fs::remove_file(&manifest).unwrap(),
+            "corrupt" => fs::write(&manifest, "broken").unwrap(),
+            "identity" | "future" => {
+                let mut value: serde_json::Value = serde_json::from_slice(&original).unwrap();
+                if fault == "identity" {
+                    value["store_id"] = "ffffffffffffffffffffffffffffffff".into();
+                } else {
+                    value["version"] = 2.into();
+                }
+                fs::write(&manifest, serde_json::to_vec(&value).unwrap()).unwrap();
+            }
+            "database" => fs::remove_file(&db).unwrap(),
+            "foreign" | "future-database" => {
+                let conn = rusqlite::Connection::open(&db).unwrap();
+                if fault == "foreign" {
+                    conn.execute_batch("pragma application_id = 0").unwrap();
+                } else {
+                    conn.execute_batch(
+                        "insert into schema_migrations(version, applied_at) values (999, 'now')",
+                    )
+                    .unwrap();
+                }
+            }
+            "pending-only" => fs::rename(
+                &manifest,
+                manifest.with_extension("json.interrupted.pending"),
+            )
+            .unwrap(),
+            _ => unreachable!(),
+        }
+        let before = fs::read(&manifest).ok();
+        let out = p.run("init");
+        assert!(out.starts_with("exit 1\n"), "{fault}: {out}");
+        assert!(
+            !out.contains(&format!("tk init --attach {id}")),
+            "{fault}: {out}"
+        );
+        assert!(
+            p.run(&format!("init --attach {id}"))
+                .starts_with("exit 1\n")
+        );
+        assert_eq!(fs::read(&manifest).ok(), before, "{fault}");
+        assert_eq!(
+            fs::read_dir(p.root.join("data/tk/stores")).unwrap().count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn recovery_ranks_all_matching_facts_without_migrating_candidates() {
+    let p = Repo::new("repo");
+    p.git(&["remote", "add", "origin", "https://example.com/repo.git"]);
+    let mut ids = Vec::new();
+    for _ in 0..5 {
+        assert!(
+            p.run("init --new")
+                .contains("Initialized Repository Store at ")
+        );
+        ids.push(p.git(&["config", "--local", "--get", "tk.storeId"]));
+        p.git(&["config", "--local", "--unset-all", "tk.storeId"]);
+    }
+    ids.sort();
+    let common = fs::canonicalize(p.cwd.join(".git")).unwrap();
+    let stores = p.root.join("data/tk/stores");
+    for (i, id) in ids.iter().enumerate() {
+        let path = stores.join(id).join("store.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        if i != 3 {
+            manifest["association"]["git_common_dir"] =
+                p.root.join("gone/.git").to_str().unwrap().into();
+        }
+        if i == 2 || i == 4 {
+            manifest["evidence"]["previous_git_common_dirs"] = serde_json::json!([common]);
+        }
+        fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    }
+    p.git(&["config", "--local", "tk.storeId", &ids[4]]);
+    let candidate_db = stores.join(&ids[3]).join("tk.db");
+    {
+        let conn = rusqlite::Connection::open(&candidate_db).unwrap();
+        conn.execute_batch("delete from schema_migrations where version = (select max(version) from schema_migrations)").unwrap();
+    }
+    let before = fs::read(&candidate_db).unwrap();
+    let out = p.run("init");
+    let positions: Vec<_> = [4, 3, 2, 0, 1]
+        .iter()
+        .map(|i| out.find(&format!("Store \"{}\":", ids[*i])).unwrap())
+        .collect();
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{out}");
+    assert!(
+        out.contains("referenced Store ID")
+            && out.contains("historical canonical path")
+            && out.contains("associated current canonical path")
+            && out.contains("exact Git remote URL"),
+        "{out}"
+    );
+    assert_eq!(fs::read(candidate_db).unwrap(), before);
+    assert_eq!(
+        fs::read_dir(stores.join(&ids[3]).join("backups"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn recovery_remote_spelling_is_exact_and_options_are_mutually_exclusive() {
+    let mut p = Repo::new("repo");
+    p.git(&["remote", "add", "origin", "https://example.com/repo.git"]);
+    p.run("init");
+    let id = p.git(&["config", "--local", "--get", "tk.storeId"]);
+    assert!(
+        p.run(&format!("init --new --attach {id}"))
+            .starts_with("exit 2\n")
+    );
+    assert!(p.run("init --force").starts_with("exit 2\n"));
+    p.cwd = p.root.join("clone");
+    fs::create_dir(&p.cwd).unwrap();
+    p.git(&["init", "-q"]);
+    p.git(&["remote", "add", "origin", "https://example.com/repo"]);
+    assert!(
+        p.run("init")
+            .starts_with("Initialized Repository Store at ")
+    );
+}
+
+#[test]
+fn recovery_copied_config_refuses_live_owner_but_accepts_reused_path() {
+    let mut p = Repo::new("repo");
+    p.git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://example.com/original.git",
+    ]);
+    p.run("init");
+    p.run("add -m 'Retained across path reuse'");
+    let db = p.db_path();
+    let id = p.git(&["config", "--local", "--get", "tk.storeId"]);
+    let original = p.cwd.clone();
+    p.cwd = p.root.join("copy");
+    fs::create_dir(&p.cwd).unwrap();
+    p.git(&["init", "-q"]);
+    fs::copy(original.join(".git/config"), p.cwd.join(".git/config")).unwrap();
+    assert!(
+        p.run(&format!("init --attach {id}"))
+            .contains("another Git Common Directory")
+    );
+    let copy = p.cwd.clone();
+    fs::remove_dir_all(original.join(".git")).unwrap();
+    p.cwd = original.clone();
+    p.git(&["init", "-q"]);
+    p.cwd = copy;
+    p.git(&["remote", "set-url", "origin", "https://example.com/new.git"]);
+    assert!(
+        p.run(&format!("init --attach {id}"))
+            .starts_with("Attached Repository Store at ")
+    );
+    assert!(p.run("show repo-1").contains("Retained across path reuse"));
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(db.with_file_name("store.json")).unwrap()).unwrap();
+    assert_eq!(
+        manifest["evidence"]["previous_git_common_dirs"],
+        serde_json::json!([fs::canonicalize(original.join(".git")).unwrap()])
+    );
+    assert_eq!(
+        manifest["evidence"]["git_remote_urls"],
+        serde_json::json!([
+            "https://example.com/new.git",
+            "https://example.com/original.git"
+        ])
+    );
+}
+
+#[test]
+fn recovery_manifest_publication_failure_keeps_the_valid_manifest_for_retry() {
+    use rand::SeedableRng;
+    let mut p = Repo::new("repo");
+    p.run("init");
+    p.run("add -m 'Keep through manifest failure'");
+    let db = p.db_path();
+    let manifest = db.with_file_name("store.json");
+    let before = fs::read(&manifest).unwrap();
+    let id = p.git(&["config", "--local", "--get", "tk.storeId"]);
+    p.git(&["config", "--local", "--unset-all", "tk.storeId"]);
+    p.cwd = p.root.join("clone");
+    fs::create_dir(&p.cwd).unwrap();
+    p.git(&["init", "-q"]);
+    let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+    let staged_id = tk::store::association::StoreId::generate(&mut rng);
+    let staged = db.with_file_name(format!("store.json.{}.pending", staged_id.text()));
+    fs::write(&staged, "interrupted publication").unwrap();
+    let out = p.run_env(&format!("init --attach {id}"), &[("TK_TEST_SEED", "42")]);
+    assert!(out.starts_with("exit 1\n"), "{out}");
+    assert_eq!(fs::read(&manifest).unwrap(), before);
+    assert_eq!(
+        fs::read_to_string(&staged).unwrap(),
+        "interrupted publication"
+    );
+    assert!(
+        p.run(&format!("init --attach {id}"))
+            .starts_with("Attached Repository Store at ")
+    );
+    assert!(
+        p.run("show repo-1")
+            .contains("Keep through manifest failure")
+    );
 }

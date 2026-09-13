@@ -20,6 +20,7 @@ pub fn run(cwd: &Path, root: &Path, args: &[String], env: &[(&str, &str)]) -> Ou
         .env_remove("GIT_WORK_TREE")
         .env_remove("TK_TEST_DATA_ROOT")
         .env_remove("TK_TEST_SEED")
+        .env_remove("TK_TEST_GIT_FAILURE")
         .env_remove("GIT_CONFIG_COUNT")
         .env_remove("GIT_CONFIG_PARAMETERS")
         .env_remove("TK_SCOPE")
@@ -49,7 +50,7 @@ fn cli_child() {
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let mut stdin = std::io::empty();
-    let runner = tk::proc::RealRunner::new();
+    let runner = InjectedRunner(tk::proc::RealRunner::new());
     let clock = tk::clock::RealClock::new();
     let mut rng = rand::rngs::StdRng::try_from_rng(&mut rand::rngs::SysRng).unwrap();
     if let Ok(seed) = std::env::var("TK_TEST_SEED") {
@@ -76,4 +77,31 @@ fn cli_child() {
     std::fs::write(capture.join("stdout"), stdout).unwrap();
     std::fs::write(capture.join("stderr"), stderr).unwrap();
     std::process::exit(i32::from(exit.code()));
+}
+
+struct InjectedRunner(tk::proc::RealRunner);
+
+impl tk::proc::ProcRunner for InjectedRunner {
+    fn run(&self, argv: &[&str], cwd: &Path) -> Result<tk::proc::RunOutput, tk::proc::ProcError> {
+        let failure = std::env::var("TK_TEST_GIT_FAILURE").unwrap_or_default();
+        if (failure == "former" && argv.contains(&"--git-dir"))
+            || (failure == "replace-before" && argv.contains(&"--replace-all"))
+        {
+            return Err(tk::proc::ProcError::SpawnFailed);
+        }
+        let out = self.0.run(argv, cwd)?;
+        if failure == "replace-after" && argv.contains(&"--replace-all") {
+            return Err(tk::proc::ProcError::OutcomeUnobserved);
+        }
+        Ok(out)
+    }
+
+    fn run_with_stdin(
+        &self,
+        argv: &[&str],
+        cwd: &Path,
+        stdin: &[u8],
+    ) -> Result<tk::proc::RunOutput, tk::proc::ProcError> {
+        self.0.run_with_stdin(argv, cwd, stdin)
+    }
 }

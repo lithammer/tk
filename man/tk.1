@@ -69,7 +69,21 @@ The repository-local \fItk.storeId\fR and the Store's \fIstore.json\fR must
 agree on its identity and Git Common Directory association.
 .PP
 Legacy Stores under \fI<git-common-dir>/tk/\fR are preserved and refused.
-Store recovery and legacy migration are not yet supported.
+Legacy migration is not yet supported.
+.PP
+With a broken association, plain init prints ranked Store evidence and complete
+recovery commands. Use \fBtk init \-\-attach\fR \fIStore-ID\fR to attach a valid,
+readable Store after its former repository releases ownership. Use
+\fBtk init \-\-new\fR to create a distinct Store while preserving prior Stores.
+Both options refuse healthy associations and cannot be combined. A missing
+referenced Store is reported as possible data loss; its ID is never recreated.
+.PP
+Unreadable or invalid metadata requires manual restoration. Failed ownership
+inspection never permits attachment. If the former Git Common Directory's parent
+is missing, restore access to that parent first; it may be an unavailable volume.
+An active command holds the Store's association lock until it closes the database,
+so attachment may ask you to retry. After an interrupted attachment, retry the
+same attach command; if Git already installed the pointer, plain init confirms it.
 .PP
 .B tk init
 is idempotent. If the store already exists and is current, it reports the

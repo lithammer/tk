@@ -72,6 +72,8 @@ pub mod work_state;
 pub struct Store {
     pub(crate) conn: Connection,
     tk_dir: PathBuf,
+    // Fields drop in order: close SQLite before releasing Store ownership.
+    pub(super) association_guard: Option<File>,
 }
 
 /// Exclusive ownership of one repository's remote-changing workflow.
@@ -168,6 +170,7 @@ impl Store {
         Self {
             conn,
             tk_dir: PathBuf::new(),
+            association_guard: None,
         }
     }
 }
@@ -244,8 +247,14 @@ pub fn open_existing<R: ProcRunner + ?Sized>(
     let common = super::association::canonical_common(&paths)?;
     super::association::refuse_legacy(&common)?;
     let id = super::association::pointer(runner, cwd)?.ok_or(OpenError::StoreMissing)?;
+    let guard = super::association::lock_store(&root.join(id.text()), false)?;
+    if super::association::pointer(runner, cwd)?.as_ref() != Some(&id) {
+        return Err(super::association::Error::Recovery.into());
+    }
     let db_path = super::association::validate(&root, &id, &common)?;
-    open_database(&db_path, clock)
+    let mut store = open_database(&db_path, clock)?;
+    store.association_guard = Some(guard);
+    Ok(store)
 }
 
 /// Open a validated Store database, preserving the migration and backup contracts.
@@ -280,6 +289,7 @@ pub(super) fn open_database(db_path: &Path, clock: &dyn Clock) -> Result<Store, 
     Ok(Store {
         conn,
         tk_dir: db_path.parent().unwrap().to_path_buf(),
+        association_guard: None,
     })
 }
 

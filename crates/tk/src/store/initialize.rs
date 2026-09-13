@@ -1,18 +1,31 @@
-//! Fresh Repository Store creation (ADR-0053).
+//! Repository Store creation and explicit recovery (ADR-0053).
 use super::display_prefix;
 use crate::git::discovery::DiscoveredPaths;
 use rusqlite::Connection;
 use std::path::PathBuf;
 
-/// Init reports whether it published a Store or opened the existing association.
+/// Init either establishes a Store Association or returns recovery evidence.
 pub enum Initialized {
     /// A new Store was published and its Git pointer installed.
-    Created(PathBuf),
+    Created {
+        path: PathBuf,
+        missing: Vec<String>,
+    },
     /// The current Store Association and database validated successfully.
     Existing(PathBuf),
+    /// The manifest and repository-local pointer now name this association.
+    Attached(PathBuf),
+    Recovery(super::recovery::Report),
 }
 
-/// Validate a healthy Store or publish a fresh one before installing its pointer.
+#[derive(Clone, Copy)]
+pub enum Mode<'a> {
+    Plain,
+    Attach(&'a str),
+    New,
+}
+
+/// Hold the lifecycle lock through inspection, publication, and pointer writes.
 pub fn initialize(
     runner: &dyn crate::proc::ProcRunner,
     cwd: &std::path::Path,
@@ -20,28 +33,79 @@ pub fn initialize(
     rng: &mut dyn rand::Rng,
     data_root: Option<&std::path::Path>,
     paths: &DiscoveredPaths,
+    mode: Mode<'_>,
 ) -> Result<Initialized, super::repository::OpenError> {
     use super::{association, repository};
     use crate::git::association as git;
     let root = association::stores_root(data_root)?;
     let common = association::canonical_common(paths)?;
     association::refuse_legacy(&common)?;
-    let (id, _guard) = if let Some(id) = association::pointer(runner, cwd)? {
-        (Some(id), None)
-    } else {
-        let guard = association::lock_init(&root)?;
-        // Another init may have installed a pointer before this lock was acquired.
-        (association::pointer(runner, cwd)?, Some(guard))
-    };
-    if let Some(id) = id {
-        let path = association::validate(&root, &id, &common)?;
-        let store = repository::open_database(&path, clock)?;
-        configure_repository_store(store.conn())?;
-        return Ok(Initialized::Existing(path));
+    let _guard = association::lock_init(&root)?;
+    let pointers = git::pointers(runner, cwd).map_err(association::Error::from)?;
+    let pointer = association::parse_pointer(&pointers);
+    if let Ok(Some(id)) = &pointer {
+        if association::validate(&root, id, &common).is_ok() {
+            let guard = association::lock_store(&root.join(id.text()), false)?;
+            let path = association::validate(&root, id, &common)?;
+            if super::recovery::inspect_database(&path).is_ok() {
+                if !matches!(mode, Mode::Plain) {
+                    return Err(association::Error::Healthy.into());
+                }
+                let store = repository::open_database(&path, clock)?;
+                configure_repository_store(store.conn())?;
+                drop(store);
+                drop(guard);
+                return Ok(Initialized::Existing(path));
+            }
+        }
     }
     let urls = git::remote_urls(runner, cwd).map_err(association::Error::from)?;
-    association::refuse_recovery(&root, &common, &urls)?;
+    if let Mode::Attach(id) = mode {
+        let id = association::StoreId::try_from(id.to_owned())?;
+        let dir = root.join(id.text());
+        let mut manifest = association::read_manifest(&dir)?;
+        let _store_guard = association::lock_store(&dir, true)?;
+        super::recovery::released(runner, &manifest, &common)?;
+        super::recovery::inspect_database(&dir.join("tk.db"))?;
+        if manifest.association.git_common_dir != common {
+            manifest
+                .evidence
+                .previous_git_common_dirs
+                .push(manifest.association.git_common_dir.clone());
+        }
+        manifest.association.git_common_dir = common;
+        manifest.evidence.previous_git_common_dirs.sort();
+        manifest.evidence.previous_git_common_dirs.dedup();
+        manifest.evidence.git_remote_urls.extend(urls);
+        manifest.evidence.git_remote_urls.sort();
+        manifest.evidence.git_remote_urls.dedup();
+        association::replace(&dir, &manifest, rng)?;
+        git::replace(runner, cwd, id.text()).map_err(association::Error::from)?;
+        association::validate(&root, &id, &manifest.association.git_common_dir)?;
+        return Ok(Initialized::Attached(dir.join("tk.db")));
+    }
+    if matches!(mode, Mode::Plain) {
+        let candidates = super::recovery::discover(runner, &root, &pointers, &common, &urls)?;
+        if !pointers.is_empty() || !candidates.is_empty() {
+            return Ok(Initialized::Recovery(super::recovery::Report {
+                candidates,
+                pointer_error: pointer.err(),
+            }));
+        }
+    }
+    let missing: Vec<_> = pointers
+        .iter()
+        .filter(|id| {
+            association::StoreId::try_from((*id).clone()).is_ok()
+                && std::fs::symlink_metadata(root.join(id))
+                    .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+        })
+        .cloned()
+        .collect();
     let id = association::StoreId::generate(rng);
+    if pointers.iter().any(|previous| previous == id.text()) {
+        return Err(association::Error::Collision.into());
+    }
     let dir = association::reserve(&root, &id)?;
     let path = dir.join("tk.db");
     let mut conn = Connection::open(&path)?;
@@ -61,8 +125,12 @@ pub fn initialize(
         },
     };
     association::publish(&dir, &manifest)?;
-    git::install(runner, cwd, manifest.store_id.text()).map_err(association::Error::from)?;
-    Ok(Initialized::Created(path))
+    if matches!(mode, Mode::New) {
+        git::replace(runner, cwd, manifest.store_id.text()).map_err(association::Error::from)?;
+    } else {
+        git::install(runner, cwd, manifest.store_id.text()).map_err(association::Error::from)?;
+    }
+    Ok(Initialized::Created { path, missing })
 }
 
 /// Require WAL for an on-disk Repository Store (ADR-0053).

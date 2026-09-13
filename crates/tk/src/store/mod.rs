@@ -19,6 +19,7 @@ pub mod initialize;
 pub mod migrations;
 pub mod mutations;
 pub mod promotion;
+pub(crate) mod recovery;
 pub mod repository;
 pub mod sequences;
 mod sql_value;

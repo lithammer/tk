@@ -1,0 +1,19 @@
+---
+source: crates/tk/tests/scenarios.rs
+expression: "p.run(&format!(\"{command} --help\"))"
+---
+Initialize the Repository Store in the current Git repository.
+
+Broken associations print ranked evidence and complete recovery commands. Attachment requires valid metadata and a readable database. Release the former repository's pointer before attaching a Store it still owns. Both recovery options refuse a healthy association and preserve prior data.
+
+Usage: tk init [OPTIONS]
+
+Options:
+      --attach <STORE_ID>
+          Explicitly attach a valid Store whose former ownership has been released
+
+      --new
+          Create a distinct Store, preserving all prior Stores
+
+  -h, --help
+          Print help (see a summary with '-h')

@@ -77,9 +77,10 @@ small boundary module after the second caller proves the shape.
 - `git/` classifies Git discovery outcomes and keeps shared Git diagnostic
   phrasing out of command modules.
 - `store/association.rs` owns Store IDs, manifests, association validation, and
-  fresh-creation publication. `store/initialize.rs` composes fresh init and
-  healthy reopen. `git/association.rs` owns local config reads/writes and the
-  credential-free URL policy (ADR-0053).
+  publication. `store/initialize.rs` composes fresh init, explicit attachment,
+  and healthy reopen. `store/recovery.rs` ranks manifest evidence and inspects
+  shortlisted candidates without migration. `git/association.rs` owns local
+  config reads/writes and the credential-free URL policy (ADR-0053).
 - `store/` owns Repository Store opening, migrations, current-state reads and
   writes, Display ID / Alias resolution, sequence allocation, and Mutation Log
   persistence. `store/backup.rs` owns the Store Backup mechanism — where the
@@ -153,6 +154,11 @@ repository-local `tk.storeId` points to a versioned `store.json` beside the
 database. The shared opener validates the Store ID and canonical Git Common
 Directory association before SQLite access. Legacy Git-directory Stores are
 preserved and refused until migration exists.
+
+An opened `Store` retains a shared `association.lock` until its SQLite connection
+closes. Attachment requires the exclusive lock and publishes the manifest before
+replacing Git's pointer. All initializers also hold `init.lock` through pointer
+writes (ADR-0053).
 
 Migration SQL files are the source of truth for exact table columns and checks.
 Important stable contracts:
