@@ -114,10 +114,13 @@ pub fn canonical_common(paths: &DiscoveredPaths) -> Result<PathBuf, Error> {
 
 /// Read the sole authoritative pointer without selecting a substitute Store.
 pub fn pointer<R: ProcRunner + ?Sized>(runner: &R, cwd: &Path) -> Result<Option<StoreId>, Error> {
-    let values = git::pointers(runner, cwd)?;
-    match values.len() {
-        0 => Ok(None),
-        1 => StoreId::try_from(values.into_iter().next().unwrap()).map(Some),
+    parse_pointer(&git::pointers(runner, cwd)?)
+}
+
+pub(super) fn parse_pointer(values: &[String]) -> Result<Option<StoreId>, Error> {
+    match values {
+        [] => Ok(None),
+        [value] => StoreId::try_from(value.clone()).map(Some),
         _ => Err(Error::DuplicatePointer),
     }
 }
@@ -126,9 +129,6 @@ pub fn pointer<R: ProcRunner + ?Sized>(runner: &R, cwd: &Path) -> Result<Option<
 pub fn validate(root: &Path, id: &StoreId, common: &Path) -> Result<PathBuf, Error> {
     let dir = root.join(id.text());
     let manifest = read_manifest(&dir)?;
-    if manifest.store_id != *id {
-        return Err(Error::Manifest);
-    }
     if manifest.association.git_common_dir != common {
         return Err(Error::AssociationMismatch);
     }

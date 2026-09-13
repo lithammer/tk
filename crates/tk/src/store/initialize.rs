@@ -42,10 +42,11 @@ pub fn initialize(
     association::refuse_legacy(&common)?;
     let _guard = association::lock_init(&root)?;
     let pointers = git::pointers(runner, cwd).map_err(association::Error::from)?;
-    if let Ok(Some(id)) = association::pointer(runner, cwd) {
-        if association::validate(&root, &id, &common).is_ok() {
+    let pointer = association::parse_pointer(&pointers);
+    if let Ok(Some(id)) = &pointer {
+        if association::validate(&root, id, &common).is_ok() {
             let guard = association::lock_store(&root.join(id.text()), false)?;
-            let path = association::validate(&root, &id, &common)?;
+            let path = association::validate(&root, id, &common)?;
             if super::recovery::inspect_database(&path).is_ok() {
                 if !matches!(mode, Mode::Plain) {
                     return Err(association::Error::Healthy.into());
@@ -88,7 +89,7 @@ pub fn initialize(
         if !pointers.is_empty() || !candidates.is_empty() {
             return Ok(Initialized::Recovery(super::recovery::Report {
                 candidates,
-                pointer_error: association::pointer(runner, cwd).err(),
+                pointer_error: pointer.err(),
             }));
         }
     }

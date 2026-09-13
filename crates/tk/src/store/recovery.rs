@@ -9,9 +9,7 @@ use crate::proc::ProcRunner;
 pub struct Candidate {
     pub id: String,
     pub facts: Vec<Fact>,
-    manifest: Result<Manifest, Error>,
     pub available: Result<(), String>,
-    rank: usize,
 }
 
 pub enum Fact {
@@ -65,40 +63,41 @@ pub(super) fn discover(
             }
         }
         if !facts.is_empty() || manifest.is_err() {
-            candidates.push(Candidate {
-                id,
-                facts,
-                manifest,
-                available: Ok(()),
-                rank,
-            });
+            candidates.push((rank, id, facts, manifest));
         }
     }
     for id in pointers {
-        if StoreId::try_from(id.clone()).is_ok() && !candidates.iter().any(|c| &c.id == id) {
-            candidates.push(Candidate {
-                id: id.clone(),
-                facts: vec![Fact::Referenced, Fact::MissingStore],
-                manifest: Err(Error::Manifest),
-                available: Err("missing Store; restore it from backup".into()),
-                rank: 0,
-            });
+        if StoreId::try_from(id.clone()).is_ok()
+            && !candidates
+                .iter()
+                .any(|(_, candidate_id, _, _)| candidate_id == id)
+        {
+            candidates.push((
+                0,
+                id.clone(),
+                vec![Fact::Referenced, Fact::MissingStore],
+                Err(Error::Manifest),
+            ));
         }
     }
-    candidates.sort_by(|a, b| (a.rank, &a.id).cmp(&(b.rank, &b.id)));
-    for candidate in &mut candidates {
-        candidate.available = candidate
-            .manifest
-            .as_ref()
-            .map_err(ToString::to_string)
-            .and_then(|m| {
-                let dir = root.join(&candidate.id);
+    candidates
+        .sort_by(|(rank_a, id_a, _, _), (rank_b, id_b, _, _)| (rank_a, id_a).cmp(&(rank_b, id_b)));
+    Ok(candidates
+        .into_iter()
+        .map(|(_, id, facts, manifest)| {
+            let available = manifest.map_err(|e| e.to_string()).and_then(|manifest| {
+                let dir = root.join(&id);
                 let _guard = association::lock_store(&dir, false).map_err(|e| e.to_string())?;
-                released(runner, m, common).map_err(|e| e.to_string())?;
+                released(runner, &manifest, common).map_err(|e| e.to_string())?;
                 inspect_database(&dir.join("tk.db")).map_err(|e| e.to_string())
             });
-    }
-    Ok(candidates)
+            Candidate {
+                id,
+                facts,
+                available,
+            }
+        })
+        .collect())
 }
 
 /// Missing ancestors are not proof of release: the volume may be unavailable.
