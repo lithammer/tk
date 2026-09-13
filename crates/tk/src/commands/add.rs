@@ -213,7 +213,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&store.data_root);
+        let mut h = Harness::with_seed(&cwd_path, &store, 7);
         expect_git(&h, &store);
         let code = run_rendered(&mut h, args_with(vec!["Ship it".into()]));
         assert_eq!(code, Exit::Ok);
@@ -229,7 +229,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&store.data_root);
+        let mut h = Harness::with_seed(&cwd_path, &store, 7);
         expect_git(&h, &store);
         let mut a = args_with(vec!["Crash on click".into()]);
         a.bug = true;
@@ -244,7 +244,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&store.data_root);
+        let mut h = Harness::with_seed(&cwd_path, &store, 7);
         expect_git(&h, &store);
         let mut a = args_with(vec!["Investigate flaky test".into()]);
         a.triage = true;
@@ -263,7 +263,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&store.data_root);
+        let mut h = Harness::with_seed(&cwd_path, &store, 7);
         expect_git(&h, &store);
         let mut a = args_with(vec!["Big work".into()]);
         a.epic = true;
@@ -283,7 +283,7 @@ mod tests {
 
         // First create an epic.
         {
-            let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&store.data_root);
+            let mut h = Harness::with_seed(&cwd_path, &store, 7);
             expect_git(&h, &store);
             let mut a = args_with(vec!["Epic".into()]);
             a.epic = true;
@@ -292,7 +292,7 @@ mod tests {
 
         // Then a child ticket referencing it. Distinct seed so the internal
         // 128-bit id doesn't collide with the epic's.
-        let mut h = Harness::with_seed(&cwd_path, 11).with_data_root(&store.data_root);
+        let mut h = Harness::with_seed(&cwd_path, &store, 11);
         expect_git(&h, &store);
         let mut a = args_with(vec!["Child ticket".into()]);
         a.parent = Some("tk-1".into());
@@ -309,7 +309,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&store.data_root);
+        let mut h = Harness::with_seed(&cwd_path, &store, 7);
         expect_git(&h, &store);
         let mut a = args_with(vec!["Title".into()]);
         a.parent = Some("nope".into());
@@ -327,7 +327,7 @@ mod tests {
 
         // Create a ticket first.
         {
-            let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&store.data_root);
+            let mut h = Harness::with_seed(&cwd_path, &store, 7);
             expect_git(&h, &store);
             assert_eq!(
                 run_rendered(&mut h, args_with(vec!["Standalone".into()])),
@@ -336,7 +336,7 @@ mod tests {
         }
 
         // Trying to parent a new ticket under that ticket should fail.
-        let mut h = Harness::with_seed(&cwd_path, 11).with_data_root(&store.data_root);
+        let mut h = Harness::with_seed(&cwd_path, &store, 11);
         expect_git(&h, &store);
         let mut a = args_with(vec!["Child".into()]);
         a.parent = Some("tk-1".into());
@@ -351,7 +351,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&store.data_root);
+        let mut h = Harness::with_seed(&cwd_path, &store, 7);
         expect_git(&h, &store);
         let code = run_rendered(&mut h, args_with(vec!["   ".into()]));
         assert_eq!(code, Exit::Failure);
@@ -364,7 +364,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&store.data_root);
+        let mut h = Harness::with_seed(&cwd_path, &store, 7);
         let code = run_rendered(&mut h, args_with(vec![]));
         assert_eq!(code, Exit::Usage);
         let stderr = String::from_utf8(h.stderr).unwrap();
@@ -376,7 +376,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&store.data_root);
+        let mut h = Harness::with_seed(&cwd_path, &store, 7);
         h.stdin = std::io::Cursor::new(b"From stdin\n\nBody p".to_vec());
         expect_git(&h, &store);
         let mut a = args_with(vec![]);

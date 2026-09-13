@@ -439,7 +439,7 @@ mod tests {
     fn missing_store_renders_init_diagnostic() {
         let store = TmpStore::new("repo");
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Failure);
@@ -455,7 +455,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run_rendered(
             &mut h,
@@ -486,7 +486,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Ok);
@@ -528,7 +528,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Ok);
@@ -565,7 +565,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Ok);
@@ -610,7 +610,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Ok);
@@ -652,7 +652,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Ok);
@@ -688,7 +688,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Ok);
@@ -718,7 +718,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let _ = run_rendered(&mut h, Args { id: "tk-1".into() });
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -873,7 +873,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let _ = run_rendered(&mut h, Args { id: "tk-1".into() });
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -980,7 +980,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Ok);

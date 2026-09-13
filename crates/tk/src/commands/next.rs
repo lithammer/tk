@@ -261,7 +261,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_open(&h, &store);
         let code = run_rendered(&mut h, args(None));
         assert_eq!(code, Exit::Failure);
@@ -279,7 +279,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_open(&h, &store);
         let code = run_rendered(&mut h, args(None));
         assert_eq!(code, Exit::Ok);
@@ -298,7 +298,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_open(&h, &store);
         let code = run_rendered(&mut h, args(None));
         assert_eq!(code, Exit::Ok);
@@ -324,7 +324,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_open(&h, &store);
         let code = run_rendered(
             &mut h,
@@ -351,7 +351,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_open(&h, &store);
         let code = run_rendered(&mut h, args(None));
         assert_eq!(code, Exit::Ok);
@@ -367,7 +367,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_open(&h, &store);
         let code = run_rendered(
             &mut h,
@@ -394,7 +394,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_open(&h, &store);
         let code = run_rendered_with(
             &mut h,
@@ -421,7 +421,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_open(&h, &store);
         let code = run_rendered_with(&mut h, Styler::always(), args(None));
         assert_eq!(code, Exit::Ok);
@@ -444,7 +444,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_open(&h, &store);
         let code = run_rendered(&mut h, args(None));
         assert_eq!(code, Exit::Ok);
@@ -457,7 +457,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_open(&h, &store);
         let code = run_rendered(
             &mut h,
@@ -607,7 +607,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_open(&h, &store);
         let code = run_rendered(&mut h, args(Some("tk-1")));
         assert_eq!(code, Exit::Ok);
@@ -628,7 +628,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_open(&h, &store);
         let code = run_rendered(&mut h, args(Some("tk-1")));
         assert_eq!(code, Exit::Failure);
@@ -644,7 +644,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_open(&h, &store);
         let code = run_rendered(&mut h, args(Some("vanished")));
         assert_eq!(code, Exit::Failure);
@@ -663,7 +663,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_open(&h, &store);
         let code = run_rendered(&mut h, args(Some("tk-1")));
         assert_eq!(code, Exit::Failure);

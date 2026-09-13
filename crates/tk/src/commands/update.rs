@@ -203,7 +203,8 @@ mod tests {
             vec!["--body-file", "-", "-b", "Text"],
         ] {
             let cwd_path = cwd();
-            let mut h = Harness::new(&cwd_path);
+            let store = TmpStore::new("repo");
+            let mut h = Harness::new(&cwd_path, &store);
             h.stdin = std::io::Cursor::new(b"Must not be consumed".to_vec());
             let argv: Vec<_> = ["update", "tk-1"]
                 .into_iter()
@@ -248,7 +249,7 @@ mod tests {
             ),
             ("missing", b"".as_slice(), "failed to read 'missing.txt':"),
         ] {
-            let mut h = Harness::new(&fixture.toplevel).with_data_root(&fixture.data_root);
+            let mut h = Harness::new(&fixture.toplevel, &fixture);
             let input = match source {
                 "inline" => ["--body", std::str::from_utf8(bytes).unwrap()],
                 "file" => {
@@ -324,7 +325,7 @@ mod tests {
             "A\u{2028}B",
             "A\u{2029}B",
         ] {
-            let mut h = Harness::new(&fixture.toplevel).with_data_root(&fixture.data_root);
+            let mut h = Harness::new(&fixture.toplevel, &fixture);
             let argv = [
                 "update", "tk-1", "--title", title, "-b", "Changed", "-p", "P0",
             ]
@@ -350,7 +351,7 @@ mod tests {
             assert_eq!(item.body, "Keep body");
             assert_eq!(item.priority, Some(Priority::P2));
         }
-        let mut h = Harness::new(&fixture.toplevel).with_data_root(&fixture.data_root);
+        let mut h = Harness::new(&fixture.toplevel, &fixture);
         expect_git(&h, &fixture);
         let argv = ["update", "tk-1", "--title", " \tA\t\u{a0}B\u{a0} \t"].map(String::from);
         assert_eq!(crate::cli::run_argv(h.deps(), &argv).unwrap(), Exit::Ok);
@@ -391,7 +392,7 @@ mod tests {
                 .unwrap();
                 drop(conn);
                 for body in ["@notes.md\r\n\n  Keep spaces\t\r\n", " \t\n", ""] {
-                    let mut h = Harness::new(&fixture.toplevel).with_data_root(&fixture.data_root);
+                    let mut h = Harness::new(&fixture.toplevel, &fixture);
                     let input = match source {
                         "inline" => ["-b", body],
                         "file" => {
@@ -446,7 +447,7 @@ mod tests {
         )
         .unwrap();
         drop(conn);
-        let mut h = Harness::new(&fixture.toplevel).with_data_root(&fixture.data_root);
+        let mut h = Harness::new(&fixture.toplevel, &fixture);
         expect_git(&h, &fixture);
         let argv = ["update", "gh-1", "-t", "Corrected title"].map(String::from);
         assert_eq!(crate::cli::run_argv(h.deps(), &argv).unwrap(), Exit::Ok);
@@ -501,7 +502,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         let code = run_rendered(&mut h, args("tk-1"));
         assert_eq!(code, Exit::Usage);
         let stderr = String::from_utf8(h.stderr).unwrap();
@@ -528,7 +529,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let mut a = args("tk-1");
         a.priority = Some(crate::domain::priority::Priority::P1);
@@ -575,7 +576,7 @@ mod tests {
         )
         .unwrap();
         drop(conn);
-        let mut h = Harness::new(&fixture.toplevel).with_data_root(&fixture.data_root);
+        let mut h = Harness::new(&fixture.toplevel, &fixture);
         h.stdin = std::io::Cursor::new(b"New body\n".to_vec());
         expect_git(&h, &fixture);
         let argv = [
@@ -629,7 +630,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let mut a = args("tk-1");
         a.priority = Some(Priority::P0);
@@ -667,7 +668,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let mut a = args("tk-1");
         a.priority = Some(Priority::P0);
@@ -698,7 +699,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let mut a = args("tk-1");
         a.no_parent = true;
@@ -713,7 +714,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let mut a = args("tk-9999");
         a.title = Some("X".into());

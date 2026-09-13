@@ -621,7 +621,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
         let code = run(
@@ -657,7 +657,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store); // only git discovery; no gh call expected
         let code = run(
             h.deps(),
@@ -703,7 +703,7 @@ mod tests {
         .unwrap();
         drop(conn);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         h.runner.expect_exact_error(
             &[
@@ -773,7 +773,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         expect_github_pull(&h, "o", "r", 1, "Backend", "B", Lifecycle::Open);
         h.runner.expect(
@@ -826,7 +826,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         // No Remote configured: sync still exits 1 on no-remote, but the skip
         // committed first.
@@ -887,7 +887,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         // No Remote configured: the skip's line is what this test cares about,
         // reported before sync fails on the missing Remote.
@@ -952,7 +952,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         // The reopen lands before this Pull call, so the Item is back in the
         // open-only working set; the Backend answers with the issue closed.
@@ -1031,7 +1031,7 @@ mod tests {
             resolver::open_for_command(&holder_runner, &cwd_path, &clock, Some(&store.data_root))
                 .unwrap();
         let first_guard = first.lock_remote_workflow().unwrap();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let exit = run(
             h.deps(),
@@ -1086,7 +1086,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run(
             h.deps(),
@@ -1130,7 +1130,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run(
             h.deps(),
@@ -1154,7 +1154,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
         let code = run(h.deps(), log_args(None));
@@ -1184,7 +1184,7 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
         let code = run(h.deps(), log_args(None));
@@ -1207,7 +1207,7 @@ mod tests {
         );
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
         let code = run(h.deps_with(Styler::always()), log_args(None));
@@ -1244,7 +1244,7 @@ mod tests {
         seed_list_view_log(&store, HOSTILE_FAILURE_JSON);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
         let code = run(h.deps(), log_args(None));
@@ -1264,7 +1264,7 @@ mod tests {
         seed_list_view_log(&store, r#"{"detail":"HTTP 422: rejected"}"#);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run(h.deps(), log_args(None));
         assert_eq!(code, Exit::Ok);
@@ -1283,7 +1283,7 @@ mod tests {
         seed_detail_view_log(&store, CLEAN_PAYLOAD_JSON, HOSTILE_FAILURE_JSON);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
         let code = run(h.deps(), log_args(Some(7)));
@@ -1306,7 +1306,7 @@ mod tests {
         seed_detail_view_log(&store, HOSTILE_PAYLOAD_JSON, CLEAN_FAILURE_JSON);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
         let code = run(h.deps(), log_args(Some(7)));
@@ -1325,7 +1325,7 @@ mod tests {
         seed_detail_view_log(&store, CLEAN_PAYLOAD_JSON, CLEAN_FAILURE_JSON);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run(h.deps(), log_args(Some(7)));
         assert_eq!(code, Exit::Ok);
@@ -1345,7 +1345,7 @@ mod tests {
         seed_detail_view_log(&store, CLEAN_PAYLOAD_JSON, CLEAN_FAILURE_JSON);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
         let code = run(h.deps_with(Styler::always()), log_args(Some(7)));
@@ -1389,7 +1389,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run(h.deps(), log_args(None));
         assert_eq!(code, Exit::Ok);
@@ -1421,7 +1421,7 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run(h.deps(), log_args(Some(3)));
         assert_eq!(code, Exit::Ok);
@@ -1438,7 +1438,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         let code = run(h.deps(), log_args(Some(99)));
         assert_eq!(code, Exit::Failure);

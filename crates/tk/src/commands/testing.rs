@@ -43,19 +43,19 @@ pub(crate) struct Harness<'a> {
     pub runner: FakeRunner,
     pub clock: FakeClock,
     rng: StdRng,
-    data_root: Option<PathBuf>,
+    data_root: PathBuf,
     cwd: &'a Path,
 }
 
 impl<'a> Harness<'a> {
-    /// Harness seeded at RNG seed 0 and [`CLOCK_MS`].
-    pub fn new(cwd: &'a Path) -> Self {
-        Self::with_seed(cwd, 0)
+    /// Use the fixture's isolated data root, RNG seed 0, and [`CLOCK_MS`].
+    pub fn new(cwd: &'a Path, store: &TmpStore) -> Self {
+        Self::with_seed(cwd, store, 0)
     }
 
-    /// Harness at an explicit RNG seed. Commands that mint identifiers assert
-    /// the exact IDs a seed produces, so each module pins its own.
-    pub fn with_seed(cwd: &'a Path, seed: u64) -> Self {
+    /// Use the fixture's isolated data root and an explicit RNG seed.
+    /// Tests pin the seed when they assert exact generated IDs.
+    pub fn with_seed(cwd: &'a Path, store: &TmpStore, seed: u64) -> Self {
         Self {
             stdout: Vec::new(),
             stderr: Vec::new(),
@@ -63,15 +63,9 @@ impl<'a> Harness<'a> {
             runner: FakeRunner::new(),
             clock: FakeClock::new(CLOCK_MS),
             rng: StdRng::seed_from_u64(seed),
-            data_root: None,
+            data_root: store.data_root.clone(),
             cwd,
         }
-    }
-
-    /// Set the isolated data root before running commands against a Store fixture.
-    pub fn with_data_root(mut self, data_root: &Path) -> Self {
-        self.data_root = Some(data_root.to_path_buf());
-        self
     }
 
     /// `Deps` with colour off.
@@ -86,7 +80,7 @@ impl<'a> Harness<'a> {
     /// exercise the coloured path.
     pub fn deps_with(&mut self, styler: Styler) -> Deps<'_> {
         Deps {
-            data_root: self.data_root.as_deref(),
+            data_root: Some(&self.data_root),
             stdout: &mut self.stdout,
             stderr: &mut self.stderr,
             stdin: &mut self.stdin,
