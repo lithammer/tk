@@ -181,8 +181,8 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&h, &store);
 
         let code = run_rendered(&mut h, set_args("github"));
         assert_eq!(code, Exit::Ok);
@@ -219,12 +219,12 @@ mod tests {
         let cwd_path = cwd();
 
         {
-            let mut h = Harness::new(&cwd_path);
-            expect_git(&mut h, &store);
+            let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+            expect_git(&h, &store);
             assert_eq!(run_rendered(&mut h, set_args("github")), Exit::Ok);
         }
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&h, &store);
         let code = run_rendered(&mut h, set_args("github"));
         assert_eq!(code, Exit::Ok);
         assert!(
@@ -245,7 +245,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
         // No git expectation: parse_set_kind rejects before the store opens.
 
         let code = run_rendered(&mut h, set_args("jira"));
@@ -262,7 +262,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
 
         let code = run_rendered(&mut h, set_args("gitlab"));
         assert_eq!(code, Exit::Usage);
@@ -278,8 +278,8 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&h, &store);
 
         let code = run_rendered(&mut h, show_args());
         assert_eq!(code, Exit::Ok);
@@ -296,13 +296,13 @@ mod tests {
         seed_store(&store);
         let cwd_path = cwd();
         {
-            let mut h = Harness::new(&cwd_path);
-            expect_git(&mut h, &store);
+            let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+            expect_git(&h, &store);
             run_rendered(&mut h, set_args("github"));
         }
 
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&h, &store);
         let code = run_rendered(&mut h, show_args());
         assert_eq!(code, Exit::Ok);
         assert_eq!(
@@ -317,8 +317,8 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&h, &store);
 
         let code = run_rendered(&mut h, clear_args());
         assert_eq!(code, Exit::Failure);
@@ -335,13 +335,13 @@ mod tests {
         seed_store(&store);
         let cwd_path = cwd();
         {
-            let mut h = Harness::new(&cwd_path);
-            expect_git(&mut h, &store);
+            let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+            expect_git(&h, &store);
             run_rendered(&mut h, set_args("github"));
         }
 
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&h, &store);
         let code = run_rendered(&mut h, clear_args());
         assert_eq!(code, Exit::Ok);
         assert!(
@@ -394,13 +394,13 @@ mod tests {
 
         let cwd_path = cwd();
         {
-            let mut h = Harness::new(&cwd_path);
-            expect_git(&mut h, &store);
+            let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+            expect_git(&h, &store);
             run_rendered(&mut h, set_args("github"));
         }
 
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&h, &store);
         let code = run_rendered(&mut h, clear_args());
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
@@ -454,13 +454,13 @@ mod tests {
 
         let cwd_path = cwd();
         {
-            let mut h = Harness::new(&cwd_path);
-            expect_git(&mut h, &store);
+            let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+            expect_git(&h, &store);
             run_rendered(&mut h, set_args("github"));
         }
 
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&h, &store);
         let code = run_rendered(&mut h, clear_args());
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();

@@ -119,8 +119,8 @@ mod tests {
         seed_ticket(&conn, "t1", "tk-1", "parked", Some("P1"));
         drop(conn);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&h, &store);
         let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Ok, "stderr={:?}", String::from_utf8(h.stderr));
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -138,8 +138,8 @@ mod tests {
         seed_ticket(&conn, "t1", "tk-1", "accepted", Some("P2"));
         drop(conn);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&h, &store);
         let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Ok);
         assert!(
@@ -156,8 +156,8 @@ mod tests {
         seed_ticket(&conn, "t1", "tk-1", "triage", None);
         drop(conn);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&h, &store);
         let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
@@ -172,8 +172,8 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&h, &store);
         let code = run_rendered(
             &mut h,
             Args {

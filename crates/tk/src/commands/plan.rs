@@ -230,8 +230,8 @@ mod tests {
         let mut store = crate::store::repository::Store::for_test(conn);
         plan::edit_membership(&mut store, &["tk-1".into()], MembershipEdit::Add).unwrap();
         let path = cwd();
-        let mut h = Harness::new(&path);
-        expect_git(&mut h, &tmp);
+        let mut h = Harness::new(&path).with_data_root(&tmp.data_root);
+        expect_git(&h, &tmp);
         run(&mut h.deps(), Args { command: None }).unwrap();
         insta::assert_snapshot!(h.out(), @r"
         Waiting

@@ -1250,7 +1250,7 @@ mod tests {
 
     /// Open the Repository Store the way `run` does, so a test can drive
     /// [`promote`] against a scripted Adapter.
-    fn open_store(h: &mut Harness<'_>, fixture: &TmpStore, cwd: &Path) -> Store {
+    fn open_store(h: &Harness<'_>, fixture: &TmpStore, cwd: &Path) -> Store {
         expect_git(h, fixture);
         resolver::open_for_command(&h.runner, cwd, &h.clock, Some(&fixture.data_root))
             .expect("open the Repository Store")
@@ -1392,8 +1392,8 @@ mod tests {
         let fixture = TmpStore::new("repo");
         seed_store(&fixture);
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&mut h, &fixture);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        expect_git(&h, &fixture);
 
         let code = run_rendered(&mut h, "tk-9999", false);
 
@@ -1412,8 +1412,8 @@ mod tests {
         let conn = seed_store(&fixture);
         local_ticket(&conn, "t1", "tk-1", 1);
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&mut h, &fixture);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        expect_git(&h, &fixture);
 
         let code = run_rendered(&mut h, "tk-1", true);
 
@@ -1440,8 +1440,8 @@ mod tests {
         conn.execute("delete from remotes", []).unwrap();
         local_ticket(&conn, "t1", "tk-1", 1);
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&mut h, &fixture);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        expect_git(&h, &fixture);
 
         let code = run_rendered(&mut h, "tk-1", false);
 
@@ -1465,8 +1465,8 @@ mod tests {
             .unwrap();
         local_ticket(&conn, "t1", "tk-1", 1);
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&mut h, &fixture);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        expect_git(&h, &fixture);
 
         let code = run_rendered(&mut h, "tk-1", false);
 
@@ -1514,8 +1514,8 @@ mod tests {
         local_ticket(&conn, "outside", "tk-4", 4);
         insert_dependency(&conn, "outside", "c1").unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&mut h, &fixture);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        expect_git(&h, &fixture);
 
         let code = run_rendered(&mut h, "tk-1", true);
 
@@ -1537,8 +1537,8 @@ mod tests {
         let conn = seed_store(&fixture);
         local_ticket(&conn, "t1", "tk-1", 1);
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        let mut store = open_store(&mut h, &fixture, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = FakeAdapter::new()
             .with_capability_error(AdapterReadError::Failed("taxonomy read failed".into()));
 
@@ -1558,8 +1558,8 @@ mod tests {
         let conn = seed_store(&fixture);
         local_ticket(&conn, "t1", "tk-1", 1);
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&mut h, &fixture);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        expect_git(&h, &fixture);
         h.runner.expect_exact(
             &[
                 "gh",
@@ -1603,8 +1603,8 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&mut h, &fixture);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        expect_git(&h, &fixture);
         h.runner.expect_exact(
             &[
                 "gh",
@@ -1666,8 +1666,8 @@ mod tests {
         conn.execute("update mutations set state = 'applying'", [])
             .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&mut h, &fixture);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        expect_git(&h, &fixture);
         let issue = br#"{"number":42,"title":"Local work","body":"","state":"OPEN","issueType":null,"url":"https://github.com/o/r/issues/42"}"#;
         h.runner.expect_exact(
             &[
@@ -1710,8 +1710,8 @@ mod tests {
         conn.execute("update mutations set state = 'applying'", [])
             .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&mut h, &fixture);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        expect_git(&h, &fixture);
         h.runner.expect_exact(
             &[
                 "gh",
@@ -1742,10 +1742,10 @@ mod tests {
         let fixture = TmpStore::new("repo");
         let _conn = seed_store(&fixture);
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        let blocking_store = open_store(&mut h, &fixture, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        let blocking_store = open_store(&h, &fixture, &cwd_path);
         let _guard = blocking_store.lock_remote_workflow().unwrap();
-        expect_git(&mut h, &fixture);
+        expect_git(&h, &fixture);
 
         let code = run_subcommand_rendered(
             &mut h,
@@ -1769,10 +1769,10 @@ mod tests {
         let fixture = TmpStore::new("repo");
         let _conn = seed_store(&fixture);
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        let blocking_store = open_store(&mut h, &fixture, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        let blocking_store = open_store(&h, &fixture, &cwd_path);
         let _guard = blocking_store.lock_remote_workflow().unwrap();
-        expect_git(&mut h, &fixture);
+        expect_git(&h, &fixture);
 
         let code = run_subcommand_rendered(&mut h, Sub::Retry(RetryArgs { id: "tk-1".into() }));
 
@@ -1790,8 +1790,8 @@ mod tests {
         let conn = seed_store(&fixture);
         local_ticket(&conn, "t1", "tk-1", 1);
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&mut h, &fixture);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        expect_git(&h, &fixture);
 
         let code = run_subcommand_rendered(&mut h, Sub::Retry(RetryArgs { id: "tk-1".into() }));
 
@@ -1812,8 +1812,8 @@ mod tests {
         conn.execute("update mutations set state = 'applying'", [])
             .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        let mut store = open_store(&mut h, &fixture, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = FakeAdapter::new()
             .with_inspections(vec![inspection(
                 "gh-42",
@@ -1855,8 +1855,8 @@ mod tests {
         conn.execute("update mutations set state = 'applying'", [])
             .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        let mut store = open_store(&mut h, &fixture, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = FakeAdapter::new().with_inspections(vec![inspection(
             "gh-42",
             "42",
@@ -1893,8 +1893,8 @@ mod tests {
         conn.execute("update mutations set state = 'applying'", [])
             .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        let mut store = open_store(&mut h, &fixture, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = FakeAdapter::new().with_inspections(vec![inspection_with_kind(
             "gh-42",
             "42",
@@ -1924,8 +1924,8 @@ mod tests {
         conn.execute("update mutations set state = 'applying'", [])
             .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        let mut store = open_store(&mut h, &fixture, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = FakeAdapter::new().with_inspections(vec![inspection_with_kind(
             "gh-42",
             "42",
@@ -1957,8 +1957,8 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        let mut store = open_store(&mut h, &fixture, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = FakeAdapter::new()
             .with_inspections(vec![inspection(
                 "gh-42",
@@ -2009,8 +2009,8 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        let mut store = open_store(&mut h, &fixture, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = FakeAdapter::new()
             .with_inspections(vec![inspection("gh-1", "1", "Local work", "")])
             .with_pulls(vec![PullResponse::Items(vec![refresh(
@@ -2046,8 +2046,8 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        let mut store = open_store(&mut h, &fixture, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = FakeAdapter::new()
             .with_inspections(vec![inspection("gh-1", "1", "Local work", "")])
             .with_pulls(vec![PullResponse::Items(vec![refresh(
@@ -2077,8 +2077,8 @@ mod tests {
         conn.execute("update mutations set state = 'applying'", [])
             .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        let mut store = open_store(&mut h, &fixture, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = FakeAdapter::new().with_creates(vec![CreateResponse::Created {
             backend_key: "42".into(),
             display_id: "gh-42".into(),
@@ -2100,8 +2100,8 @@ mod tests {
         conn.execute("update mutations set state = 'applying'", [])
             .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        let mut store = open_store(&mut h, &fixture, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = FakeAdapter::new().with_creates(vec![CreateResponse::Indeterminate(
             "request outcome unknown".into(),
         )]);
@@ -2129,8 +2129,8 @@ mod tests {
         commit_promotion(&mut conn, "t1");
         drop(conn);
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&mut h, &fixture);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        expect_git(&h, &fixture);
 
         let code = cancel_rendered(&mut h, "tk-1");
 
@@ -2155,8 +2155,8 @@ mod tests {
         conn.execute("delete from remotes", []).unwrap();
         drop(conn);
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&mut h, &fixture);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        expect_git(&h, &fixture);
 
         let code = cancel_rendered(&mut h, "tk-1");
 
@@ -2194,8 +2194,8 @@ mod tests {
         .unwrap();
         drop(conn);
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&mut h, &fixture);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        expect_git(&h, &fixture);
 
         let code = cancel_rendered(&mut h, "tk-1");
 
@@ -2217,8 +2217,8 @@ mod tests {
             .unwrap();
         drop(conn);
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&mut h, &fixture);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        expect_git(&h, &fixture);
 
         let code = cancel_rendered(&mut h, "tk-1");
 
@@ -2252,8 +2252,8 @@ mod tests {
         insert_dependency(&conn, "t1", "backend").unwrap();
         drop(conn);
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&mut h, &fixture);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        expect_git(&h, &fixture);
 
         let code = cancel_rendered(&mut h, "tk-1");
 
@@ -2270,13 +2270,13 @@ mod tests {
         drop(conn);
         let cwd_path = cwd();
         {
-            let mut h = Harness::with_seed(&cwd_path, 7);
-            expect_git(&mut h, &fixture);
+            let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+            expect_git(&h, &fixture);
             assert_eq!(cancel_rendered(&mut h, "tk-1"), Exit::Ok);
         }
 
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&mut h, &fixture);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        expect_git(&h, &fixture);
         let code = cancel_rendered(&mut h, "tk-1");
 
         assert_eq!(code, Exit::Failure);
@@ -2293,8 +2293,8 @@ mod tests {
         local_ticket(&conn, "t1", "tk-1", 1);
         drop(conn);
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        expect_git(&mut h, &fixture);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        expect_git(&h, &fixture);
 
         let code = cancel_rendered(&mut h, "tk-1");
 
@@ -2474,8 +2474,8 @@ mod tests {
         let fixture = TmpStore::new("repo");
         let _conn = seed_store(&fixture);
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        let store = open_store(&mut h, &fixture, &cwd_path);
+        let h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        let store = open_store(&h, &fixture, &cwd_path);
         let captured = [PromotionMapping {
             item_id: "missing".into(),
             outgoing_display_id: "tk-404".into(),
@@ -2500,8 +2500,8 @@ mod tests {
         let conn = seed_store(&fixture);
         local_ticket(&conn, "other", "tk-2", 1);
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        let store = open_store(&mut h, &fixture, &cwd_path);
+        let h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        let store = open_store(&h, &fixture, &cwd_path);
         let captured = [PromotionMapping {
             item_id: "expected".into(),
             outgoing_display_id: "tk-2".into(),
@@ -2540,8 +2540,8 @@ mod tests {
         .unwrap();
         insert_alias(&conn, "tk-2", "landed").unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        let store = open_store(&mut h, &fixture, &cwd_path);
+        let h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        let store = open_store(&h, &fixture, &cwd_path);
         let captured = [
             PromotionMapping {
                 item_id: "missing".into(),
@@ -2708,8 +2708,8 @@ mod tests {
         conn.execute("update mutations set state = 'abandoned'", [])
             .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        let mut store = open_store(&mut h, &fixture, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = adapter(
             vec![],
             vec![CreateResponse::Created {
@@ -2733,8 +2733,8 @@ mod tests {
         let conn = seed_store(&fixture);
         local_ticket(&conn, "t1", "tk-1", 1);
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        let mut store = open_store(&mut h, &fixture, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = adapter(
             vec![],
             vec![CreateResponse::Created {
@@ -2774,8 +2774,8 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        let mut store = open_store(&mut h, &fixture, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         // Promotions first, then the membership the operation makes intent.
         let mut fake = adapter(
             vec![EditResponse::Success],
@@ -2835,8 +2835,8 @@ mod tests {
         .unwrap();
         insert_dependency(&conn, "c1", "c2").unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        let mut store = open_store(&mut h, &fixture, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         // Three Promotions, then the two memberships and the Dependency.
         let mut fake = adapter(
             vec![
@@ -2899,8 +2899,8 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        let mut store = open_store(&mut h, &fixture, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = adapter_with_refresh(vec![], vec![]);
 
         let code = promote_rendered(&mut h, &mut store, &mut fake, "gh-7", false);
@@ -2922,8 +2922,8 @@ mod tests {
         local_ticket(&conn, "t1", "tk-1", 1);
         commit_promotion(&mut conn, "t1");
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        let mut store = open_store(&mut h, &fixture, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = adapter(
             vec![],
             vec![CreateResponse::Rejected(
@@ -2948,8 +2948,8 @@ mod tests {
         local_ticket(&conn, "t1", "tk-1", 1);
         commit_promotion(&mut conn, "t1");
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        let mut store = open_store(&mut h, &fixture, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = adapter(
             vec![],
             vec![CreateResponse::Created {
@@ -2992,8 +2992,8 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        let mut store = open_store(&mut h, &fixture, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = adapter(
             vec![],
             vec![
@@ -3026,8 +3026,8 @@ mod tests {
         let conn = seed_store(&fixture);
         local_ticket(&conn, "t1", "tk-1", 1);
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        let mut store = open_store(&mut h, &fixture, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = adapter(
             vec![],
             vec![CreateResponse::Indeterminate(
@@ -3074,8 +3074,8 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        let mut store = open_store(&mut h, &fixture, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = adapter_with_refresh(vec![], vec![]);
 
         let code = promote_rendered(&mut h, &mut store, &mut fake, "tk-1", false);
@@ -3124,8 +3124,8 @@ mod tests {
         conn.execute("update mutations set state = 'applying'", [])
             .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        let mut store = open_store(&mut h, &fixture, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake =
             FakeAdapter::new().with_inspections(vec![inspection("gh-42", "42", "Local work", "")]);
 
@@ -3187,8 +3187,8 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        let mut store = open_store(&mut h, &fixture, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = adapter_with_refresh(
             vec![EditResponse::RecordedFailure("HTTP 403".into())],
             vec![],
@@ -3224,8 +3224,8 @@ mod tests {
         let conn = seed_store(&fixture);
         local_ticket(&conn, "t1", "tk-1", 1);
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        let mut store = open_store(&mut h, &fixture, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         let mut fake = adapter(
             vec![],
             vec![CreateResponse::Rejected(
@@ -3267,8 +3267,8 @@ mod tests {
         local_ticket(&conn, "outside", "tk-3", 3);
         insert_dependency(&conn, "outside", "c1").unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, 7);
-        let mut store = open_store(&mut h, &fixture, &cwd_path);
+        let mut h = Harness::with_seed(&cwd_path, 7).with_data_root(&fixture.data_root);
+        let mut store = open_store(&h, &fixture, &cwd_path);
         // Dependencies are the only facet this Backend cannot represent, so the
         // rejected edge is the finding, not a capability complaint.
         let mut fake = FakeAdapter::new().with_capabilities(

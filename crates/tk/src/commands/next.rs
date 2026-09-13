@@ -182,7 +182,7 @@ mod tests {
         .unwrap();
     }
 
-    fn expect_open(h: &mut Harness<'_>, store: &TmpStore) {
+    fn expect_open(h: &Harness<'_>, store: &TmpStore) {
         crate::commands::testing::expect_git(h, store);
     }
 
@@ -261,8 +261,8 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_open(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_open(&h, &store);
         let code = run_rendered(&mut h, args(None));
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
@@ -279,8 +279,8 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_open(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_open(&h, &store);
         let code = run_rendered(&mut h, args(None));
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -298,8 +298,8 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_open(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_open(&h, &store);
         let code = run_rendered(&mut h, args(None));
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -324,8 +324,8 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_open(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_open(&h, &store);
         let code = run_rendered(
             &mut h,
             Args {
@@ -351,8 +351,8 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_open(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_open(&h, &store);
         let code = run_rendered(&mut h, args(None));
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -367,8 +367,8 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_open(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_open(&h, &store);
         let code = run_rendered(
             &mut h,
             Args {
@@ -394,8 +394,8 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_open(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_open(&h, &store);
         let code = run_rendered_with(
             &mut h,
             Styler::always(),
@@ -421,8 +421,8 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_open(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_open(&h, &store);
         let code = run_rendered_with(&mut h, Styler::always(), args(None));
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -444,8 +444,8 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_open(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_open(&h, &store);
         let code = run_rendered(&mut h, args(None));
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
@@ -457,8 +457,8 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_open(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_open(&h, &store);
         let code = run_rendered(
             &mut h,
             Args {
@@ -607,8 +607,8 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_open(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_open(&h, &store);
         let code = run_rendered(&mut h, args(Some("tk-1")));
         assert_eq!(code, Exit::Ok);
         // tk-3 outranks tk-2 globally, but the Epic Scope confines selection.
@@ -628,8 +628,8 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_open(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_open(&h, &store);
         let code = run_rendered(&mut h, args(Some("tk-1")));
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
@@ -644,8 +644,8 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_open(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_open(&h, &store);
         let code = run_rendered(&mut h, args(Some("vanished")));
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
@@ -663,8 +663,8 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_open(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_open(&h, &store);
         let code = run_rendered(&mut h, args(Some("tk-1")));
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();

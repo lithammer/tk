@@ -34,8 +34,8 @@ pub(crate) fn cwd() -> PathBuf {
 ///
 /// `stdout` / `stderr` / `stdin` / `runner` / `clock` are public because tests
 /// move the buffers out (`String::from_utf8(h.stdout)`) and queue subprocess
-/// expectations directly (`h.runner.expect(...)`). `rng` and `cwd` are only
-/// ever handed to [`Deps`], so they stay private.
+/// expectations directly (`h.runner.expect(...)`). `rng`, `cwd`, and `data_root`
+/// are only handed to [`Deps`], so they stay private.
 pub(crate) struct Harness<'a> {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
@@ -43,7 +43,7 @@ pub(crate) struct Harness<'a> {
     pub runner: FakeRunner,
     pub clock: FakeClock,
     rng: StdRng,
-    pub data_root: Option<PathBuf>,
+    data_root: Option<PathBuf>,
     cwd: &'a Path,
 }
 
@@ -66,6 +66,12 @@ impl<'a> Harness<'a> {
             data_root: None,
             cwd,
         }
+    }
+
+    /// Set the isolated data root before running commands against a Store fixture.
+    pub fn with_data_root(mut self, data_root: &Path) -> Self {
+        self.data_root = Some(data_root.to_path_buf());
+        self
     }
 
     /// `Deps` with colour off.
@@ -101,9 +107,9 @@ impl<'a> Harness<'a> {
     }
 }
 
-/// Supply the fixture's data root and queue Git discovery and pointer reads.
+/// Queue Git discovery and pointer reads for the fixture.
 /// These expectations must precede any Backend calls.
-pub(crate) fn expect_git(h: &mut Harness<'_>, store: &TmpStore) {
+pub(crate) fn expect_git(h: &Harness<'_>, store: &TmpStore) {
     h.runner.expect(
         &["git", "rev-parse"],
         RunOutput {
@@ -112,7 +118,6 @@ pub(crate) fn expect_git(h: &mut Harness<'_>, store: &TmpStore) {
             stderr: Vec::new(),
         },
     );
-    h.data_root = Some(store.data_root.clone());
     crate::store::testing::expect_pointer(&h.runner);
 }
 

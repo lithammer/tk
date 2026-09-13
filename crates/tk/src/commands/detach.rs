@@ -223,8 +223,8 @@ mod tests {
         insert_external_blocker(&conn, "external", "target", None).unwrap();
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&h, &store);
 
         let exit = run_rendered(&mut h, "gh-42");
 
@@ -339,8 +339,8 @@ mod tests {
             .unwrap();
         assert_eq!((dependencies, blockers), (1, 1));
 
-        let mut show_h = Harness::new(&cwd_path);
-        expect_git(&mut show_h, &store);
+        let mut show_h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&show_h, &store);
         assert_eq!(run_show_rendered(&mut show_h, "tk-1"), Exit::Ok);
         assert!(
             show_h.out().contains(
@@ -351,8 +351,8 @@ mod tests {
         );
 
         insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
-        let mut sync_h = Harness::new(&cwd_path);
-        expect_git(&mut sync_h, &store);
+        let mut sync_h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&sync_h, &store);
         let sync_exit = sync_command::run(
             sync_h.deps(),
             sync_command::Args {
@@ -385,8 +385,8 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&h, &store);
 
         assert_eq!(run_rendered(&mut h, "gh-7"), Exit::Ok);
         let state: (String, String, String) = conn
@@ -429,8 +429,8 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&h, &store);
 
         assert_eq!(run_rendered(&mut h, "gh-53"), Exit::Ok, "{}", h.err());
         assert_eq!(
@@ -500,8 +500,8 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&h, &store);
 
         assert_eq!(run_rendered(&mut h, "gh-9"), Exit::Ok, "{}", h.err());
         assert_eq!(
@@ -596,8 +596,8 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&h, &store);
 
         assert_eq!(run_rendered(&mut h, "gh-42"), Exit::Failure);
         assert_eq!(
@@ -641,16 +641,16 @@ mod tests {
         commit_promotion(&mut conn, "pending");
         let cwd_path = cwd();
 
-        let mut local_h = Harness::new(&cwd_path);
-        expect_git(&mut local_h, &store);
+        let mut local_h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&local_h, &store);
         assert_eq!(run_rendered(&mut local_h, "tk-1"), Exit::Failure);
         assert_eq!(
             local_h.err(),
             "tk detach: 'tk-1' is already a Local Item; only Backend Items can be detached\n"
         );
 
-        let mut pending_h = Harness::new(&cwd_path);
-        expect_git(&mut pending_h, &store);
+        let mut pending_h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&pending_h, &store);
         assert_eq!(run_rendered(&mut pending_h, "tk-2"), Exit::Failure);
         assert_eq!(
             pending_h.err(),
@@ -682,8 +682,8 @@ mod tests {
             .unwrap();
         lock_file.lock().unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&h, &store);
 
         assert_eq!(run_rendered(&mut h, "gh-42"), Exit::Failure);
         assert_eq!(
@@ -837,8 +837,8 @@ mod tests {
         }
         let before = mutation_rows(&conn);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&h, &store);
 
         assert_eq!(run_rendered(&mut h, "gh-42"), Exit::Ok, "{}", h.err());
         assert_eq!(
@@ -942,8 +942,8 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&h, &store);
 
         assert_eq!(run_rendered(&mut h, "gh-9"), Exit::Ok, "{}", h.err());
         assert_eq!(
@@ -1033,8 +1033,8 @@ mod tests {
             )
             .unwrap();
             let cwd_path = cwd();
-            let mut h = Harness::new(&cwd_path);
-            expect_git(&mut h, &store);
+            let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+            expect_git(&h, &store);
 
             assert_eq!(run_rendered(&mut h, "gh-9"), Exit::Failure);
             assert_eq!(
@@ -1102,8 +1102,8 @@ mod tests {
         )
         .unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&h, &store);
 
         assert_eq!(run_rendered(&mut h, "gh-42"), Exit::Ok, "{}", h.err());
         assert_eq!(
@@ -1131,8 +1131,8 @@ mod tests {
         }
         insert_dependency(&conn, "blocking", "blocked").unwrap();
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&h, &store);
 
         assert_eq!(run_rendered(&mut h, "gh-42"), Exit::Failure);
         assert_eq!(

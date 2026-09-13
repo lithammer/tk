@@ -124,8 +124,8 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&h, &store);
         let code = run_rendered(
             &mut h,
             Args {
@@ -161,8 +161,8 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&h, &store);
         let code = run_rendered(
             &mut h,
             Args {
@@ -224,8 +224,8 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&h, &store);
         let code = run_rendered(
             &mut h,
             Args {
@@ -256,7 +256,7 @@ mod tests {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
         // No git expectation: a truly-empty query is rejected before discovery
         // (ADR-0026, amended) — an empty `instr` substring matches every row.
         let code = run_rendered(
@@ -306,8 +306,8 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&h, &store);
         let code = run_rendered(
             &mut h,
             Args {
@@ -324,8 +324,8 @@ mod tests {
     fn missing_store_renders_init_diagnostic() {
         let store = TmpStore::new("repo");
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&h, &store);
         let code = run_rendered(
             &mut h,
             Args {
@@ -372,8 +372,8 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&h, &store);
         let code = run_rendered(
             &mut h,
             Args {

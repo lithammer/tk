@@ -122,8 +122,8 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&h, &store);
         let code = run_rendered(
             &mut h,
             Args {
@@ -154,8 +154,8 @@ mod tests {
         drop(conn);
 
         let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path);
-        expect_git(&mut h, &store);
+        let mut h = Harness::new(&cwd_path).with_data_root(&store.data_root);
+        expect_git(&h, &store);
         let code = run_rendered(
             &mut h,
             Args {
