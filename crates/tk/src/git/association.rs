@@ -69,7 +69,7 @@ pub fn remote_urls<R: ProcRunner + ?Sized>(
     Ok(urls)
 }
 
-/// Explicit recovery replaces all broken local values under the lifecycle lock.
+/// Replace all local pointer values; the caller must hold the lifecycle lock.
 pub fn replace<R: ProcRunner + ?Sized>(
     runner: &R,
     cwd: &Path,

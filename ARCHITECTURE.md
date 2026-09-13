@@ -79,8 +79,8 @@ small boundary module after the second caller proves the shape.
 - `store/association.rs` owns Store IDs, manifests, association validation, and
   publication. `store/initialize.rs` composes fresh init, explicit attachment,
   and healthy reopen. `store/recovery.rs` ranks manifest evidence and inspects
-  shortlisted candidates without migration. `git/association.rs` owns local config reads/writes and the
-  credential-free URL policy (ADR-0053).
+  shortlisted candidates without migration. `git/association.rs` owns local
+  config reads/writes and the credential-free URL policy (ADR-0053).
 - `store/` owns Repository Store opening, migrations, current-state reads and
   writes, Display ID / Alias resolution, sequence allocation, and Mutation Log
   persistence. `store/backup.rs` owns the Store Backup mechanism — where the
@@ -153,9 +153,7 @@ creates it at `<local data>/tk/stores/<Store ID>/tk.db` (ADR-0053). The
 repository-local `tk.storeId` points to a versioned `store.json` beside the
 database. The shared opener validates the Store ID and canonical Git Common
 Directory association before SQLite access. Legacy Git-directory Stores are
-preserved and refused until migration exists. Recovery scans and read-only candidate
-inspection live in `store/recovery.rs`; `store/initialize.rs` owns explicit
-attachment and creation under the data-root lifecycle lock.
+preserved and refused until migration exists.
 
 An opened `Store` retains a shared `association.lock` until its SQLite connection
 closes. Attachment requires the exclusive lock and publishes the manifest before

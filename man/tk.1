@@ -79,8 +79,8 @@ Both options refuse healthy associations and cannot be combined. A missing
 referenced Store is reported as possible data loss; its ID is never recreated.
 .PP
 Unreadable or invalid metadata requires manual restoration. Failed ownership
-inspection never permits attachment. If the former checkout's parent is also
-missing, restore access to the former path first; it may be an unavailable volume.
+inspection never permits attachment. If the former Git Common Directory's parent
+is missing, restore access to that parent first; it may be an unavailable volume.
 An active command holds the Store's association lock until it closes the database,
 so attachment may ask you to retry. After an interrupted attachment, retry the
 same attach command; if Git already installed the pointer, plain init confirms it.

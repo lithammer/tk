@@ -229,7 +229,7 @@ pub(super) fn read_manifest(dir: &Path) -> Result<Manifest, Error> {
     Ok(manifest)
 }
 
-/// The guard spans association validation and every use of the database.
+/// Hold the returned guard through association validation and database use.
 pub(super) fn lock_store(dir: &Path, exclusive: bool) -> Result<File, Error> {
     let file = OpenOptions::new()
         .read(true)
