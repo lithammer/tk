@@ -9,6 +9,17 @@ its values with a Rust enum whose `text()` method owns the SQL spelling.
 When a type depends on evidence from a future Backend Adapter, defer its
 shape until that consumer exists (ADR-0016).
 
+## Shared APIs
+
+When a shared API changes, including a test helper, inspect callers for
+each distinct setup pattern. For optional dependencies and setup builders,
+identify a caller that needs the default state. Make dependencies required
+at construction when every caller needs them.
+
+For each new mutable borrow, trace the state change and check whether it
+belongs to construction or the called operation. Keep required setup in
+construction and helper effects within the helper's stated purpose.
+
 ## Contracts
 
 Review behavior against CONTEXT.md, ARCHITECTURE.md, and the relevant ADRs.
