@@ -279,9 +279,12 @@ impl Repo {
 /// Render a command result with `$TESTROOT` redacted: bare stdout on the happy
 /// path, and a framed block exposing exit/stderr only when they are non-trivial.
 fn render(out: &Output, root: &Path) -> String {
-    let redact = |bytes: &[u8]| {
+    static STORE_PATH: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(r"\$TESTROOT[/\\]data[/\\]tk[/\\]stores[/\\][0-9a-f]{32}[/\\]tk\.db")
             .unwrap()
+    });
+    let redact = |bytes: &[u8]| {
+        STORE_PATH
             .replace_all(
                 &String::from_utf8_lossy(bytes)
                     .replace(root.to_str().expect("utf-8 root"), "$TESTROOT"),
@@ -326,13 +329,7 @@ fn durable_store_survives_checkout_and_has_a_valid_association() {
     let p = Repo::new("repo");
     let out = p.run("init");
     assert!(out.starts_with("Initialized Repository Store at "), "{out}");
-    let output = Command::new("git")
-        .args(["config", "--local", "--get", "tk.storeId"])
-        .current_dir(&p.cwd)
-        .output()
-        .unwrap();
-    let id = String::from_utf8(output.stdout).unwrap();
-    let id = id.trim();
+    let id = p.git(&["config", "--local", "--get", "tk.storeId"]);
     assert_eq!(id.len(), 32, "init must install a Store ID");
     assert!(
         id.bytes()
