@@ -40,11 +40,8 @@ pub fn apply_promotion_receipt(
     Ok(tx.commit()?)
 }
 
-/// On-disk scaffolding for a fake Git repository plus its `git rev-parse`
-/// stdout payload. The `tk init` discovery layer expects two newline-
-/// separated absolute paths (git-common-dir, top-level); planting the same
-/// shape via the fake subprocess runner lets `Store::open_existing` exercise
-/// the production discovery flow.
+/// Isolated Git paths and a Store manifest for tests of the shared opener.
+/// The database is seeded separately so tests can choose its schema and contents.
 pub struct TmpStore {
     _tmp: TempDir,
     pub common_dir: PathBuf,
@@ -53,7 +50,7 @@ pub struct TmpStore {
 }
 
 impl TmpStore {
-    /// Create a temporary `<basename>/.git` skeleton under a fresh tempdir.
+    /// Create Git paths and a valid Store Association under a fresh tempdir.
     ///
     /// `basename` chooses the toplevel directory name — the seed prefix the
     /// store derives from it pins downstream Display IDs (e.g. picking
@@ -90,7 +87,7 @@ impl TmpStore {
         self.tk_dir().join("tk.db")
     }
 
-    /// Path to the `tk/` directory the store would create on `tk init`.
+    /// Store ID directory holding this fixture's manifest and database.
     #[must_use]
     pub fn tk_dir(&self) -> PathBuf {
         self.data_root

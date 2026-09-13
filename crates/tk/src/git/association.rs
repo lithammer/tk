@@ -16,27 +16,6 @@ pub fn pointers<R: ProcRunner + ?Sized>(
     values(runner, cwd, &["--get-all", "tk.storeId"])
 }
 
-fn values<R: ProcRunner + ?Sized>(
-    runner: &R,
-    cwd: &Path,
-    query: &[&str],
-) -> Result<Vec<String>, ConfigError> {
-    let mut args = vec!["git", "config", "--local", "--no-includes", "--null"];
-    args.extend_from_slice(query);
-    let output = runner.run(&args, cwd).map_err(|_| ConfigError("read"))?;
-    match output.exit_code {
-        1 if output.stdout.is_empty() => Ok(Vec::new()),
-        0 => {
-            let text = String::from_utf8(output.stdout).map_err(|_| ConfigError("decode"))?;
-            let Some(text) = text.strip_suffix('\0') else {
-                return Err(ConfigError("decode"));
-            };
-            Ok(text.split('\0').map(str::to_owned).collect())
-        }
-        _ => Err(ConfigError("read")),
-    }
-}
-
 /// Add a pointer only after publication. Never replace another pointer's value.
 pub fn install<R: ProcRunner + ?Sized>(
     runner: &R,
@@ -88,4 +67,26 @@ pub fn remote_urls<R: ProcRunner + ?Sized>(
     urls.sort();
     urls.dedup();
     Ok(urls)
+}
+
+/// Decode NUL-terminated local config results without exposing Git diagnostics.
+fn values<R: ProcRunner + ?Sized>(
+    runner: &R,
+    cwd: &Path,
+    query: &[&str],
+) -> Result<Vec<String>, ConfigError> {
+    let mut args = vec!["git", "config", "--local", "--no-includes", "--null"];
+    args.extend_from_slice(query);
+    let output = runner.run(&args, cwd).map_err(|_| ConfigError("read"))?;
+    match output.exit_code {
+        1 if output.stdout.is_empty() => Ok(Vec::new()),
+        0 => {
+            let text = String::from_utf8(output.stdout).map_err(|_| ConfigError("decode"))?;
+            let Some(text) = text.strip_suffix('\0') else {
+                return Err(ConfigError("decode"));
+            };
+            Ok(text.split('\0').map(str::to_owned).collect())
+        }
+        _ => Err(ConfigError("read")),
+    }
 }

@@ -129,25 +129,6 @@ pub fn validate(root: &Path, id: &StoreId, common: &Path) -> Result<PathBuf, Err
     Ok(dir.join("tk.db"))
 }
 
-fn read_manifest(dir: &Path) -> Result<Manifest, Error> {
-    if !fs::symlink_metadata(dir)?.file_type().is_dir() {
-        return Err(Error::Manifest);
-    }
-    let manifest: Manifest =
-        serde_json::from_slice(&fs::read(dir.join("store.json"))?).map_err(|_| Error::Manifest)?;
-    if manifest.version != 1
-        || !manifest.association.git_common_dir.is_absolute()
-        || manifest
-            .evidence
-            .previous_git_common_dirs
-            .iter()
-            .any(|p| !p.is_absolute())
-    {
-        return Err(Error::Manifest);
-    }
-    Ok(manifest)
-}
-
 /// Refuse legacy data even when no Git pointer exists.
 pub fn refuse_legacy(common: &Path) -> Result<(), Error> {
     match fs::symlink_metadata(common.join("tk")) {
@@ -243,4 +224,24 @@ pub fn create_private_dirs(path: &Path) -> Result<(), std::io::Error> {
         }
         Err(e) => Err(e),
     }
+}
+
+/// Check manifest structure before comparing it with the requested association.
+fn read_manifest(dir: &Path) -> Result<Manifest, Error> {
+    if !fs::symlink_metadata(dir)?.file_type().is_dir() {
+        return Err(Error::Manifest);
+    }
+    let manifest: Manifest =
+        serde_json::from_slice(&fs::read(dir.join("store.json"))?).map_err(|_| Error::Manifest)?;
+    if manifest.version != 1
+        || !manifest.association.git_common_dir.is_absolute()
+        || manifest
+            .evidence
+            .previous_git_common_dirs
+            .iter()
+            .any(|p| !p.is_absolute())
+    {
+        return Err(Error::Manifest);
+    }
+    Ok(manifest)
 }

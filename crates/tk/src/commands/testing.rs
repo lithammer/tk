@@ -1,9 +1,7 @@
 //! Shared unit-test scaffolding for the command modules.
 //!
-//! Every command test runs the same prologue: a [`Deps`] over in-memory
-//! writers, a Repository Store seeded inside a temp directory, and a queued
-//! `git rev-parse` discovery call for the runner to answer. This module owns
-//! that prologue so the command modules only carry what is specific to them.
+//! Command tests share in-memory writers, an isolated Repository Store, and
+//! queued Git discovery and Store pointer reads.
 //!
 //! Available to crate tests only — `mod testing` is gated on `#[cfg(test)]` in
 //! `commands/mod.rs`, mirroring `store/mod.rs`.
@@ -23,8 +21,7 @@ use crate::proc::{FakeRunner, RunOutput};
 use crate::render::Styler;
 use crate::store::testing::TmpStore;
 
-/// Fixed wall clock for command tests. Timestamps and the ULIDs derived from
-/// them appear verbatim in assertions, so this value is load-bearing.
+/// Fixed wall clock for timestamps asserted verbatim in command tests.
 pub(crate) const CLOCK_MS: i64 = 1_778_284_800_000;
 
 /// The command cwd tests run against. Discovery is answered by [`expect_git`],
@@ -57,7 +54,7 @@ impl<'a> Harness<'a> {
     }
 
     /// Harness at an explicit RNG seed. Commands that mint identifiers assert
-    /// the exact ULIDs a seed produces, so each module pins its own.
+    /// the exact IDs a seed produces, so each module pins its own.
     pub fn with_seed(cwd: &'a Path, seed: u64) -> Self {
         Self {
             stdout: Vec::new(),
@@ -104,8 +101,8 @@ impl<'a> Harness<'a> {
     }
 }
 
-/// Queue the `git rev-parse` discovery call `open_for_command` makes. FIFO, so
-/// this must precede any `gh` expectation.
+/// Supply the fixture's data root and queue Git discovery and pointer reads.
+/// These expectations must precede any Backend calls.
 pub(crate) fn expect_git(h: &mut Harness<'_>, store: &TmpStore) {
     h.runner.expect(
         &["git", "rev-parse"],

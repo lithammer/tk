@@ -21,65 +21,55 @@ pub fn initialize(
     data_root: Option<&std::path::Path>,
     paths: &DiscoveredPaths,
 ) -> Result<Initialized, super::repository::OpenError> {
-    use super::{association as a, repository};
+    use super::{association, repository};
     use crate::git::association as git;
-    let root = a::stores_root(data_root)?;
-    let common = a::canonical_common(paths)?;
-    a::refuse_legacy(&common)?;
-    let (id, _guard) = if let Some(id) = a::pointer(runner, cwd)? {
+    let root = association::stores_root(data_root)?;
+    let common = association::canonical_common(paths)?;
+    association::refuse_legacy(&common)?;
+    let (id, _guard) = if let Some(id) = association::pointer(runner, cwd)? {
         (Some(id), None)
     } else {
-        let guard = a::lock_init(&root)?;
+        let guard = association::lock_init(&root)?;
         // Another init may have installed a pointer before this lock was acquired.
-        (a::pointer(runner, cwd)?, Some(guard))
+        (association::pointer(runner, cwd)?, Some(guard))
     };
     if let Some(id) = id {
-        let path = a::validate(&root, &id, &common)?;
+        let path = association::validate(&root, &id, &common)?;
         let store = repository::open_database(&path, clock)?;
         configure_repository_store(store.conn())?;
         return Ok(Initialized::Existing(path));
     }
-    let urls = git::remote_urls(runner, cwd).map_err(a::Error::from)?;
-    a::refuse_recovery(&root, &common, &urls)?;
-    let id = a::StoreId::generate(rng);
-    let dir = a::reserve(&root, &id)?;
+    let urls = git::remote_urls(runner, cwd).map_err(association::Error::from)?;
+    association::refuse_recovery(&root, &common, &urls)?;
+    let id = association::StoreId::generate(rng);
+    let dir = association::reserve(&root, &id)?;
     let path = dir.join("tk.db");
     let mut conn = Connection::open(&path)?;
     configure_repository_store(&conn)?;
     super::migrations::apply_all(&mut conn, &clock.now_iso())?;
     seed_display_prefix(&conn, paths)?;
     conn.close().map_err(|(_, e)| e)?;
-    let manifest = a::Manifest {
+    let manifest = association::Manifest {
         version: 1,
-        store_id: id.clone(),
-        association: a::Association {
+        store_id: id,
+        association: association::Association {
             git_common_dir: common,
         },
-        evidence: a::Evidence {
+        evidence: association::Evidence {
             previous_git_common_dirs: Vec::new(),
             git_remote_urls: urls,
         },
     };
-    a::publish(&dir, &manifest)?;
-    git::install(runner, cwd, id.text()).map_err(a::Error::from)?;
+    association::publish(&dir, &manifest)?;
+    git::install(runner, cwd, manifest.store_id.text()).map_err(association::Error::from)?;
     Ok(Initialized::Created(path))
 }
 
-/// Apply connection and file pragmas required by the Repository Store.
+/// Require WAL for an on-disk Repository Store (ADR-0053).
 ///
-/// `journal_mode` persists in the file header; `foreign_keys` and
-/// `busy_timeout` are connection-scoped and have to be set on every open.
-///
-/// SQLite silently downgrades `journal_mode = wal` to `delete` or `memory` on
-/// filesystems that don't support the shared-memory mmap WAL requires (some
-/// network mounts, certain Docker overlays). Read the mode back and refuse
-/// rather than ship a store whose durability contract doesn't match what
-/// `tk init` advertised on stdout.
-///
-/// **Contract**: this helper is for on-disk Repository Stores. A `:memory:`
-/// connection cannot use WAL and will be refused here — that's deliberate, so
-/// tests that need an in-memory store skip this helper and apply the matching
-/// pragmas directly (see `tests` modules in `store::migrations`).
+/// Read the journal mode back before reporting success. WAL is file state;
+/// foreign keys and the busy timeout must be set on each connection.
+/// An in-memory database cannot satisfy the WAL contract.
 fn configure_repository_store(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.pragma_update(None, "journal_mode", "wal")?;
     let mode: String = conn.query_row("pragma journal_mode", [], |r| r.get(0))?;
