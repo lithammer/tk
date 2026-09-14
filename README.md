@@ -73,6 +73,50 @@ identity for it, so finding and adopting or closing it is yours to do.
 Use `tk --help`, `tk <command> --help`, or `man tk` for the command
 reference.
 
+## Repository Store and recovery
+
+Your Repository Store lives outside the checkout and survives its deletion.
+All linked Workspaces share it. The location is:
+
+| Platform | Store directory |
+| --- | --- |
+| Linux | `$XDG_DATA_HOME/tk/stores/<Store ID>/`, or `~/.local/share/tk/stores/<Store ID>/` |
+| macOS | `~/Library/Application Support/tk/stores/<Store ID>/` |
+| Windows | `<LocalAppData>/tk/stores/<Store ID>/` |
+
+`tk init` prints the database path. Git's repository-local `tk.storeId` and
+that Store's `store.json` record the association. Do not copy the Git setting
+to another repository to share a Store.
+
+| Situation | Action |
+| --- | --- |
+| Fresh repository | Run `tk init`. |
+| Healthy association | Work normally; `tk init` reports the existing Store. |
+| Legacy Store in Git metadata | Stop all tk processes, run `tk init`, and keep old binaries stopped until cleanup finishes. |
+| Lost pointer or moved checkout | Run `tk init` to inspect ranked evidence and copy a complete `tk init --attach <Store ID>` command. A uniquely identified Vacant Store may be repaired automatically. |
+| Start separately after a broken association | Run `tk init --new`; prior Stores remain intact. |
+| Missing or corrupt manifest | Restore the metadata manually; init cannot reconstruct it. |
+| Interrupted migration | Retry `tk init`; retain both copies and all progress records until it succeeds. |
+| Interrupted attachment | Retry the same attach command; use plain `tk init` if the association is already healthy. |
+
+Attachment requires release of the former repository's ownership. If the former
+checkout's parent path is unavailable, restore access before retrying: tk cannot
+tell a deleted checkout from a missing volume. After moving a whole checkout,
+the old checkout directory must be readable so tk can establish that its `.git`
+entry is absent. Healthy associations refuse both `--attach` and `--new`.
+
+Migration preserves Tickets, Local Fields, Plans, Mutations, and Store Backups.
+Before pointer installation, retry rebuilds from legacy data; afterward, the
+new Store is authoritative and retry finishes cleanup. If legacy files changed
+after cutover, preserve both Stores and restore manually. Windows recovery
+covers process interruption; sudden-power-loss safety is not established.
+
+Ordinary commands read Git metadata and leave the manifest untouched, but need
+write access to the Store for SQLite and lock files. In a sandbox, grant the
+specific `tk/stores/<Store ID>/` directory as a writable root. Initialization
+and reassociation also need to write Git config and the data-root initialization
+lock. Agent configuration is a separate setup step.
+
 ## License
 
 [MIT](./LICENSE)

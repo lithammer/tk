@@ -61,6 +61,7 @@ fn cli_child() {
     let cwd = std::env::current_dir().unwrap();
     let data_root = match std::env::var("TK_TEST_DATA_ROOT") {
         Ok(value) if value == "missing" => None,
+        Ok(value) if value == "native" => dirs::data_local_dir(),
         Ok(value) => Some(std::path::PathBuf::from(value)),
         Err(_) => Some(root.join("data")),
     };

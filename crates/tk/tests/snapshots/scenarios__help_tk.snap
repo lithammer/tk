@@ -11,7 +11,7 @@ Commands:
   accept       Accept a triage Ticket into ranked, selectable work
   park         Hold an accepted Ticket out of automatic selection, keeping its Priority
   unpark       Return a parked Ticket to accepted, selectable work
-  init         Initialize the Repository Store in the current Git repository
+  init         Initialize the Repository Store for the current Git repository
   list         Render the Repository Store List Tree
   next         Select the next ready Ticket
   plan         Inspect and edit the current local Plan

@@ -2876,8 +2876,8 @@ fn vacant_recovery_accepts_defaults_seeded_from_a_linked_workspace() {
 }
 
 #[test]
-fn legacy_migration_preserves_work_backups_and_linked_access() {
-    let p = Repo::new("legacy");
+fn store_lifecycle_preserves_work_through_migration_linked_access_and_recovery() {
+    let mut p = Repo::new("legacy");
     p.run("init");
     p.run("add --epic -m 'Release'");
     p.run("add --bug -m 'Keep this work' -P legacy-1");
@@ -2926,6 +2926,49 @@ fn legacy_migration_preserves_work_backups_and_linked_access() {
     );
     assert!(out.status.success());
     assert_eq!(render(&out, &p.root), shown);
+    let main = p.cwd.clone();
+    p.cwd = p.root.join("linked");
+    assert!(
+        p.run("update legacy-2 --title 'Worked from linked Workspace'")
+            .contains("Updated")
+    );
+    p.cwd = main;
+    let shown = p.run("show legacy-2");
+    assert!(shown.contains("Worked from linked Workspace"));
+    p.git(&["worktree", "remove", "../linked"]);
+    let original = p.cwd.clone();
+    let moved = p.root.join("moved checkout å");
+    fs::rename(&original, &moved).unwrap();
+    p.cwd = moved;
+    fs::create_dir(&original).unwrap();
+    let guidance = p.run("init");
+    assert!(guidance.starts_with("exit 1\n"), "{guidance}");
+    assert!(
+        guidance.contains(&format!("tk init --attach {id}")),
+        "{guidance}"
+    );
+    assert_eq!(p.run("prime"), "");
+    p.git(&["config", "--local", "--unset", "tk.storeId"]);
+    let interrupted = p.run_env(
+        &format!("init --attach {id}"),
+        &[("TK_TEST_GIT_FAILURE", "replace-before")],
+    );
+    assert!(interrupted.starts_with("exit 1\n"), "{interrupted}");
+    assert!(
+        p.run(&format!("init --attach {id}"))
+            .starts_with("Attached Repository Store at ")
+    );
+    assert_eq!(p.run("show legacy-2"), shown);
+    assert_eq!(
+        p.run("plan"),
+        plan.replace("Keep this work", "Worked from linked Workspace")
+    );
+    assert_eq!(p.run("sync log"), "No Mutations recorded.\n");
+    assert_eq!(
+        fs::read(p.db_path().parent().unwrap().join("backups/manual.db")).unwrap(),
+        backup_bytes
+    );
+    assert!(p.run("add -m 'After recovery'").contains("legacy-3"));
 }
 
 fn legacy_repo() -> Repo {
@@ -3270,4 +3313,70 @@ fn legacy_migration_refuses_hard_links_without_losing_sqlite_locks() {
     assert!(source.join("tk.db").is_file());
     fs::remove_file(source.join("backups/hardlink.db")).unwrap();
     assert!(p.run("init").contains("Migrated Repository Store"));
+}
+
+#[test]
+fn healthy_store_work_does_not_write_git_config_or_refresh_manifest() {
+    let p = Repo::new("repo");
+    p.run("init");
+    let manifest = p.db_path().with_file_name("store.json");
+    let before = fs::read(&manifest).unwrap();
+    let modified = fs::metadata(&manifest).unwrap().modified().unwrap();
+    let config = p.cwd.join(".git/config");
+    let config_before = fs::read(&config).unwrap();
+    let config_modified = fs::metadata(&config).unwrap().modified().unwrap();
+    fs::write(p.cwd.join(".git/config.lock"), "held by another process").unwrap();
+    assert!(p.run("add -m 'Normal work'").contains("repo-1"));
+    assert!(p.run("start repo-1").contains("Started"));
+    assert!(p.run("plan add repo-1").contains("Added to Plan"));
+    assert!(p.run("show repo-1").contains("Normal work"));
+    assert!(p.run("prime").contains("Normal work"));
+    assert_eq!(p.run("sync log"), "No Mutations recorded.\n");
+    assert_eq!(fs::read(&manifest).unwrap(), before);
+    assert_eq!(
+        fs::metadata(&manifest).unwrap().modified().unwrap(),
+        modified
+    );
+    assert_eq!(fs::read(&config).unwrap(), config_before);
+    assert_eq!(
+        fs::metadata(&config).unwrap().modified().unwrap(),
+        config_modified
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn native_data_root_uses_an_isolated_home() {
+    let p = Repo::new("repo");
+    let home = p.root.join("home å");
+    fs::create_dir(&home).unwrap();
+    let xdg = home.join("xdg data");
+    for use_xdg in [false, true] {
+        let env = [
+            ("TK_TEST_DATA_ROOT", "native"),
+            ("HOME", home.to_str().unwrap()),
+            (
+                "XDG_DATA_HOME",
+                if use_xdg { xdg.to_str().unwrap() } else { "" },
+            ),
+        ];
+        let result = p.run_env("init", &env);
+        assert!(
+            result.starts_with("Initialized Repository Store at "),
+            "{result}"
+        );
+        let id = p.git(&["config", "--local", "--get", "tk.storeId"]);
+        let data = if cfg!(target_os = "macos") {
+            home.join("Library/Application Support")
+        } else if use_xdg {
+            xdg.clone()
+        } else {
+            home.join(".local/share")
+        };
+        let store = data.join("tk/stores").join(id);
+        assert!(store.join("tk.db").is_file());
+        assert!(p.run_env("add -m 'Native root'", &env).contains("repo-1"));
+        p.git(&["config", "--local", "--unset", "tk.storeId"]);
+        fs::remove_dir_all(data.join("tk")).unwrap();
+    }
 }

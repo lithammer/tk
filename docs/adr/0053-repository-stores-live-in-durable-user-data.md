@@ -255,5 +255,15 @@ receipt removal, partial cleanup, stale pre-pointer images, changed post-pointer
 sources, every Mutation state, full row preservation, backup bytes, linked
 Workspaces, active WAL, old connections, competing operations, hard links, and
 injected storage faults. The legacy-connection fixture uses bundled SQLite
-without tk lifecycle locks. Native Windows and macOS execution remains part of
-the platform lifecycle verification in tk-237.
+without tk lifecycle locks. CI runs the scenario suite on Linux, macOS, and
+Windows. The composed lifecycle also covers linked Workspace edits, a moved
+checkout, interrupted reattachment, and preserved Plan and backup contents.
+Ordinary work runs with Git's config lock held and checks that config and
+manifest bytes and modification times stay unchanged.
+
+Native root resolution runs with isolated HOME and XDG locations on Unix.
+Windows scenarios inject an isolated data root: they do not redirect the user's
+known-folder configuration or prove native LocalAppData resolution. The alias
+reopening scenario uses Unix symlinks; Windows alias reopening remains untested.
+Native macOS and Windows results require their CI runners; a Linux run alone
+does not verify those platforms.
