@@ -126,17 +126,17 @@ impl CommandError {
     /// Style only the `tk <command>:` prefix with the stderr policy.
     /// The body (including newlines) and subprocess tail pass through unchanged.
     pub fn render<W: Write + ?Sized>(&self, stderr: &mut W, command: &str, styler: SubStyler) {
-        let prefix = format!("tk {command}:");
-        let prefix = styler.wrap(palette::ERROR_LABEL, &prefix);
+        let open = styler.open(palette::ERROR_LABEL);
+        let close = styler.close(palette::ERROR_LABEL);
         match self {
             Self::Failure { body, tail } => {
-                let _ = writeln!(stderr, "{prefix} {body}");
+                let _ = writeln!(stderr, "{open}tk {command}:{close} {body}");
                 if let Some(tail) = tail {
                     let _ = stderr.write_all(tail);
                 }
             }
             Self::Usage { body } => {
-                let _ = writeln!(stderr, "{prefix} {body}");
+                let _ = writeln!(stderr, "{open}tk {command}:{close} {body}");
             }
         }
     }
