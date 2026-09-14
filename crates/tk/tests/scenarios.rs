@@ -246,6 +246,16 @@ impl Repo {
             .join("tk.db")
     }
 
+    /// Move the fixture's Store into Git metadata and remove its association.
+    fn move_to_legacy(&self) -> PathBuf {
+        let source = self.cwd.join(".git/tk");
+        fs::rename(self.db_path().parent().unwrap(), &source).unwrap();
+        fs::remove_file(source.join("store.json")).unwrap();
+        fs::remove_file(source.join("association.lock")).unwrap();
+        self.git(&["config", "--local", "--unset", "tk.storeId"]);
+        source
+    }
+
     /// Write one Mutation straight into this repo's Mutation Log.
     ///
     /// No `tk` command leaves a `pending` or `failed` Mutation on a Local
@@ -2883,11 +2893,7 @@ fn legacy_migration_preserves_work_backups_and_linked_access() {
         .execute("vacuum into ?1", [backup.to_str().unwrap()])
         .unwrap();
     let backup_bytes = fs::read(&backup).unwrap();
-    let legacy = p.cwd.join(".git/tk");
-    fs::rename(original.parent().unwrap(), &legacy).unwrap();
-    fs::remove_file(legacy.join("store.json")).unwrap();
-    fs::remove_file(legacy.join("association.lock")).unwrap();
-    p.git(&["config", "--local", "--unset", "tk.storeId"]);
+    let legacy = p.move_to_legacy();
     assert!(p.run("list").contains("run 'tk init'"));
     assert_eq!(p.run("prime"), "");
     let result = p.run("init");
@@ -2934,11 +2940,7 @@ fn legacy_repo() -> Repo {
         .unwrap()
         .execute("vacuum into ?1", [backup.to_str().unwrap()])
         .unwrap();
-    let source = p.cwd.join(".git/tk");
-    fs::rename(dir, &source).unwrap();
-    fs::remove_file(source.join("store.json")).unwrap();
-    fs::remove_file(source.join("association.lock")).unwrap();
-    p.git(&["config", "--local", "--unset", "tk.storeId"]);
+    p.move_to_legacy();
     p
 }
 
@@ -3175,12 +3177,7 @@ fn legacy_migration_preserves_all_rows_and_mutation_states() {
     let before = database_rows(&db);
     let show = p.run("show old-2");
     let log = p.run("sync log");
-    let dir = db.parent().unwrap();
-    let source = p.cwd.join(".git/tk");
-    fs::rename(dir, &source).unwrap();
-    fs::remove_file(source.join("store.json")).unwrap();
-    fs::remove_file(source.join("association.lock")).unwrap();
-    p.git(&["config", "--local", "--unset", "tk.storeId"]);
+    p.move_to_legacy();
     let out = p.run("init");
     assert!(out.contains("Migrated Repository Store"), "{out}");
     assert_eq!(database_rows(&p.db_path()), before);

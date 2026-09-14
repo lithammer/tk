@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use super::association::{self, Error, StoreId};
 use crate::{git::association as git, proc::ProcRunner};
 
-/// Durable boundaries exposed to the command harness, never environment policy.
+/// Migration checkpoints exposed to the command harness.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Boundary {
     Recorded,
@@ -26,6 +26,7 @@ pub enum Boundary {
     Finished,
 }
 
+/// An error stops migration at the current checkpoint.
 pub type Observer = fn(Boundary) -> std::io::Result<()>;
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
@@ -45,7 +46,7 @@ struct Receipt {
     files: BTreeMap<PathBuf, String>,
 }
 
-/// A pointer can open a migrated Store during cleanup only with both receipts.
+/// Opening during cleanup requires matching source progress and destination receipt.
 pub(super) fn access(root: &Path, common: &Path, id: &StoreId) -> Result<(), Error> {
     let dir = root.join(id.text());
     if exists(&common.join("tk"))? || exists(&dir.join("migration.json"))? {
@@ -53,7 +54,7 @@ pub(super) fn access(root: &Path, common: &Path, id: &StoreId) -> Result<(), Err
         if &progress.store_id != id {
             return Err(Error::Legacy);
         }
-        receipt(&dir, &progress)?;
+        read_receipt(&dir, &progress)?;
     }
     Ok(())
 }
@@ -68,7 +69,7 @@ pub(super) fn refuse_pending(dir: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-/// Run under init.lock. Quiescence must cover old binaries and Windows cleanup.
+/// Requires init.lock; old tk processes must stay stopped through cleanup.
 pub(super) fn migrate(
     runner: &dyn ProcRunner,
     cwd: &Path,
@@ -113,7 +114,7 @@ pub(super) fn migrate(
             finish(&record, &dir, observe)?;
             return Ok(dir.join("tk.db"));
         }
-        let receipt = receipt(&dir, &progress)?;
+        let receipt = read_receipt(&dir, &progress)?;
         flush_pointer(common)?;
         drop(legacy_guard);
         cleanup(&source, &receipt, observe)?;
@@ -146,7 +147,7 @@ pub(super) fn migrate(
                 continue;
             }
         }
-        receipt(prior, &progress)?;
+        read_receipt(prior, &progress)?;
         if prior == &dir {
             let guard = association::lock_store(prior, true)?;
             drop(guard);
@@ -262,7 +263,7 @@ fn read_progress(root: &Path, common: &Path) -> Result<Progress, Error> {
     Ok(progress)
 }
 
-fn receipt(dir: &Path, progress: &Progress) -> Result<Receipt, Error> {
+fn read_receipt(dir: &Path, progress: &Progress) -> Result<Receipt, Error> {
     if !fs::symlink_metadata(dir)?.is_dir() {
         return Err(fault("migration destination is not a directory"));
     }
@@ -334,7 +335,7 @@ fn inspect_source(source: &Path) -> Result<(), Error> {
 }
 
 // Closing any descriptor for the database releases this process's POSIX
-// locks. Keep the fingerprint descriptor until SQLite has closed its own.
+// locks. Field order closes SQLite before the fingerprint descriptor.
 struct Frozen {
     conn: Connection,
     file: File,

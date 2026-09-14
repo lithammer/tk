@@ -37,17 +37,13 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     );
     let (path, prefix) = match result.map_err(|e| resolver::open_error(&e))? {
         Initialized::Migrated { from, path } => {
-            let id = path
-                .parent()
-                .unwrap()
-                .file_name()
-                .unwrap()
-                .to_string_lossy();
+            let dir = path.parent().unwrap();
+            let id = dir.file_name().unwrap().to_string_lossy();
             let _ = writeln!(
                 deps.stdout,
                 "Migrated Repository Store {id} from {} to {}",
                 from.display(),
-                path.parent().unwrap().display()
+                dir.display()
             );
             return Ok(Exit::Ok);
         }
