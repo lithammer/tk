@@ -227,7 +227,7 @@ impl Repo {
         let output = Command::new("git")
             .args(args)
             .current_dir(&self.cwd)
-            .env("GIT_CONFIG_GLOBAL", self.root.join("global.gitconfig"))
+            .env("GIT_CONFIG_GLOBAL", support::global_config(&self.root))
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()
             .unwrap();
