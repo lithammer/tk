@@ -128,32 +128,33 @@ pub(super) fn migrate(
     let files = inventory(&source, &mut frozen.file)?;
     let staged = stage(&progress);
     for prior in [&staged, &dir] {
-        if exists(prior)? {
-            if prior == &staged
-                && fs::symlink_metadata(prior)?.is_dir()
-                && !exists(&prior.join("migration.json"))?
-            {
-                let entries = fs::read_dir(prior)?.collect::<Result<Vec<_>, _>>()?;
-                if entries.iter().all(|e| {
-                    e.file_name() == "migration.pending" && e.file_type().is_ok_and(|t| t.is_file())
-                }) {
-                    for entry in entries {
-                        fs::remove_file(entry.path())?;
-                    }
-                    fs::remove_dir(prior)?;
-                    continue;
-                }
-            }
-            receipt(prior, &progress)?;
-            if prior == &dir {
-                let guard = association::lock_store(prior, true)?;
-                drop(guard);
-            }
-            // No pointer has ever made this image authoritative. The source
-            // is locked and intact; retries must replace stale snapshots.
-            fs::remove_dir_all(prior)?;
-            flush_dir(prior.parent().unwrap())?;
+        if !exists(prior)? {
+            continue;
         }
+        if prior == &staged
+            && fs::symlink_metadata(prior)?.is_dir()
+            && !exists(&prior.join("migration.json"))?
+        {
+            let entries = fs::read_dir(prior)?.collect::<Result<Vec<_>, _>>()?;
+            if entries.iter().all(|e| {
+                e.file_name() == "migration.pending" && e.file_type().is_ok_and(|t| t.is_file())
+            }) {
+                for entry in entries {
+                    fs::remove_file(entry.path())?;
+                }
+                fs::remove_dir(prior)?;
+                continue;
+            }
+        }
+        receipt(prior, &progress)?;
+        if prior == &dir {
+            let guard = association::lock_store(prior, true)?;
+            drop(guard);
+        }
+        // No pointer has ever made this image authoritative. The source
+        // is locked and intact; retries must replace stale snapshots.
+        fs::remove_dir_all(prior)?;
+        flush_dir(prior.parent().unwrap())?;
     }
     association::create_private_dirs(staged.parent().unwrap())?;
     if !fs::symlink_metadata(staged.parent().unwrap())?.is_dir() {

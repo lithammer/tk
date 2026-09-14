@@ -151,17 +151,7 @@ pub fn refuse_legacy(common: &Path) -> Result<(), Error> {
 /// Serialize fresh init across the data root while scanning and publishing Stores.
 pub fn lock_init(root: &Path) -> Result<File, Error> {
     create_private_dirs(root)?;
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(root.parent().unwrap().join("init.lock"))?;
-    match file.try_lock() {
-        Ok(()) => Ok(file),
-        Err(fs::TryLockError::WouldBlock) => Err(Error::Busy),
-        Err(fs::TryLockError::Error(e)) => Err(e.into()),
-    }
+    lock_file(&root.parent().unwrap().join("init.lock"), true)
 }
 
 /// Reserve a fresh Store directory exclusively; a collision never opens its contents.
