@@ -516,8 +516,6 @@ mod tests {
         crate::cli::run_argv(deps, &argv).unwrap()
     }
 
-    // ---- tk sync (adapter-reachable paths) ------------------------------
-
     #[test]
     fn sync_no_remote_returns_1_with_diagnostic() {
         let store = TmpStore::new("repo");
@@ -537,8 +535,7 @@ mod tests {
 
     #[test]
     fn sync_github_with_no_adopted_items_is_a_noop() {
-        // github now resolves to a real adapter; with no Adopted items the
-        // engine derives an empty key set and makes no gh call.
+        // With no Adopted items, sync must make no Backend calls.
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_remote(
@@ -762,8 +759,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
-        // No Remote configured: the skip's line is what this test cares about,
-        // reported before sync fails on the missing Remote.
+        // Report the committed reopen even when no Remote is configured.
         let code = run(h.deps(), &["sync", "--skip", "1"]);
         assert_eq!(code, Exit::Failure);
         assert!(
@@ -839,10 +835,7 @@ mod tests {
             "Skipped Mutation 1; restored gh-1 to open.\nSync complete: 1 pulled, 0 applied.\n"
         );
 
-        // Lifecycle and content together: the reopen puts the Item back in the
-        // working set, so this run's merge is free to overwrite title and body
-        // from the snapshot. Seeding the two sides differently is what lets
-        // that assertion fail if it ever stops holding.
+        // Pull must refresh title and body as well as Lifecycle after the reopen.
         let (status, title, body): (String, String, String) = Connection::open(store.db_path())
             .unwrap()
             .query_row(
@@ -1009,8 +1002,6 @@ mod tests {
                 .contains("is not in the failed state")
         );
     }
-
-    // ---- tk sync log ----------------------------------------------------
 
     #[test]
     fn sync_log_empty_prints_default_message() {
@@ -1312,8 +1303,6 @@ mod tests {
         );
     }
 
-    // ---- report / error rendering ---------------------------------------
-
     #[test]
     fn render_report_includes_stopped_clause() {
         let mut out = Vec::new();
@@ -1350,10 +1339,8 @@ mod tests {
 
     #[test]
     fn skip_error_frames_a_failed_reopen_as_a_bug() {
-        // ADR-0017 keeps these lines verbatim, and the store-side tests assert
-        // the variant rather than the rendered bytes. Neither reopen failure is
-        // reachable through a Store writer, so this is the only place their
-        // wording is pinned.
+        // Store writers cannot produce these invariant failures. Construct them
+        // directly to check that the diagnostic asks the user to report a bug.
         for err in [
             MarkSkippedError::ReopenMatchedNothing(4),
             MarkSkippedError::ReopenRefusedByTrigger(4),
