@@ -79,7 +79,9 @@ small boundary module after the second caller proves the shape.
 - `store/association.rs` owns Store IDs, manifests, association validation, and
   publication. `store/initialize.rs` composes fresh init, explicit attachment,
   automatic Vacant Store repair, and healthy reopen. `store/relocation.rs` owns
-  legacy cutover, migration receipts, and verified cleanup. `store/recovery.rs` ranks
+  legacy cutover and migration receipts. Its private `relocation/source.rs` owns
+  legacy source locks, inspection, snapshot reads, and verified cleanup.
+  `store/recovery.rs` ranks
   manifest evidence and inspects shortlisted candidates without migration.
   `git/association.rs` owns local config reads/writes and the credential-free URL
   policy (ADR-0053).

@@ -1,15 +1,15 @@
 //! Resumable legacy Store cutover. The Git pointer selects authority (ADR-0053).
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use super::association::{self, Error, StoreId};
 use crate::{git::association as git, proc::ProcRunner};
+
+mod source;
 
 /// Migration checkpoints exposed to the command harness.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,7 +80,7 @@ pub(super) fn migrate(
 ) -> Result<PathBuf, Error> {
     let _lock = association::lock_file(&common.join("tk-migration.lock"), true)?;
     let source = common.join("tk");
-    let legacy_guard = lock_remote(&source)?;
+    let legacy = source::LegacySource::lock(&source)?;
     let record = common.join("tk-migration.json");
     let pointers = git::pointers(runner, cwd)?;
     let progress = if exists(&record)? {
@@ -89,7 +89,7 @@ pub(super) fn migrate(
         if !pointers.is_empty() {
             return Err(Error::Legacy);
         }
-        inspect_source(&source)?;
+        legacy.inspect()?;
         let progress = Progress {
             version: 1,
             store_id: StoreId::generate(rng),
@@ -116,17 +116,17 @@ pub(super) fn migrate(
         }
         let receipt = read_receipt(&dir, &progress)?;
         flush_pointer(common)?;
-        drop(legacy_guard);
-        cleanup(&source, &receipt, observe)?;
+        drop(legacy);
+        source::cleanup(&source, &receipt, observe)?;
         finish(&record, &dir, observe)?;
         return Ok(dir.join("tk.db"));
     }
     if !pointers.is_empty() {
         return Err(fault("Git pointer disagrees with migration progress"));
     }
-    inspect_source(&source)?;
-    let frozen = freeze(&source.join("tk.db"))?;
-    let files = inventory(&source, &frozen.file, legacy_guard.as_ref())?;
+    legacy.inspect()?;
+    let frozen = legacy.freeze()?;
+    let files = frozen.inventory()?;
     let staged = stage(&progress);
     for prior in [&staged, &dir] {
         if !exists(prior)? {
@@ -170,18 +170,7 @@ pub(super) fn migrate(
     fs::create_dir(&backup_dir)?;
     crate::platform::set_dir_mode_0700(&backup_dir)?;
     let image = staged.join("tk.db");
-    let image_text = image
-        .to_str()
-        .ok_or_else(|| fault("destination path is not UTF-8"))?;
-    sql(frozen.conn.execute("vacuum into ?1", [image_text]))?;
-    let destination = sql(Connection::open(&image))?;
-    sql(destination.pragma_update(None, "journal_mode", "wal"))?;
-    destination.close().map_err(|(_, e)| fault(e.to_string()))?;
-    flush_file(&image)?;
-    for name in receipt.files.keys().filter(|p| p.starts_with("backups")) {
-        fs::copy(source.join(name), staged.join(name))?;
-        flush_file(&staged.join(name))?;
-    }
+    frozen.snapshot(&staged, &receipt.files)?;
     observe(Boundary::Staged)?;
     super::recovery::inspect_database(&image).map_err(|e| fault(e.to_string()))?;
     for entry in fs::read_dir(&backup_dir)? {
@@ -213,7 +202,7 @@ pub(super) fn migrate(
     association::validate(root, &manifest.store_id, common)?;
     let _guard = association::lock_store(&dir, true)?;
     observe(Boundary::Published)?;
-    if inventory(&source, &frozen.file, legacy_guard.as_ref())? != receipt.files {
+    if frozen.inventory()? != receipt.files {
         return Err(fault("legacy files changed during staging"));
     }
     git::install(runner, cwd, manifest.store_id.text())?;
@@ -221,8 +210,7 @@ pub(super) fn migrate(
     flush_pointer(common)?;
     observe(Boundary::Pointed)?;
     drop(frozen);
-    drop(legacy_guard);
-    cleanup(&source, &receipt, observe)?;
+    source::cleanup(&source, &receipt, observe)?;
     finish(&record, &dir, observe)?;
     Ok(dir.join("tk.db"))
 }
@@ -233,10 +221,6 @@ pub(super) fn pending(common: &Path) -> Result<bool, Error> {
 
 fn fault(message: impl Into<String>) -> Error {
     Error::Migration(message.into())
-}
-
-fn sql<T>(result: rusqlite::Result<T>) -> Result<T, Error> {
-    result.map_err(|e| fault(e.to_string()))
 }
 
 fn exists(path: &Path) -> Result<bool, Error> {
@@ -326,179 +310,6 @@ fn allowed(name: &Path) -> bool {
     ) || (name.parent() == Some(Path::new("backups")) && name.file_name().is_some())
 }
 
-fn inspect_source(source: &Path) -> Result<(), Error> {
-    if !fs::symlink_metadata(source)?.is_dir() {
-        return Err(Error::Legacy);
-    }
-    regular(&source.join("tk.db"))?;
-    super::recovery::inspect_database(&source.join("tk.db")).map_err(|e| fault(e.to_string()))
-}
-
-// Closing any descriptor for the database releases this process's POSIX
-// locks. Field order closes SQLite before the fingerprint descriptor.
-struct Frozen {
-    conn: Connection,
-    file: File,
-}
-
-fn freeze(path: &Path) -> Result<Frozen, Error> {
-    regular(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if fs::metadata(path)?.nlink() != 1 {
-            return Err(fault(
-                "legacy database has hard links; make an independent copy before migration",
-            ));
-        }
-    }
-    let file = File::open(path)?;
-    let conn = sql(Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE,
-    ))?;
-    sql(conn.busy_timeout(std::time::Duration::ZERO))?;
-    sql(conn.execute_batch(
-        "pragma locking_mode=exclusive; pragma journal_mode=delete; begin exclusive; commit;",
-    ))?;
-    let mode: String = sql(conn.query_row("pragma journal_mode", [], |row| row.get(0)))?;
-    if mode != "delete" {
-        return Err(fault("legacy database could not leave WAL mode"));
-    }
-    // Read-only inspectors may leave WAL sidecars behind. The successful
-    // transition checkpointed the WAL; these files no longer own any data.
-    for suffix in ["-wal", "-shm"] {
-        let sidecar = path.with_file_name(format!("tk.db{suffix}"));
-        if exists(&sidecar)? {
-            regular(&sidecar)?;
-            fs::remove_file(sidecar)?;
-        }
-    }
-    Ok(Frozen { conn, file })
-}
-
-fn inventory(
-    source: &Path,
-    database: &File,
-    remote: Option<&File>,
-) -> Result<BTreeMap<PathBuf, String>, Error> {
-    let mut files = BTreeMap::new();
-    for entry in fs::read_dir(source)? {
-        let entry = entry?;
-        let name = PathBuf::from(entry.file_name());
-        if name == Path::new("backups") && entry.file_type()?.is_dir() {
-            for backup in fs::read_dir(entry.path())? {
-                let backup = backup?;
-                let name = name.join(backup.file_name());
-                files.insert(name, fingerprint(&backup.path())?);
-            }
-        } else if name == Path::new("tk.db") {
-            regular(&entry.path())?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                let held = database.metadata()?;
-                let current = entry.metadata()?;
-                if held.dev() != current.dev()
-                    || held.ino() != current.ino()
-                    || current.nlink() != 1
-                {
-                    return Err(fault("legacy database path changed while locked"));
-                }
-            }
-            files.insert(name, hash_file(database)?);
-        } else if name == Path::new("remote.lock") {
-            // Windows denies reads through a second handle while this lock is held.
-            regular(&entry.path())?;
-            let remote =
-                remote.ok_or_else(|| fault("legacy Remote lock appeared during migration"))?;
-            files.insert(name, hash_file(remote)?);
-        } else if allowed(&name) {
-            files.insert(name, fingerprint(&entry.path())?);
-        } else {
-            return Err(fault(format!(
-                "unexpected legacy entry: {}",
-                entry.path().display()
-            )));
-        }
-    }
-    Ok(files)
-}
-
-fn fingerprint(path: &Path) -> Result<String, Error> {
-    regular(path)?;
-    hash_file(&File::open(path)?)
-}
-
-fn hash_file(mut file: &File) -> Result<String, Error> {
-    file.rewind()?;
-    let mut hash = Sha256::new();
-    let mut buf = [0; 16384];
-    loop {
-        let len = file.read(&mut buf)?;
-        if len == 0 {
-            break;
-        }
-        hash.update(&buf[..len]);
-    }
-    Ok(format!("{:x}", hash.finalize()))
-}
-
-fn cleanup(source: &Path, receipt: &Receipt, observe: Observer) -> Result<(), Error> {
-    if !exists(source)? {
-        return Ok(());
-    }
-    if !fs::symlink_metadata(source)?.is_dir() {
-        return Err(fault("legacy directory was replaced; cleanup refused"));
-    }
-    let remote = lock_remote(source)?;
-    let frozen = if exists(&source.join("tk.db"))? {
-        Some(freeze(&source.join("tk.db"))?)
-    } else {
-        None
-    };
-    let current = if let Some(frozen) = &frozen {
-        inventory(source, &frozen.file, remote.as_ref())?
-    } else {
-        // The database is removed last; only an empty directory may remain.
-        let entries = fs::read_dir(source)?.collect::<Result<Vec<_>, _>>()?;
-        if !entries.is_empty() {
-            return Err(fault("legacy database is missing but other files remain"));
-        }
-        BTreeMap::new()
-    };
-    if current
-        .iter()
-        .any(|(name, hash)| receipt.files.get(name) != Some(hash))
-    {
-        return Err(fault(
-            "legacy files changed after cutover; preserve both Stores and restore manually",
-        ));
-    }
-    observe(Boundary::Cleanup)?;
-    // SQLite's Windows VFS denies delete sharing. Old processes must remain
-    // stopped until cleanup finishes, including this close-to-delete gap.
-    drop(frozen);
-    drop(remote);
-    for name in current
-        .keys()
-        .filter(|name| name.as_path() != Path::new("tk.db"))
-    {
-        fs::remove_file(source.join(name))?;
-        observe(Boundary::CleanedFile)?;
-    }
-    if exists(&source.join("backups"))? {
-        fs::remove_dir(source.join("backups"))?;
-    }
-    if exists(&source.join("tk.db"))? {
-        fs::remove_file(source.join("tk.db"))?;
-    }
-    fs::remove_dir(source)?;
-    flush_dir(source.parent().unwrap())?;
-    observe(Boundary::Removed)?;
-    Ok(())
-}
-
 fn finish(record: &Path, dir: &Path, observe: Observer) -> Result<(), Error> {
     if exists(&dir.join("migration.json"))? {
         fs::remove_file(dir.join("migration.json"))?;
@@ -527,13 +338,4 @@ fn flush_pointer(common: &Path) -> Result<(), Error> {
     regular(&common.join("config"))?;
     flush_file(&common.join("config"))?;
     flush_dir(common)
-}
-
-fn lock_remote(source: &Path) -> Result<Option<File>, Error> {
-    let path = source.join("remote.lock");
-    if !exists(&path)? {
-        return Ok(None);
-    }
-    regular(&path)?;
-    association::lock_file(&path, true).map(Some)
 }

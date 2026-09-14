@@ -192,6 +192,18 @@ and closing a backup alias would otherwise release the same lock. SQLite's
 `os_unix.c` describes this constraint; the competing-writer CLI scenario checks
 that the source remains locked after hashing and publication.
 
+The private migration source module owns the path and handles together.
+`LegacySource` holds the Remote lock during inspection and progress publication;
+freezing it transfers ownership into `Frozen`, which owns the SQLite connection,
+fingerprint descriptor, and Remote lock. Inventory and snapshot reads go through
+that owner. Its fields close SQLite before the fingerprint descriptor, then
+release the Remote lock.
+
+Cleanup reacquires those locks and checks the surviving inventory against the
+receipt. It represents an already removed database separately and accepts only
+an empty source directory in that state. It closes the source handles before
+deleting verified files, with the database last.
+
 The inventory reads `remote.lock` through the handle that owns its exclusive
 lock. Windows [denies access through a second handle](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-lockfileex),
 even in the same process.
