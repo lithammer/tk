@@ -245,13 +245,17 @@ pub fn open_existing<R: ProcRunner + ?Sized>(
     let paths = discovery::discover_paths(runner, cwd)?;
     let root = super::association::stores_root(data_root)?;
     let common = super::association::canonical_common(&paths)?;
-    super::association::refuse_legacy(&common)?;
-    let id = super::association::pointer(runner, cwd)?.ok_or(OpenError::StoreMissing)?;
+    let pointer = super::association::pointer(runner, cwd)?;
+    if pointer.is_none() {
+        super::association::refuse_legacy(&common)?;
+    }
+    let id = pointer.ok_or(OpenError::StoreMissing)?;
     let guard = super::association::lock_store(&root.join(id.text()), false)?;
     if super::association::pointer(runner, cwd)?.as_ref() != Some(&id) {
         return Err(super::association::Error::Recovery.into());
     }
     let db_path = super::association::validate(&root, &id, &common)?;
+    super::relocation::access(&root, &common, &id)?;
     let mut store = open_database(&db_path, clock)?;
     store.association_guard = Some(guard);
     Ok(store)

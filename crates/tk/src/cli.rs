@@ -152,6 +152,8 @@ impl CommandError {
 /// implementor, so commands can call `gen_range` etc. on `*deps.rng` once a
 /// caller imports the extension trait.
 pub struct Deps<'a> {
+    /// An error stops migration at the checkpoint; production uses a no-op.
+    pub migration_boundary: crate::store::relocation::Observer,
     pub stdout: &'a mut dyn Write,
     pub stderr: &'a mut dyn Write,
     /// Stdin reader; consumed only by write commands that accept

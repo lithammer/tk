@@ -90,6 +90,7 @@ pub struct Args {
 pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     let reborrow = Deps {
         data_root: deps.data_root,
+        migration_boundary: deps.migration_boundary,
         stdout: &mut *deps.stdout,
         stderr: &mut *deps.stderr,
         stdin: &mut *deps.stdin,
@@ -766,6 +767,7 @@ mod tests {
     ) -> Deps<'a> {
         Deps {
             data_root: None,
+            migration_boundary: |_| Ok(()),
             stdout,
             stderr,
             stdin,

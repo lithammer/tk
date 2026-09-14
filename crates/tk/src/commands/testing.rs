@@ -81,6 +81,7 @@ impl<'a> Harness<'a> {
     pub fn deps_with(&mut self, styler: Styler) -> Deps<'_> {
         Deps {
             data_root: Some(&self.data_root),
+            migration_boundary: |_| Ok(()),
             stdout: &mut self.stdout,
             stderr: &mut self.stderr,
             stdin: &mut self.stdin,

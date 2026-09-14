@@ -17,6 +17,7 @@ variable. The process shim resolves the root once and passes it through `Deps`.
 <local data>/tk/
   init.lock
   stores/
+    .migrations/                  # unpublished legacy migration images
     <32 lowercase hexadecimal characters>/
       store.json
       tk.db
@@ -127,7 +128,7 @@ An absent former Git Common Directory permits attachment only when its immediate
 
 Path inspection cannot distinguish deletion from a volume silently unmounted beneath a still-readable parent. Restore unavailable volumes before recovery.
 
-Any legacy `<git-common-dir>/tk` entry is preserved and refused, including during attachment and explicit new creation. Legacy migration belongs to tk-236. Invalid, missing, mismatched, unsupported, or unreadable manifests need manual restoration; pending files never replace that requirement.
+Plain init migrates legacy `<git-common-dir>/tk` Stores using the protocol below. Attachment and explicit new creation preserve and refuse legacy data and pending migrations. Invalid, missing, mismatched, unsupported, or unreadable manifests need manual restoration; pending files never replace that requirement.
 
 ## Lifecycle synchronization and interrupted attachment
 
@@ -135,7 +136,7 @@ All initialization and attachment commands hold the stable data-root `init.lock`
 
 Each Store has a stable `association.lock`: ordinary opening takes a shared OS lock before validating the manifest, rechecks the local pointer, and retains the lock in `Store` until its SQLite connection closes. Attachment holds that Store lock exclusively before inspecting ownership or changing metadata. Contention returns exit 1 with retry guidance. Independent Stores can remain open concurrently; initializers sharing a data root serialize. Remote workflows hold their lock while the Store remains open.
 
-This protocol prevents two supported initializers from attaching the same Store and prevents an old opener from writing after attachment changes ownership. Locks release on process exit. tk never deletes or replaces lock files. External config edits, older binaries without these locks, and moving a repository during an active command are outside this synchronization protocol.
+This protocol prevents two supported initializers from attaching the same Store and prevents an old opener from writing after attachment changes ownership. Locks release on process exit. tk never deletes or replaces the lock files of an authoritative Store. A pre-pointer migration image is private staging; retry may discard that image and its unused association lock. External config edits, older binaries without these locks, and moving a repository during an active command are outside this synchronization protocol.
 
 Attachment writes a uniquely named pending manifest beside `store.json`, syncs and closes it, then atomically renames it over `store.json` and syncs the directory on Unix. Only then does it replace all repository-local pointer values through Git's config lock. The manifest retains the former canonical path and merges sorted, deduplicated safe remote observations. Healthy operations never refresh evidence.
 
@@ -159,3 +160,100 @@ requirement for those tests: Windows resolves LocalAppData through a known-folde
 API, so an environment override cannot isolate it. Test-only root and RNG inputs
 exist in the test harness, never in the shipped binary. Release smoke tests
 continue to exercise the production process shim on native CI runners.
+
+## Legacy migration protocol
+
+Stop all tk processes before running `tk init` on a legacy Store, and keep old
+binaries stopped through retries and cleanup. Migration moves
+`<git-common-dir>/tk` into `<local data>/tk/stores/<Store ID>`. The legacy path
+is migration input only. Ordinary commands direct users to init; Prime stays
+silent. Attach and new refuse legacy data and pending migrations.
+
+Init holds `init.lock` and a stable `tk-migration.lock` in the Git Common
+Directory, and takes any existing legacy `remote.lock`. It then retains SQLite
+exclusive locking mode on the legacy database. It switches WAL to DELETE and commits an exclusive transaction
+before taking the image. Switching out of WAL checkpoints live WAL data and
+requires an exclusive database lock. Contention refuses migration. The lock
+stays held through pointer installation and source verification. SQLite 3.46.0,
+bundled by libsqlite3-sys 0.30.1, defines this in `sqlite3PagerCloseWal` and
+`pager_end_transaction` in its amalgamation.
+
+This lock excludes writes while held; it does not prove that every connection
+has closed. An idle rollback-mode connection can survive it. Windows also
+requires closing SQLite before deleting its database: SQLite's Windows VFS
+opens database handles without delete sharing. Keeping old processes stopped
+prevents writes between closing SQLite and deleting the source. A rename alone
+cannot stop an old process from writing.
+
+On Unix, closing any descriptor for a database inode releases that process's
+POSIX locks. The fingerprint reader therefore holds its descriptor until the
+SQLite connection closes. Source databases with hard links are refused: reading
+and closing a backup alias would otherwise release the same lock. SQLite's
+`os_unix.c` describes this constraint; the competing-writer CLI scenario checks
+that the source remains locked after hashing and publication.
+
+A versioned `tk-migration.json` in the Git Common Directory records a random
+Store ID, a separate random token, the canonical Git Common Directory and the
+directory containing Stores (`<local data>/tk/stores`). Init publishes the
+record through a flushed pending file before staging starts and keeps it
+through legacy cleanup. A matching receipt beside the destination manifest
+binds that attempt to its source and records SHA-256 fingerprints of the
+legacy files. Neither a matching path nor an ordinary manifest authorizes
+resuming a migration. The stable `store.json` remains version 1 and owns only
+identity and association.
+
+Before pointer installation, legacy remains authoritative. Init builds a fresh
+`VACUUM INTO` image under `stores/.migrations/<Store ID>`, on the destination
+filesystem, and copies every Store Backup. It validates the images and manifest,
+and flushes files before publishing the
+complete directory. Retry uses the recorded Store ID and rebuilds its own
+staged or published image from the locked source; it never reuses an older
+snapshot. Unrelated or unverifiable destinations are preserved and refused.
+
+After publication, init installs and verifies the Git pointer, flushes Git's
+local config, and checks both sides of the association. The destination is now
+authoritative. Init verifies surviving legacy files against the receipt before
+cleanup; changed or unexpected files retain both copies for manual recovery.
+Partial cleanup permits missing recorded files. It removes only verified files,
+the database last, and removes the source progress record after cleanup.
+Post-pointer retries never copy legacy data over the destination.
+
+File contents are flushed on all platforms; directories and their parents are
+also flushed on Unix, including newly created data-root ancestors.
+Process-interruption recovery applies on all supported
+platforms. These operations do not establish Windows sudden-power-loss safety.
+A failed flush refuses source cleanup. Store Backup names and retention stay
+unchanged; relocation copies all backups before later schema upgrades run.
+
+The progress record has this shape (paths below are examples):
+
+```json
+{
+  "version": 1,
+  "store_id": "0123456789abcdef0123456789abcdef",
+  "token": "fedcba9876543210fedcba9876543210",
+  "common": "/home/user/src/project/.git",
+  "root": "/home/user/.local/share/tk/stores"
+}
+```
+
+The receipt is `migration.json` beside `store.json`. It has `progress` (the
+record above) and `files` (relative legacy filenames mapped to SHA-256 hex
+strings). Init removes the receipt and progress record after source cleanup;
+neither changes the stable manifest. A leftover empty `.migrations` directory
+has no Store identity and is excluded from candidate discovery.
+
+Migration success prints `Migrated Repository Store <Store ID> from <legacy
+directory> to <durable directory>`. Legacy open refusal says `legacy Repository
+Store data exists; stop all tk processes, then run 'tk init'; data was preserved`.
+Source divergence after cutover says `legacy files changed after cutover;
+preserve both Stores and restore manually`. Retry does not overwrite either
+Store in that state.
+
+The CLI scenarios cover process exits from progress publication through final
+receipt removal, partial cleanup, stale pre-pointer images, changed post-pointer
+sources, every Mutation state, full row preservation, backup bytes, linked
+Workspaces, active WAL, old connections, competing operations, hard links, and
+injected storage faults. The legacy-connection fixture uses bundled SQLite
+without tk lifecycle locks. Native Windows and macOS execution remains part of
+the platform lifecycle verification in tk-237.

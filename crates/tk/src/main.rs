@@ -73,6 +73,7 @@ fn main() -> ExitCode {
     let data_root = dirs::data_local_dir();
     let deps = cli::Deps {
         data_root: data_root.as_deref(),
+        migration_boundary: |_| Ok(()),
         stdout: &mut stdout,
         stderr: &mut stderr,
         stdin: &mut stdin,

@@ -417,6 +417,7 @@ mod tests {
         let mut stdin = std::io::Cursor::new(Vec::new());
         let mut deps = Deps {
             data_root: Some(&store.data_root),
+            migration_boundary: |_| Ok(()),
             stdout: &mut stdout,
             stderr: &mut stderr,
             stdin: &mut stdin,
