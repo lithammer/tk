@@ -190,7 +190,7 @@ mod tests {
             Ok(exit) => exit,
             Err(err) => {
                 let exit = err.exit();
-                err.render(deps.stderr, "add");
+                err.render(deps.stderr, "add", deps.styler.for_stderr());
                 exit
             }
         }

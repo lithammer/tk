@@ -1145,6 +1145,7 @@ mod tests {
     use crate::remote::fake::{
         CreateResponse, EditResponse, FakeAdapter, InspectionResponse, PullResponse,
     };
+    use crate::render::Styler;
     use crate::store::sync::{LoadApplicableError, PersistMutationOutcomeError, RefreshStoreError};
     use crate::store::testing::{
         FixtureItem, FixtureMutation, FixtureRemote, TmpStore, commit_promotion, insert_alias,
@@ -1225,7 +1226,7 @@ mod tests {
             Ok(exit) => exit,
             Err(err) => {
                 let exit = err.exit();
-                err.render(deps.stderr, "promote");
+                err.render(deps.stderr, "promote", deps.styler.for_stderr());
                 exit
             }
         }
@@ -1242,7 +1243,7 @@ mod tests {
             Ok(exit) => exit,
             Err(err) => {
                 let exit = err.exit();
-                err.render(deps.stderr, "promote");
+                err.render(deps.stderr, "promote", deps.styler.for_stderr());
                 exit
             }
         }
@@ -1273,7 +1274,7 @@ mod tests {
             Ok(exit) => exit,
             Err(err) => {
                 let exit = err.exit();
-                err.render(deps.stderr, "promote");
+                err.render(deps.stderr, "promote", deps.styler.for_stderr());
                 exit
             }
         }
@@ -1342,7 +1343,7 @@ mod tests {
             Ok(exit) => exit,
             Err(err) => {
                 let exit = err.exit();
-                err.render(deps.stderr, "promote");
+                err.render(deps.stderr, "promote", deps.styler.for_stderr());
                 exit
             }
         }
@@ -1364,7 +1365,7 @@ mod tests {
             Ok(exit) => exit,
             Err(err) => {
                 let exit = err.exit();
-                err.render(deps.stderr, "promote");
+                err.render(deps.stderr, "promote", deps.styler.for_stderr());
                 exit
             }
         }
@@ -1379,7 +1380,7 @@ mod tests {
             Ok(exit) => exit,
             Err(err) => {
                 let exit = err.exit();
-                err.render(deps.stderr, "promote");
+                err.render(deps.stderr, "promote", deps.styler.for_stderr());
                 exit
             }
         }
@@ -2321,7 +2322,7 @@ mod tests {
 
         let failure = finish_recovery_sync(Err(error), RecoveryAction::Retry).unwrap_err();
         let mut rendered = Vec::new();
-        failure.render(&mut rendered, "promote");
+        failure.render(&mut rendered, "promote", Styler::plain().for_stderr());
         let rendered = String::from_utf8(rendered).unwrap();
 
         assert!(rendered.contains("the Promotion was retried"));
@@ -2349,7 +2350,7 @@ mod tests {
 
         let failure = finish_recovery_sync(Err(error), RecoveryAction::Retry).unwrap_err();
         let mut rendered = Vec::new();
-        failure.render(&mut rendered, "promote");
+        failure.render(&mut rendered, "promote", Styler::plain().for_stderr());
         let rendered = String::from_utf8(rendered).unwrap();
 
         assert!(rendered.contains("Backend created gh-42"));
@@ -2375,7 +2376,7 @@ mod tests {
         )
         .unwrap_err();
         let mut rendered = Vec::new();
-        failure.render(&mut rendered, "promote");
+        failure.render(&mut rendered, "promote", Styler::plain().for_stderr());
 
         assert_eq!(
             String::from_utf8(rendered).unwrap(),
@@ -2394,7 +2395,7 @@ mod tests {
         )
         .unwrap_err();
         let mut rendered = Vec::new();
-        failure.render(&mut rendered, "promote");
+        failure.render(&mut rendered, "promote", Styler::plain().for_stderr());
         assert_eq!(
             String::from_utf8(rendered).unwrap(),
             "tk promote: the Promotion was retried, but sync did not finish\n\
@@ -2442,7 +2443,7 @@ mod tests {
         for (error, expected) in cases {
             let failure = finish_recovery_sync(Err(error), RecoveryAction::Reconcile).unwrap_err();
             let mut rendered = Vec::new();
-            failure.render(&mut rendered, "promote");
+            failure.render(&mut rendered, "promote", Styler::plain().for_stderr());
             assert_eq!(String::from_utf8(rendered).unwrap(), expected);
         }
     }
@@ -2459,7 +2460,7 @@ mod tests {
         )
         .unwrap_err();
         let mut rendered = Vec::new();
-        failure.render(&mut rendered, "promote");
+        failure.render(&mut rendered, "promote", Styler::plain().for_stderr());
         let rendered = String::from_utf8(rendered).unwrap();
 
         assert!(rendered.contains("indeterminate Backend creation outcome"));
@@ -2485,7 +2486,7 @@ mod tests {
 
         let error = render_mappings(&mut stdout, &store, &captured).unwrap_err();
         let mut stderr = Vec::new();
-        error.render(&mut stderr, "promote");
+        error.render(&mut stderr, "promote", Styler::plain().for_stderr());
 
         assert!(stdout.is_empty());
         assert_eq!(
@@ -2511,7 +2512,7 @@ mod tests {
 
         let error = render_mappings(&mut stdout, &store, &captured).unwrap_err();
         let mut stderr = Vec::new();
-        error.render(&mut stderr, "promote");
+        error.render(&mut stderr, "promote", Styler::plain().for_stderr());
 
         assert!(stdout.is_empty());
         assert_eq!(
@@ -2558,7 +2559,7 @@ mod tests {
 
         let error = render_mappings(&mut stdout, &store, &captured).unwrap_err();
         let mut stderr = Vec::new();
-        error.render(&mut stderr, "promote");
+        error.render(&mut stderr, "promote", Styler::plain().for_stderr());
 
         assert_eq!(
             String::from_utf8(stdout).unwrap(),
@@ -2684,7 +2685,11 @@ mod tests {
         ];
 
         let mut out = Vec::new();
-        refusal("tk-1", &findings, BackendKind::Github).render(&mut out, "promote");
+        refusal("tk-1", &findings, BackendKind::Github).render(
+            &mut out,
+            "promote",
+            Styler::plain().for_stderr(),
+        );
 
         assert_eq!(
             String::from_utf8(out).unwrap(),
@@ -3319,7 +3324,7 @@ mod tests {
         let err = unresolved_failure(Some(&unresolved), &unresolved, None);
 
         let mut out = Vec::new();
-        err.render(&mut out, "promote");
+        err.render(&mut out, "promote", Styler::plain().for_stderr());
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "tk promote: the Promotion did not finish: Mutation 4 (failed) for tk-2 is unresolved\n\
@@ -3334,7 +3339,7 @@ mod tests {
         let err = unresolved_failure(None, &status(4, MutationState::Skipped, "tk-2"), None);
 
         let mut out = Vec::new();
-        err.render(&mut out, "promote");
+        err.render(&mut out, "promote", Styler::plain().for_stderr());
         assert!(
             String::from_utf8(out)
                 .unwrap()

@@ -419,7 +419,7 @@ mod tests {
             Ok(exit) => exit,
             Err(err) => {
                 let exit = err.exit();
-                err.render(deps.stderr, "list");
+                err.render(deps.stderr, "list", deps.styler.for_stderr());
                 exit
             }
         }

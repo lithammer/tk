@@ -12,9 +12,9 @@
 //! several writes) and another wraps a span inside it, the two must touch
 //! disjoint SGR families (foreground colour vs. bold/dim vs. underline vs.
 //! background). The inner span's close resets its family to default but
-//! does *not* restore a previously-set outer value. The initial entries
-//! here are constraint-safe: foreground-colour families and bold/dim
-//! families do not overlap.
+//! does *not* restore a previously-set outer value. Nested entries keep
+//! foreground-colour families separate from bold/dim. `ERROR_LABEL` uses
+//! both families and must never nest.
 //!
 //! The crate-level `Styler` honours the invariant by hand-deriving each
 //! palette entry's close from the [`Style`] value rather than reaching
@@ -34,6 +34,9 @@ const fn fg(color: AnsiColor) -> Style {
 
 /// Bold heading text used for section labels in `tk show` and `tk list`.
 pub const HEADER: Style = Style::new().bold();
+
+/// Command-error prefix. Never nested: its close resets both bold and foreground.
+pub const ERROR_LABEL: Style = fg(AnsiColor::Red).bold();
 
 /// Display ID for Epics. Cyan — the Display ID is the per-item anchor that
 /// lets a reader pick one item out of a wall of text (`tk grep`, ADR-0026);

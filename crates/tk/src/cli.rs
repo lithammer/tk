@@ -19,6 +19,8 @@ use crate::clock::Clock;
 use crate::commands;
 use crate::proc::ProcRunner;
 use crate::render::Styler;
+use crate::render::palette;
+use crate::render::styler::SubStyler;
 
 /// Process exit status returned by every command handler.
 ///
@@ -121,22 +123,20 @@ impl CommandError {
         }
     }
 
-    /// Frame the diagnostic to `stderr` with the `tk <command>:` prefix. The
-    /// body's own newlines pass through, so a multi-line body (a cause detail
-    /// after the headline) is framed on its first line only — matching the
-    /// pre-seam `writeln!(stderr, "tk {command}: {body}")` bytes exactly. A
-    /// forwarded `tail` is written verbatim after the frame and is never
-    /// styled — it is the subprocess's voice, not tk's.
-    pub fn render<W: Write + ?Sized>(&self, stderr: &mut W, command: &str) {
+    /// Style only the `tk <command>:` prefix with the stderr policy.
+    /// The body (including newlines) and subprocess tail pass through unchanged.
+    pub fn render<W: Write + ?Sized>(&self, stderr: &mut W, command: &str, styler: SubStyler) {
+        let open = styler.open(palette::ERROR_LABEL);
+        let close = styler.close(palette::ERROR_LABEL);
         match self {
             Self::Failure { body, tail } => {
-                let _ = writeln!(stderr, "tk {command}: {body}");
+                let _ = writeln!(stderr, "{open}tk {command}:{close} {body}");
                 if let Some(tail) = tail {
                     let _ = stderr.write_all(tail);
                 }
             }
             Self::Usage { body } => {
-                let _ = writeln!(stderr, "tk {command}: {body}");
+                let _ = writeln!(stderr, "{open}tk {command}:{close} {body}");
             }
         }
     }
@@ -386,7 +386,7 @@ fn finish(deps: &mut Deps<'_>, command: &str, result: Result<Exit, CommandError>
     match result {
         Ok(exit) => exit,
         Err(err) => {
-            err.render(deps.stderr, command);
+            err.render(deps.stderr, command, deps.styler.for_stderr());
             err.exit()
         }
     }
@@ -438,7 +438,102 @@ fn render_clap_error(deps: Deps<'_>, err: &clap::Error) -> Exit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
+    use crate::render::ColorChoice;
+    use crate::store::testing::TmpStore;
     use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn failure_prefix_uses_stderr_color_choice() {
+        for stdout in [ColorChoice::Always, ColorChoice::Never] {
+            for stderr in [ColorChoice::Always, ColorChoice::Never] {
+                let store = TmpStore::new("repo");
+                seed_store(&store);
+                let cwd = cwd();
+                let mut h = Harness::new(&cwd, &store);
+                expect_git(&h, &store);
+                let args = ["sync", "log", "7"].map(str::to_owned);
+
+                let exit = run_argv(h.deps_with(Styler { stdout, stderr }), &args).unwrap();
+
+                assert_eq!(exit, Exit::Failure);
+                assert!(h.stdout.is_empty());
+                assert_eq!(
+                    h.err(),
+                    match stderr {
+                        ColorChoice::Always => {
+                            "\x1b[1m\x1b[31mtk sync log:\x1b[39m\x1b[22m Mutation 7 not found\n"
+                        }
+                        ColorChoice::Never => "tk sync log: Mutation 7 not found\n",
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn usage_error_styles_only_its_prefix() {
+        let store = TmpStore::new("repo");
+        let cwd = cwd();
+        let mut h = Harness::new(&cwd, &store);
+        let args = ["grep", ""].map(str::to_owned);
+
+        let exit = run_argv(h.deps_with(Styler::always()), &args).unwrap();
+
+        assert_eq!(exit, Exit::Usage);
+        assert!(h.stdout.is_empty());
+        assert_eq!(
+            h.err(),
+            "\x1b[1m\x1b[31mtk grep:\x1b[39m\x1b[22m pattern must not be empty\n"
+        );
+    }
+
+    #[test]
+    fn styled_error_preserves_multiline_body_and_subprocess_bytes() {
+        let error = CommandError::failure_with_tail(
+            "smoke check failed\nretry after fixing the binary",
+            b"\xff\x1b[32mchild output\x1b[0m\nno trailing newline".to_vec(),
+        );
+        let mut stderr = Vec::new();
+
+        error.render(&mut stderr, "self-update", Styler::always().for_stderr());
+
+        assert_eq!(
+            stderr,
+            b"\x1b[1m\x1b[31mtk self-update:\x1b[39m\x1b[22m smoke check failed\nretry after fixing the binary\n\xff\x1b[32mchild output\x1b[0m\nno trailing newline"
+        );
+    }
+
+    #[test]
+    fn no_match_stays_silent_with_color_enabled() {
+        let store = TmpStore::new("repo");
+        seed_store(&store);
+        let cwd = cwd();
+        let mut h = Harness::new(&cwd, &store);
+        expect_git(&h, &store);
+        let args = ["grep", "missing"].map(str::to_owned);
+
+        let exit = run_argv(h.deps_with(Styler::always()), &args).unwrap();
+
+        assert_eq!(exit, Exit::NoMatch);
+        assert!(h.stdout.is_empty());
+        assert!(h.stderr.is_empty());
+    }
+
+    #[test]
+    fn parser_errors_stay_plain_with_color_enabled() {
+        let store = TmpStore::new("repo");
+        let cwd = cwd();
+        let mut h = Harness::new(&cwd, &store);
+        let args = ["--unknown".to_owned()];
+
+        let exit = run_argv(h.deps_with(Styler::always()), &args).unwrap();
+
+        assert_eq!(exit, Exit::Usage);
+        assert!(h.stdout.is_empty());
+        assert!(h.err().contains("unexpected argument '--unknown'"));
+        assert!(!h.stderr.contains(&0x1b));
+    }
 
     #[test]
     fn broken_pipe_write_error_is_success() {
@@ -454,7 +549,7 @@ mod tests {
             .expect_err("a non-broken-pipe write error is a diagnosed failure");
         assert_eq!(diagnostic.exit(), Exit::Failure);
         let mut stderr: Vec<u8> = Vec::new();
-        diagnostic.render(&mut stderr, "grep");
+        diagnostic.render(&mut stderr, "grep", Styler::plain().for_stderr());
         let stderr = String::from_utf8(stderr).unwrap();
         assert!(
             stderr.contains("tk grep: failed to write output"),

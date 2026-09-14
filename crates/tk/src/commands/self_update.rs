@@ -789,7 +789,7 @@ mod tests {
             Ok(exit) => exit,
             Err(err) => {
                 let exit = err.exit();
-                err.render(stderr, "self-update");
+                err.render(stderr, "self-update", Styler::plain().for_stderr());
                 exit
             }
         }

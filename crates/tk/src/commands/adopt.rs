@@ -314,6 +314,7 @@ fn readopt_display_id<'a>(
 
 #[cfg(test)]
 mod tests {
+    use crate::render::Styler;
     use std::path::Path;
 
     use super::*;
@@ -368,7 +369,7 @@ mod tests {
             Ok(exit) => exit,
             Err(err) => {
                 let exit = err.exit();
-                err.render(deps.stderr, "adopt");
+                err.render(deps.stderr, "adopt", deps.styler.for_stderr());
                 exit
             }
         }
@@ -729,12 +730,12 @@ mod tests {
         // failure — both framed `tk adopt:` by the seam.
         let failed = adapter_read_error(AdapterReadError::Failed("HTTP 502".into()));
         let mut out = Vec::new();
-        failed.render(&mut out, "adopt");
+        failed.render(&mut out, "adopt", Styler::plain().for_stderr());
         assert_eq!(String::from_utf8(out).unwrap(), "tk adopt: HTTP 502\n");
 
         let env = adapter_read_error(AdapterReadError::Env(ProcError::ExecutableNotFound));
         let mut out = Vec::new();
-        env.render(&mut out, "adopt");
+        env.render(&mut out, "adopt", Styler::plain().for_stderr());
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "tk adopt: executable not found on PATH\n"
@@ -764,7 +765,7 @@ mod tests {
             ],
         });
         let mut out = Vec::new();
-        error.render(&mut out, "adopt");
+        error.render(&mut out, "adopt", Styler::plain().for_stderr());
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "tk adopt: cannot re-adopt gh-42:\n  \

@@ -84,7 +84,7 @@ mod tests {
             Ok(exit) => exit,
             Err(err) => {
                 let exit = err.exit();
-                err.render(deps.stderr, "unpark");
+                err.render(deps.stderr, "unpark", deps.styler.for_stderr());
                 exit
             }
         }
