@@ -246,7 +246,6 @@ impl Repo {
             .join("tk.db")
     }
 
-    /// Move the fixture's Store into Git metadata and remove its association.
     fn move_to_legacy(&self) -> PathBuf {
         let source = self.cwd.join(".git/tk");
         fs::rename(self.db_path().parent().unwrap(), &source).unwrap();

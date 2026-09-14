@@ -181,8 +181,9 @@ bundled by libsqlite3-sys 0.30.1, defines this in `sqlite3PagerCloseWal` and
 This lock excludes writes while held; it does not prove that every connection
 has closed. An idle rollback-mode connection can survive it. Windows also
 requires closing SQLite before deleting its database: SQLite's Windows VFS
-opens database handles without delete sharing. Quiescence covers that gap.
-A rename alone cannot stop an old process from writing.
+opens database handles without delete sharing. Keeping old processes stopped
+prevents writes between closing SQLite and deleting the source. A rename alone
+cannot stop an old process from writing.
 
 On Unix, closing any descriptor for a database inode releases that process's
 POSIX locks. The fingerprint reader therefore holds its descriptor until the
@@ -193,11 +194,13 @@ that the source remains locked after hashing and publication.
 
 A versioned `tk-migration.json` in the Git Common Directory records a random
 Store ID, a separate random token, the canonical Git Common Directory and the
-data root. It is published through a flushed pending file before staging starts
-and survives legacy cleanup. A matching receipt beside the destination manifest
-binds that attempt to its source and records SHA-256 fingerprints of the legacy files. Neither a
-matching path nor an ordinary manifest authorizes resuming a migration.
-The stable `store.json` remains version 1 and owns only identity and association.
+directory containing Stores (`<local data>/tk/stores`). Init publishes the
+record through a flushed pending file before staging starts and keeps it
+through legacy cleanup. A matching receipt beside the destination manifest
+binds that attempt to its source and records SHA-256 fingerprints of the
+legacy files. Neither a matching path nor an ordinary manifest authorizes
+resuming a migration. The stable `store.json` remains version 1 and owns only
+identity and association.
 
 Before pointer installation, legacy remains authoritative. Init builds a fresh
 `VACUUM INTO` image under `stores/.migrations/<Store ID>`, on the destination
@@ -236,9 +239,9 @@ The progress record has this shape (paths below are examples):
 
 The receipt is `migration.json` beside `store.json`. It has `progress` (the
 record above) and `files` (relative legacy filenames mapped to SHA-256 hex
-strings). Progress files are separate from the stable manifest and are removed
-after cleanup. A leftover empty `.migrations` directory has no Store identity
-and is excluded from candidate discovery.
+strings). Init removes the receipt and progress record after source cleanup;
+neither changes the stable manifest. A leftover empty `.migrations` directory
+has no Store identity and is excluded from candidate discovery.
 
 Migration success prints `Migrated Repository Store <Store ID> from <legacy
 directory> to <durable directory>`. Legacy open refusal says `legacy Repository

@@ -148,7 +148,7 @@ pub fn refuse_legacy(common: &Path) -> Result<(), Error> {
     }
 }
 
-/// Serialize fresh init across the data root while scanning and publishing Stores.
+/// Serialize initialization and attachment across the data root.
 pub fn lock_init(root: &Path) -> Result<File, Error> {
     create_private_dirs(root)?;
     lock_file(&root.parent().unwrap().join("init.lock"), true)
