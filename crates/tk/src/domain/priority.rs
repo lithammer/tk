@@ -46,26 +46,26 @@ impl fmt::Display for Priority {
     }
 }
 
-/// Returned by [`Priority::from_str`] when the text is not a `P0..P4` spelling.
+/// Returned by [`Priority::from_str`] when the text is not an accepted CLI spelling.
 /// Its `Display` is the message `clap` surfaces for an invalid `--priority`
 /// value, so the single parser (used by `tk add` / `tk update` / `tk accept`)
 /// keeps one verbatim diagnostic instead of drifting per-command copies.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("invalid priority `{0}` (expected P0, P1, P2, P3, or P4)")]
+#[error("invalid priority `{0}` (expected P0..P4, p0..p4, or 0..4)")]
 pub struct ParsePriorityError(pub String);
 
 impl FromStr for Priority {
     type Err = ParsePriorityError;
 
-    /// Parse a CLI `--priority` token. The accepted spellings mirror
-    /// [`Priority::text`] and the `items.priority` CHECK constraint.
+    /// Parse a CLI `--priority` token: `P0`..`P4`, `p0`..`p4`, or `0`..`4`.
+    /// Storage and rendering still use [`Priority::text`].
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "P0" => Ok(Self::P0),
-            "P1" => Ok(Self::P1),
-            "P2" => Ok(Self::P2),
-            "P3" => Ok(Self::P3),
-            "P4" => Ok(Self::P4),
+            "P0" | "p0" | "0" => Ok(Self::P0),
+            "P1" | "p1" | "1" => Ok(Self::P1),
+            "P2" | "p2" | "2" => Ok(Self::P2),
+            "P3" | "p3" | "3" => Ok(Self::P3),
+            "P4" | "p4" | "4" => Ok(Self::P4),
             other => Err(ParsePriorityError(other.to_string())),
         }
     }
@@ -74,6 +74,41 @@ impl FromStr for Priority {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn from_str_accepts_cli_spellings_and_keeps_canonical_text() {
+        for (spellings, expected, text) in [
+            (["P0", "p0", "0"], Priority::P0, "P0"),
+            (["P1", "p1", "1"], Priority::P1, "P1"),
+            (["P2", "p2", "2"], Priority::P2, "P2"),
+            (["P3", "p3", "3"], Priority::P3, "P3"),
+            (["P4", "p4", "4"], Priority::P4, "P4"),
+        ] {
+            for spelling in spellings {
+                let priority = Priority::from_str(spelling).unwrap();
+                assert_eq!(priority, expected, "{spelling}");
+                assert_eq!(priority.text(), text);
+                assert_eq!(priority.to_string(), text);
+            }
+        }
+    }
+
+    #[test]
+    fn from_str_rejects_other_spellings_with_shared_diagnostic() {
+        for spelling in [
+            "", "P5", "p5", "5", "P10", "10", "01", "p01", "-1", "+1", "p-1", "high", "crit",
+            " P1", "P1 ", "1\n", "Ｐ1",
+        ] {
+            assert_eq!(
+                Priority::from_str(spelling),
+                Err(ParsePriorityError(spelling.to_owned())),
+            );
+        }
+        assert_eq!(
+            Priority::from_str("high").unwrap_err().to_string(),
+            "invalid priority `high` (expected P0..P4, p0..p4, or 0..4)",
+        );
+    }
 
     #[test]
     fn display_writes_text() {
