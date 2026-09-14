@@ -68,6 +68,11 @@ It survives deletion of the repository until the user explicitly deletes it.
 The repository-local \fItk.storeId\fR and the Store's \fIstore.json\fR must
 agree on its identity and Git Common Directory association.
 .PP
+Ordinary commands read Git metadata without writing it or refreshing the manifest.
+They still need a writable Store directory for SQLite and lock files. Sandboxes
+must grant the specific Store directory as a writable root. Initialization and
+reassociation also write Git config and the data-root initialization lock.
+.PP
 For a legacy Store under \fI<git-common-dir>/tk/\fR, stop all tk processes,
 then run \fBtk init\fR. Keep old binaries stopped through retries and cleanup.
 Init moves a consistent SQLite image and all Store Backups into

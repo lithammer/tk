@@ -157,7 +157,10 @@ database. The shared opener validates the Store ID and canonical Git Common
 Directory association before SQLite access. Legacy Git-directory Stores are
 migration input for `tk init`; ordinary commands never open them. Relocation
 retains exclusive SQLite locks through cutover and uses separate progress
-records to resume with the same Store ID (ADR-0053).
+records to resume with the same Store ID (ADR-0053). Ordinary opens read Git
+metadata without writing it and never refresh the manifest. SQLite and Store
+locks still require a writable per-Store directory in a sandbox; initialization
+and reassociation also write Git config and the data-root initialization lock.
 
 An opened `Store` retains a shared `association.lock` until its SQLite connection
 closes. Attachment requires the exclusive lock and publishes the manifest before

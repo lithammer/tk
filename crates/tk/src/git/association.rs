@@ -100,13 +100,12 @@ pub fn former_pointers<R: ProcRunner + ?Sized>(
     runner: &R,
     common: &Path,
 ) -> Result<Vec<String>, ConfigError> {
-    let common_text = common.to_str().ok_or(ConfigError("inspect ownership of"))?;
     let output = runner
         .run(
             &[
                 "git",
                 "--git-dir",
-                common_text,
+                ".",
                 "config",
                 "--local",
                 "--no-includes",

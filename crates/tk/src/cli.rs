@@ -207,9 +207,12 @@ enum Command {
     Park(commands::park::Args),
     /// Return a parked Ticket to accepted, selectable work.
     Unpark(commands::unpark::Args),
-    /// Initialize the Repository Store in the current Git repository.
+    /// Initialize the Repository Store for the current Git repository.
     ///
-    /// Broken associations print ranked evidence and complete recovery commands.
+    /// Stores live in platform-local user data outside the checkout. Stop all tk
+    /// processes before running init to migrate a legacy Store from Git metadata.
+    /// Init repairs uniquely identified Vacant Stores; other broken associations
+    /// print ranked evidence and complete recovery commands.
     /// Attachment requires valid metadata and a readable database. Release the
     /// former repository's pointer before attaching a Store it still owns.
     /// Both recovery options refuse a healthy association and preserve prior data.

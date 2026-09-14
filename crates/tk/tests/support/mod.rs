@@ -12,7 +12,7 @@ pub fn run(cwd: &Path, root: &Path, args: &[String], env: &[(&str, &str)]) -> Ou
         .env("TK_TEST_ARGS", serde_json::to_string(args).unwrap())
         .env("TK_TEST_ROOT", root)
         .env("TK_TEST_CAPTURE", capture.path())
-        .env("GIT_CONFIG_GLOBAL", root.join("global.gitconfig"))
+        .env("GIT_CONFIG_GLOBAL", global_config(root))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CEILING_DIRECTORIES", root)
         .env_remove("GIT_DIR")
@@ -39,6 +39,21 @@ pub fn run(cwd: &Path, root: &Path, args: &[String], env: &[(&str, &str)]) -> Ou
     }
 }
 
+/// Git rejects Windows verbatim paths in GIT_CONFIG_GLOBAL.
+pub fn global_config(root: &Path) -> String {
+    let path = root.join("global.gitconfig");
+    let text = path.to_str().expect("UTF-8 test path");
+    if cfg!(windows) {
+        if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{unc}");
+        }
+        if let Some(drive) = text.strip_prefix(r"\\?\") {
+            return drive.to_string();
+        }
+    }
+    text.to_string()
+}
+
 #[test]
 #[ignore = "subprocess entry point for the real-Git command seam"]
 fn cli_child() {
@@ -61,6 +76,7 @@ fn cli_child() {
     let cwd = std::env::current_dir().unwrap();
     let data_root = match std::env::var("TK_TEST_DATA_ROOT") {
         Ok(value) if value == "missing" => None,
+        Ok(value) if value == "native" => dirs::data_local_dir(),
         Ok(value) => Some(std::path::PathBuf::from(value)),
         Err(_) => Some(root.join("data")),
     };

@@ -122,7 +122,7 @@ If vacancy inspection fails or finds user data, tk returns the ranked recovery
 report with explicit commands. Vacancy neither changes candidate rank nor overrides live
 or unknown ownership.
 
-tk permits attachment when the manifest names the current Git Common Directory, or when the former directory is readable and its local config no longer points to this Store. tk invokes `git --git-dir <former path> config --local --no-includes --null --get-all tk.storeId` so parent repository discovery cannot stand in for ownership inspection. Git 2.53.0's [`builtin/config.c`](https://github.com/git/git/blob/v2.53.0/builtin/config.c) selects repository config and refuses `--local` outside a repository. Failed Git invocations, unreadable directories, and directory symlinks leave ownership unknown.
+tk permits attachment when the manifest names the current Git Common Directory, or when the former directory is readable and its local config no longer points to this Store. tk runs `git --git-dir . config --local --no-includes --null --get-all tk.storeId` from that exact directory so parent repository discovery cannot stand in for ownership inspection. Passing `.` also avoids Windows verbatim paths: Git for Windows 2.55.0.windows.5 rejects their `?` in [`is_valid_win32_path`](https://github.com/git-for-windows/git/blob/v2.55.0.windows.5/compat/mingw.c). Failed Git invocations, unreadable directories, and directory symlinks leave ownership unknown.
 
 An absent former Git Common Directory permits attachment only when its immediate parent is readable and a directory listing confirms that the final component is absent. A missing ancestor remains unknown: it could be an unavailable volume. After moving a whole checkout, restore access to the former Git Common Directory's parent before attachment. tk does not infer release from an absent ancestor.
 
@@ -192,6 +192,10 @@ and closing a backup alias would otherwise release the same lock. SQLite's
 `os_unix.c` describes this constraint; the competing-writer CLI scenario checks
 that the source remains locked after hashing and publication.
 
+The inventory reads `remote.lock` through the handle that owns its exclusive
+lock. Windows [denies access through a second handle](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-lockfileex),
+even in the same process.
+
 A versioned `tk-migration.json` in the Git Common Directory records a random
 Store ID, a separate random token, the canonical Git Common Directory and the
 directory containing Stores (`<local data>/tk/stores`). Init publishes the
@@ -255,5 +259,17 @@ receipt removal, partial cleanup, stale pre-pointer images, changed post-pointer
 sources, every Mutation state, full row preservation, backup bytes, linked
 Workspaces, active WAL, old connections, competing operations, hard links, and
 injected storage faults. The legacy-connection fixture uses bundled SQLite
-without tk lifecycle locks. Native Windows and macOS execution remains part of
-the platform lifecycle verification in tk-237.
+without tk lifecycle locks. CI runs the scenario suite on Linux, macOS, and
+Windows. The composed lifecycle also covers linked Workspace edits, a moved
+checkout, interrupted reattachment, and preserved Plan and backup contents.
+A scenario holds Git's config lock while running ordinary commands against a
+healthy Store, then checks that config and manifest bytes and modification
+times stay unchanged.
+
+A Unix scenario tests native root resolution with isolated `HOME` and
+`XDG_DATA_HOME` settings.
+Windows scenarios inject an isolated data root: they do not redirect the user's
+known-folder configuration or prove native LocalAppData resolution. The alias
+reopening scenario uses Unix symlinks; Windows alias reopening remains untested.
+Native macOS and Windows results require their CI runners; a Linux run alone
+does not verify those platforms.
