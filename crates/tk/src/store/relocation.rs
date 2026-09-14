@@ -1,6 +1,6 @@
 //! Resumable legacy Store cutover. The Git pointer selects authority (ADR-0053).
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -328,7 +328,7 @@ fn flush_file(path: &Path) -> Result<(), Error> {
 
 fn flush_dir(path: &Path) -> Result<(), Error> {
     #[cfg(unix)]
-    File::open(path)?.sync_all()?;
+    fs::File::open(path)?.sync_all()?;
     #[cfg(not(unix))]
     let _ = path;
     Ok(())
