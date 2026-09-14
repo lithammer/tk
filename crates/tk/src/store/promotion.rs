@@ -344,7 +344,7 @@ pub fn apply_receipt(
           where id = ?1",
         params![
             item_id,
-            Origin::Backend.text(),
+            Origin::Backend,
             backend_kind,
             receipt.backend_key,
             receipt.display_id,
@@ -742,7 +742,7 @@ fn ensure_identity_unclaimed(
         .query_row(
             "select 1 from items \
               where backend_kind = ?1 and backend_key = ?2 and id <> ?3",
-            params![backend_kind.text(), &identity.backend_key, item_id],
+            params![backend_kind, &identity.backend_key, item_id],
             |_| Ok(()),
         )
         .optional()?

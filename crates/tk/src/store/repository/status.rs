@@ -202,8 +202,8 @@ pub fn close_item<C: Clock + ?Sized>(
            where id = ?1",
         params![
             id,
-            Lifecycle::Done.text(),
-            WorkState::Idle.text(),
+            Lifecycle::Done,
+            WorkState::Idle,
             closing_reason,
             now_iso,
         ],

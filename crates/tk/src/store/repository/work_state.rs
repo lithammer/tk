@@ -123,7 +123,7 @@ pub fn set_work_state<C: Clock + ?Sized>(
 
     tx.execute(
         "update items set work_state = ?2, updated_at = ?3 where id = ?1",
-        params![id, target.text(), now_iso],
+        params![id, target, now_iso],
     )?;
 
     tx.commit()?;

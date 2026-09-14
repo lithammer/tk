@@ -123,7 +123,7 @@ where
         NewTicketSelection::Triage => (SelectionState::Triage, None),
         NewTicketSelection::Accepted(priority) => (SelectionState::Accepted, Some(priority)),
     };
-    let container_class: Option<&str> = input.parent_id.map(|_| ItemClass::Epic.text());
+    let container_class = input.parent_id.map(|_| ItemClass::Epic);
     // Both axes are bound side by side, rather than letting the `work_state`
     // DDL default supply one, so "a newly created Item is open and idle"
     // (ADR-0043) is visible where it is decided.
@@ -136,17 +136,17 @@ where
         params![
             id,
             display_id,
-            ItemClass::Ticket.text(),
-            input.kind.text(),
-            priority.map(Priority::text),
+            ItemClass::Ticket,
+            input.kind,
+            priority,
             input.title,
             input.body,
             input.parent_id,
             container_class,
-            Origin::Local.text(),
-            lifecycle.text(),
-            work_state.text(),
-            selection_state.text(),
+            Origin::Local,
+            lifecycle,
+            work_state,
+            selection_state,
             created_seq,
             now_iso,
         ],
@@ -197,12 +197,12 @@ where
         params![
             id,
             display_id,
-            ItemClass::Epic.text(),
+            ItemClass::Epic,
             input.title,
             input.body,
-            Origin::Local.text(),
-            lifecycle.text(),
-            work_state.text(),
+            Origin::Local,
+            lifecycle,
+            work_state,
             created_seq,
             now_iso,
         ],

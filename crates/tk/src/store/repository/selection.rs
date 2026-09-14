@@ -99,7 +99,7 @@ pub fn accept_ticket<C: Clock + ?Sized>(
             tx.execute(
                 "update items set selection_state = 'accepted', priority = ?2, updated_at = ?3 \
                  where id = ?1",
-                params![id, priority.text(), clock.now_iso()],
+                params![id, priority, clock.now_iso()],
             )?;
             tx.commit()?;
             Ok(AcceptOutcome::Accepted {
