@@ -183,7 +183,7 @@ pub fn detach(
                 detached_seq = excluded.detached_seq, \
                 detached_at = excluded.detached_at",
         params![
-            backend_kind.text(),
+            backend_kind,
             backend_key,
             &reference.id,
             &reference.display_id,

@@ -267,15 +267,15 @@ pub fn adopt_backend_ticket(
         params![
             id,
             adopted.display_id,
-            ItemClass::Ticket.text(),
-            adopted.ticket_kind.text(),
+            ItemClass::Ticket,
+            adopted.ticket_kind,
             "P2",
             adopted.title,
             adopted.body,
-            expected_kind.text(),
+            expected_kind,
             adopted.backend_key,
-            adopted.status.text(),
-            SelectionState::Accepted.text(),
+            adopted.status,
+            SelectionState::Accepted,
             created_seq,
             now,
         ],
@@ -432,14 +432,14 @@ fn readopt_backend_item(
           where id = ?1",
         params![
             &former.item_id,
-            backend_kind.text(),
+            backend_kind,
             &former.backend_key,
             &former.backend_display_id,
             adopted.title,
             adopted.body,
-            ticket_kind.map(TicketKind::text),
-            adopted.status.text(),
-            work_state.text(),
+            ticket_kind,
+            adopted.status,
+            work_state,
             closing_reason,
             now,
             stored_provenance,
@@ -538,7 +538,7 @@ fn find_former_backend_identity(
             and (backend_key = ?2 or (?3 is not null and backend_key = ?3)) \
           order by backend_key = ?2 desc \
           limit 1",
-        params![backend_kind.text(), backend_key, legacy_backend_key],
+        params![backend_kind, backend_key, legacy_backend_key],
         |row| {
             Ok(FormerIdentity {
                 item_id: row.get(0)?,
@@ -1446,10 +1446,10 @@ fn relinquish_close(
               where id = ?1 and status = ?5",
             params![
                 item_id,
-                Lifecycle::Open.text(),
-                WorkState::Idle.text(),
+                Lifecycle::Open,
+                WorkState::Idle,
                 now,
-                Lifecycle::Done.text(),
+                Lifecycle::Done,
             ],
         )
         .map_err(|err| match err {
@@ -1514,7 +1514,7 @@ fn find_adopted_ticket_by_identity(
            from items \
           where backend_kind = ?1 \
             and (backend_key = ?2 or (?3 is not null and backend_key = ?3))",
-            params![backend_kind.text(), backend_key, legacy_backend_key],
+            params![backend_kind, backend_key, legacy_backend_key],
             |row| {
                 Ok((
                     row.get::<_, ItemClass>(0)?,
@@ -1654,7 +1654,7 @@ pub fn merge_backend_refreshes(
             .query_row(
                 "select id, item_class from items \
                   where backend_kind = ?1 and backend_key = ?2 and status = 'open'",
-                params![expected_kind.text(), key],
+                params![expected_kind, key],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
@@ -1692,8 +1692,8 @@ pub fn merge_backend_refreshes(
               status = ?4, \
               work_state = coalesce(?7, work_state) \
               where id = ?1",
-            params![item_id, title_write, body_write, status.text(), now,
-                ticket_kind.map(TicketKind::text), work_state_write],
+            params![item_id, title_write, body_write, status, now,
+                ticket_kind, work_state_write],
         )?;
     }
     tx.commit()?;
@@ -1904,12 +1904,12 @@ pub fn set_remote(
     tx.execute(
         "insert into remotes(name, backend_kind, config_json, created_at, updated_at) \
          values ('primary', ?1, ?2, ?3, ?3)",
-        params![kind.text(), config_json, now],
+        params![kind, config_json, now],
     )?;
     tx.execute(
         "insert into sync_cursors(remote_name, backend_kind, last_applied_sequence, updated_at) \
          values ('primary', ?1, 0, ?2)",
-        params![kind.text(), now],
+        params![kind, now],
     )?;
 
     tx.commit()?;
