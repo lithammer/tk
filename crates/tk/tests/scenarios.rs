@@ -2918,16 +2918,9 @@ fn store_lifecycle_preserves_work_through_migration_linked_access_and_recovery()
         "Initial",
     ]);
     p.git(&["worktree", "add", "-q", "../linked"]);
-    let out = support::run(
-        &p.root.join("linked"),
-        &p.root,
-        &["show".into(), "legacy-2".into()],
-        &[],
-    );
-    assert!(out.status.success());
-    assert_eq!(render(&out, &p.root), shown);
     let main = p.cwd.clone();
     p.cwd = p.root.join("linked");
+    assert_eq!(p.run("show legacy-2"), shown);
     assert!(
         p.run("update legacy-2 --title 'Worked from linked Workspace'")
             .contains("Updated")
