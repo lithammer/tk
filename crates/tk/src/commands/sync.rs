@@ -265,8 +265,6 @@ fn skip_error(err: &MarkSkippedError) -> Error {
     }
 }
 
-/// Map a [`LogError`] from any `tk sync log` read. Only the SQLite arm is an
-/// ordinary storage fault; the rest fall through to the generic frame.
 fn log_error(err: &LogError) -> CommandError {
     match err {
         LogError::Storage(err) => resolver::storage_error(err),
@@ -276,8 +274,6 @@ fn log_error(err: &LogError) -> CommandError {
     }
 }
 
-/// Map a [`RunSyncError`] to its diagnostic body. Storage-class and
-/// environment failures fall through to the generic frame.
 fn run_sync_error(err: &RunSyncError) -> CommandError {
     match err.category() {
         RunSyncErrorCategory::BackendDetail(detail) => CommandError::failure(detail),
@@ -1353,7 +1349,7 @@ mod tests {
     }
 
     #[test]
-    fn render_skip_error_frames_a_failed_reopen_as_a_bug() {
+    fn skip_error_frames_a_failed_reopen_as_a_bug() {
         // ADR-0017 keeps these lines verbatim, and the store-side tests assert
         // the variant rather than the rendered bytes. Neither reopen failure is
         // reachable through a Store writer, so this is the only place their
@@ -1378,7 +1374,7 @@ mod tests {
     }
 
     #[test]
-    fn render_run_sync_error_renders_pull_failure_detail() {
+    fn run_sync_error_renders_pull_failure_detail() {
         let mut err_out = Vec::new();
         run_sync_error(&RunSyncError::Pull(AdapterReadError::Failed(
             "gh: HTTP 502".into(),
@@ -1391,7 +1387,7 @@ mod tests {
     }
 
     #[test]
-    fn render_run_sync_error_renders_remote_change_retry_guidance() {
+    fn run_sync_error_renders_remote_change_retry_guidance() {
         let mut err_out = Vec::new();
         run_sync_error(&RunSyncError::Refresh(RefreshStoreError::RemoteChanged {
             expected: BackendKind::Github,
@@ -1406,7 +1402,7 @@ mod tests {
     }
 
     #[test]
-    fn render_run_sync_error_renders_unknown_backend_cohort_as_an_invariant_failure() {
+    fn run_sync_error_renders_unknown_backend_cohort_as_an_invariant_failure() {
         let mut err_out = Vec::new();
         run_sync_error(&RunSyncError::Refresh(RefreshStoreError::BackendCohort(
             BackendCohortError::UnknownBackendKind("gitlab".into()),
@@ -1420,7 +1416,7 @@ mod tests {
     }
 
     #[test]
-    fn render_run_sync_error_renders_schema_drift() {
+    fn run_sync_error_renders_schema_drift() {
         let mut err_out = Vec::new();
         run_sync_error(&RunSyncError::Load(
             LoadApplicableError::UnknownMutationType("weird".into()),
@@ -1434,7 +1430,7 @@ mod tests {
     }
 
     #[test]
-    fn render_run_sync_error_names_an_outcome_boundary_mismatch_as_a_bug() {
+    fn run_sync_error_names_an_outcome_boundary_mismatch_as_a_bug() {
         // An Adapter that answers a Promotion with a bare acknowledgement has
         // broken its contract: the Mutation stays applicable, so the user needs
         // to know retrying will not clear it.
@@ -1454,7 +1450,7 @@ mod tests {
     }
 
     #[test]
-    fn render_run_sync_error_names_a_malformed_payload_as_a_bug() {
+    fn run_sync_error_names_a_malformed_payload_as_a_bug() {
         let mut err_out = Vec::new();
         run_sync_error(&RunSyncError::Outcome(
             PersistMutationOutcomeError::PayloadJson {
@@ -1472,7 +1468,7 @@ mod tests {
     }
 
     #[test]
-    fn render_run_sync_error_blocks_retry_after_indeterminate_creation() {
+    fn run_sync_error_blocks_retry_after_indeterminate_creation() {
         let mut stderr = Vec::new();
 
         run_sync_error(&RunSyncError::ApplyingMutation(7)).render(&mut stderr, COMMAND);
@@ -1484,7 +1480,7 @@ mod tests {
     }
 
     #[test]
-    fn render_run_sync_error_preserves_an_unstored_created_identity() {
+    fn run_sync_error_preserves_an_unstored_created_identity() {
         let mut stderr = Vec::new();
         let error = RunSyncError::CreatedIdentityNotStored {
             sequence: 7,
@@ -1505,7 +1501,7 @@ mod tests {
     }
 
     #[test]
-    fn render_run_sync_error_labels_post_create_origin_drift_as_corruption() {
+    fn run_sync_error_labels_post_create_origin_drift_as_corruption() {
         let mut stderr = Vec::new();
         let error = RunSyncError::CreatedIdentityNotStored {
             sequence: 7,
@@ -1529,7 +1525,7 @@ mod tests {
     }
 
     #[test]
-    fn render_run_sync_error_preserves_storage_classification() {
+    fn run_sync_error_preserves_storage_classification() {
         let busy = rusqlite::Error::SqliteFailure(
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
             None,
@@ -1548,7 +1544,7 @@ mod tests {
     }
 
     #[test]
-    fn render_run_sync_error_preserves_direct_technical_errors() {
+    fn run_sync_error_preserves_direct_technical_errors() {
         let mut stderr = Vec::new();
 
         run_sync_error(&RunSyncError::Outcome(
