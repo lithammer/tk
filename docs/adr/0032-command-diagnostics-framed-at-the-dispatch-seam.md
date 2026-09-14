@@ -5,8 +5,7 @@ Command handlers stop writing their own stderr. Each `run()` returns
 the `tk <command>:` frame, applies stderr styling, and maps the failure to its
 exit code. This replaces the per-command "handler writes its own diagnostic"
 shape ADR-0018 recorded, removes the per-command `const COMMAND` and the ~44
-inline `tk <command>:` prefix literals, and makes the stderr colour policy
-(gh-64) a change at the seam instead of a 16-file scatter.
+inline `tk <command>:` prefix literals, and centralizes stderr styling.
 
 ## The grep-able unit is the message body, not the full line
 
@@ -96,7 +95,7 @@ subprocess output.
 
 ## Error-prefix styling
 
-gh-64 gives `CommandError::Failure` and `CommandError::Usage` the same
+The renderer gives `CommandError::Failure` and `CommandError::Usage` the same
 red+bold `tk <command>:` prefix through `deps.styler.for_stderr()`. The
 style includes the colon and ends before the following space. The body,
 including any later lines, and the forwarded subprocess tail retain their
@@ -105,7 +104,7 @@ bytes. `Exit::NoMatch` remains silent.
 This style belongs to the shared command-error renderer. Parser errors,
 internal failures, successful-command warnings, and informational stderr
 output are outside its scope, even when their text contains a similar
-prefix. gh-64 adds no warning style.
+prefix.
 
 The existing per-stream color policy in ADR-0014 governs emission. Checks
 cover both error variants, independent stdout/stderr TTY states, forced
@@ -127,11 +126,9 @@ scaffolding, mirroring ADR-0018's "pin the idioms on one slice, then fan out":
    `Usage`), then `self_update` last (the only `tail` case, plus the
    `QueryError` prefix-stripping fixup).
 
-The `insta` scenario snapshots guard byte-for-byte stderr at every step.
-gh-64 lands after tk-128 brings sync's remaining diagnostics through the
-dispatch seam, completing the migration begun in tk-127. Styling a subset
-of commands' error prefixes would be inconsistent. Unforced non-TTY output
-stays byte-identical when styling lands.
+The `insta` scenario snapshots pin the plain diagnostic bytes. All command-error
+prefixes use the dispatch seam so they share one styling policy. Unforced
+non-TTY output stays byte-identical.
 
 `Exit::Internal` (exit 3, main's catch-all for I/O faults) is orthogonal and
 untouched.

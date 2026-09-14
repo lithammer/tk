@@ -33,11 +33,10 @@ the decision to add it or drop that part of this ADR.
 
 ## Consequences
 
-- The resolved per-stream color decision is ANSI or plain output. tk emits
-  SGR bytes only and downgrades unsupported legacy Windows consoles to plain.
-  Users on a modern terminal or a VT-enabled console see colour normally;
-  users on legacy `cmd.exe` get plain output rather than literal escape
-  codes.
+- The resolved per-stream color decision is ANSI or plain output. If a Windows
+  terminal cannot enable VT and `TERM` does not advertise ANSI support, tk
+  downgrades that stream to plain output. Redirected output can still carry
+  forced ANSI.
 - Nested-safe spans must touch **disjoint SGR families** (foreground color
   vs. bold/dim vs. underline vs. background). Closing an attribute resets
   that family to default; it does not restore a previously-set value. The

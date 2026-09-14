@@ -172,7 +172,7 @@ impl Styler {
         }
     }
 
-    /// Sub-styler bound to the stderr choice.
+    /// Uses stderr's color choice independently of stdout redirection.
     #[must_use]
     pub const fn for_stderr(self) -> SubStyler {
         SubStyler {
