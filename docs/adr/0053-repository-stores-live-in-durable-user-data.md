@@ -122,7 +122,7 @@ If vacancy inspection fails or finds user data, tk returns the ranked recovery
 report with explicit commands. Vacancy neither changes candidate rank nor overrides live
 or unknown ownership.
 
-tk permits attachment when the manifest names the current Git Common Directory, or when the former directory is readable and its local config no longer points to this Store. tk invokes `git --git-dir <former path> config --local --no-includes --null --get-all tk.storeId` so parent repository discovery cannot stand in for ownership inspection. Git 2.53.0's [`builtin/config.c`](https://github.com/git/git/blob/v2.53.0/builtin/config.c) selects repository config and refuses `--local` outside a repository. Failed Git invocations, unreadable directories, and directory symlinks leave ownership unknown.
+tk permits attachment when the manifest names the current Git Common Directory, or when the former directory is readable and its local config no longer points to this Store. tk runs `git --git-dir . config --local --no-includes --null --get-all tk.storeId` from that exact directory so parent repository discovery cannot stand in for ownership inspection. Passing `.` also avoids Windows verbatim paths: Git for Windows 2.55.0.windows.5 rejects their `?` in [`is_valid_win32_path`](https://github.com/git-for-windows/git/blob/v2.55.0.windows.5/compat/mingw.c). Failed Git invocations, unreadable directories, and directory symlinks leave ownership unknown.
 
 An absent former Git Common Directory permits attachment only when its immediate parent is readable and a directory listing confirms that the final component is absent. A missing ancestor remains unknown: it could be an unavailable volume. After moving a whole checkout, restore access to the former Git Common Directory's parent before attachment. tk does not infer release from an absent ancestor.
 
@@ -191,6 +191,10 @@ SQLite connection closes. Source databases with hard links are refused: reading
 and closing a backup alias would otherwise release the same lock. SQLite's
 `os_unix.c` describes this constraint; the competing-writer CLI scenario checks
 that the source remains locked after hashing and publication.
+
+The inventory reads `remote.lock` through the handle that owns its exclusive
+lock. Windows [denies access through a second handle](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-lockfileex),
+even in the same process.
 
 A versioned `tk-migration.json` in the Git Common Directory records a random
 Store ID, a separate random token, the canonical Git Common Directory and the

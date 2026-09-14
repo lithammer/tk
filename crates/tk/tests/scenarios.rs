@@ -393,7 +393,7 @@ fn durable_store_linked_workspaces_share_but_copied_pointers_refuse() {
         "initial",
     ]);
     let linked = p.root.join("linked");
-    p.git(&["worktree", "add", "-b", "linked", linked.to_str().unwrap()]);
+    p.git(&["worktree", "add", "-b", "linked", "../linked"]);
     let id = p.git(&["config", "--local", "--get", "tk.storeId"]);
     p.cwd = linked;
     assert!(p.run("show repo-1").contains("Shared work"));
@@ -437,14 +437,9 @@ fn durable_store_pointer_scope_and_duplicates() {
         "[tk]\nstoreId = invalid-global\n",
     )
     .unwrap();
-    let include = p.root.join("included.config");
+    let include = p.cwd.join(".git/included.config");
     fs::write(&include, "[tk]\nstoreId = invalid-include\n").unwrap();
-    p.git(&[
-        "config",
-        "--local",
-        "include.path",
-        include.to_str().unwrap(),
-    ]);
+    p.git(&["config", "--local", "include.path", "included.config"]);
     p.git(&["config", "--local", "extensions.worktreeConfig", "true"]);
     p.git(&["config", "--worktree", "tk.storeId", "invalid-worktree"]);
     assert!(
@@ -2156,7 +2151,10 @@ fn recovery_repairs_missing_and_multiple_pointers_explicitly() {
         assert!(out.starts_with("exit 1\n"), "{out}");
         assert!(out.contains(&format!("tk init --attach {id}")), "{out}");
         if !duplicate {
-            insta::assert_snapshot!("recovery_missing_pointer", out.replace(&id, "<store-id>"));
+            insta::assert_snapshot!(
+                "recovery_missing_pointer",
+                out.replace(&id, "<store-id>").replace('\\', "/")
+            );
         }
         let out = p.run(&format!("init --attach {id}"));
         assert!(out.starts_with("Attached Repository Store at "), "{out}");
@@ -2864,7 +2862,7 @@ fn vacant_recovery_accepts_defaults_seeded_from_a_linked_workspace() {
         "Initial",
     ]);
     let linked = p.root.join("linked");
-    p.git(&["worktree", "add", "-qb", "linked", linked.to_str().unwrap()]);
+    p.git(&["worktree", "add", "-qb", "linked", "../linked"]);
     p.cwd = linked;
     p.run("init");
     let id = p.git(&["config", "--local", "--get", "tk.storeId"]);
@@ -3213,6 +3211,8 @@ fn legacy_migration_preserves_all_rows_and_mutation_states() {
     let show = p.run("show old-2");
     let log = p.run("sync log");
     p.move_to_legacy();
+    let interrupted = p.run_env("init", &[("TK_TEST_MIGRATION_FAILURE", "crash:Pointed")]);
+    assert!(interrupted.starts_with("exit 99\n"), "{interrupted}");
     let out = p.run("init");
     assert!(out.contains("Migrated Repository Store"), "{out}");
     assert_eq!(database_rows(&p.db_path()), before);

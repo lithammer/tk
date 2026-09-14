@@ -125,8 +125,8 @@ pub(super) fn migrate(
         return Err(fault("Git pointer disagrees with migration progress"));
     }
     inspect_source(&source)?;
-    let mut frozen = freeze(&source.join("tk.db"))?;
-    let files = inventory(&source, &mut frozen.file)?;
+    let frozen = freeze(&source.join("tk.db"))?;
+    let files = inventory(&source, &frozen.file, legacy_guard.as_ref())?;
     let staged = stage(&progress);
     for prior in [&staged, &dir] {
         if !exists(prior)? {
@@ -213,7 +213,7 @@ pub(super) fn migrate(
     association::validate(root, &manifest.store_id, common)?;
     let _guard = association::lock_store(&dir, true)?;
     observe(Boundary::Published)?;
-    if inventory(&source, &mut frozen.file)? != receipt.files {
+    if inventory(&source, &frozen.file, legacy_guard.as_ref())? != receipt.files {
         return Err(fault("legacy files changed during staging"));
     }
     git::install(runner, cwd, manifest.store_id.text())?;
@@ -377,7 +377,11 @@ fn freeze(path: &Path) -> Result<Frozen, Error> {
     Ok(Frozen { conn, file })
 }
 
-fn inventory(source: &Path, database: &mut File) -> Result<BTreeMap<PathBuf, String>, Error> {
+fn inventory(
+    source: &Path,
+    database: &File,
+    remote: Option<&File>,
+) -> Result<BTreeMap<PathBuf, String>, Error> {
     let mut files = BTreeMap::new();
     for entry in fs::read_dir(source)? {
         let entry = entry?;
@@ -402,8 +406,13 @@ fn inventory(source: &Path, database: &mut File) -> Result<BTreeMap<PathBuf, Str
                     return Err(fault("legacy database path changed while locked"));
                 }
             }
-            database.rewind()?;
             files.insert(name, hash_file(database)?);
+        } else if name == Path::new("remote.lock") {
+            // Windows denies reads through a second handle while this lock is held.
+            regular(&entry.path())?;
+            let remote =
+                remote.ok_or_else(|| fault("legacy Remote lock appeared during migration"))?;
+            files.insert(name, hash_file(remote)?);
         } else if allowed(&name) {
             files.insert(name, fingerprint(&entry.path())?);
         } else {
@@ -418,10 +427,11 @@ fn inventory(source: &Path, database: &mut File) -> Result<BTreeMap<PathBuf, Str
 
 fn fingerprint(path: &Path) -> Result<String, Error> {
     regular(path)?;
-    hash_file(&mut File::open(path)?)
+    hash_file(&File::open(path)?)
 }
 
-fn hash_file(file: &mut File) -> Result<String, Error> {
+fn hash_file(mut file: &File) -> Result<String, Error> {
+    file.rewind()?;
     let mut hash = Sha256::new();
     let mut buf = [0; 16384];
     loop {
@@ -442,13 +452,13 @@ fn cleanup(source: &Path, receipt: &Receipt, observe: Observer) -> Result<(), Er
         return Err(fault("legacy directory was replaced; cleanup refused"));
     }
     let remote = lock_remote(source)?;
-    let mut frozen = if exists(&source.join("tk.db"))? {
+    let frozen = if exists(&source.join("tk.db"))? {
         Some(freeze(&source.join("tk.db"))?)
     } else {
         None
     };
-    let current = if let Some(frozen) = &mut frozen {
-        inventory(source, &mut frozen.file)?
+    let current = if let Some(frozen) = &frozen {
+        inventory(source, &frozen.file, remote.as_ref())?
     } else {
         // The database is removed last; only an empty directory may remain.
         let entries = fs::read_dir(source)?.collect::<Result<Vec<_>, _>>()?;
