@@ -16,6 +16,10 @@ pub enum Initialized {
     /// The manifest and repository-local pointer now name this association.
     Attached(PathBuf),
     Recovery(super::recovery::Report),
+    Migrated {
+        from: PathBuf,
+        path: PathBuf,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -23,6 +27,12 @@ pub enum Mode<'a> {
     Plain,
     Attach(&'a str),
     New,
+}
+
+#[derive(Clone, Copy)]
+pub struct Options<'a> {
+    pub mode: Mode<'a>,
+    pub observe: super::relocation::Observer,
 }
 
 /// Hold the lifecycle lock through inspection, publication, and pointer writes.
@@ -33,14 +43,24 @@ pub fn initialize(
     rng: &mut dyn rand::Rng,
     data_root: Option<&std::path::Path>,
     paths: &DiscoveredPaths,
-    mode: Mode<'_>,
+    options: Options<'_>,
 ) -> Result<Initialized, super::repository::OpenError> {
     use super::{association, repository};
     use crate::git::association as git;
     let root = association::stores_root(data_root)?;
     let common = association::canonical_common(paths)?;
-    association::refuse_legacy(&common)?;
+    let mode = options.mode;
     let _guard = association::lock_init(&root)?;
+    if super::relocation::pending(&common)? {
+        if !matches!(mode, Mode::Plain) {
+            return Err(association::Error::Legacy.into());
+        }
+        let path = super::relocation::migrate(runner, cwd, &root, &common, rng, options.observe)?;
+        return Ok(Initialized::Migrated {
+            from: common.join("tk"),
+            path,
+        });
+    }
     let pointers = git::pointers(runner, cwd).map_err(association::Error::from)?;
     let pointer = association::parse_pointer(&pointers);
     if let Ok(Some(id)) = &pointer {
@@ -96,6 +116,7 @@ pub fn initialize(
         let id = association::StoreId::try_from(id.to_owned())?;
         let dir = root.join(id.text());
         let _store_guard = association::lock_store(&dir, true)?;
+        super::relocation::refuse_pending(&dir)?;
         let mut manifest = association::read_manifest(&dir)?;
         let released = super::recovery::released(runner, &manifest, &common);
         if matches!(mode, Mode::Plain)

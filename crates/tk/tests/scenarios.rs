@@ -492,16 +492,16 @@ fn durable_store_refuses_legacy_and_lost_pointers() {
     fs::create_dir(&legacy).unwrap();
     fs::write(legacy.join("tk.db"), "retained legacy data").unwrap();
     for command in ["init", "list"] {
-        assert!(
-            p.run(command)
-                .contains("legacy Repository Store data exists")
-        );
+        assert!(p.run(command).contains("legacy Repository Store"));
     }
     assert_eq!(
         fs::read_to_string(legacy.join("tk.db")).unwrap(),
         "retained legacy data"
     );
-    assert!(!p.root.join("data").exists());
+    assert_eq!(
+        fs::read_dir(p.root.join("data/tk/stores")).unwrap().count(),
+        0
+    );
     fs::remove_dir_all(legacy).unwrap();
     p.run("init");
     p.run("add -m 'Keep this Store'");
@@ -2864,4 +2864,414 @@ fn vacant_recovery_accepts_defaults_seeded_from_a_linked_workspace() {
     assert!(out.starts_with("Attached Repository Store at "), "{out}");
     assert_eq!(p.git(&["config", "--local", "--get", "tk.storeId"]), id);
     assert!(p.run("add -m 'After repair'").contains("linked-1"));
+}
+
+#[test]
+fn legacy_migration_preserves_work_backups_and_linked_access() {
+    let p = Repo::new("legacy");
+    p.run("init");
+    p.run("add --epic -m 'Release'");
+    p.run("add --bug -m 'Keep this work' -P legacy-1");
+    p.run("start legacy-2");
+    p.run("plan add legacy-2");
+    let shown = p.run("show legacy-2");
+    let plan = p.run("plan");
+    let original = p.db_path();
+    let backup = original.parent().unwrap().join("backups/manual.db");
+    rusqlite::Connection::open(&original)
+        .unwrap()
+        .execute("vacuum into ?1", [backup.to_str().unwrap()])
+        .unwrap();
+    let backup_bytes = fs::read(&backup).unwrap();
+    let legacy = p.cwd.join(".git/tk");
+    fs::rename(original.parent().unwrap(), &legacy).unwrap();
+    fs::remove_file(legacy.join("store.json")).unwrap();
+    fs::remove_file(legacy.join("association.lock")).unwrap();
+    p.git(&["config", "--local", "--unset", "tk.storeId"]);
+    assert!(p.run("list").contains("run 'tk init'"));
+    assert_eq!(p.run("prime"), "");
+    let result = p.run("init");
+    assert!(result.contains("Migrated Repository Store"), "{result}");
+    assert_eq!(p.run("show legacy-2"), shown);
+    assert_eq!(p.run("plan"), plan);
+    assert_eq!(
+        fs::read(p.db_path().parent().unwrap().join("backups/manual.db")).unwrap(),
+        backup_bytes
+    );
+    assert!(!legacy.exists());
+    let id = p.git(&["config", "--local", "--get", "tk.storeId"]);
+    assert!(p.run("init").contains("already initialized"));
+    assert_eq!(p.git(&["config", "--local", "--get", "tk.storeId"]), id);
+    p.git(&[
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "Initial",
+    ]);
+    p.git(&["worktree", "add", "-q", "../linked"]);
+    let out = support::run(
+        &p.root.join("linked"),
+        &p.root,
+        &["show".into(), "legacy-2".into()],
+        &[],
+    );
+    assert!(out.status.success());
+    assert_eq!(render(&out, &p.root), shown);
+}
+
+fn legacy_repo() -> Repo {
+    let p = Repo::new("legacy");
+    p.run("init");
+    p.run("add -m 'Before migration'");
+    p.run("plan add legacy-1");
+    let dir = p.db_path().parent().unwrap().to_path_buf();
+    let backup = dir.join("backups/retained.db");
+    rusqlite::Connection::open(dir.join("tk.db"))
+        .unwrap()
+        .execute("vacuum into ?1", [backup.to_str().unwrap()])
+        .unwrap();
+    let source = p.cwd.join(".git/tk");
+    fs::rename(dir, &source).unwrap();
+    fs::remove_file(source.join("store.json")).unwrap();
+    fs::remove_file(source.join("association.lock")).unwrap();
+    p.git(&["config", "--local", "--unset", "tk.storeId"]);
+    p
+}
+
+#[test]
+fn legacy_migration_resumes_after_process_exit_at_every_boundary() {
+    for boundary in [
+        "Recorded",
+        "Reserved",
+        "Staged",
+        "Validated",
+        "Published",
+        "Pointed",
+        "Cleanup",
+        "CleanedFile",
+        "Removed",
+        "Finished",
+    ] {
+        let p = legacy_repo();
+        let backup = fs::read(p.cwd.join(".git/tk/backups/retained.db")).unwrap();
+        let out = p.run_env(
+            "init",
+            &[("TK_TEST_MIGRATION_FAILURE", &format!("crash:{boundary}"))],
+        );
+        assert!(out.starts_with("exit 99"), "{boundary}: {out}");
+        let progress: serde_json::Value =
+            serde_json::from_slice(&fs::read(p.cwd.join(".git/tk-migration.json")).unwrap())
+                .unwrap();
+        let id = progress["store_id"].as_str().unwrap();
+        let result = p.run("init");
+        assert!(
+            result.contains("Migrated Repository Store"),
+            "{boundary}: {result}"
+        );
+        assert_eq!(p.git(&["config", "--local", "--get", "tk.storeId"]), id);
+        assert!(p.run("show legacy-1").contains("Before migration"));
+        assert!(p.run("plan").contains("legacy-1"));
+        assert_eq!(
+            fs::read(p.db_path().parent().unwrap().join("backups/retained.db")).unwrap(),
+            backup
+        );
+        assert!(!p.cwd.join(".git/tk").exists());
+    }
+}
+
+#[test]
+fn legacy_migration_rebuilds_before_pointer_and_preserves_divergence_after_it() {
+    for boundary in ["Published", "Pointed"] {
+        let p = legacy_repo();
+        let out = p.run_env("init", &[("TK_TEST_MIGRATION_FAILURE", boundary)]);
+        assert!(out.contains(&format!("interrupted at {boundary}")), "{out}");
+        let record: serde_json::Value =
+            serde_json::from_slice(&fs::read(p.cwd.join(".git/tk-migration.json")).unwrap())
+                .unwrap();
+        let id = record["store_id"].as_str().unwrap();
+        let source = p.cwd.join(".git/tk/tk.db");
+        let conn = rusqlite::Connection::open(&source).unwrap();
+        conn.execute("update items set title = 'Later legacy write'", [])
+            .unwrap();
+        drop(conn);
+        if boundary == "Pointed" {
+            assert!(
+                p.run("update legacy-1 --title 'New authoritative write'")
+                    .contains("Updated")
+            );
+            let out = p.run("init");
+            assert!(out.contains("legacy files changed after cutover"), "{out}");
+            assert!(p.run("show legacy-1").contains("New authoritative write"));
+            assert!(source.is_file());
+            assert_eq!(
+                rusqlite::Connection::open(&source)
+                    .unwrap()
+                    .query_row("select title from items", [], |r| r.get::<_, String>(0))
+                    .unwrap(),
+                "Later legacy write"
+            );
+        } else {
+            let out = p.run("init");
+            assert!(out.contains("Migrated Repository Store"), "{out}");
+            assert!(p.run("show legacy-1").contains("Later legacy write"));
+            assert!(!source.exists());
+        }
+        assert_eq!(p.git(&["config", "--local", "--get", "tk.storeId"]), id);
+    }
+}
+
+#[test]
+fn legacy_migration_refuses_old_wal_connections_and_includes_uncheckpointed_data() {
+    let p = legacy_repo();
+    let path = p.cwd.join(".git/tk/tk.db");
+    let old = rusqlite::Connection::open(&path).unwrap();
+    old.pragma_update(None, "journal_mode", "wal").unwrap();
+    old.execute("update items set title = 'Old process write'", [])
+        .unwrap();
+    let out = p.run("init");
+    assert!(out.contains("database is locked"), "{out}");
+    assert!(path.is_file());
+    drop(old);
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "legacy_wal_child", "--ignored"])
+        .env("TK_TEST_LEGACY_DATABASE", &path)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(
+        fs::metadata(path.with_file_name("tk.db-wal"))
+            .unwrap()
+            .len()
+            > 32
+    );
+    let out = p.run("init");
+    assert!(out.contains("Migrated Repository Store"), "{out}");
+    assert!(p.run("show legacy-1").contains("Uncheckpointed WAL write"));
+}
+
+#[test]
+#[ignore = "legacy SQLite process exits without closing its WAL connection"]
+fn legacy_wal_child() {
+    let path = std::env::var_os("TK_TEST_LEGACY_DATABASE").unwrap();
+    let conn = rusqlite::Connection::open(PathBuf::from(path)).unwrap();
+    conn.pragma_update(None, "journal_mode", "wal").unwrap();
+    conn.execute("update items set title = 'Uncheckpointed WAL write'", [])
+        .unwrap();
+    std::process::exit(0);
+}
+
+#[test]
+fn legacy_migration_excludes_competing_init_attach_open_and_writes() {
+    let p = legacy_repo();
+    let gate = tempfile::tempdir().unwrap();
+    let cwd = p.cwd.clone();
+    let root = p.root.clone();
+    let gate_path = gate.path().to_path_buf();
+    let migration = std::thread::spawn(move || {
+        support::run(
+            &cwd,
+            &root,
+            &["init".into()],
+            &[
+                ("TK_TEST_MIGRATION_FAILURE", "pause:Published"),
+                ("TK_TEST_MIGRATION_GATE", gate_path.to_str().unwrap()),
+            ],
+        )
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !gate.path().join("ready").exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "migration must reach publication"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let record: serde_json::Value =
+        serde_json::from_slice(&fs::read(p.cwd.join(".git/tk-migration.json")).unwrap()).unwrap();
+    let id = record["store_id"].as_str().unwrap();
+    for command in [
+        "init".to_string(),
+        "init --new".to_string(),
+        format!("init --attach {id}"),
+    ] {
+        assert!(
+            p.run(&command)
+                .contains("another Store lifecycle operation")
+        );
+    }
+    assert!(p.run("list").contains("legacy Repository Store"));
+    assert!(
+        p.run("update legacy-1 --title 'Must not write'")
+            .contains("legacy Repository Store")
+    );
+    let old = rusqlite::Connection::open(p.cwd.join(".git/tk/tk.db")).unwrap();
+    old.busy_timeout(std::time::Duration::ZERO).unwrap();
+    assert!(
+        old.execute("update items set title = 'Must not write'", [])
+            .is_err()
+    );
+    drop(old);
+    fs::write(gate.path().join("release"), "").unwrap();
+    let out = migration.join().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(p.run("show legacy-1").contains("Before migration"));
+    assert_eq!(p.git(&["config", "--local", "--get", "tk.storeId"]), id);
+}
+
+#[test]
+fn legacy_migration_preserves_all_rows_and_mutation_states() {
+    let p = Repo::new("legacy");
+    for command in [
+        "init",
+        "remote set github",
+        "add --epic -m 'Epic'",
+        "add --bug -p P1 -P legacy-1 -m 'Child'",
+        "add -m 'Done'",
+        "done legacy-3 -m 'Kept reason'",
+        "add --triage -m 'Triage'",
+        "add -m 'Parked'",
+        "park legacy-5",
+        "start legacy-2",
+        "block legacy-5 legacy-2",
+        "plan add legacy-2 legacy-3 legacy-4 legacy-5",
+    ] {
+        let out = p.run(command);
+        assert!(!out.starts_with("exit"), "{command}: {out}");
+    }
+    p.seed_mutation("legacy-2", "pending", None);
+    let db = p.db_path();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute("update items set body = 'Retained body with unicode: å', updated_at = '2026-01-02T03:04:05.006Z' where display_value = 'legacy-2'", []).unwrap();
+    conn.execute("insert into item_ids(value, source, item_id, created_at) select 'old-2', 'alias', id, created_at from items where display_value = 'legacy-2'", []).unwrap();
+    for (sequence, state, kind, failure) in [
+        (
+            2,
+            "failed",
+            "update_ticket",
+            Some(r#"{"detail":"refused"}"#),
+        ),
+        (3, "applying", "promote_ticket", None),
+        (4, "applied", "update_ticket", None),
+        (5, "skipped", "update_ticket", None),
+        (6, "cancelled", "update_ticket", None),
+        (7, "abandoned", "promote_ticket", None),
+    ] {
+        conn.execute("insert into mutations(sequence, mutation_type, item_id, item_class, payload_json, state, failure_json, created_at, state_changed_at) select ?1, ?2, item_id, item_class, payload_json, ?3, ?4, created_at, state_changed_at from mutations where sequence = 1", rusqlite::params![sequence, kind, state, failure]).unwrap();
+    }
+    conn.execute(
+        "update sequences set value = 7 where name = 'mutation_seq'",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    let before = database_rows(&db);
+    let show = p.run("show old-2");
+    let log = p.run("sync log");
+    let dir = db.parent().unwrap();
+    let source = p.cwd.join(".git/tk");
+    fs::rename(dir, &source).unwrap();
+    fs::remove_file(source.join("store.json")).unwrap();
+    fs::remove_file(source.join("association.lock")).unwrap();
+    p.git(&["config", "--local", "--unset", "tk.storeId"]);
+    let out = p.run("init");
+    assert!(out.contains("Migrated Repository Store"), "{out}");
+    assert_eq!(database_rows(&p.db_path()), before);
+    assert_eq!(p.run("show old-2"), show);
+    assert_eq!(p.run("sync log"), log);
+    assert!(p.run("add -m 'Next ID'").contains("legacy-6"));
+}
+
+fn database_rows(path: &Path) -> Vec<(String, Vec<String>)> {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    let tables = conn.prepare("select name from sqlite_schema where type = 'table' and name not like 'sqlite_%' order by name").unwrap()
+        .query_map([], |r| r.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+    tables
+        .into_iter()
+        .map(|table| {
+            let mut query = conn
+                .prepare(&format!("select * from \"{}\"", table.replace('"', "\"\"")))
+                .unwrap();
+            let columns = query.column_count();
+            let mut rows = query
+                .query_map([], |r| {
+                    (0..columns)
+                        .map(|i| r.get::<_, rusqlite::types::Value>(i))
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .unwrap()
+                .map(|row| format!("{:?}", row.unwrap()))
+                .collect::<Vec<_>>();
+            rows.sort();
+            (table, rows)
+        })
+        .collect()
+}
+
+#[test]
+fn legacy_migration_requires_its_receipt_and_blocks_orphan_attachment() {
+    let p = legacy_repo();
+    assert!(p.run("init --new").contains("legacy Repository Store"));
+    p.run_env("init", &[("TK_TEST_MIGRATION_FAILURE", "Published")]);
+    let record: serde_json::Value =
+        serde_json::from_slice(&fs::read(p.cwd.join(".git/tk-migration.json")).unwrap()).unwrap();
+    let id = record["store_id"].as_str().unwrap();
+    assert!(
+        p.run(&format!("init --attach {id}"))
+            .contains("legacy Repository Store")
+    );
+    let other = Repo::new("other");
+    let out = other.run_env(
+        &format!("init --attach {id}"),
+        &[("TK_TEST_DATA_ROOT", p.root.join("data").to_str().unwrap())],
+    );
+    assert!(out.contains("migration is pending"), "{out}");
+    let destination = p.root.join("data/tk/stores").join(id);
+    let before = fs::read(destination.join("tk.db")).unwrap();
+    fs::remove_file(destination.join("migration.json")).unwrap();
+    let out = p.run("init");
+    assert!(out.starts_with("exit 1"), "{out}");
+    assert_eq!(fs::read(destination.join("tk.db")).unwrap(), before);
+    assert!(p.cwd.join(".git/tk/tk.db").is_file());
+}
+
+#[test]
+fn legacy_migration_retains_source_on_storage_failures_and_retries() {
+    for failure in ["full:Staged", "deny:Validated", "deny:Cleanup"] {
+        let p = legacy_repo();
+        let backup = fs::read(p.cwd.join(".git/tk/backups/retained.db")).unwrap();
+        let out = p.run_env("init", &[("TK_TEST_MIGRATION_FAILURE", failure)]);
+        assert!(out.starts_with("exit 1"), "{failure}: {out}");
+        assert!(p.cwd.join(".git/tk/tk.db").is_file());
+        assert_eq!(
+            fs::read(p.cwd.join(".git/tk/backups/retained.db")).unwrap(),
+            backup
+        );
+        let out = p.run("init");
+        assert!(
+            out.contains("Migrated Repository Store"),
+            "{failure}: {out}"
+        );
+        assert!(p.run("show legacy-1").contains("Before migration"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn legacy_migration_refuses_hard_links_without_losing_sqlite_locks() {
+    let p = legacy_repo();
+    let source = p.cwd.join(".git/tk");
+    fs::hard_link(source.join("tk.db"), source.join("backups/hardlink.db")).unwrap();
+    let out = p.run("init");
+    assert!(out.contains("legacy database has hard links"), "{out}");
+    assert!(source.join("tk.db").is_file());
+    fs::remove_file(source.join("backups/hardlink.db")).unwrap();
+    assert!(p.run("init").contains("Migrated Repository Store"));
 }

@@ -129,6 +129,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
         let mut deps = Deps {
             data_root: None,
+            migration_boundary: |_| Ok(()),
             stdout: &mut stdout,
             stderr: &mut stderr,
             stdin: &mut stdin,

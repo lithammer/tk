@@ -26,13 +26,31 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         deps.rng,
         deps.data_root,
         &paths,
-        match args.attach.as_deref() {
-            Some(id) => Mode::Attach(id),
-            None if args.new => Mode::New,
-            None => Mode::Plain,
+        initialize::Options {
+            observe: deps.migration_boundary,
+            mode: match args.attach.as_deref() {
+                Some(id) => Mode::Attach(id),
+                None if args.new => Mode::New,
+                None => Mode::Plain,
+            },
         },
     );
     let (path, prefix) = match result.map_err(|e| resolver::open_error(&e))? {
+        Initialized::Migrated { from, path } => {
+            let id = path
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy();
+            let _ = writeln!(
+                deps.stdout,
+                "Migrated Repository Store {id} from {} to {}",
+                from.display(),
+                path.parent().unwrap().display()
+            );
+            return Ok(Exit::Ok);
+        }
         Initialized::Created { path, missing } => {
             for id in missing {
                 let _ = writeln!(

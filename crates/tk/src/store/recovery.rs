@@ -37,6 +37,9 @@ pub(super) fn discover(
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         let id = entry.file_name().to_string_lossy().into_owned();
+        if id == ".migrations" {
+            continue;
+        }
         let manifest = association::read_manifest(&entry.path());
         let mut facts = Vec::new();
         let mut rank = usize::MAX;

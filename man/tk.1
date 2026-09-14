@@ -68,8 +68,25 @@ It survives deletion of the repository until the user explicitly deletes it.
 The repository-local \fItk.storeId\fR and the Store's \fIstore.json\fR must
 agree on its identity and Git Common Directory association.
 .PP
-Legacy Stores under \fI<git-common-dir>/tk/\fR are preserved and refused.
-Legacy migration is not yet supported.
+For a legacy Store under \fI<git-common-dir>/tk/\fR, stop all tk processes,
+then run \fBtk init\fR. Keep old binaries stopped through retries and cleanup.
+Init moves a consistent SQLite image and all Store Backups into
+\fI<local data>/tk/stores/<Store ID>/\fR and reports both locations and the ID.
+Ordinary commands direct you to init; Prime stays silent.
+.PP
+If migration stops before installing the Git pointer, the legacy Store remains
+authoritative. Run init again: it retains the Store ID and rebuilds the image
+from the current legacy data. After pointer installation, the durable Store is
+authoritative and retry only finishes cleanup. If legacy files changed after
+cutover, tk preserves both Stores and refuses cleanup; restore manually.
+Do not remove \fItk-migration.json\fR or \fImigration.json\fR to bypass a refusal.
+Unknown files, invalid metadata, and unsafe or busy Stores require inspection.
+.PP
+File contents are flushed on every platform; directory entries are also flushed
+on Unix. Process-interruption recovery is supported; Windows sudden-power-loss
+safety is not established by this protocol. On Unix, hard-linked legacy databases
+are refused: replace the hard links with independent copies before retrying.
+Attach and new refuse legacy data and pending migrations.
 .PP
 With a broken association, plain init can repair a uniquely identified Vacant
 Store after confirming release of its former ownership. The candidate must match

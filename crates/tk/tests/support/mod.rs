@@ -21,6 +21,8 @@ pub fn run(cwd: &Path, root: &Path, args: &[String], env: &[(&str, &str)]) -> Ou
         .env_remove("TK_TEST_DATA_ROOT")
         .env_remove("TK_TEST_SEED")
         .env_remove("TK_TEST_GIT_FAILURE")
+        .env_remove("TK_TEST_MIGRATION_FAILURE")
+        .env_remove("TK_TEST_MIGRATION_GATE")
         .env_remove("GIT_CONFIG_COUNT")
         .env_remove("GIT_CONFIG_PARAMETERS")
         .env_remove("TK_SCOPE")
@@ -71,6 +73,7 @@ fn cli_child() {
         rng: &mut rng,
         cwd: &cwd,
         data_root: data_root.as_deref(),
+        migration_boundary,
         styler: tk::render::resolve_styler_from_env(),
     };
     let exit = tk::cli::run_argv(deps, &args).unwrap();
@@ -104,4 +107,38 @@ impl tk::proc::ProcRunner for InjectedRunner {
     ) -> Result<tk::proc::RunOutput, tk::proc::ProcError> {
         self.0.run_with_stdin(argv, cwd, stdin)
     }
+}
+
+fn migration_boundary(step: tk::store::relocation::Boundary) -> std::io::Result<()> {
+    let failure = std::env::var("TK_TEST_MIGRATION_FAILURE").unwrap_or_default();
+    if failure == format!("crash:{step:?}") {
+        let capture = std::path::PathBuf::from(std::env::var_os("TK_TEST_CAPTURE").unwrap());
+        std::fs::write(capture.join("stdout"), "").unwrap();
+        std::fs::write(capture.join("stderr"), format!("interrupted at {step:?}")).unwrap();
+        std::process::exit(99);
+    }
+    if failure == format!("pause:{step:?}") {
+        let gate = std::path::PathBuf::from(std::env::var_os("TK_TEST_MIGRATION_GATE").unwrap());
+        std::fs::write(gate.join("ready"), "").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !gate.join("release").exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "migration test must release its gate"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+    for (prefix, kind) in [
+        ("full", std::io::ErrorKind::StorageFull),
+        ("deny", std::io::ErrorKind::PermissionDenied),
+    ] {
+        if failure == format!("{prefix}:{step:?}") {
+            return Err(kind.into());
+        }
+    }
+    if failure == format!("{step:?}") {
+        return Err(std::io::Error::other(format!("interrupted at {step:?}")));
+    }
+    Ok(())
 }

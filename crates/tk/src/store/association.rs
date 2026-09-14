@@ -73,9 +73,13 @@ pub enum Error {
     #[error("multiple repository-local tk.storeId values; restore a single valid Store pointer")]
     DuplicatePointer,
     #[error(
-        "legacy Repository Store data exists; migration is not yet supported; data was preserved"
+        "legacy Repository Store data exists; stop all tk processes, then run 'tk init'; data was preserved"
     )]
     Legacy,
+    #[error(
+        "legacy Repository Store migration: {0}; keep old tk processes stopped and retry 'tk init'; data was preserved"
+    )]
+    Migration(String),
     #[error("Store evidence requires recovery; run 'tk init'; data was preserved")]
     Recovery,
     #[error("current repository has a healthy Store Association; attach/new refused")]
@@ -231,12 +235,17 @@ pub(super) fn read_manifest(dir: &Path) -> Result<Manifest, Error> {
 
 /// Hold the returned guard through association validation and database use.
 pub(super) fn lock_store(dir: &Path, exclusive: bool) -> Result<File, Error> {
+    lock_file(&dir.join("association.lock"), exclusive)
+}
+
+/// Retain the returned descriptor through the protected filesystem operation.
+pub(super) fn lock_file(path: &Path, exclusive: bool) -> Result<File, Error> {
     let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(dir.join("association.lock"))?;
+        .open(path)?;
     let result = if exclusive {
         file.try_lock()
     } else {

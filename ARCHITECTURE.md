@@ -78,7 +78,8 @@ small boundary module after the second caller proves the shape.
   phrasing out of command modules.
 - `store/association.rs` owns Store IDs, manifests, association validation, and
   publication. `store/initialize.rs` composes fresh init, explicit attachment,
-  automatic Vacant Store repair, and healthy reopen. `store/recovery.rs` ranks
+  automatic Vacant Store repair, and healthy reopen. `store/relocation.rs` owns
+  legacy cutover, migration receipts, and verified cleanup. `store/recovery.rs` ranks
   manifest evidence and inspects shortlisted candidates without migration.
   `git/association.rs` owns local config reads/writes and the credential-free URL
   policy (ADR-0053).
@@ -154,7 +155,9 @@ creates it at `<local data>/tk/stores/<Store ID>/tk.db` (ADR-0053). The
 repository-local `tk.storeId` points to a versioned `store.json` beside the
 database. The shared opener validates the Store ID and canonical Git Common
 Directory association before SQLite access. Legacy Git-directory Stores are
-preserved and refused until migration exists.
+migration input for `tk init`; ordinary commands never open them. Relocation
+retains exclusive SQLite locks through cutover and uses separate progress
+records to resume with the same Store ID (ADR-0053).
 
 An opened `Store` retains a shared `association.lock` until its SQLite connection
 closes. Attachment requires the exclusive lock and publishes the manifest before
