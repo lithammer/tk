@@ -162,7 +162,7 @@ fn run_log(deps: &mut Deps<'_>, args: LogArgs) -> Result<Exit, CommandError> {
     if let Some(seq) = args.id {
         let detail = store_sync::show_mutation_log(store.conn(), seq).map_err(|err| match err {
             LogError::MutationNotFound(seq) => {
-                CommandError::failure(format!("Mutation {seq} not found"))
+                CommandError::failure(format_args!("Mutation {seq} not found"))
             }
             err => log_error(&err),
         })?;
@@ -243,20 +243,20 @@ fn render_skip_outcome<W: Write + ?Sized>(stdout: &mut W, seq: i64, outcome: &Sk
 
 fn skip_error(err: &MarkSkippedError) -> Error {
     let error = match err {
-        MarkSkippedError::MutationNotFailed(seq) => CommandError::failure(format!(
+        MarkSkippedError::MutationNotFailed(seq) => CommandError::failure(format_args!(
             "Mutation {seq} is not in the failed state; --skip only bypasses failed Mutations"
         )),
         MarkSkippedError::MutationNotFound(seq) => {
-            CommandError::failure(format!("Mutation {seq} not found"))
+            CommandError::failure(format_args!("Mutation {seq} not found"))
         }
-        MarkSkippedError::CannotSkipPromotion(seq) => CommandError::failure(format!(
+        MarkSkippedError::CannotSkipPromotion(seq) => CommandError::failure(format_args!(
             "Mutation {seq} is a Promotion; skipping it would leave every Mutation queued behind it with no backend identity to apply against. Use 'tk promote cancel <id>' to withdraw the whole Promotion Operation."
         )),
         MarkSkippedError::Transition(_)
         | MarkSkippedError::ReopenMatchedNothing(_)
-        | MarkSkippedError::ReopenRefusedByTrigger(_) => {
-            CommandError::failure(format!("{err}; this is a Ticket bug — please report it"))
-        }
+        | MarkSkippedError::ReopenRefusedByTrigger(_) => CommandError::failure(format_args!(
+            "{err}; this is a Ticket bug — please report it"
+        )),
         MarkSkippedError::Storage(err) => return resolver::storage_error(err).into(),
     };
     Error {
@@ -271,7 +271,7 @@ fn log_error(err: &LogError) -> CommandError {
     match err {
         LogError::Storage(err) => resolver::storage_error(err),
         LogError::MutationNotFound(_) | LogError::FailureJson(_) => {
-            CommandError::failure(format!("failed to read Repository Store\n{err}"))
+            CommandError::failure(format_args!("failed to read Repository Store\n{err}"))
         }
     }
 }
@@ -284,34 +284,35 @@ fn run_sync_error(err: &RunSyncError) -> CommandError {
         RunSyncErrorCategory::MutationSchemaDrift(_) => CommandError::failure(
             "Mutation Log row has an unrecognised mutation kind; this is a Ticket bug — please report it",
         ),
-        RunSyncErrorCategory::TicketBug(error) => {
-            CommandError::failure(format!("{error}; this is a Ticket bug — please report it"))
-        }
+        RunSyncErrorCategory::TicketBug(error) => CommandError::failure(format_args!(
+            "{error}; this is a Ticket bug — please report it"
+        )),
         RunSyncErrorCategory::Storage(error) => resolver::storage_error(error),
         RunSyncErrorCategory::CreatedIdentityNotStored {
             error,
             sequence,
             cause,
         } => {
-            let mut body = error.to_string();
-            if matches!(cause, CreatedIdentityNotStoredCause::TargetNotLocal) {
-                body.push_str(
-                    "\nThis is Repository Store corruption or a Ticket bug — please report it",
-                );
-            }
-            CommandError::failure(format!(
-                "{body}\nMutation {sequence} remains applying; use 'tk promote reconcile <id> <backend-key>' after confirming the created Backend object"
+            let guidance = if matches!(cause, CreatedIdentityNotStoredCause::TargetNotLocal) {
+                "\nThis is Repository Store corruption or a Ticket bug — please report it"
+            } else {
+                ""
+            };
+            CommandError::failure(format_args!(
+                "{error}{guidance}\nMutation {sequence} remains applying; use 'tk promote reconcile <id> <backend-key>' after confirming the created Backend object"
             ))
         }
 
         RunSyncErrorCategory::Direct(error) => CommandError::failure(error),
-        RunSyncErrorCategory::IndeterminateCreation(sequence) => CommandError::failure(format!(
-            "Mutation {sequence} has an indeterminate Backend creation outcome; use 'tk promote reconcile <id> <backend-key>' if the object exists, 'tk promote retry <id>' only when creating it again is safe, or 'tk promote cancel <id>' to withdraw the Promotion Operation, leaving any object it created untracked"
-        )),
+        RunSyncErrorCategory::IndeterminateCreation(sequence) => {
+            CommandError::failure(format_args!(
+                "Mutation {sequence} has an indeterminate Backend creation outcome; use 'tk promote reconcile <id> <backend-key>' if the object exists, 'tk promote retry <id>' only when creating it again is safe, or 'tk promote cancel <id>' to withdraw the Promotion Operation, leaving any object it created untracked"
+            ))
+        }
         RunSyncErrorCategory::RemoteChanged => CommandError::failure(
             "the configured Remote changed while contacting the Backend; retry 'tk sync'",
         ),
-        RunSyncErrorCategory::RepositoryInvariant(error) => CommandError::failure(format!(
+        RunSyncErrorCategory::RepositoryInvariant(error) => CommandError::failure(format_args!(
             "{error}; this is a Repository Store invariant failure"
         )),
     }
@@ -514,43 +515,9 @@ mod tests {
     const HOSTILE_FAILURE_JSON: &str =
         r#"{"detail":"HTTP 422: \u001b[31mred\u0007 title rejected"}"#;
 
-    fn run(deps: Deps<'_>, args: Args) -> Exit {
-        let mut argv = vec!["sync".to_owned()];
-        if let Some(Sub::Log(log)) = args.subcommand {
-            argv.push("log".to_owned());
-            for (enabled, flag) in [
-                (log.pending, "--pending"),
-                (log.failed, "--failed"),
-                (log.skipped, "--skipped"),
-                (log.cancelled, "--cancelled"),
-                (log.abandoned, "--abandoned"),
-            ] {
-                if enabled {
-                    argv.push(flag.to_owned());
-                }
-            }
-            if let Some(id) = log.id {
-                argv.push(id.to_string());
-            }
-        }
-        if let Some(seq) = args.skip {
-            argv.extend(["--skip".to_owned(), seq.to_string()]);
-        }
+    fn run(deps: Deps<'_>, args: &[&str]) -> Exit {
+        let argv = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
         crate::cli::run_argv(deps, &argv).unwrap()
-    }
-
-    fn log_args(id: Option<i64>) -> Args {
-        Args {
-            subcommand: Some(Sub::Log(LogArgs {
-                pending: false,
-                failed: false,
-                skipped: false,
-                cancelled: false,
-                abandoned: false,
-                id,
-            })),
-            skip: None,
-        }
     }
 
     // ---- tk sync (adapter-reachable paths) ------------------------------
@@ -563,13 +530,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
-        let code = run(
-            h.deps(),
-            Args {
-                subcommand: None,
-                skip: None,
-            },
-        );
+        let code = run(h.deps(), &["sync"]);
         assert_eq!(code, Exit::Failure);
         assert!(
             String::from_utf8(h.stderr)
@@ -598,13 +559,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store); // only git discovery; no gh call expected
-        let code = run(
-            h.deps(),
-            Args {
-                subcommand: None,
-                skip: None,
-            },
-        );
+        let code = run(h.deps(), &["sync"]);
         assert_eq!(code, Exit::Ok);
         assert!(
             String::from_utf8(h.stdout)
@@ -657,13 +612,7 @@ mod tests {
             ProcError::ExecutableNotFound,
         );
 
-        let code = run(
-            h.deps(),
-            Args {
-                subcommand: None,
-                skip: None,
-            },
-        );
+        let code = run(h.deps(), &["sync"]);
 
         assert_eq!(code, Exit::Failure);
         assert!(h.stderr.is_empty());
@@ -724,13 +673,7 @@ mod tests {
                 stderr: Vec::new(),
             },
         );
-        let code = run(
-            h.deps(),
-            Args {
-                subcommand: None,
-                skip: None,
-            },
-        );
+        let code = run(h.deps(), &["sync"]);
         assert_eq!(code, Exit::Ok);
         assert!(
             String::from_utf8(h.stdout)
@@ -770,13 +713,7 @@ mod tests {
         expect_git(&h, &store);
         // No Remote configured: sync still exits 1 on no-remote, but the skip
         // committed first.
-        let code = run(
-            h.deps(),
-            Args {
-                subcommand: None,
-                skip: Some(1),
-            },
-        );
+        let code = run(h.deps(), &["sync", "--skip", "1"]);
         assert_eq!(code, Exit::Failure);
         assert!(
             String::from_utf8(h.stdout)
@@ -831,13 +768,7 @@ mod tests {
         expect_git(&h, &store);
         // No Remote configured: the skip's line is what this test cares about,
         // reported before sync fails on the missing Remote.
-        let code = run(
-            h.deps(),
-            Args {
-                subcommand: None,
-                skip: Some(1),
-            },
-        );
+        let code = run(h.deps(), &["sync", "--skip", "1"]);
         assert_eq!(code, Exit::Failure);
         assert!(
             String::from_utf8(h.stdout)
@@ -905,13 +836,7 @@ mod tests {
             "Backend body",
             Lifecycle::Done,
         );
-        let code = run(
-            h.deps(),
-            Args {
-                subcommand: None,
-                skip: Some(1),
-            },
-        );
+        let code = run(h.deps(), &["sync", "--skip", "1"]);
         assert_eq!(code, Exit::Ok);
         assert_eq!(
             String::from_utf8(h.stdout).unwrap(),
@@ -973,13 +898,7 @@ mod tests {
         let first_guard = first.lock_remote_workflow().unwrap();
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
-        let exit = run(
-            h.deps(),
-            Args {
-                subcommand: None,
-                skip: Some(1),
-            },
-        );
+        let exit = run(h.deps(), &["sync", "--skip", "1"]);
         assert_eq!(exit, Exit::Failure);
         assert_eq!(
             String::from_utf8(h.stderr).unwrap(),
@@ -1028,13 +947,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
-            Args {
-                subcommand: None,
-                skip: Some(1),
-            },
-        );
+        let code = run(h.deps(), &["sync", "--skip", "1"]);
         assert_eq!(code, Exit::Failure);
         assert_eq!(
             String::from_utf8(h.stderr).unwrap(),
@@ -1062,11 +975,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
-        let code = crate::cli::run_argv(
-            h.deps(),
-            &["sync".to_owned(), "--skip".to_owned(), "1".to_owned()],
-        )
-        .unwrap();
+        let code = run(h.deps(), &["sync", "--skip", "1"]);
 
         assert_eq!(code, Exit::Failure);
         assert!(h.stdout.is_empty());
@@ -1096,13 +1005,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
-            Args {
-                subcommand: None,
-                skip: Some(1),
-            },
-        );
+        let code = run(h.deps(), &["sync", "--skip", "1"]);
         assert_eq!(code, Exit::Failure);
         assert!(
             String::from_utf8(h.stderr)
@@ -1121,7 +1024,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
-        let code = run(h.deps(), log_args(None));
+        let code = run(h.deps(), &["sync", "log"]);
         assert_eq!(code, Exit::Ok);
         assert!(
             String::from_utf8(h.stdout)
@@ -1151,7 +1054,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
-        let code = run(h.deps(), log_args(None));
+        let code = run(h.deps(), &["sync", "log"]);
 
         assert_eq!(code, Exit::Ok);
         assert_eq!(
@@ -1174,7 +1077,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
-        let code = run(h.deps_with(Styler::always()), log_args(None));
+        let code = run(h.deps_with(Styler::always()), &["sync", "log"]);
 
         assert_eq!(code, Exit::Ok);
         let out = String::from_utf8(h.stdout).unwrap();
@@ -1211,7 +1114,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
-        let code = run(h.deps(), log_args(None));
+        let code = run(h.deps(), &["sync", "log"]);
 
         assert_eq!(code, Exit::Ok);
         let out = String::from_utf8(h.stdout).unwrap();
@@ -1230,7 +1133,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
-        let code = run(h.deps(), log_args(None));
+        let code = run(h.deps(), &["sync", "log"]);
         assert_eq!(code, Exit::Ok);
         let out = String::from_utf8(h.stdout).unwrap();
         assert!(out.contains("1 pending update_ticket tk-1"));
@@ -1250,7 +1153,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
-        let code = run(h.deps(), log_args(Some(7)));
+        let code = run(h.deps(), &["sync", "log", "7"]);
 
         assert_eq!(code, Exit::Ok);
         let out = String::from_utf8(h.stdout).unwrap();
@@ -1273,7 +1176,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
-        let code = run(h.deps(), log_args(Some(7)));
+        let code = run(h.deps(), &["sync", "log", "7"]);
 
         assert_eq!(code, Exit::Ok);
         let out = String::from_utf8(h.stdout).unwrap();
@@ -1291,7 +1194,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
-        let code = run(h.deps(), log_args(Some(7)));
+        let code = run(h.deps(), &["sync", "log", "7"]);
         assert_eq!(code, Exit::Ok);
         let out = String::from_utf8(h.stdout).unwrap();
         assert!(out.contains("Mutation 7  [failed]"));
@@ -1312,7 +1215,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
-        let code = run(h.deps_with(Styler::always()), log_args(Some(7)));
+        let code = run(h.deps_with(Styler::always()), &["sync", "log", "7"]);
 
         assert_eq!(code, Exit::Ok);
         let out = String::from_utf8(h.stdout).unwrap();
@@ -1355,7 +1258,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
-        let code = run(h.deps(), log_args(None));
+        let code = run(h.deps(), &["sync", "log"]);
         assert_eq!(code, Exit::Ok);
         let out = String::from_utf8(h.stdout).unwrap();
         assert!(
@@ -1387,7 +1290,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
-        let code = run(h.deps(), log_args(Some(3)));
+        let code = run(h.deps(), &["sync", "log", "3"]);
         assert_eq!(code, Exit::Ok);
         let out = String::from_utf8(h.stdout).unwrap();
         assert!(out.contains("Class:      validation"), "{out}");
@@ -1404,7 +1307,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
-        let code = run(h.deps(), log_args(Some(99)));
+        let code = run(h.deps(), &["sync", "log", "99"]);
         assert_eq!(code, Exit::Failure);
         assert!(
             String::from_utf8(h.stderr)
