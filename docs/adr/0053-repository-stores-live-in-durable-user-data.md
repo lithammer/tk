@@ -258,10 +258,12 @@ injected storage faults. The legacy-connection fixture uses bundled SQLite
 without tk lifecycle locks. CI runs the scenario suite on Linux, macOS, and
 Windows. The composed lifecycle also covers linked Workspace edits, a moved
 checkout, interrupted reattachment, and preserved Plan and backup contents.
-Ordinary work runs with Git's config lock held and checks that config and
-manifest bytes and modification times stay unchanged.
+A scenario holds Git's config lock while running ordinary commands against a
+healthy Store, then checks that config and manifest bytes and modification
+times stay unchanged.
 
-Native root resolution runs with isolated HOME and XDG locations on Unix.
+A Unix scenario tests native root resolution with isolated `HOME` and
+`XDG_DATA_HOME` settings.
 Windows scenarios inject an isolated data root: they do not redirect the user's
 known-folder configuration or prove native LocalAppData resolution. The alias
 reopening scenario uses Unix symlinks; Windows alias reopening remains untested.

@@ -115,7 +115,7 @@ Ordinary commands read Git metadata and leave the manifest untouched, but need
 write access to the Store for SQLite and lock files. In a sandbox, grant the
 specific `tk/stores/<Store ID>/` directory as a writable root. Initialization
 and reassociation also need to write Git config and the data-root initialization
-lock. Agent configuration is a separate setup step.
+lock.
 
 ## License
 
