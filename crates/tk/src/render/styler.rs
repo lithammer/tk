@@ -172,8 +172,7 @@ impl Styler {
         }
     }
 
-    /// Sub-styler bound to the stderr choice. The stderr palette has no
-    /// entries yet; only the plumbing is in place (ADR-0014).
+    /// Sub-styler bound to the stderr choice.
     #[must_use]
     pub const fn for_stderr(self) -> SubStyler {
         SubStyler {
@@ -507,6 +506,12 @@ mod tests {
     /// Every entry in [`palette`], with its expected open / close bytes.
     const PALETTE_CASES: &[Case] = &[
         Case {
+            name: "error_label",
+            style: palette::ERROR_LABEL,
+            on_open: "\x1b[1m\x1b[31m",
+            on_close: "\x1b[39m\x1b[22m",
+        },
+        Case {
             name: "header",
             style: palette::HEADER,
             on_open: "\x1b[1m",
@@ -769,16 +774,14 @@ mod tests {
             on_close.split_inclusive('m').collect()
         }
 
-        // `SEPARATOR` closes `22` like the bracketing entries, so it would
-        // fail as an inner. It is exempt because it nests in neither
-        // direction: standalone chrome, always `wrap`, always outside a
-        // bracketed row. Give it an inner use and this exemption needs
-        // justifying again.
+        // `SEPARATOR` and `ERROR_LABEL` reset bold/dim but never nest:
+        // standalone chrome and error prefixes sit outside bracketed rows.
+        // An inner use would cancel the row's style and needs a new palette entry.
         //
         // The bracketing entries share `22` with each other harmlessly, one
         // dimming list rows and the other bolding show / grep headers.
         let bracketing = ["blocked_row", "header"];
-        let never_nested = ["separator"];
+        let never_nested = ["separator", "error_label"];
 
         for outer_name in bracketing {
             let outer = PALETTE_CASES

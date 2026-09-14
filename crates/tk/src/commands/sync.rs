@@ -1347,7 +1347,9 @@ mod tests {
         ] {
             let mut out = Vec::new();
             let error = skip_error(&err);
-            error.error.render(&mut out, error.command);
+            error
+                .error
+                .render(&mut out, error.command, Styler::plain().for_stderr());
             let rendered = String::from_utf8(out).unwrap();
             assert!(
                 rendered.starts_with("tk sync --skip: mutation 4's reopen "),
@@ -1366,7 +1368,7 @@ mod tests {
         run_sync_error(&RunSyncError::Pull(AdapterReadError::Failed(
             "gh: HTTP 502".into(),
         )))
-        .render(&mut err_out, COMMAND);
+        .render(&mut err_out, COMMAND, Styler::plain().for_stderr());
         assert_eq!(
             String::from_utf8(err_out).unwrap(),
             "tk sync: gh: HTTP 502\n"
@@ -1380,7 +1382,7 @@ mod tests {
             expected: BackendKind::Github,
             actual: Some(BackendKind::Jira),
         }))
-        .render(&mut err_out, COMMAND);
+        .render(&mut err_out, COMMAND, Styler::plain().for_stderr());
         assert_eq!(
             String::from_utf8(err_out).unwrap(),
             "tk sync: the configured Remote changed while contacting the Backend; \
@@ -1394,7 +1396,7 @@ mod tests {
         run_sync_error(&RunSyncError::Refresh(RefreshStoreError::BackendCohort(
             BackendCohortError::UnknownBackendKind("gitlab".into()),
         )))
-        .render(&mut err_out, COMMAND);
+        .render(&mut err_out, COMMAND, Styler::plain().for_stderr());
         assert_eq!(
             String::from_utf8(err_out).unwrap(),
             "tk sync: Repository Store contains unknown Backend kind 'gitlab'; \
@@ -1408,7 +1410,7 @@ mod tests {
         run_sync_error(&RunSyncError::Load(
             LoadApplicableError::UnknownMutationType("weird".into()),
         ))
-        .render(&mut err_out, COMMAND);
+        .render(&mut err_out, COMMAND, Styler::plain().for_stderr());
         assert!(
             String::from_utf8(err_out)
                 .unwrap()
@@ -1428,7 +1430,7 @@ mod tests {
                 mutation_type: MutationType::PromoteTicket,
             },
         ))
-        .render(&mut err_out, COMMAND);
+        .render(&mut err_out, COMMAND, Styler::plain().for_stderr());
         assert_eq!(
             String::from_utf8(err_out).unwrap(),
             "tk sync: mutation 4 of type promote_ticket cannot carry this receipt; \
@@ -1445,7 +1447,7 @@ mod tests {
                 source: serde_json::from_str::<Promotion>("{}").unwrap_err(),
             },
         ))
-        .render(&mut err_out, COMMAND);
+        .render(&mut err_out, COMMAND, Styler::plain().for_stderr());
         let rendered = String::from_utf8(err_out).unwrap();
         assert!(
             rendered.starts_with("tk sync: mutation 4 has malformed payload_json: ")
@@ -1458,7 +1460,11 @@ mod tests {
     fn run_sync_error_blocks_retry_after_indeterminate_creation() {
         let mut stderr = Vec::new();
 
-        run_sync_error(&RunSyncError::ApplyingMutation(7)).render(&mut stderr, COMMAND);
+        run_sync_error(&RunSyncError::ApplyingMutation(7)).render(
+            &mut stderr,
+            COMMAND,
+            Styler::plain().for_stderr(),
+        );
 
         assert_eq!(
             String::from_utf8(stderr).unwrap(),
@@ -1478,7 +1484,7 @@ mod tests {
             source: PersistMutationOutcomeError::MutationNotFound(7),
         };
 
-        run_sync_error(&error).render(&mut stderr, COMMAND);
+        run_sync_error(&error).render(&mut stderr, COMMAND, Styler::plain().for_stderr());
 
         let rendered = String::from_utf8(stderr).unwrap();
         assert!(rendered.contains("gh-42"));
@@ -1502,7 +1508,7 @@ mod tests {
             },
         };
 
-        run_sync_error(&error).render(&mut stderr, COMMAND);
+        run_sync_error(&error).render(&mut stderr, COMMAND, Styler::plain().for_stderr());
 
         let rendered = String::from_utf8(stderr).unwrap();
         assert!(rendered.contains("Repository Store corruption or a Ticket bug"));
@@ -1522,7 +1528,7 @@ mod tests {
         run_sync_error(&RunSyncError::Outcome(
             PersistMutationOutcomeError::Storage(busy),
         ))
-        .render(&mut stderr, COMMAND);
+        .render(&mut stderr, COMMAND, Styler::plain().for_stderr());
 
         assert_eq!(
             String::from_utf8(stderr).unwrap(),
@@ -1537,7 +1543,7 @@ mod tests {
         run_sync_error(&RunSyncError::Outcome(
             PersistMutationOutcomeError::MutationNotFound(8),
         ))
-        .render(&mut stderr, COMMAND);
+        .render(&mut stderr, COMMAND, Styler::plain().for_stderr());
 
         assert_eq!(
             String::from_utf8(stderr).unwrap(),

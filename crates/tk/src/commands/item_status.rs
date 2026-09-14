@@ -152,7 +152,7 @@ mod tests {
             Ok(exit) => exit,
             Err(err) => {
                 let exit = err.exit();
-                err.render(deps.stderr, command);
+                err.render(deps.stderr, command, deps.styler.for_stderr());
                 exit
             }
         }

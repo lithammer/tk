@@ -96,7 +96,7 @@ mod tests {
             Ok(exit) => exit,
             Err(err) => {
                 let exit = err.exit();
-                err.render(deps.stderr, "accept");
+                err.render(deps.stderr, "accept", deps.styler.for_stderr());
                 exit
             }
         }

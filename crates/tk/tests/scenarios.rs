@@ -12,6 +12,33 @@ mod support;
 use tempfile::TempDir;
 
 #[test]
+fn stderr_diagnostics_honor_forced_color_and_no_color() {
+    let repo = Repo::new("color");
+    repo.run("init");
+    let args = ["sync", "log", "7"].map(str::to_owned);
+    for (env, expected) in [
+        (vec![], "tk sync log: Mutation 7 not found\n"),
+        (
+            vec![("CLICOLOR_FORCE", "1")],
+            "\x1b[1m\x1b[31mtk sync log:\x1b[39m\x1b[22m Mutation 7 not found\n",
+        ),
+        (
+            vec![("CLICOLOR_FORCE", "0")],
+            "\x1b[1m\x1b[31mtk sync log:\x1b[39m\x1b[22m Mutation 7 not found\n",
+        ),
+        (
+            vec![("CLICOLOR_FORCE", "1"), ("NO_COLOR", "1")],
+            "tk sync log: Mutation 7 not found\n",
+        ),
+    ] {
+        let out = support::run(&repo.cwd, &repo.root, &args, &env);
+        assert_eq!(out.status.code(), Some(1));
+        assert!(out.stdout.is_empty());
+        assert_eq!(out.stderr, expected.as_bytes(), "env={env:?}");
+    }
+}
+
+#[test]
 fn plan_bulk_edits_reject_invalid_batches_without_partial_changes() {
     let repo = Repo::new("plan");
     repo.run("init");
