@@ -3309,6 +3309,7 @@ mod tests {
             sequence,
             state,
             target_display_id: display.to_owned(),
+            item_class: ItemClass::Ticket,
         }
     }
 

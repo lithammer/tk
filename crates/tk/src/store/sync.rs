@@ -1210,6 +1210,7 @@ pub struct MutationSummary {
     pub sequence: i64,
     pub state: MutationState,
     pub target_display_id: String,
+    pub item_class: ItemClass,
 }
 
 /// The earliest nonterminal Mutation: the lowest Mutation Sequence in
@@ -1225,7 +1226,7 @@ pub fn earliest_applicable_mutation(
     conn: &Connection,
 ) -> rusqlite::Result<Option<MutationSummary>> {
     conn.query_row(
-        "select m.sequence, m.state, i.display_value \
+        "select m.sequence, m.state, i.display_value, i.item_class \
            from mutations m join items i on i.id = m.item_id \
           where m.state in ('pending','failed','applying') \
           order by m.sequence asc limit 1",
@@ -1235,6 +1236,7 @@ pub fn earliest_applicable_mutation(
                 sequence: r.get(0)?,
                 state: r.get(1)?,
                 target_display_id: r.get(2)?,
+                item_class: r.get(3)?,
             })
         },
     )
@@ -2283,6 +2285,7 @@ mod tests {
                 sequence: 1,
                 state: MutationState::Failed,
                 target_display_id: "tk-1".to_owned(),
+                item_class: ItemClass::Ticket,
             })
         );
     }
@@ -2321,6 +2324,7 @@ mod tests {
                 sequence: 3,
                 state: MutationState::Applying,
                 target_display_id: "tk-1".into(),
+                item_class: ItemClass::Ticket,
             })
         );
     }

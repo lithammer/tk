@@ -208,11 +208,7 @@ fn render_sync_banner<W: Write + ?Sized>(
         styler.wrap(palette::HEADER, "Sync:"),
         head.sequence,
         styler.wrap(palette::mutation_state_style(head.state), head.state.text()),
-        // MutationSummary carries no Item class, so ID_TICKET and ID_EPIC
-        // cannot be chosen between here; both resolve to cyan today, so the
-        // anchor renders identically either way. Revisit if the two colours
-        // ever diverge.
-        styler.wrap(palette::ID_TICKET, &head.target_display_id),
+        styler.wrap(palette::id_style(head.item_class), &head.target_display_id),
         styler.wrap(palette::SEPARATOR, &sync_log),
     )
 }

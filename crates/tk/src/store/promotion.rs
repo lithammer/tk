@@ -1245,7 +1245,7 @@ pub fn unresolved_promotion(
     operation_id: &str,
 ) -> rusqlite::Result<Option<MutationSummary>> {
     conn.query_row(
-        "select m.sequence, m.state, i.display_value \
+        "select m.sequence, m.state, i.display_value, i.item_class \
            from mutations m join items i on i.id = m.item_id \
           where m.promotion_operation_id = ?1 \
             and m.mutation_type in ('promote_ticket', 'promote_epic') \
@@ -1257,6 +1257,7 @@ pub fn unresolved_promotion(
                 sequence: r.get(0)?,
                 state: r.get(1)?,
                 target_display_id: r.get(2)?,
+                item_class: r.get(3)?,
             })
         },
     )
@@ -1281,7 +1282,7 @@ pub fn unresolved_in_operation(
     operation_id: &str,
 ) -> rusqlite::Result<Vec<MutationSummary>> {
     let mut stmt = conn.prepare(
-        "select m.sequence, m.state, i.display_value \
+        "select m.sequence, m.state, i.display_value, i.item_class \
            from mutations m join items i on i.id = m.item_id \
           where m.promotion_operation_id = ?1 \
             and m.state in ('pending', 'failed', 'applying') \
@@ -1292,6 +1293,7 @@ pub fn unresolved_in_operation(
             sequence: r.get(0)?,
             state: r.get(1)?,
             target_display_id: r.get(2)?,
+            item_class: r.get(3)?,
         })
     })?;
     rows.collect()
@@ -3008,11 +3010,13 @@ mod tests {
                     sequence: 3,
                     state: MutationState::Failed,
                     target_display_id: "tk-1".to_owned(),
+                    item_class: ItemClass::Ticket,
                 },
                 MutationSummary {
                     sequence: 4,
                     state: MutationState::Pending,
                     target_display_id: "tk-1".to_owned(),
+                    item_class: ItemClass::Ticket,
                 },
             ]
         );
