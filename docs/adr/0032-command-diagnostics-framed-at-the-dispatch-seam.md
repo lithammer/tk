@@ -74,6 +74,26 @@ pub enum CommandError {
   is not the `anyhow`/`eyre` dynamic-reporting ADR-0018 declined — there is no
   context chain, downcast, or backtrace.
 
+## Sync's command names
+
+Sync returns a local wrapper carrying a command name and `CommandError`.
+Dispatch passes both to the existing `finish()` function. This keeps sync's
+three names out of the shared error type, at the cost of a distinct return
+type for sync.
+
+The name follows the failure, not just the arguments: Sync Log errors use
+`sync log`; Sync Skip validation errors use `sync --skip`, while its storage
+errors retain `sync`. Other sync errors also use `sync`. Diagnostic bytes
+and exit codes remain unchanged.
+
+Sync releases its workflow lock before dispatch writes an error. Backend
+work and Store writes have ended by then; diagnostic output needs no lock.
+The handler reports a committed Sync Skip before starting Backend work.
+A stopped sync prints its summary to stdout and returns
+`Ok(Exit::Failure)`, with no stderr diagnostic. Multiline recovery guidance
+belongs in the error body because tk writes it; the tail holds only
+subprocess output.
+
 ## Migration
 
 Incremental, command-by-command — each dispatch arm can independently return the

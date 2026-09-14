@@ -356,7 +356,13 @@ pub fn run_argv(mut deps: Deps<'_>, argv: &[String]) -> std::io::Result<Exit> {
             let result = commands::remote::run(&mut deps, args);
             Ok(finish(&mut deps, "remote", result))
         }
-        Command::Sync(args) => Ok(commands::sync::run(deps, args)),
+        Command::Sync(args) => {
+            let (command, result) = match commands::sync::run(&mut deps, args) {
+                Ok(exit) => ("sync", Ok(exit)),
+                Err(err) => (err.command, Err(err.error)),
+            };
+            Ok(finish(&mut deps, command, result))
+        }
         Command::Promote(args) => {
             let result = commands::promote::run(&mut deps, args);
             Ok(finish(&mut deps, "promote", result))

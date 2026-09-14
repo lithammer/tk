@@ -130,7 +130,6 @@ fn detach_error(err: detach::DetachError, id: &str) -> CommandError {
 mod tests {
     use super::*;
     use crate::commands::show;
-    use crate::commands::sync as sync_command;
     use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
     use crate::domain::backend_operation::BackendItemIdentity;
     use crate::domain::item_class::ItemClass;
@@ -353,13 +352,7 @@ mod tests {
         insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
         let mut sync_h = Harness::new(&cwd_path, &store);
         expect_git(&sync_h, &store);
-        let sync_exit = sync_command::run(
-            sync_h.deps(),
-            sync_command::Args {
-                subcommand: None,
-                skip: None,
-            },
-        );
+        let sync_exit = crate::cli::run_argv(sync_h.deps(), &["sync".to_owned()]).unwrap();
         assert_eq!(sync_exit, Exit::Ok, "stderr={}", sync_h.err());
         assert_eq!(sync_h.out(), "Sync complete: 0 pulled, 0 applied.\n");
         sync_h.runner.assert_all_consumed();

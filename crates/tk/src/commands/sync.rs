@@ -19,7 +19,7 @@ use std::io::Write;
 
 use clap::{Args as ClapArgs, Subcommand};
 
-use crate::cli::{Deps, Exit};
+use crate::cli::{CommandError, Deps, Exit};
 use crate::commands::resolver;
 use crate::domain::backend_outcome::FailureClass;
 use crate::remote::factory::{self, OpenError as FactoryOpenError};
@@ -86,129 +86,88 @@ pub struct LogArgs {
     pub id: Option<i64>,
 }
 
-#[must_use]
-pub fn run(deps: Deps<'_>, args: Args) -> Exit {
+/// The failure chooses the frame: even with --skip, storage errors use sync.
+#[derive(Debug)]
+pub struct Error {
+    pub command: &'static str,
+    pub error: CommandError,
+}
+
+impl From<CommandError> for Error {
+    fn from(error: CommandError) -> Self {
+        Self {
+            command: COMMAND,
+            error,
+        }
+    }
+}
+
+pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, Error> {
     match args.subcommand {
-        Some(Sub::Log(log_args)) => run_log(deps, log_args),
+        Some(Sub::Log(log_args)) => run_log(deps, log_args).map_err(|error| Error {
+            command: LOG_COMMAND,
+            error,
+        }),
         None => run_sync(deps, args.skip),
     }
 }
 
-fn run_sync(deps: Deps<'_>, skip: Option<i64>) -> Exit {
-    let Deps {
-        data_root,
-        stdout,
-        stderr,
-        runner,
-        clock,
-        cwd,
-        ..
-    } = deps;
-
-    let mut store = match resolver::open_for_command(runner, cwd, clock, data_root) {
-        Ok(s) => s,
-        Err(err) => {
-            resolver::open_error(&err).render(stderr, COMMAND);
-            return Exit::Failure;
-        }
-    };
-    let now = clock.now_iso();
-
-    let workflow = match store.lock_remote_workflow() {
-        Ok(guard) => guard,
-        Err(err) => {
-            let _ = writeln!(stderr, "tk sync: {err}");
-            return Exit::Failure;
-        }
-    };
+fn run_sync(deps: &mut Deps<'_>, skip: Option<i64>) -> Result<Exit, Error> {
+    let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock, deps.data_root)
+        .map_err(|err| resolver::open_error(&err))?;
+    let now = deps.clock.now_iso();
+    let workflow = store
+        .lock_remote_workflow()
+        .map_err(CommandError::failure)?;
 
     // Commit the skip before opening the adapter: a broken or unimplemented
     // Remote must not block an operator from bypassing a failed Mutation, and
     // the committed local outcome is reported before Backend work begins
     // (ADR-0046).
     if let Some(seq) = skip {
-        match store_sync::mark_mutation_skipped(store.conn_mut(), &workflow, seq, &now) {
-            Ok(outcome) => render_skip_outcome(stdout, seq, &outcome),
-            Err(err) => {
-                render_skip_error(stderr, &err);
-                return Exit::Failure;
-            }
-        }
+        let outcome = store_sync::mark_mutation_skipped(store.conn_mut(), &workflow, seq, &now)
+            .map_err(|err| skip_error(&err))?;
+        render_skip_outcome(deps.stdout, seq, &outcome);
     }
 
-    let adapter_opt = match factory::open_configured(store.conn(), runner, cwd) {
-        Ok(a) => a,
-        Err(FactoryOpenError::NotImplemented) => {
-            let _ = writeln!(
-                stderr,
-                "tk sync: the configured Remote's adapter is not implemented in this build"
-            );
-            return Exit::Failure;
-        }
-        Err(FactoryOpenError::Storage(err)) => {
-            resolver::storage_error(&err).render(stderr, COMMAND);
-            return Exit::Failure;
-        }
-    };
+    let adapter_opt =
+        factory::open_configured(store.conn(), deps.runner, deps.cwd).map_err(|err| match err {
+            FactoryOpenError::NotImplemented => CommandError::failure(
+                "the configured Remote's adapter is not implemented in this build",
+            ),
+            FactoryOpenError::Storage(err) => resolver::storage_error(&err),
+        })?;
     let Some(mut adapter) = adapter_opt else {
-        let _ = writeln!(
-            stderr,
-            "tk sync: no Remote configured; run 'tk remote set <kind>' first"
-        );
-        return Exit::Failure;
+        return Err(CommandError::failure(
+            "no Remote configured; run 'tk remote set <kind>' first",
+        )
+        .into());
     };
 
-    let report = match sync::run_sync(store.conn_mut(), &mut *adapter, &workflow, &now) {
-        Ok(report) => report,
-        Err(err) => {
-            render_run_sync_error(stderr, &err);
-            return Exit::Failure;
-        }
-    };
-    render_sync_report(stdout, &report);
-    if report.stopped_at_sequence.is_some() {
+    let report = sync::run_sync(store.conn_mut(), &mut *adapter, &workflow, &now)
+        .map_err(|err| run_sync_error(&err))?;
+    render_sync_report(deps.stdout, &report);
+    Ok(if report.stopped_at_sequence.is_some() {
         Exit::Failure
     } else {
         Exit::Ok
-    }
+    })
 }
 
-fn run_log(deps: Deps<'_>, args: LogArgs) -> Exit {
-    let Deps {
-        data_root,
-        stdout,
-        stderr,
-        runner,
-        clock,
-        cwd,
-        styler,
-        ..
-    } = deps;
-    let styler = styler.for_stdout();
-
-    let store = match resolver::open_for_command(runner, cwd, clock, data_root) {
-        Ok(s) => s,
-        Err(err) => {
-            resolver::open_error(&err).render(stderr, LOG_COMMAND);
-            return Exit::Failure;
-        }
-    };
+fn run_log(deps: &mut Deps<'_>, args: LogArgs) -> Result<Exit, CommandError> {
+    let styler = deps.styler.for_stdout();
+    let store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock, deps.data_root)
+        .map_err(|err| resolver::open_error(&err))?;
 
     if let Some(seq) = args.id {
-        return match store_sync::show_mutation_log(store.conn(), seq) {
-            Ok(detail) => {
-                render_log_detail(stdout, &detail, styler);
-                Exit::Ok
+        let detail = store_sync::show_mutation_log(store.conn(), seq).map_err(|err| match err {
+            LogError::MutationNotFound(seq) => {
+                CommandError::failure(format_args!("Mutation {seq} not found"))
             }
-            Err(LogError::MutationNotFound(seq)) => {
-                let _ = writeln!(stderr, "tk sync log: Mutation {seq} not found");
-                Exit::Failure
-            }
-            Err(err) => {
-                render_log_error(stderr, &err);
-                Exit::Failure
-            }
-        };
+            err => log_error(&err),
+        })?;
+        render_log_detail(deps.stdout, &detail, styler);
+        return Ok(Exit::Ok);
     }
 
     let filter = if args.pending {
@@ -225,41 +184,30 @@ fn run_log(deps: Deps<'_>, args: LogArgs) -> Exit {
         LogListFilter::Default
     };
 
-    let rows = match store_sync::list_mutation_log(store.conn(), filter) {
-        Ok(rows) => rows,
-        Err(err) => {
-            render_log_error(stderr, &err);
-            return Exit::Failure;
-        }
-    };
-
+    let rows =
+        store_sync::list_mutation_log(store.conn(), filter).map_err(|err| log_error(&err))?;
     if rows.is_empty() {
         let message = match filter {
-            // The default list is the only filter that leaves a state out, so
-            // it is the only one whose empty result can still sit on a log
-            // that holds rows. Every other filter names the state it looked
-            // for, so its own empty line already says everything.
-            LogListFilter::Default => match store_sync::mutation_log_is_empty(store.conn()) {
-                Ok(true) => "No Mutations recorded.",
-                Ok(false) => "All Mutations applied.",
-                Err(err) => {
-                    render_log_error(stderr, &err);
-                    return Exit::Failure;
+            LogListFilter::Default => {
+                if store_sync::mutation_log_is_empty(store.conn()).map_err(|err| log_error(&err))? {
+                    "No Mutations recorded."
+                } else {
+                    "All Mutations applied."
                 }
-            },
+            }
             LogListFilter::Pending => "No pending Mutations.",
             LogListFilter::Failed => "No failed Mutations.",
             LogListFilter::Skipped => "No skipped Mutations.",
             LogListFilter::Cancelled => "No cancelled Mutations.",
             LogListFilter::Abandoned => "No abandoned Mutations.",
         };
-        let _ = writeln!(stdout, "{message}");
-        return Exit::Ok;
+        let _ = writeln!(deps.stdout, "{message}");
+        return Ok(Exit::Ok);
     }
     for row in &rows {
-        render_log_row(stdout, row, styler);
+        render_log_row(deps.stdout, row, styler);
     }
-    Exit::Ok
+    Ok(Exit::Ok)
 }
 
 /// Render the one-line sync summary: `Sync complete: <p> pulled, <a> applied`
@@ -293,113 +241,76 @@ fn render_skip_outcome<W: Write + ?Sized>(stdout: &mut W, seq: i64, outcome: &Sk
     }
 }
 
-fn render_skip_error<W: Write + ?Sized>(stderr: &mut W, err: &MarkSkippedError) {
-    match err {
-        MarkSkippedError::MutationNotFailed(seq) => {
-            let _ = writeln!(
-                stderr,
-                "tk sync --skip: Mutation {seq} is not in the failed state; --skip only bypasses failed Mutations"
-            );
-        }
+fn skip_error(err: &MarkSkippedError) -> Error {
+    let error = match err {
+        MarkSkippedError::MutationNotFailed(seq) => CommandError::failure(format_args!(
+            "Mutation {seq} is not in the failed state; --skip only bypasses failed Mutations"
+        )),
         MarkSkippedError::MutationNotFound(seq) => {
-            let _ = writeln!(stderr, "tk sync --skip: Mutation {seq} not found");
+            CommandError::failure(format_args!("Mutation {seq} not found"))
         }
-        MarkSkippedError::CannotSkipPromotion(seq) => {
-            let _ = writeln!(
-                stderr,
-                "tk sync --skip: Mutation {seq} is a Promotion; skipping it would leave every Mutation queued behind it with no backend identity to apply against. Use 'tk promote cancel <id>' to withdraw the whole Promotion Operation."
-            );
-        }
+        MarkSkippedError::CannotSkipPromotion(seq) => CommandError::failure(format_args!(
+            "Mutation {seq} is a Promotion; skipping it would leave every Mutation queued behind it with no backend identity to apply against. Use 'tk promote cancel <id>' to withdraw the whole Promotion Operation."
+        )),
         MarkSkippedError::Transition(_)
         | MarkSkippedError::ReopenMatchedNothing(_)
-        | MarkSkippedError::ReopenRefusedByTrigger(_) => {
-            let _ = writeln!(
-                stderr,
-                "tk sync --skip: {err}; this is a Ticket bug — please report it"
-            );
-        }
-        MarkSkippedError::Storage(err) => resolver::storage_error(err).render(stderr, COMMAND),
+        | MarkSkippedError::ReopenRefusedByTrigger(_) => CommandError::failure(format_args!(
+            "{err}; this is a Ticket bug — please report it"
+        )),
+        MarkSkippedError::Storage(err) => return resolver::storage_error(err).into(),
+    };
+    Error {
+        command: "sync --skip",
+        error,
     }
 }
 
-/// Render a [`LogError`] from any `tk sync log` read. Only the SQLite arm is an
-/// ordinary storage fault; the rest fall through to the generic frame.
-fn render_log_error<W: Write + ?Sized>(stderr: &mut W, err: &LogError) {
+fn log_error(err: &LogError) -> CommandError {
     match err {
-        LogError::Storage(err) => resolver::storage_error(err).render(stderr, LOG_COMMAND),
+        LogError::Storage(err) => resolver::storage_error(err),
         LogError::MutationNotFound(_) | LogError::FailureJson(_) => {
-            let _ = writeln!(
-                stderr,
-                "tk sync log: failed to read Repository Store\n{err}"
-            );
+            CommandError::failure(format_args!("failed to read Repository Store\n{err}"))
         }
     }
 }
 
-/// Dispatch a [`RunSyncError`] to its verbatim stderr line. Storage-class and
-/// environment failures fall through to the generic frame.
-fn render_run_sync_error<W: Write + ?Sized>(stderr: &mut W, err: &RunSyncError) {
+fn run_sync_error(err: &RunSyncError) -> CommandError {
     match err.category() {
-        RunSyncErrorCategory::BackendDetail(detail) => {
-            let _ = writeln!(stderr, "tk sync: {detail}");
-        }
-        RunSyncErrorCategory::MutationSchemaDrift(_) => {
-            let _ = writeln!(
-                stderr,
-                "tk sync: Mutation Log row has an unrecognised mutation kind; this is a Ticket bug — please report it"
-            );
-        }
-        RunSyncErrorCategory::TicketBug(error) => {
-            let _ = writeln!(
-                stderr,
-                "tk sync: {error}; this is a Ticket bug — please report it"
-            );
-        }
-        RunSyncErrorCategory::Storage(error) => {
-            resolver::storage_error(error).render(stderr, COMMAND);
-        }
+        RunSyncErrorCategory::BackendDetail(detail) => CommandError::failure(detail),
+        RunSyncErrorCategory::MutationSchemaDrift(_) => CommandError::failure(
+            "Mutation Log row has an unrecognised mutation kind; this is a Ticket bug — please report it",
+        ),
+        RunSyncErrorCategory::TicketBug(error) => CommandError::failure(format_args!(
+            "{error}; this is a Ticket bug — please report it"
+        )),
+        RunSyncErrorCategory::Storage(error) => resolver::storage_error(error),
         RunSyncErrorCategory::CreatedIdentityNotStored {
             error,
             sequence,
             cause,
         } => {
-            let _ = writeln!(stderr, "tk sync: {error}");
-            match cause {
-                CreatedIdentityNotStoredCause::TargetNotLocal => {
-                    let _ = writeln!(
-                        stderr,
-                        "This is Repository Store corruption or a Ticket bug — please report it"
-                    );
-                }
-                CreatedIdentityNotStoredCause::Storage(_)
-                | CreatedIdentityNotStoredCause::Direct => {}
-            }
-            let _ = writeln!(
-                stderr,
-                "Mutation {sequence} remains applying; use 'tk promote reconcile <id> <backend-key>' after confirming the created Backend object"
-            );
+            let guidance = if matches!(cause, CreatedIdentityNotStoredCause::TargetNotLocal) {
+                "\nThis is Repository Store corruption or a Ticket bug — please report it"
+            } else {
+                ""
+            };
+            CommandError::failure(format_args!(
+                "{error}{guidance}\nMutation {sequence} remains applying; use 'tk promote reconcile <id> <backend-key>' after confirming the created Backend object"
+            ))
         }
-        RunSyncErrorCategory::Direct(error) => {
-            let _ = writeln!(stderr, "tk sync: {error}");
-        }
+
+        RunSyncErrorCategory::Direct(error) => CommandError::failure(error),
         RunSyncErrorCategory::IndeterminateCreation(sequence) => {
-            let _ = writeln!(
-                stderr,
-                "tk sync: Mutation {sequence} has an indeterminate Backend creation outcome; use 'tk promote reconcile <id> <backend-key>' if the object exists, 'tk promote retry <id>' only when creating it again is safe, or 'tk promote cancel <id>' to withdraw the Promotion Operation, leaving any object it created untracked"
-            );
+            CommandError::failure(format_args!(
+                "Mutation {sequence} has an indeterminate Backend creation outcome; use 'tk promote reconcile <id> <backend-key>' if the object exists, 'tk promote retry <id>' only when creating it again is safe, or 'tk promote cancel <id>' to withdraw the Promotion Operation, leaving any object it created untracked"
+            ))
         }
-        RunSyncErrorCategory::RemoteChanged => {
-            let _ = writeln!(
-                stderr,
-                "tk sync: the configured Remote changed while contacting the Backend; retry 'tk sync'"
-            );
-        }
-        RunSyncErrorCategory::RepositoryInvariant(error) => {
-            let _ = writeln!(
-                stderr,
-                "tk sync: {error}; this is a Repository Store invariant failure"
-            );
-        }
+        RunSyncErrorCategory::RemoteChanged => CommandError::failure(
+            "the configured Remote changed while contacting the Backend; retry 'tk sync'",
+        ),
+        RunSyncErrorCategory::RepositoryInvariant(error) => CommandError::failure(format_args!(
+            "{error}; this is a Repository Store invariant failure"
+        )),
     }
 }
 
@@ -600,21 +511,10 @@ mod tests {
     const HOSTILE_FAILURE_JSON: &str =
         r#"{"detail":"HTTP 422: \u001b[31mred\u0007 title rejected"}"#;
 
-    fn log_args(id: Option<i64>) -> Args {
-        Args {
-            subcommand: Some(Sub::Log(LogArgs {
-                pending: false,
-                failed: false,
-                skipped: false,
-                cancelled: false,
-                abandoned: false,
-                id,
-            })),
-            skip: None,
-        }
+    fn run(deps: Deps<'_>, args: &[&str]) -> Exit {
+        let argv = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+        crate::cli::run_argv(deps, &argv).unwrap()
     }
-
-    // ---- tk sync (adapter-reachable paths) ------------------------------
 
     #[test]
     fn sync_no_remote_returns_1_with_diagnostic() {
@@ -624,13 +524,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
-        let code = run(
-            h.deps(),
-            Args {
-                subcommand: None,
-                skip: None,
-            },
-        );
+        let code = run(h.deps(), &["sync"]);
         assert_eq!(code, Exit::Failure);
         assert!(
             String::from_utf8(h.stderr)
@@ -641,8 +535,7 @@ mod tests {
 
     #[test]
     fn sync_github_with_no_adopted_items_is_a_noop() {
-        // github now resolves to a real adapter; with no Adopted items the
-        // engine derives an empty key set and makes no gh call.
+        // With no Adopted items, sync must make no Backend calls.
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_remote(
@@ -659,13 +552,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store); // only git discovery; no gh call expected
-        let code = run(
-            h.deps(),
-            Args {
-                subcommand: None,
-                skip: None,
-            },
-        );
+        let code = run(h.deps(), &["sync"]);
         assert_eq!(code, Exit::Ok);
         assert!(
             String::from_utf8(h.stdout)
@@ -718,15 +605,10 @@ mod tests {
             ProcError::ExecutableNotFound,
         );
 
-        let code = run(
-            h.deps(),
-            Args {
-                subcommand: None,
-                skip: None,
-            },
-        );
+        let code = run(h.deps(), &["sync"]);
 
         assert_eq!(code, Exit::Failure);
+        assert!(h.stderr.is_empty());
         assert_eq!(
             String::from_utf8(h.stdout).unwrap(),
             "Sync complete: 0 pulled, 0 applied, stopped at 1.\n"
@@ -784,13 +666,7 @@ mod tests {
                 stderr: Vec::new(),
             },
         );
-        let code = run(
-            h.deps(),
-            Args {
-                subcommand: None,
-                skip: None,
-            },
-        );
+        let code = run(h.deps(), &["sync"]);
         assert_eq!(code, Exit::Ok);
         assert!(
             String::from_utf8(h.stdout)
@@ -830,13 +706,7 @@ mod tests {
         expect_git(&h, &store);
         // No Remote configured: sync still exits 1 on no-remote, but the skip
         // committed first.
-        let code = run(
-            h.deps(),
-            Args {
-                subcommand: None,
-                skip: Some(1),
-            },
-        );
+        let code = run(h.deps(), &["sync", "--skip", "1"]);
         assert_eq!(code, Exit::Failure);
         assert!(
             String::from_utf8(h.stdout)
@@ -889,15 +759,8 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
-        // No Remote configured: the skip's line is what this test cares about,
-        // reported before sync fails on the missing Remote.
-        let code = run(
-            h.deps(),
-            Args {
-                subcommand: None,
-                skip: Some(1),
-            },
-        );
+        // Report the committed reopen even when no Remote is configured.
+        let code = run(h.deps(), &["sync", "--skip", "1"]);
         assert_eq!(code, Exit::Failure);
         assert!(
             String::from_utf8(h.stdout)
@@ -965,23 +828,14 @@ mod tests {
             "Backend body",
             Lifecycle::Done,
         );
-        let code = run(
-            h.deps(),
-            Args {
-                subcommand: None,
-                skip: Some(1),
-            },
-        );
+        let code = run(h.deps(), &["sync", "--skip", "1"]);
         assert_eq!(code, Exit::Ok);
         assert_eq!(
             String::from_utf8(h.stdout).unwrap(),
             "Skipped Mutation 1; restored gh-1 to open.\nSync complete: 1 pulled, 0 applied.\n"
         );
 
-        // Lifecycle and content together: the reopen puts the Item back in the
-        // working set, so this run's merge is free to overwrite title and body
-        // from the snapshot. Seeding the two sides differently is what lets
-        // that assertion fail if it ever stops holding.
+        // Pull must refresh title and body as well as Lifecycle after the reopen.
         let (status, title, body): (String, String, String) = Connection::open(store.db_path())
             .unwrap()
             .query_row(
@@ -1033,13 +887,7 @@ mod tests {
         let first_guard = first.lock_remote_workflow().unwrap();
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
-        let exit = run(
-            h.deps(),
-            Args {
-                subcommand: None,
-                skip: Some(1),
-            },
-        );
+        let exit = run(h.deps(), &["sync", "--skip", "1"]);
         assert_eq!(exit, Exit::Failure);
         assert_eq!(
             String::from_utf8(h.stderr).unwrap(),
@@ -1088,13 +936,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
-            Args {
-                subcommand: None,
-                skip: Some(1),
-            },
-        );
+        let code = run(h.deps(), &["sync", "--skip", "1"]);
         assert_eq!(code, Exit::Failure);
         assert_eq!(
             String::from_utf8(h.stderr).unwrap(),
@@ -1110,6 +952,26 @@ mod tests {
             })
             .unwrap();
         assert_eq!(state, "failed", "the refusal must not commit the skip");
+    }
+
+    #[test]
+    fn sync_skip_storage_failure_keeps_the_sync_frame() {
+        let store = TmpStore::new("repo");
+        let conn = seed_store(&store);
+        conn.execute_batch("DROP TABLE mutations").unwrap();
+        drop(conn);
+        let cwd_path = cwd();
+        let mut h = Harness::new(&cwd_path, &store);
+        expect_git(&h, &store);
+
+        let code = run(h.deps(), &["sync", "--skip", "1"]);
+
+        assert_eq!(code, Exit::Failure);
+        assert!(h.stdout.is_empty());
+        assert_eq!(
+            h.err(),
+            "tk sync: failed to read Repository Store\nno such table: mutations\n"
+        );
     }
 
     #[test]
@@ -1132,13 +994,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
-        let code = run(
-            h.deps(),
-            Args {
-                subcommand: None,
-                skip: Some(1),
-            },
-        );
+        let code = run(h.deps(), &["sync", "--skip", "1"]);
         assert_eq!(code, Exit::Failure);
         assert!(
             String::from_utf8(h.stderr)
@@ -1146,8 +1002,6 @@ mod tests {
                 .contains("is not in the failed state")
         );
     }
-
-    // ---- tk sync log ----------------------------------------------------
 
     #[test]
     fn sync_log_empty_prints_default_message() {
@@ -1157,7 +1011,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
-        let code = run(h.deps(), log_args(None));
+        let code = run(h.deps(), &["sync", "log"]);
         assert_eq!(code, Exit::Ok);
         assert!(
             String::from_utf8(h.stdout)
@@ -1187,7 +1041,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
-        let code = run(h.deps(), log_args(None));
+        let code = run(h.deps(), &["sync", "log"]);
 
         assert_eq!(code, Exit::Ok);
         assert_eq!(
@@ -1210,7 +1064,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
-        let code = run(h.deps_with(Styler::always()), log_args(None));
+        let code = run(h.deps_with(Styler::always()), &["sync", "log"]);
 
         assert_eq!(code, Exit::Ok);
         let out = String::from_utf8(h.stdout).unwrap();
@@ -1247,7 +1101,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
-        let code = run(h.deps(), log_args(None));
+        let code = run(h.deps(), &["sync", "log"]);
 
         assert_eq!(code, Exit::Ok);
         let out = String::from_utf8(h.stdout).unwrap();
@@ -1266,7 +1120,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
-        let code = run(h.deps(), log_args(None));
+        let code = run(h.deps(), &["sync", "log"]);
         assert_eq!(code, Exit::Ok);
         let out = String::from_utf8(h.stdout).unwrap();
         assert!(out.contains("1 pending update_ticket tk-1"));
@@ -1286,7 +1140,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
-        let code = run(h.deps(), log_args(Some(7)));
+        let code = run(h.deps(), &["sync", "log", "7"]);
 
         assert_eq!(code, Exit::Ok);
         let out = String::from_utf8(h.stdout).unwrap();
@@ -1309,7 +1163,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
-        let code = run(h.deps(), log_args(Some(7)));
+        let code = run(h.deps(), &["sync", "log", "7"]);
 
         assert_eq!(code, Exit::Ok);
         let out = String::from_utf8(h.stdout).unwrap();
@@ -1327,7 +1181,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
-        let code = run(h.deps(), log_args(Some(7)));
+        let code = run(h.deps(), &["sync", "log", "7"]);
         assert_eq!(code, Exit::Ok);
         let out = String::from_utf8(h.stdout).unwrap();
         assert!(out.contains("Mutation 7  [failed]"));
@@ -1348,7 +1202,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
 
-        let code = run(h.deps_with(Styler::always()), log_args(Some(7)));
+        let code = run(h.deps_with(Styler::always()), &["sync", "log", "7"]);
 
         assert_eq!(code, Exit::Ok);
         let out = String::from_utf8(h.stdout).unwrap();
@@ -1391,7 +1245,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
-        let code = run(h.deps(), log_args(None));
+        let code = run(h.deps(), &["sync", "log"]);
         assert_eq!(code, Exit::Ok);
         let out = String::from_utf8(h.stdout).unwrap();
         assert!(
@@ -1423,7 +1277,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
-        let code = run(h.deps(), log_args(Some(3)));
+        let code = run(h.deps(), &["sync", "log", "3"]);
         assert_eq!(code, Exit::Ok);
         let out = String::from_utf8(h.stdout).unwrap();
         assert!(out.contains("Class:      validation"), "{out}");
@@ -1440,7 +1294,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
-        let code = run(h.deps(), log_args(Some(99)));
+        let code = run(h.deps(), &["sync", "log", "99"]);
         assert_eq!(code, Exit::Failure);
         assert!(
             String::from_utf8(h.stderr)
@@ -1448,8 +1302,6 @@ mod tests {
                 .contains("Mutation 99 not found")
         );
     }
-
-    // ---- report / error rendering ---------------------------------------
 
     #[test]
     fn render_report_includes_stopped_clause() {
@@ -1486,17 +1338,16 @@ mod tests {
     }
 
     #[test]
-    fn render_skip_error_frames_a_failed_reopen_as_a_bug() {
-        // ADR-0017 keeps these lines verbatim, and the store-side tests assert
-        // the variant rather than the rendered bytes. Neither reopen failure is
-        // reachable through a Store writer, so this is the only place their
-        // wording is pinned.
+    fn skip_error_frames_a_failed_reopen_as_a_bug() {
+        // Store writers cannot produce these invariant failures. Construct them
+        // directly to check that the diagnostic asks the user to report a bug.
         for err in [
             MarkSkippedError::ReopenMatchedNothing(4),
             MarkSkippedError::ReopenRefusedByTrigger(4),
         ] {
             let mut out = Vec::new();
-            render_skip_error(&mut out, &err);
+            let error = skip_error(&err);
+            error.error.render(&mut out, error.command);
             let rendered = String::from_utf8(out).unwrap();
             assert!(
                 rendered.starts_with("tk sync --skip: mutation 4's reopen "),
@@ -1510,12 +1361,12 @@ mod tests {
     }
 
     #[test]
-    fn render_run_sync_error_renders_pull_failure_detail() {
+    fn run_sync_error_renders_pull_failure_detail() {
         let mut err_out = Vec::new();
-        render_run_sync_error(
-            &mut err_out,
-            &RunSyncError::Pull(AdapterReadError::Failed("gh: HTTP 502".into())),
-        );
+        run_sync_error(&RunSyncError::Pull(AdapterReadError::Failed(
+            "gh: HTTP 502".into(),
+        )))
+        .render(&mut err_out, COMMAND);
         assert_eq!(
             String::from_utf8(err_out).unwrap(),
             "tk sync: gh: HTTP 502\n"
@@ -1523,15 +1374,13 @@ mod tests {
     }
 
     #[test]
-    fn render_run_sync_error_renders_remote_change_retry_guidance() {
+    fn run_sync_error_renders_remote_change_retry_guidance() {
         let mut err_out = Vec::new();
-        render_run_sync_error(
-            &mut err_out,
-            &RunSyncError::Refresh(RefreshStoreError::RemoteChanged {
-                expected: BackendKind::Github,
-                actual: Some(BackendKind::Jira),
-            }),
-        );
+        run_sync_error(&RunSyncError::Refresh(RefreshStoreError::RemoteChanged {
+            expected: BackendKind::Github,
+            actual: Some(BackendKind::Jira),
+        }))
+        .render(&mut err_out, COMMAND);
         assert_eq!(
             String::from_utf8(err_out).unwrap(),
             "tk sync: the configured Remote changed while contacting the Backend; \
@@ -1540,14 +1389,12 @@ mod tests {
     }
 
     #[test]
-    fn render_run_sync_error_renders_unknown_backend_cohort_as_an_invariant_failure() {
+    fn run_sync_error_renders_unknown_backend_cohort_as_an_invariant_failure() {
         let mut err_out = Vec::new();
-        render_run_sync_error(
-            &mut err_out,
-            &RunSyncError::Refresh(RefreshStoreError::BackendCohort(
-                BackendCohortError::UnknownBackendKind("gitlab".into()),
-            )),
-        );
+        run_sync_error(&RunSyncError::Refresh(RefreshStoreError::BackendCohort(
+            BackendCohortError::UnknownBackendKind("gitlab".into()),
+        )))
+        .render(&mut err_out, COMMAND);
         assert_eq!(
             String::from_utf8(err_out).unwrap(),
             "tk sync: Repository Store contains unknown Backend kind 'gitlab'; \
@@ -1556,12 +1403,12 @@ mod tests {
     }
 
     #[test]
-    fn render_run_sync_error_renders_schema_drift() {
+    fn run_sync_error_renders_schema_drift() {
         let mut err_out = Vec::new();
-        render_run_sync_error(
-            &mut err_out,
-            &RunSyncError::Load(LoadApplicableError::UnknownMutationType("weird".into())),
-        );
+        run_sync_error(&RunSyncError::Load(
+            LoadApplicableError::UnknownMutationType("weird".into()),
+        ))
+        .render(&mut err_out, COMMAND);
         assert!(
             String::from_utf8(err_out)
                 .unwrap()
@@ -1570,18 +1417,18 @@ mod tests {
     }
 
     #[test]
-    fn render_run_sync_error_names_an_outcome_boundary_mismatch_as_a_bug() {
+    fn run_sync_error_names_an_outcome_boundary_mismatch_as_a_bug() {
         // An Adapter that answers a Promotion with a bare acknowledgement has
         // broken its contract: the Mutation stays applicable, so the user needs
         // to know retrying will not clear it.
         let mut err_out = Vec::new();
-        render_run_sync_error(
-            &mut err_out,
-            &RunSyncError::Outcome(PersistMutationOutcomeError::OperationShapeMismatch {
+        run_sync_error(&RunSyncError::Outcome(
+            PersistMutationOutcomeError::OperationShapeMismatch {
                 sequence: 4,
                 mutation_type: MutationType::PromoteTicket,
-            }),
-        );
+            },
+        ))
+        .render(&mut err_out, COMMAND);
         assert_eq!(
             String::from_utf8(err_out).unwrap(),
             "tk sync: mutation 4 of type promote_ticket cannot carry this receipt; \
@@ -1590,15 +1437,15 @@ mod tests {
     }
 
     #[test]
-    fn render_run_sync_error_names_a_malformed_payload_as_a_bug() {
+    fn run_sync_error_names_a_malformed_payload_as_a_bug() {
         let mut err_out = Vec::new();
-        render_run_sync_error(
-            &mut err_out,
-            &RunSyncError::Outcome(PersistMutationOutcomeError::PayloadJson {
+        run_sync_error(&RunSyncError::Outcome(
+            PersistMutationOutcomeError::PayloadJson {
                 sequence: 4,
                 source: serde_json::from_str::<Promotion>("{}").unwrap_err(),
-            }),
-        );
+            },
+        ))
+        .render(&mut err_out, COMMAND);
         let rendered = String::from_utf8(err_out).unwrap();
         assert!(
             rendered.starts_with("tk sync: mutation 4 has malformed payload_json: ")
@@ -1608,10 +1455,10 @@ mod tests {
     }
 
     #[test]
-    fn render_run_sync_error_blocks_retry_after_indeterminate_creation() {
+    fn run_sync_error_blocks_retry_after_indeterminate_creation() {
         let mut stderr = Vec::new();
 
-        render_run_sync_error(&mut stderr, &RunSyncError::ApplyingMutation(7));
+        run_sync_error(&RunSyncError::ApplyingMutation(7)).render(&mut stderr, COMMAND);
 
         assert_eq!(
             String::from_utf8(stderr).unwrap(),
@@ -1620,7 +1467,7 @@ mod tests {
     }
 
     #[test]
-    fn render_run_sync_error_preserves_an_unstored_created_identity() {
+    fn run_sync_error_preserves_an_unstored_created_identity() {
         let mut stderr = Vec::new();
         let error = RunSyncError::CreatedIdentityNotStored {
             sequence: 7,
@@ -1631,7 +1478,7 @@ mod tests {
             source: PersistMutationOutcomeError::MutationNotFound(7),
         };
 
-        render_run_sync_error(&mut stderr, &error);
+        run_sync_error(&error).render(&mut stderr, COMMAND);
 
         let rendered = String::from_utf8(stderr).unwrap();
         assert!(rendered.contains("gh-42"));
@@ -1641,7 +1488,7 @@ mod tests {
     }
 
     #[test]
-    fn render_run_sync_error_labels_post_create_origin_drift_as_corruption() {
+    fn run_sync_error_labels_post_create_origin_drift_as_corruption() {
         let mut stderr = Vec::new();
         let error = RunSyncError::CreatedIdentityNotStored {
             sequence: 7,
@@ -1655,7 +1502,7 @@ mod tests {
             },
         };
 
-        render_run_sync_error(&mut stderr, &error);
+        run_sync_error(&error).render(&mut stderr, COMMAND);
 
         let rendered = String::from_utf8(stderr).unwrap();
         assert!(rendered.contains("Repository Store corruption or a Ticket bug"));
@@ -1665,17 +1512,17 @@ mod tests {
     }
 
     #[test]
-    fn render_run_sync_error_preserves_storage_classification() {
+    fn run_sync_error_preserves_storage_classification() {
         let busy = rusqlite::Error::SqliteFailure(
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
             None,
         );
         let mut stderr = Vec::new();
 
-        render_run_sync_error(
-            &mut stderr,
-            &RunSyncError::Outcome(PersistMutationOutcomeError::Storage(busy)),
-        );
+        run_sync_error(&RunSyncError::Outcome(
+            PersistMutationOutcomeError::Storage(busy),
+        ))
+        .render(&mut stderr, COMMAND);
 
         assert_eq!(
             String::from_utf8(stderr).unwrap(),
@@ -1684,13 +1531,13 @@ mod tests {
     }
 
     #[test]
-    fn render_run_sync_error_preserves_direct_technical_errors() {
+    fn run_sync_error_preserves_direct_technical_errors() {
         let mut stderr = Vec::new();
 
-        render_run_sync_error(
-            &mut stderr,
-            &RunSyncError::Outcome(PersistMutationOutcomeError::MutationNotFound(8)),
-        );
+        run_sync_error(&RunSyncError::Outcome(
+            PersistMutationOutcomeError::MutationNotFound(8),
+        ))
+        .render(&mut stderr, COMMAND);
 
         assert_eq!(
             String::from_utf8(stderr).unwrap(),

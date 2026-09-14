@@ -318,9 +318,7 @@ mod tests {
 
     use super::*;
     use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
-    use crate::commands::{
-        detach, list, next, promote, remote, search, show, sync as sync_command,
-    };
+    use crate::commands::{detach, list, next, promote, remote, search, show};
     use crate::domain::backend_operation::BackendItemIdentity;
     use crate::domain::item_class::ItemClass;
     use crate::domain::lifecycle::Lifecycle;
@@ -1186,13 +1184,7 @@ mod tests {
 
         let mut sync_h = Harness::new(&cwd_path, &store);
         expect_git(&sync_h, &store);
-        let sync_exit = sync_command::run(
-            sync_h.deps(),
-            sync_command::Args {
-                subcommand: None,
-                skip: None,
-            },
-        );
+        let sync_exit = crate::cli::run_argv(sync_h.deps(), &["sync".to_owned()]).unwrap();
         assert_eq!(sync_exit, Exit::Ok, "stderr={}", sync_h.err());
         sync_h.runner.assert_all_consumed();
         assert_eq!(sync_h.out(), "Sync complete: 0 pulled, 0 applied.\n");
