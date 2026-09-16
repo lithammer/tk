@@ -278,7 +278,7 @@ mod tests {
     use crate::store::migrations;
     use crate::store::testing::{
         FixtureItem, FixtureMutation, insert_dependency, insert_external_blocker,
-        insert_fixture_item, insert_fixture_mutation,
+        insert_fixture_item, insert_fixture_mutation, seed_mutation,
     };
     use rusqlite::Connection;
 
@@ -324,27 +324,6 @@ mod tests {
 
     fn display_ids(rows: &[ListRow]) -> Vec<&str> {
         rows.iter().map(|r| r.display_id.as_str()).collect()
-    }
-
-    fn seed_mutation(
-        store: &Store,
-        sequence: i64,
-        item_id: &str,
-        item_class: ItemClass,
-        mutation_type: MutationType,
-        state: &str,
-    ) {
-        insert_fixture_mutation(
-            &store.conn,
-            FixtureMutation {
-                sequence,
-                item_class,
-                state,
-                failure_json: (state == "failed").then_some(r#"{"detail":"prior"}"#),
-                ..FixtureMutation::new(mutation_type, item_id)
-            },
-        )
-        .unwrap();
     }
 
     #[test]
@@ -999,12 +978,10 @@ mod tests {
             let item_id = state.text();
             seed_ticket(&store, item_id, &format!("tk-{seq}"), "open", seq);
             seed_mutation(
-                &store,
+                &store.conn,
                 seq,
-                item_id,
-                ItemClass::Ticket,
-                mutation_type,
                 state.text(),
+                FixtureMutation::new(mutation_type, item_id),
             );
             expected.push((state, mutation_type, expect_pending, expect_failed));
         }
@@ -1055,7 +1032,15 @@ mod tests {
             };
             for state in ["pending", "failed"] {
                 seq += 1;
-                seed_mutation(&store, seq, item_id, item_class, mutation_type, state);
+                seed_mutation(
+                    &store.conn,
+                    seq,
+                    state,
+                    FixtureMutation {
+                        item_class,
+                        ..FixtureMutation::new(mutation_type, item_id)
+                    },
+                );
             }
         }
 
@@ -1077,20 +1062,16 @@ mod tests {
         let store = open_seeded();
         seed_ticket(&store, "t1", "tk-1", "open", 1);
         seed_mutation(
-            &store,
+            &store.conn,
             1,
-            "t1",
-            ItemClass::Ticket,
-            MutationType::PromoteTicket,
             "pending",
+            FixtureMutation::new(MutationType::PromoteTicket, "t1"),
         );
         seed_mutation(
-            &store,
+            &store.conn,
             2,
-            "t1",
-            ItemClass::Ticket,
-            MutationType::SetItemStatus,
             "pending",
+            FixtureMutation::new(MutationType::SetItemStatus, "t1"),
         );
         let rows = list_rows(&store, ListOptions::default()).unwrap();
         assert_eq!(rows.len(), 1);
@@ -1103,12 +1084,13 @@ mod tests {
         let store = open_seeded();
         seed_epic(&store, "e1", "tk-1", "open", 1);
         seed_mutation(
-            &store,
+            &store.conn,
             1,
-            "e1",
-            ItemClass::Epic,
-            MutationType::UpdateEpic,
             "failed",
+            FixtureMutation {
+                item_class: ItemClass::Epic,
+                ..FixtureMutation::new(MutationType::UpdateEpic, "e1")
+            },
         );
         let rows = list_rows(&store, ListOptions::default()).unwrap();
         assert_eq!(rows.len(), 1);
@@ -1135,12 +1117,10 @@ mod tests {
         )
         .unwrap();
         seed_mutation(
-            &store,
+            &store.conn,
             1,
-            "child",
-            ItemClass::Ticket,
-            MutationType::UpdateTicket,
             "pending",
+            FixtureMutation::new(MutationType::UpdateTicket, "child"),
         );
         let rows = list_rows(&store, ListOptions::default()).unwrap();
         let epic_row = rows.iter().find(|r| r.id == "epic").unwrap();

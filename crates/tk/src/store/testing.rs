@@ -480,6 +480,20 @@ impl<'a> FixtureMutation<'a> {
     }
 }
 
+/// Seed a Mutation with the failure detail required by the failed-state CHECK.
+pub fn seed_mutation(conn: &Connection, sequence: i64, state: &str, mutation: FixtureMutation<'_>) {
+    insert_fixture_mutation(
+        conn,
+        FixtureMutation {
+            sequence,
+            state,
+            failure_json: (state == "failed").then_some(r#"{"detail":"prior"}"#),
+            ..mutation
+        },
+    )
+    .unwrap();
+}
+
 pub fn insert_fixture_mutation(
     conn: &Connection,
     mutation: FixtureMutation<'_>,
