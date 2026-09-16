@@ -79,7 +79,7 @@ mod tests {
     use crate::store::migrations;
     use crate::store::testing::{
         FixtureItem, FixtureMutation, insert_external_blocker, insert_fixture_item,
-        insert_fixture_mutation,
+        insert_fixture_mutation, seed_mutation,
     };
     use rusqlite::Connection;
 
@@ -118,27 +118,6 @@ mod tests {
                 status,
                 created_seq: seq,
                 ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-    }
-
-    /// Seed one Mutation against `item_id`, supplying the `failure_json` the
-    /// `failed` state's CHECK requires.
-    fn seed_mutation(
-        store: &Store,
-        sequence: i64,
-        item_id: &str,
-        mutation_type: MutationType,
-        state: &str,
-    ) {
-        insert_fixture_mutation(
-            &store.conn,
-            FixtureMutation {
-                sequence,
-                state,
-                failure_json: (state == "failed").then_some(r#"{"detail":"prior"}"#),
-                ..FixtureMutation::new(mutation_type, item_id)
             },
         )
         .unwrap();
@@ -310,32 +289,28 @@ mod tests {
         seed_ticket(&store, "failed-edit", "tk-2", "Auth failed", "open", 2);
         seed_ticket(&store, "promo-only", "tk-3", "Auth promoted", "open", 3);
         seed_mutation(
-            &store,
+            &store.conn,
             1,
-            "pending-edit",
-            MutationType::UpdateTicket,
             "pending",
+            FixtureMutation::new(MutationType::UpdateTicket, "pending-edit"),
         );
         seed_mutation(
-            &store,
+            &store.conn,
             2,
-            "failed-edit",
-            MutationType::UpdateTicket,
             "failed",
+            FixtureMutation::new(MutationType::UpdateTicket, "failed-edit"),
         );
         seed_mutation(
-            &store,
+            &store.conn,
             3,
-            "promo-only",
-            MutationType::PromoteTicket,
             "pending",
+            FixtureMutation::new(MutationType::PromoteTicket, "promo-only"),
         );
         seed_mutation(
-            &store,
+            &store.conn,
             4,
-            "promo-only",
-            MutationType::PromoteTicket,
             "failed",
+            FixtureMutation::new(MutationType::PromoteTicket, "promo-only"),
         );
 
         let search = search_rows(&store, "auth").unwrap();
