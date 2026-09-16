@@ -27,9 +27,8 @@ detection, then carried on `Deps`; commands never re-resolve it.
 **Policy gate location.** Resolving the policy once at startup and
 carrying it on `Deps` was chosen over per-command `--color` flags (which
 would multiply the parse surface and risk drift) and over no gating (which
-can't honor `NO_COLOR`). The original decision called for a top-level
-`--color=auto|always|never` flag. That flag is not implemented; tk-154 owns
-the decision to add it or drop that part of this ADR.
+can't honor `NO_COLOR`). The original decision also called for a top-level
+`--color=auto|always|never` flag; see the Amendment below.
 
 ## Consequences
 
@@ -52,3 +51,32 @@ the decision to add it or drop that part of this ADR.
 - Scenario snapshots assert plain output. A separate scenario checks forced
   stderr color and `NO_COLOR` precedence. Palette tests pin the SGR bytes;
   dispatch tests check prefix boundaries and independent stream choices.
+
+## Amendment: the colour policy is env and TTY only
+
+The top-level `--color=auto|always|never` flag the original decision called
+for was never built, and is dropped rather than finished. Nothing is removed
+from the CLI; the env and TTY chain above has always been the whole policy.
+
+The flag would reach nothing the chain does not. `--color=never` is
+`NO_COLOR=1`, `--color=always` is `CLICOLOR_FORCE=1` — with `NO_COLOR=`
+beside it when one is inherited, since `NO_COLOR` wins the chain — and
+`--color=auto` is the default, because `resolve_styler_from_env` reads an
+empty value as unset. What a flag adds is a second spelling for each arm,
+visible in `--help` where the env vars are not; tk(1)'s ENVIRONMENT section
+carries them instead.
+
+Against that, a flag lands on the wrong side of the startup seam. `main`
+resolves the styler and wraps both streams in `anstream::AutoStream` before
+`run_argv` parses argv, so a parsed flag arrives after the streams it would
+govern. Honoring it needs either a second argv reader in `main`, free to
+drift from clap's, or the parse moved out of `run_argv` — which the
+command-handler tests call directly, each injecting its own `Styler` through
+`Deps`. Both give the policy a second source of truth, which is the drift
+the "resolved once, never re-resolved" rule exists to prevent.
+
+**Scope.** This policy governs what tk writes through `Deps`. clap's help
+and usage errors sit outside it. `render_clap_error` prints `err.render()`
+through `StyledStr`'s `Display` impl, which walks the text parts and emits
+no SGR, so clap's chrome is plain on a terminal and off it. Styling it is a
+separate decision needing its own evidence, not an extension of this one.
