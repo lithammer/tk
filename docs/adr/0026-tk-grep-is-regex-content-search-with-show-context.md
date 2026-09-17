@@ -163,7 +163,7 @@ before the store opens. Empty and malformed patterns keep the same fail-fast
 usage errors as the default form.
 
 The Display ID and title are sanitised as single-line fields, and the output is
-plain even under `--color always`. The list form omits all Item metadata,
+unstyled whatever the colour policy. The list form omits all Item metadata,
 including status, kind, priority, dates, Mutation markers, and the Pending
 Promotion label or Binding row. This last omission is deliberate for `pending`,
 `failed`, and `applying` Promotions: the one-line form is only an Item identity
