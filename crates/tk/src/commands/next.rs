@@ -561,12 +561,14 @@ mod tests {
             assert_eq!(exit, Exit::Failure, "quiet={quiet}");
             let rationale = "tk-1: Effective Priority P0 (via tk-2)";
             let diagnostic = "tk next: failed to write output";
+            let rationale_offset = stderr
+                .find(rationale)
+                .expect("write failure must retain the rationale");
+            let diagnostic_offset = stderr
+                .find(diagnostic)
+                .expect("write failure must emit a diagnostic");
             assert!(
-                stderr.contains(diagnostic),
-                "quiet={quiet}, stderr={stderr:?}"
-            );
-            assert!(
-                stderr.find(rationale) < stderr.find(diagnostic),
+                rationale_offset < diagnostic_offset,
                 "the rationale precedes the diagnostic: quiet={quiet}, stderr={stderr:?}"
             );
         }
