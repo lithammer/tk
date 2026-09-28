@@ -20,4 +20,10 @@ release:
 clean:
 	cargo clean
 
-.PHONY: all test lint run release clean
+manpage:
+	cargo run --locked --example manpage
+
+check-manpage:
+	cargo run --locked --example manpage -- --check
+
+.PHONY: all test lint run release clean manpage check-manpage

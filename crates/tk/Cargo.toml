@@ -14,6 +14,10 @@ description = "Agent-first, repository-local work tracker with pluggable issue-t
 name = "tk"
 path = "src/main.rs"
 
+[[example]]
+name = "manpage"
+test = true
+
 [lints]
 workspace = true
 
@@ -91,3 +95,4 @@ tempfile = "3"
 # environment-variable stderr).
 insta = { version = "1", features = ["filters"] }
 shlex = "1"
+clap_mangen = "0.3"

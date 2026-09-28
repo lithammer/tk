@@ -1,0 +1,9 @@
+Create a Backend object for a Local Ticket or Epic through the configured
+Remote. The outgoing local Display ID remains an Alias after the Backend
+Display ID replaces it.
+.PP
+.B \-\-children
+includes an Epic's directly contained Local Tickets in the same Promotion
+Operation. Promotion preflight rejects the whole operation before any Backend
+write when its Item classes, Ticket Kinds, Dependencies, or Epic membership
+cannot be represented.

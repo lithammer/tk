@@ -1,0 +1,11 @@
+Print current work and a condensed command reference to standard output.
+Show Scope, the next Ticket, active Items, and the whole Plan. A populated Plan
+narrows selection like \fBtk next \-\-plan\fR, intersecting any
+\fBTK_SCOPE\fR. With a configured Remote, also show Mutation counts and
+Remote commands. No Backend access occurs.
+.PP
+.B tk prime
+exits successfully with no output when the Repository Store cannot be opened,
+including outside a git repository, so a global agent hook can run it anywhere.
+A read failure after opening exits nonzero with a diagnostic on standard error
+and no briefing on standard output.

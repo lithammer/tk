@@ -1,0 +1,36 @@
+.SH DESCRIPTION
+.B tk
+is an agent-first tool for managing backend-agnostic work items through a
+local-first Repository Store and explicit backend Promotion.
+.PP
+This manual documents every public command, subcommand, argument, and option.
+.PP
+New
+.B Tickets
+are local by default. A configured Remote does not make new Tickets
+Backend Items. Use
+.B tk promote
+to create Backend objects for them.
+.PP
+A
+.B Scope
+narrows
+.B tk next
+and
+.B tk list
+to one Epic. Pass it as the optional positional
+.I epic-id
+argument or set
+.BR TK_SCOPE ;
+the argument wins. A Scope covers the named Epic and its child Tickets, and
+naming a Ticket instead is an error. Absent a Scope, both commands consider the
+whole Repository Store.
+.B tk
+neither stores a Scope nor infers one from git state, so a command's Scope is
+visible in the command line or its environment.
+.PP
+.B tk search
+and
+.B tk grep
+ignore Scope. Both cover the whole Repository Store, so a lookup never misses
+because a Scope was active.

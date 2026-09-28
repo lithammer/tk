@@ -1,0 +1,103 @@
+.B tk next
+selects open Tickets with no unresolved Dependencies or External Blockers. It
+orders ready Tickets by Effective Priority, then own Priority, then creation
+order in the Repository Store, and never selects Epics. Effective Priority is
+the lowest of a candidate's own Priority and the Priorities of every unfinished
+item it transitively blocks through Dependencies and Epic Membership, so a ready
+Ticket that gates a higher-Priority Blocked Item outranks lower-priority
+direct work. Effective Priority does not cross the Scope boundary, so the same
+Ticket can rank differently scoped and unscoped.
+Backend Tickets use local import order to break ties, not Backend creation
+time. Ticket Kind does not affect ordering.
+.PP
+.B tk next
+does not explain skipped candidates. When the selected Ticket's Effective
+Priority is lower than its own Priority,
+.B tk next
+writes one rationale line to standard error in the form
+.RS 4
+.nf
+<display-id>: Effective Priority <P> (via <contributor-id>)
+.fi
+.RE
+so the non-obvious pick is explainable without a follow-up
+.BR "tk show" .
+Standard output is a single line carrying the Display ID and the title.
+.B \-q
+.RB ( \-\-quiet )
+prints the Display ID alone, so
+.B id=$(tk next \-q)
+captures only the selection; redirect standard error with
+.B 2>/dev/null
+to suppress the rationale, which
+.B \-q
+does not itself silence.
+.PP
+Parent Epic status, Dependencies, and External Blockers do not hide otherwise
+ready child Tickets.
+.PP
+Mutation Log, Mutation Failure, and Sync Cursor state do not filter
+.B tk next
+selection, and
+.B tk next
+does not emit sync-health warnings.
+.PP
+.B tk next
+is read-only and does not change Item Status. Use
+.B tk start
+to begin work on the selected Ticket.
+.PP
+An optional positional
+.I epic-id
+scopes selection to that Epic and its child Tickets, falling back to
+.B TK_SCOPE
+when the argument is absent. Absent both,
+.B tk next
+considers every ready Ticket in the Repository Store. A Ticket supplied where
+an Epic is expected is a failure, not a single-item selection.
+.PP
+.B tk next
+answers with one Ticket. To inspect the whole ready set instead, use
+.BR "tk list --ready" .
+.PP
+On success,
+.B tk next
+prints one line:
+.PP
+.RS 4
+.nf
+<display-id>: <title>
+.fi
+.RE
+.PP
+With
+.BR \-q ,
+that line is the bare Display ID, unstyled whatever the colour policy:
+.PP
+.RS 4
+.nf
+<display-id>
+.fi
+.RE
+.PP
+.B tk next
+has no JSON or structured-output mode in v1; the
+.B \-q
+Display ID line is the machine interface.
+.PP
+If no ready Ticket matches,
+.B tk next
+returns exit status 1 and reports on standard error that nothing is ready,
+naming the Epic when a Scope was active. A Scope that names no known item, or
+names a Ticket rather than an Epic, fails the same way without selecting
+anything.
+.PP
+.B \-\-plan
+restricts selection to the current Plan. An Epic argument or
+.B TK_SCOPE
+intersects that membership; the argument still wins over the environment.
+Effective Priority stops at the combined boundary. Outside Dependencies still
+block readiness, but their Items are never included or selected automatically.
+An empty result names the Plan and any Epic Scope. Without
+.BR \-\-plan ,
+Plan membership does not narrow selection.

@@ -12,7 +12,7 @@
 use std::io::{Read, Write};
 use std::path::Path;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use rand::Rng;
 
 use crate::clock::Clock;
@@ -193,6 +193,12 @@ pub struct Deps<'a> {
 struct Cli {
     #[command(subcommand)]
     command: Command,
+}
+
+/// Uses the same clap definitions as argument parsing.
+#[must_use]
+pub fn command() -> clap::Command {
+    Cli::command()
 }
 
 /// Subcommand registry. Add a variant here and a module under [`commands`]

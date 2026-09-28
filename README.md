@@ -43,6 +43,9 @@ variables below for version pinning or ABI switching.
 
 Run `cargo build --release`; the binary is written to `target/release/tk`.
 
+For changes to command help or the manual, follow
+[Editing the manual](man/README.md).
+
 ## Quick start
 
 ```sh

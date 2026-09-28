@@ -1,0 +1,135 @@
+The default view shows open and active Tickets and Epics. Epics render as
+top-level rows, child Tickets render under their Epic with tree glyphs, and
+unparented Tickets render as top-level rows.
+.PP
+.B \-\-ready
+shows open Tickets with no unresolved Dependencies or External Blockers.
+.B \-\-blocked
+shows open or active Tickets with unresolved Dependencies or External Blockers.
+.B \-\-active
+shows active Tickets and Epics, retaining inactive Epics as containers for
+active child Tickets.
+.B \-\-triage
+shows open Tickets in triage \(em captured work not yet accepted.
+.B \-\-parked
+shows open Tickets parked out of automatic selection \(em accepted work
+intentionally held. The view flags are mutually exclusive.
+.PP
+.B \-\-local
+shows only items with Local Origin, including Pending Promotions.
+.B \-\-remote
+shows only items with Backend Origin. A Pending Promotion retains Local
+Origin until tk records its Backend identity.
+.PP
+.B \-\-epic
+restricts the listing to Epics and composes with any view or Origin filter.
+.PP
+.B \-\-epic
+and the positional
+.I epic-id
+are different tools despite the shared word.
+.B \-\-epic
+filters by item class \(em it shows Epics instead of Tickets.
+.I epic-id
+is a Scope \(em it narrows the listing to one Epic and its child Tickets.
+.PP
+When a Scope is active,
+.B tk list
+prints a hint above the tree so a narrowed view never reads as the whole
+store:
+.PP
+.RS 4
+.nf
+Scope: project-1 (Epic + child Tickets)
+.fi
+.RE
+.PP
+When the earliest unresolved Mutation in the Mutation Log is failed or
+applying,
+.B tk list
+prints a banner above the tree (or above the empty-view line) naming its
+Mutation Sequence, state, and target Display ID:
+.PP
+.RS 4
+.nf
+Sync: Mutation 7 failed on gh-12 (tk sync log 7)
+.fi
+.RE
+.PP
+A pending head prints no banner, since that is the ordinary state between
+syncs. The named item may sit outside the active Scope or outside the
+current view \(em the banner reports where the Mutation Log is stuck, not
+which rows are in view.
+.PP
+In every view a Ticket whose Selection State is not the default
+.B accepted
+carries a dim badge \(em
+.B [triage]
+for captured work not yet accepted,
+.B [parked]
+for accepted work held out of automatic selection. Accepted Tickets carry no
+badge.
+.PP
+A row whose Item carries a non-Promotion Mutation the Backend has not yet
+received shows a marker before the title \(em ~ for a pending Mutation, ⚑ for a
+failed one, or ⚑ ~ when both apply. The marker renders even on a done row,
+since a queued or failed Mutation means the Backend does not yet agree with
+the Item's current state; only the summary legend below is conditional \(em
+it names a
+.B Mutations:
+line only when at least one row carries a marker.
+.PP
+Below that legend, in its own block, comes a
+.B Mutation Log:
+line counting the Unresolved Mutations in the Repository Store \(em pending,
+failed and applying \(em broken down by state, omitting a state with none,
+and omitted entirely when there are none. It counts the Mutation Log rather
+than the rows in view, so it includes Mutations on Items no view shows and
+Promotions the row markers exclude: the example below counts two where one
+row carries a marker. It renders below the empty-view line as well, where no
+row or legend exists to carry a marker.
+.PP
+The count says what is waiting on the Backend, not whether a sync would do
+anything. Backend Pull covers every Adopted open Item whatever the Mutation
+Log holds, so an absent line does not mean
+.B tk sync
+would be idle. Inspect the queue itself with
+.BR "tk sync log" .
+.PP
+Pending Promotions carry
+.B [pending promotion]
+before the title in list, search, plan, ordinary next, and the related Item
+rows in show. The main headers in show and default grep output instead add
+.BR "Binding: pending promotion" .
+Both forms cover pending, failed, and applying Promotion Mutations. They mean
+tk has durable Promotion intent without a recorded Backend identity;
+the Backend object may already exist. Inspect the exact Mutation state with
+.B tk show
+or
+.BR "tk sync log" .
+The minimal
+.B "tk grep --list"
+form omits all metadata, including this label and Binding row. The label
+disappears from other views when identity is recorded or Promotion intent is
+withdrawn. Other Items gain no Binding row, and
+.B tk next \-\-quiet
+keeps its bare Display ID output.
+.PP
+On success with one local Ticket carrying an edit queued behind a Promotion
+that has not applied yet,
+.B tk list
+prints:
+.PP
+.RS 4
+.nf
+○ project-1 ● P2 ~ [pending promotion] Investigate flaky login retry
+--------------------------------------------------------------------------------
+Total: 1 item (1 open)
+
+Status: ○ open  ◐ active  ✓ done
+Blocked: ⊘ blocked
+Mutations: ~ pending
+
+Mutation Log: 2 pending
+.fi
+.RE
