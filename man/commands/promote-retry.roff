@@ -1,0 +1,9 @@
+Explicitly return a Promotion with an indeterminate creation outcome to pending
+and run normal ordered sync. Use this only when creating the Backend object
+again is safe; automatic sync never replays an indeterminate creation. A failed
+Promotion is refused, because ordinary sync already retries it.
+.PP
+Reconcile and retry cannot pass an earlier pending, failed, or applying
+Mutation. Both hold the Remote workflow lock through Backend access, Store
+changes, and nested sync, then print every Promotion Display ID replacement
+that nested sync landed.

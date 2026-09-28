@@ -7,7 +7,7 @@ Close a Ticket or Epic
 Usage: tk done [OPTIONS] <ID>
 
 Arguments:
-  <ID>  
+  <ID>  Display ID or Alias of the Ticket or Epic to close
 
 Options:
   -m, --message <TEXT>  Optional Closing Reason recorded against the closed item

@@ -7,6 +7,7 @@ use crate::commands::item_status::{self, SuccessLabel, Transition};
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
+    /// Display ID or Alias of the Ticket or Epic to start.
     #[arg(value_name = "ID")]
     pub id: String,
 }

@@ -11,6 +11,7 @@ use crate::commands::item_status::{self, SuccessLabel, Transition};
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
+    /// Display ID or Alias of the Ticket or Epic to close.
     #[arg(value_name = "ID")]
     pub id: String,
     /// Optional Closing Reason recorded against the closed item.

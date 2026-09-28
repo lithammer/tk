@@ -1,0 +1,8 @@
+Without a Mutation Sequence, list all non-applied Mutations, including
+applying, skipped, cancelled, and abandoned entries. A Sequence selects
+one entry, including an applied one, and shows its payload and recorded
+failure. Reading the Mutation Log reaches no Backend.
+.PP
+When several state filters are supplied, the first in this order wins:
+pending, failed, skipped, cancelled, abandoned. A Sequence selects the
+detail view regardless of state filters.

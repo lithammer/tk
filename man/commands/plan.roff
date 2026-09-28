@@ -1,0 +1,12 @@
+Show the whole Plan, ignoring
+.BR TK_SCOPE .
+Tickets appear once under Ready, In progress, Waiting, or Done. Empty sections
+are omitted. Waiting explains triage, parking, Dependencies and External
+Blockers; Dependencies outside the Plan are marked. Counts show remaining
+and done/total Tickets. Rows within each section follow creation order.
+.PP
+One current Plan belongs to the Repository Store. It can span Epics and hold
+Local or Backend Tickets in any state. Membership is local, works offline,
+and creates no Mutation. Promotion, Detach and Re-Adopt preserve membership.
+Done Tickets remain visible until removed or cleared. Backend Ticket status
+is only as fresh as the state already in the Repository Store.

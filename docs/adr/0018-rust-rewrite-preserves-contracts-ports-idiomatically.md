@@ -108,10 +108,14 @@ it:
   ratifies the allow-list. `clippy::nursery` and `clippy::restriction` excluded
   as groups (WIP / mutually contradictory); individual lints from them only
   when specifically motivated.
-- **Manpage:** `include_str!` the hand-authored `man/tk.1` (mirrors the Zig
-  `@embedFile`); keep the no-CR guard via `.gitattributes` + a test.
-  `clap_mangen` / `clap_complete` (generate manpage + completions from the clap
-  definitions) are **future improvements**, not initial scope.
+- **Manpage:** embed the checked-in `man/tk.1` (mirrors the Zig `@embedFile`);
+  keep the no-CR guard via `.gitattributes` + a test. The port kept the
+  handwritten manual. tk-155 replaces its command reference with generated
+  clap sections, using `clap_mangen` only as a development dependency, and
+  preserves authored guidance alongside them. Regeneration is explicit so
+  the output can be reviewed; CI rejects stale output without rewriting it.
+  See [Editing the manual](../../man/README.md). `clap_complete` remains a
+  future improvement.
 - **Self-update:** subprocess `curl`, no embedded HTTP/TLS (recorded in tk-80's
   body); revisit a typed client (`ureq` / `minreq`) only if error handling gets
   fiddly. `indoc` declined (SQL is whitespace-insensitive; clap removes the

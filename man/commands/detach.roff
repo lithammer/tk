@@ -1,0 +1,14 @@
+Detach keeps the Item and its Local Fields, including Plan membership,
+while removing its Backend Binding. It restores the former local Display ID
+when known, otherwise assigns a new local Display ID. The Backend Display ID
+stops resolving; the Former Backend Identity remains available for Re-Adopt.
+.PP
+Detach reaches no Backend and leaves the Backend object unchanged. It
+withdraws pending or failed Mutations that need the removed identity.
+It refuses a Pending Promotion: use
+.B tk promote cancel
+to withdraw that operation instead. It also refuses if a Backend-bound
+Blocked Item would wait on the detached Local Item; remove that Dependency
+with
+.B tk unblock
+first.

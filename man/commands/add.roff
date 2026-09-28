@@ -1,0 +1,52 @@
+By default, tk add creates a task Ticket at Priority P2. A triage Ticket
+has no Priority and is excluded from
+.B tk next
+until accepted with
+.BR "tk accept \fIid\fR \-\-priority \fIPn\fR" .
+.PP
+Supply a message with
+.B \-m
+or
+.BR \-F ;
+bare
+.B tk add
+does not open an editor.
+.PP
+The first paragraph becomes the title. Later paragraphs become the body. An
+empty message aborts creation.
+.PP
+On successful Ticket creation,
+.B tk add
+prints:
+.PP
+.RS 4
+.nf
+Created Ticket: <display-id> - <title>
+Kind: task|bug
+Priority: P0|P1|P2|P3|P4
+Status: open
+Parent: <epic-display-id>
+.fi
+.RE
+.PP
+A triage Ticket has no Priority, so it replaces the
+.B Priority:
+line with
+.BR "Selection: triage" .
+The
+.B Parent:
+line is printed only when
+.B \-\-parent
+is supplied, and it uses the parent Epic's current Display ID even when the
+argument was an Alias.
+.PP
+On successful Epic creation,
+.B tk add
+prints:
+.PP
+.RS 4
+.nf
+Created Epic: <display-id> - <title>
+Status: open
+.fi
+.RE

@@ -1,0 +1,14 @@
+Sync first pulls Backend changes for tracked open Items, then applies queued
+Mutations in order. Unresolved title/body edits protect those fields from
+Pull; other Shared Fields can still refresh. Sync requires a configured Remote.
+.PP
+A failed Mutation stops later Mutations from applying. Inspect it with
+.B tk sync log
+and retry sync after fixing the cause. Use
+.B \-\-skip
+to give up a failed non-Promotion Mutation; the skip commits before Backend
+access. An indeterminate Promotion is not replayed automatically: use
+.BR "tk promote reconcile" ,
+.BR "tk promote retry" ,
+or
+.BR "tk promote cancel" .

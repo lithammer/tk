@@ -1,0 +1,10 @@
+Closing clears Work State and sets Lifecycle to done. For Backend Items,
+it queues a Mutation; run
+.B tk sync
+to deliver it. tk has no command to reopen done work.
+.PP
+A Closing Reason must be non-empty. It is a Local Field shown by
+.B tk show
+and is never sent to the Backend. It can only be set when the Item closes.
+Closing an already done Item without a reason is a harmless no-op;
+supplying a reason then is refused.

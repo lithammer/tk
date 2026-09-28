@@ -9,7 +9,9 @@ and ADRs carry the durable contracts. Onboarding pointers live in
 `README.md`; review conventions live in `CODING_STANDARDS.md`; agent
 navigation lives in `AGENTS.md`; domain vocabulary lives in `CONTEXT.md`; the
 command reference lives in `tk --help`, `tk <command> --help`, and
-`man/tk.1`.
+`man/tk.1`. The manual combines the clap command tree with authored sections;
+its generated output is checked in and embedded in the binary. See
+[Editing the manual](man/README.md).
 
 ## Module Map
 

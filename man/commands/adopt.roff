@@ -1,0 +1,8 @@
+Adopt fetches one existing issue through the configured Remote. A new
+Backend Ticket starts accepted at Priority P2. Adoption records the current
+Backend state without queuing a Mutation.
+.PP
+If the Backend identity belongs to an Item previously detached, Re-Adopt
+binds that same Item again and takes the Backend's current Shared Fields.
+It preserves Priority, Selection State, and Plan membership. A Backend close
+clears Work State; a Backend reopen clears an obsolete Closing Reason.

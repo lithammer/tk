@@ -1,0 +1,13 @@
+Without an option, write the embedded roff source to standard output:
+.PP
+.RS 4
+.nf
+tk manpage | man \-l \-
+.fi
+.RE
+.PP
+Installation writes the same bytes to
+.IR <prefix>/share/man/man1/tk.1 ,
+where the prefix is the parent of the running executable's directory.
+It stages the file before replacement, preserving an existing manual if
+installation fails. Windows skips installation with an informational message.
