@@ -94,7 +94,7 @@ mod tests {
     }
 
     #[test]
-    fn block_inserts_dependency_and_renders_confirmation() {
+    fn block_renders_dependency_confirmation() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_item(

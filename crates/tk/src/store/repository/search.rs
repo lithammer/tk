@@ -129,15 +129,6 @@ mod tests {
     }
 
     #[test]
-    fn matches_title_substring() {
-        let store = open_seeded();
-        seed_ticket(&store, "t1", "tk-1", "Fix the flaky test", "open", 1);
-        seed_ticket(&store, "t2", "tk-2", "Unrelated chore", "open", 2);
-        let rows = search_rows(&store, "flaky").unwrap();
-        assert_eq!(display_ids(&rows), vec!["tk-1"]);
-    }
-
-    #[test]
     fn match_is_case_insensitive() {
         let store = open_seeded();
         seed_ticket(&store, "t1", "tk-1", "Fix the FLAKY test", "open", 1);

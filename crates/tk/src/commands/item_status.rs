@@ -164,7 +164,7 @@ mod tests {
     };
 
     #[test]
-    fn start_transitions_open_ticket_to_active() {
+    fn start_renders_active_confirmation() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_item(

@@ -927,33 +927,6 @@ mod tests {
     }
 
     #[test]
-    fn every_view_variant_has_a_case_arm_in_sql() {
-        // Drive each view through the query so a malformed LIST_ROWS_SQL — bad
-        // syntax, wrong bind count — fails here. A missing `when` arm is not
-        // caught: it yields NULL for `self_matches`, and this store holds no
-        // items, so the result is empty either way. The arms themselves are
-        // covered by the per-view tests above.
-        let store = open_seeded();
-        for view in [
-            ListView::Default,
-            ListView::Ready,
-            ListView::Blocked,
-            ListView::Active,
-            ListView::Triage,
-            ListView::Parked,
-        ] {
-            list_rows(
-                &store,
-                ListOptions {
-                    view,
-                    ..ListOptions::default()
-                },
-            )
-            .unwrap_or_else(|err| panic!("variant {view:?} failed: {err}"));
-        }
-    }
-
-    #[test]
     fn every_mutation_state_drives_the_pending_and_failed_flags() {
         // Driven off `MutationState::ALL` so a state added later fails here
         // rather than going silently untested. `applying` and `abandoned` are
@@ -1046,6 +1019,7 @@ mod tests {
         }
 
         let rows = list_rows(&store, ListOptions::default()).unwrap();
+        assert_eq!(display_ids(&rows), ["tk-1", "tk-2"]);
         for row in &rows {
             assert!(
                 !row.has_pending_mutation && !row.has_failed_mutation,

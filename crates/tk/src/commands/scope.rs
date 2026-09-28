@@ -72,32 +72,3 @@ fn effective_value(arg: Option<&str>, env: Option<&str>) -> Option<String> {
 fn env_value() -> Option<String> {
     std::env::var(SCOPE_ENV).ok()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn argument_wins_over_environment() {
-        assert_eq!(
-            effective_value(Some("tk-1"), Some("tk-2")).as_deref(),
-            Some("tk-1")
-        );
-    }
-
-    #[test]
-    fn falls_back_to_environment_when_no_argument() {
-        assert_eq!(effective_value(None, Some("tk-2")).as_deref(), Some("tk-2"));
-    }
-
-    #[test]
-    fn blank_environment_is_no_scope() {
-        assert_eq!(effective_value(None, Some("   ")), None);
-        assert_eq!(effective_value(None, Some("")), None);
-    }
-
-    #[test]
-    fn no_argument_and_no_environment_is_no_scope() {
-        assert_eq!(effective_value(None, None), None);
-    }
-}

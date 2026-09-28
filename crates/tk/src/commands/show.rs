@@ -634,70 +634,37 @@ mod tests {
 
     #[test]
     fn renders_closing_reason_section_after_description_for_a_done_ticket() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "t1",
-                display: "tk-1",
-                title: "Ticket",
-                body: "Some body",
-                status: "done",
-                closing_reason: Some("Fixed in PR #12"),
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        drop(conn);
+        for body in ["Some body", ""] {
+            let store = TmpStore::new("repo");
+            let conn = seed_store(&store);
+            insert_fixture_item(
+                &conn,
+                FixtureItem {
+                    id: "t1",
+                    display: "tk-1",
+                    title: "Ticket",
+                    body,
+                    status: "done",
+                    closing_reason: Some("Fixed in PR #12"),
+                    created_seq: 1,
+                    ..FixtureItem::default()
+                },
+            )
+            .unwrap();
+            drop(conn);
 
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_git(&h, &store);
-        let code = run_rendered(&mut h, Args { id: "tk-1".into() });
-        assert_eq!(code, Exit::Ok);
-        let stdout = String::from_utf8(h.stdout).unwrap();
-        assert!(stdout.contains("Fixed in PR #12\n"), "stdout={stdout:?}");
-        // The Closing Reason follows the body with one blank line separator.
-        assert!(
-            stdout.contains("Some body\n\nCLOSING REASON"),
-            "stdout={stdout:?}"
-        );
-    }
-
-    #[test]
-    fn renders_closing_reason_with_a_leading_blank_line_for_a_bodyless_ticket() {
-        // Local Tickets are often title-only, so a `done` item with a reason
-        // but no body is the common case; the section still needs a blank line
-        // after the facet bar, mirroring DESCRIPTION (ADR-0023).
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "t1",
-                display: "tk-1",
-                title: "Quick fix",
-                status: "done",
-                closing_reason: Some("Done in standup"),
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        drop(conn);
-
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_git(&h, &store);
-        let code = run_rendered(&mut h, Args { id: "tk-1".into() });
-        assert_eq!(code, Exit::Ok);
-        let stdout = String::from_utf8(h.stdout).unwrap();
-        assert!(
-            stdout.contains("\n\nCLOSING REASON\nDone in standup\n"),
-            "stdout={stdout:?}"
-        );
+            let cwd_path = cwd();
+            let mut h = Harness::new(&cwd_path, &store);
+            expect_git(&h, &store);
+            let code = run_rendered(&mut h, Args { id: "tk-1".into() });
+            assert_eq!(code, Exit::Ok);
+            let stdout = String::from_utf8(h.stdout).unwrap();
+            // The Closing Reason follows the body with one blank line separator.
+            assert!(
+                stdout.contains(&format!("{body}\n\nCLOSING REASON\nFixed in PR #12\n")),
+                "stdout={stdout:?}"
+            );
+        }
     }
 
     #[test]
@@ -721,8 +688,9 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
-        let _ = run_rendered(&mut h, Args { id: "tk-1".into() });
+        assert_eq!(run_rendered(&mut h, Args { id: "tk-1".into() }), Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
+        assert!(stdout.contains("✓ tk-1 · Done, no reason"), "{stdout:?}");
         assert!(!stdout.contains("CLOSING REASON"), "stdout={stdout:?}");
     }
 

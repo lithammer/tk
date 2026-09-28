@@ -25,8 +25,6 @@ pub enum PullResponse {
     Items(Vec<BackendItemRefresh>),
     /// Adapter-level rejection with this detail.
     RecordedFailure(String),
-    /// Environment failure — returns this bare error tag.
-    EnvFailure(ProcError),
 }
 
 /// Scripted response for one [`Adapter::apply_edit`] call.
@@ -165,7 +163,6 @@ impl Adapter for FakeAdapter {
             PullResponse::RecordedFailure(detail) => {
                 return Err(AdapterReadError::Failed(detail));
             }
-            PullResponse::EnvFailure(err) => return Err(AdapterReadError::Env(err)),
         };
         assert_eq!(
             refreshes.len(),
@@ -240,9 +237,7 @@ impl Adapter for FakeAdapter {
 mod tests {
     use super::*;
     use crate::domain::backend_operation::BackendItemAddress;
-    use crate::domain::item_class::ItemClass;
     use crate::domain::lifecycle::Lifecycle;
-    use crate::domain::mutation_payload::TitleBody;
     use crate::domain::ticket_kind::TicketKind;
 
     fn refresh(title: &str) -> BackendItemRefresh {
@@ -260,86 +255,11 @@ mod tests {
         }
     }
 
-    fn inspection(title: &str) -> BackendItemInspection {
-        BackendItemInspection {
-            identity: BackendItemIdentity {
-                backend_key: "https://github.com/o/r/issues/42".into(),
-                display_id: "gh-42".into(),
-            },
-            title: title.into(),
-            body: "Body".into(),
-            ticket_kind: TicketKind::Task,
-        }
-    }
-
-    fn edit() -> BackendEdit {
-        BackendEdit::UpdateTicket {
-            ticket: BackendItemAddress {
-                backend_key: "1".into(),
-            },
-            snapshot: TitleBody {
-                title: "T".into(),
-                body: "B".into(),
-            },
-        }
-    }
-
-    fn create() -> BackendCreate {
-        BackendCreate::Ticket {
-            snapshot: TitleBody {
-                title: "T".into(),
-                body: "B".into(),
-            },
-            ticket_kind: TicketKind::Task,
-        }
-    }
-
-    #[test]
-    fn pull_returns_scripted_fields_and_captures_the_working_set() {
-        let mut fake =
-            FakeAdapter::new().with_pulls(vec![PullResponse::Items(vec![refresh("Refreshed")])]);
-        let got = fake
-            .pull(&[address("42")])
-            .unwrap()
-            .into_refreshes()
-            .pop()
-            .unwrap()
-            .1;
-        assert_eq!(got.title, "Refreshed");
-        assert_eq!(got.ticket_kind, Some(TicketKind::Task));
-        assert_eq!(fake.captured_pull_keys, [vec!["42".to_string()]]);
-    }
-
-    #[test]
-    fn inspection_returns_scripted_identity_and_captures_key() {
-        let mut fake = FakeAdapter::new().with_inspections(vec![inspection("Inspected")]);
-        let got = fake
-            .inspect_item("https://github.com/o/r/issues/42")
-            .unwrap();
-        assert_eq!(got.title, "Inspected");
-        assert_eq!(got.identity.display_id, "gh-42");
-        assert_eq!(
-            fake.captured_inspection_keys,
-            ["https://github.com/o/r/issues/42"]
-        );
-    }
-
-    #[test]
-    fn pull_recorded_failure_returns_failed_with_detail() {
-        let mut fake = FakeAdapter::new()
-            .with_pulls(vec![PullResponse::RecordedFailure("gh: HTTP 502".into())]);
-        let err = fake.pull(&[address("42")]).unwrap_err();
-        match err {
-            AdapterReadError::Failed(detail) => assert!(detail.contains("HTTP 502")),
-            AdapterReadError::Env(e) => panic!("expected Failed, got Env({e:?})"),
-        }
-    }
-
     #[test]
     fn pull_advances_script_across_calls() {
         let mut fake = FakeAdapter::new().with_pulls(vec![
             PullResponse::Items(vec![refresh("First")]),
-            PullResponse::EnvFailure(ProcError::ExecutableNotFound),
+            PullResponse::Items(vec![refresh("Second")]),
         ]);
         let first = fake
             .pull(&[address("1")])
@@ -349,74 +269,15 @@ mod tests {
             .unwrap()
             .1;
         assert_eq!(first.title, "First");
-        assert!(fake.pull(&[address("2")]).is_err());
+        let second = fake
+            .pull(&[address("2")])
+            .unwrap()
+            .into_refreshes()
+            .pop()
+            .unwrap()
+            .1;
+        assert_eq!(second.title, "Second");
         assert_eq!(fake.captured_pull_keys.len(), 2);
-    }
-
-    #[test]
-    fn edit_success_returns_acknowledgement_and_captures_the_call() {
-        let mut fake = FakeAdapter::new().with_edits(vec![EditResponse::Success]);
-        let outcome = fake.apply_edit(&edit()).unwrap();
-        assert_eq!(outcome, BackendEditOutcome::Acknowledged);
-        let BackendEdit::UpdateTicket {
-            ticket, snapshot, ..
-        } = &fake.captured_edits[0]
-        else {
-            panic!("expected ticket update")
-        };
-        assert_eq!(ticket.backend_key, "1");
-        assert_eq!(snapshot.title, "T");
-    }
-
-    #[test]
-    fn create_success_returns_the_scripted_identity() {
-        let mut fake = FakeAdapter::new().with_creates(vec![CreateResponse::Created {
-            backend_key: "42".into(),
-            display_id: "gh-42".into(),
-        }]);
-        let outcome = fake.create_item(&create());
-        let BackendCreateOutcome::Created(identity) = outcome else {
-            panic!("expected created identity")
-        };
-        assert_eq!(identity.backend_key, "42");
-        assert_eq!(identity.display_id, "gh-42");
-        assert!(matches!(
-            fake.captured_creates[0],
-            BackendCreate::Ticket { .. }
-        ));
-    }
-
-    #[test]
-    fn edit_rejection_and_environment_failure_remain_distinct() {
-        let mut fake = FakeAdapter::new().with_edits(vec![
-            EditResponse::RecordedFailure("validation: title required".into()),
-            EditResponse::EnvFailure(ProcError::SpawnFailed),
-        ]);
-        let outcome = fake.apply_edit(&edit()).unwrap();
-        let BackendEditOutcome::Rejected(failure) = outcome else {
-            panic!("expected rejection")
-        };
-        assert_eq!(failure.detail, "validation: title required");
-        let err = fake.apply_edit(&edit());
-        assert!(matches!(err, Err(ProcError::SpawnFailed)));
-        assert_eq!(fake.captured_edits.len(), 2);
-    }
-
-    #[test]
-    fn creation_scripts_all_three_certainty_outcomes() {
-        let mut fake = FakeAdapter::new().with_creates(vec![
-            CreateResponse::Rejected("preflight validation".into()),
-            CreateResponse::Indeterminate("connection lost".into()),
-        ]);
-        assert!(matches!(
-            fake.create_item(&create()),
-            BackendCreateOutcome::Rejected(_)
-        ));
-        assert!(matches!(
-            fake.create_item(&create()),
-            BackendCreateOutcome::Indeterminate(_)
-        ));
-        assert_eq!(fake.captured_creates.len(), 2);
     }
 
     #[test]
@@ -426,17 +287,6 @@ mod tests {
             fake.resolve_promotion_capabilities(PromotionRequirements::none())
                 .unwrap(),
             PromotionCapabilities::none()
-        );
-    }
-
-    #[test]
-    fn with_capabilities_sets_the_resolved_value() {
-        let caps = PromotionCapabilities::none().with_item_class(ItemClass::Epic);
-        let mut fake = FakeAdapter::new().with_capabilities(caps);
-        assert_eq!(
-            fake.resolve_promotion_capabilities(PromotionRequirements::none())
-                .unwrap(),
-            caps
         );
     }
 

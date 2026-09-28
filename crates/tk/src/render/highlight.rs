@@ -63,9 +63,17 @@ mod tests {
     }
 
     #[test]
-    fn plain_output_is_byte_identical_to_a_sanitized_line() {
-        let out = highlight("the auth token", "auth", Styler::plain());
-        assert_eq!(out, "the auth token");
+    fn highlighted_and_plain_spans_escape_controls() {
+        for (styler, expected) in [
+            (Styler::plain(), r"before\x1b[auth\x07]after\x7f"),
+            (
+                Styler::always(),
+                "before\\x1b[\x1b[93mauth\\x07\x1b[39m]after\\x7f",
+            ),
+        ] {
+            let out = highlight("before\x1b[auth\x07]after\x7f", "auth\\x07", styler);
+            assert_eq!(out, expected);
+        }
     }
 
     #[test]

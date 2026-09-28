@@ -664,25 +664,34 @@ mod tests {
     }
 
     #[test]
-    fn a_non_existent_issue_surfaces_the_backend_stderr() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
-        let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, &store, 7);
-        let stderr_line = "GraphQL: Could not resolve to an issue or pull request \
-                           with the number of 5. (repository.issue)";
-        expect_git(&h, &store);
-        h.runner
-            .expect(&["gh", "issue", "view", "5"], fail(1, stderr_line));
+    fn backend_lookup_failures_preserve_their_diagnostics() {
+        for missing_executable in [false, true] {
+            let store = TmpStore::new("repo");
+            let conn = seed_store(&store);
+            insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
+            let cwd_path = cwd();
+            let mut h = Harness::with_seed(&cwd_path, &store, 7);
+            let stderr_line = "GraphQL: Could not resolve to an issue or pull request \
+                               with the number of 5. (repository.issue)";
+            expect_git(&h, &store);
+            if missing_executable {
+                h.runner
+                    .expect_error(&["gh", "issue", "view", "5"], ProcError::ExecutableNotFound);
+            } else {
+                h.runner
+                    .expect(&["gh", "issue", "view", "5"], fail(1, stderr_line));
+            }
+            let stderr_line = if missing_executable {
+                "executable not found on PATH"
+            } else {
+                stderr_line
+            };
 
-        let code = run_rendered(&mut h, "5");
-        assert_eq!(code, Exit::Failure);
-        let stderr = String::from_utf8(h.stderr).unwrap();
-        assert!(
-            stderr.contains(&format!("tk adopt: {stderr_line}")),
-            "{stderr}"
-        );
+            let code = run_rendered(&mut h, "5");
+            assert_eq!(code, Exit::Failure);
+            let stderr = String::from_utf8(h.stderr).unwrap();
+            assert_eq!(stderr, format!("tk adopt: {stderr_line}\n"));
+        }
     }
 
     #[test]
@@ -722,24 +731,6 @@ mod tests {
         assert!(
             stderr.contains("tk adopt: Display ID 'gh-42' already claimed by an existing Item"),
             "{stderr}"
-        );
-    }
-
-    #[test]
-    fn adapter_read_error_maps_both_arms_to_their_bodies() {
-        // Failed carries the adapter body verbatim; Env is the bare runner
-        // failure — both framed `tk adopt:` by the seam.
-        let failed = adapter_read_error(AdapterReadError::Failed("HTTP 502".into()));
-        let mut out = Vec::new();
-        failed.render(&mut out, "adopt", Styler::plain().for_stderr());
-        assert_eq!(String::from_utf8(out).unwrap(), "tk adopt: HTTP 502\n");
-
-        let env = adapter_read_error(AdapterReadError::Env(ProcError::ExecutableNotFound));
-        let mut out = Vec::new();
-        env.render(&mut out, "adopt", Styler::plain().for_stderr());
-        assert_eq!(
-            String::from_utf8(out).unwrap(),
-            "tk adopt: executable not found on PATH\n"
         );
     }
 

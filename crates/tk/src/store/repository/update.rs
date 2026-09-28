@@ -450,7 +450,7 @@ mod tests {
 
         let item = update_item(
             &mut store,
-            &clock(),
+            &FakeClock::new(1_900_000_000_000),
             UpdateRequest {
                 id: "t1",
                 item_class: ItemClass::Ticket,
@@ -471,7 +471,7 @@ mod tests {
             .unwrap();
         assert_eq!(title, "New title");
         assert_eq!(body, "New body");
-        assert_eq!(updated_at, "2026-05-09T00:00:00.000Z");
+        assert_eq!(updated_at, "2030-03-17T17:46:40.000Z");
 
         let (mt, payload): (String, String) = store
             .conn
@@ -582,7 +582,7 @@ mod tests {
 
         update_item(
             &mut store,
-            &clock(),
+            &FakeClock::new(1_900_000_000_000),
             UpdateRequest {
                 id: "t1",
                 item_class: ItemClass::Ticket,
@@ -784,11 +784,10 @@ mod tests {
             })
             .unwrap();
         assert!(container_id.is_none());
-        let mt: String = store
-            .conn
-            .query_row("select mutation_type from mutations", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(mt, "remove_ticket_from_epic");
+        assert_eq!(
+            mutation_types(&store.conn).unwrap(),
+            vec!["remove_ticket_from_epic"]
+        );
     }
 
     #[test]
@@ -814,7 +813,7 @@ mod tests {
         seed_backend_ticket(&store, "t1", "tk-1", 1);
         update_item(
             &mut store,
-            &clock(),
+            &FakeClock::new(1_900_000_000_000),
             UpdateRequest {
                 id: "t1",
                 item_class: ItemClass::Ticket,

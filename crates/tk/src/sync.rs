@@ -634,6 +634,14 @@ mod tests {
 
         let state = state_of(&conn, 5).unwrap();
         assert_eq!(state, MutationState::Applied);
+        let failure: Option<String> = conn
+            .query_row(
+                "select failure_json from mutations where sequence = 5",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(failure, None);
 
         let cursor: i64 = conn
             .query_row(
@@ -711,63 +719,6 @@ mod tests {
 
         let state = state_of(&conn, 1).unwrap();
         assert_eq!(state, MutationState::Pending, "engine wrote no outcome");
-    }
-
-    #[test]
-    fn indeterminate_creation_is_persisted_as_applying_without_converting_the_item() {
-        let mut conn = open_seeded();
-        seed_remote(&conn);
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "t1",
-                display: "tk-1",
-                title: "Local work",
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 1,
-                payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
-                state: MutationState::Pending,
-                promotion_operation_id: Some("op-1"),
-                ..FixtureMutation::new(MutationType::PromoteTicket, "t1")
-            },
-        )
-        .unwrap();
-        let mut fake = fake_with_create(
-            vec![],
-            vec![],
-            vec![CreateResponse::Indeterminate("spawn failed".into())],
-        );
-
-        assert!(matches!(
-            run(&mut conn, &mut fake),
-            Err(RunSyncError::ApplyingMutation(1))
-        ));
-        let (state, failure, origin, backend_key): (
-            String,
-            Option<String>,
-            String,
-            Option<String>,
-        ) = conn
-            .query_row(
-                "select m.state, m.failure_json, i.origin, i.backend_key \
-                   from mutations m join items i on i.id = m.item_id \
-                  where m.sequence = 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .unwrap();
-        assert_eq!(state, "applying");
-        assert!(failure.unwrap().contains("spawn failed"));
-        assert_eq!((origin.as_str(), backend_key), ("local", None));
-        assert_eq!(fake.captured_creates.len(), 1);
-        assert!(fake.captured_edits.is_empty());
     }
 
     #[test]
@@ -862,7 +813,10 @@ mod tests {
         let title: String = conn
             .query_row("select title from items where id = 't1'", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(title, "Old", "the earlier refresh was not merged");
+        assert_eq!(
+            title, "Old",
+            "Pull failure must leave stored content unchanged"
+        );
         let state = state_of(&conn, 1).unwrap();
         assert_eq!(state, MutationState::Pending);
     }
@@ -1141,7 +1095,17 @@ mod tests {
                 },
             )
             .unwrap();
-            let mut fake = fake_with_create(vec![], vec![], vec![response]);
+            backend_ticket(&conn, "t2", "gh-2", "2", 2);
+            insert_fixture_mutation(
+                &conn,
+                FixtureMutation {
+                    sequence: 2,
+                    payload_json: r#"{"status":"done"}"#,
+                    ..FixtureMutation::new(MutationType::SetItemStatus, "t2")
+                },
+            )
+            .unwrap();
+            let mut fake = fake_with_create(vec![refresh("Later work")], vec![], vec![response]);
 
             let result = run(&mut conn, &mut fake);
             if indeterminate {
@@ -1164,6 +1128,7 @@ mod tests {
             assert_eq!(key, None);
             assert_eq!(fake.captured_creates.len(), 1);
             assert!(fake.captured_edits.is_empty());
+            assert_eq!(state_of(&conn, 2).unwrap(), MutationState::Pending);
         }
     }
 

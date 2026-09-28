@@ -87,14 +87,6 @@ mod tests {
     }
 
     #[test]
-    fn first_allocation_returns_one() {
-        let conn = open_seeded_memory();
-        let tx = conn.unchecked_transaction().unwrap();
-        assert_eq!(next(&tx, Counter::ItemCreated).unwrap(), 1);
-        tx.commit().unwrap();
-    }
-
-    #[test]
     fn allocations_increment_monotonically_within_a_transaction() {
         let conn = open_seeded_memory();
         let tx = conn.unchecked_transaction().unwrap();

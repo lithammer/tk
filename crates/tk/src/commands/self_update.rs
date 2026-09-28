@@ -818,86 +818,33 @@ mod tests {
     }
 
     #[test]
-    fn process_error_wording_preserves_spawn_bytes_and_names_unobserved_outcomes() {
-        assert_eq!(
-            smoke_process_error(ProcError::ExecutableNotFound),
-            "staged binary smoke check failed: spawn failed (executable not found on PATH)"
-        );
-        assert_eq!(
-            smoke_process_error(ProcError::SpawnFailed),
-            "staged binary smoke check failed: spawn failed (failed to spawn child process)"
-        );
-        assert_eq!(
-            smoke_process_error(ProcError::OutcomeUnobserved),
-            "staged binary smoke check failed: child process started but its outcome could not be observed"
-        );
-        assert_eq!(
-            manpage_process_error(ProcError::ExecutableNotFound),
-            "manpage update failed; run `tk manpage --install` to retry: spawn failed: executable not found on PATH"
-        );
-        assert_eq!(
-            manpage_process_error(ProcError::SpawnFailed),
-            "manpage update failed; run `tk manpage --install` to retry: spawn failed: failed to spawn child process"
-        );
-        assert_eq!(
-            manpage_process_error(ProcError::OutcomeUnobserved),
-            "manpage update failed; run `tk manpage --install` to retry: child process started but its outcome could not be observed"
-        );
-    }
-
-    #[test]
-    fn dev_build_refuses_without_flags() {
-        let cwd = std::env::current_dir().unwrap();
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let mut stdin = std::io::Cursor::new(Vec::new());
-        let runner = FakeRunner::new();
-        let clock = FakeClock::new(0);
-        let mut rng = StdRng::seed_from_u64(0);
-        let deps = make_deps(
-            &mut stdout,
-            &mut stderr,
-            &mut stdin,
-            &runner,
-            &clock,
-            &mut rng,
-            &cwd,
-        );
-        let code = rendered(
-            run_with(deps, Args { check: false }, "v0.0.1", DEV_TRIPLE),
-            &mut stderr,
-        );
-        assert_eq!(code, Exit::Failure);
-        assert!(stdout.is_empty());
-        let s = String::from_utf8(stderr).unwrap();
-        assert!(s.contains("development builds cannot self-update"));
-    }
-
-    #[test]
-    fn dev_build_refuses_check_the_same_way() {
-        let cwd = std::env::current_dir().unwrap();
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let mut stdin = std::io::Cursor::new(Vec::new());
-        let runner = FakeRunner::new();
-        let clock = FakeClock::new(0);
-        let mut rng = StdRng::seed_from_u64(0);
-        let deps = make_deps(
-            &mut stdout,
-            &mut stderr,
-            &mut stdin,
-            &runner,
-            &clock,
-            &mut rng,
-            &cwd,
-        );
-        let code = rendered(
-            run_with(deps, Args { check: true }, "v0.0.1", DEV_TRIPLE),
-            &mut stderr,
-        );
-        assert_eq!(code, Exit::Failure);
-        let s = String::from_utf8(stderr).unwrap();
-        assert!(s.contains("development builds cannot self-update"));
+    fn dev_build_refuses_update_and_check() {
+        for check in [false, true] {
+            let cwd = std::env::current_dir().unwrap();
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let mut stdin = std::io::Cursor::new(Vec::new());
+            let runner = FakeRunner::new();
+            let clock = FakeClock::new(0);
+            let mut rng = StdRng::seed_from_u64(0);
+            let deps = make_deps(
+                &mut stdout,
+                &mut stderr,
+                &mut stdin,
+                &runner,
+                &clock,
+                &mut rng,
+                &cwd,
+            );
+            let code = rendered(
+                run_with(deps, Args { check }, "v0.0.1", DEV_TRIPLE),
+                &mut stderr,
+            );
+            assert_eq!(code, Exit::Failure);
+            assert!(stdout.is_empty());
+            let s = String::from_utf8(stderr).unwrap();
+            assert!(s.contains("development builds cannot self-update"));
+        }
     }
 
     #[test]
@@ -907,7 +854,13 @@ mod tests {
         let mut stderr = Vec::new();
         let mut stdin = std::io::Cursor::new(Vec::new());
         let runner = FakeRunner::new();
-        runner.expect(&["curl"], ok_body(r#"{"tag_name":"v0.5.0"}"#, 200));
+        runner.expect(
+            &["curl"],
+            ok_body(
+                r#"{"tag_name":"v0.5.0","name":"Release v0.5.0","prerelease":false}"#,
+                200,
+            ),
+        );
         let clock = FakeClock::new(0);
         let mut rng = StdRng::seed_from_u64(0);
         let deps = make_deps(
@@ -985,40 +938,6 @@ mod tests {
         let s = String::from_utf8(stdout).unwrap();
         assert!(s.contains("local build v0.5.0"));
         assert!(s.contains("latest published release v0.4.0"));
-    }
-
-    #[test]
-    fn check_ignores_unknown_json_fields() {
-        let cwd = std::env::current_dir().unwrap();
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let mut stdin = std::io::Cursor::new(Vec::new());
-        let runner = FakeRunner::new();
-        runner.expect(
-            &["curl"],
-            ok_body(
-                r#"{"tag_name":"v0.5.0","name":"Release v0.5.0","prerelease":false}"#,
-                200,
-            ),
-        );
-        let clock = FakeClock::new(0);
-        let mut rng = StdRng::seed_from_u64(0);
-        let deps = make_deps(
-            &mut stdout,
-            &mut stderr,
-            &mut stdin,
-            &runner,
-            &clock,
-            &mut rng,
-            &cwd,
-        );
-        let code = rendered(
-            run_with(deps, Args { check: true }, "v0.5.0", TEST_TRIPLE),
-            &mut stderr,
-        );
-        assert_eq!(code, Exit::Ok);
-        let s = String::from_utf8(stdout).unwrap();
-        assert!(s.contains("already on latest release"));
     }
 
     #[test]
@@ -1150,7 +1069,7 @@ mod tests {
     }
 
     #[test]
-    fn check_missing_tag_field() {
+    fn check_empty_tag_is_rejected() {
         let cwd = std::env::current_dir().unwrap();
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -1242,6 +1161,7 @@ mod tests {
     fn perform_update_posix_happy_path_renames_stage_into_target() {
         let tmp = tempfile::tempdir().unwrap();
         let target_dir = tmp.path();
+        fs::write(target_dir.join("tk"), b"old-bytes").unwrap();
         let stage_name = predict_stage_name(0);
         let stage_path = target_dir.join(&stage_name);
         let target_path = target_dir.join("tk");
@@ -1297,6 +1217,7 @@ mod tests {
         );
         assert_eq!(fs::read(&target_path).unwrap(), b"new-bytes");
         assert!(!stage_path.exists());
+        assert!(!target_dir.join("tk.old").exists());
     }
 
     #[test]
@@ -1384,6 +1305,7 @@ mod tests {
     fn perform_update_smoke_exit_nonzero_leaves_target_untouched() {
         let tmp = tempfile::tempdir().unwrap();
         let target_dir = tmp.path();
+        fs::write(target_dir.join("tk"), b"old-bytes").unwrap();
         let stage_name = predict_stage_name(0);
         let stage_path = target_dir.join(&stage_name);
 
@@ -1427,111 +1349,124 @@ mod tests {
         assert!(s.contains("staged binary smoke check failed: exit 7"));
         assert!(s.contains("tk: corrupt embedded payload"));
         assert!(!stage_path.exists());
-        assert!(!target_dir.join("tk").exists());
+        assert_eq!(fs::read(target_dir.join("tk")).unwrap(), b"old-bytes");
     }
 
     #[test]
-    fn perform_update_smoke_unobserved_outcome_is_not_called_a_spawn_failure() {
-        let tmp = tempfile::tempdir().unwrap();
-        let target_dir = tmp.path();
-        let stage_name = predict_stage_name(0);
-        let stage_path = target_dir.join(&stage_name);
+    fn perform_update_smoke_process_errors_preserve_outcome_certainty() {
+        for (error, expected) in [
+            (
+                ProcError::ExecutableNotFound,
+                "tk self-update: staged binary smoke check failed: spawn failed (executable not found on PATH)\n",
+            ),
+            (
+                ProcError::SpawnFailed,
+                "tk self-update: staged binary smoke check failed: spawn failed (failed to spawn child process)\n",
+            ),
+            (
+                ProcError::OutcomeUnobserved,
+                "tk self-update: staged binary smoke check failed: child process started but its outcome could not be observed\n",
+            ),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let target_dir = tmp.path();
+            let stage_name = predict_stage_name(0);
+            let stage_path = target_dir.join(&stage_name);
 
-        let runner = FakeRunner::new();
-        runner.expect_writing(
-            &["curl"],
-            ok_status_only(200),
-            stage_path.clone(),
-            b"new-bytes".to_vec(),
-        );
-        runner.expect_error(
-            &[stage_path.to_str().unwrap(), "--version"],
-            ProcError::OutcomeUnobserved,
-        );
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let mut stdin = std::io::Cursor::new(Vec::new());
-        let clock = FakeClock::new(0);
-        let mut rng = StdRng::seed_from_u64(0);
-        let cwd = std::env::current_dir().unwrap();
-        let deps = make_deps(
-            &mut stdout,
-            &mut stderr,
-            &mut stdin,
-            &runner,
-            &clock,
-            &mut rng,
-            &cwd,
-        );
+            let runner = FakeRunner::new();
+            runner.expect_writing(
+                &["curl"],
+                ok_status_only(200),
+                stage_path.clone(),
+                b"new-bytes".to_vec(),
+            );
+            runner.expect_error(&[stage_path.to_str().unwrap(), "--version"], error);
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let mut stdin = std::io::Cursor::new(Vec::new());
+            let clock = FakeClock::new(0);
+            let mut rng = StdRng::seed_from_u64(0);
+            let cwd = std::env::current_dir().unwrap();
+            let deps = make_deps(
+                &mut stdout,
+                &mut stderr,
+                &mut stdin,
+                &runner,
+                &clock,
+                &mut rng,
+                &cwd,
+            );
 
-        let code = rendered(
-            perform_update(deps, target_dir, "tk", TEST_TRIPLE, "v0.6.0"),
-            &mut stderr,
-        );
+            let code = rendered(
+                perform_update(deps, target_dir, "tk", TEST_TRIPLE, "v0.6.0"),
+                &mut stderr,
+            );
 
-        assert_eq!(code, Exit::Failure);
-        assert_eq!(
-            String::from_utf8(stderr).unwrap(),
-            "tk self-update: staged binary smoke check failed: child process started but its outcome could not be observed\n"
-        );
-        assert!(stdout.is_empty());
-        assert!(!stage_path.exists());
-        assert!(!target_dir.join("tk").exists());
-        runner.assert_all_consumed();
+            assert_eq!(code, Exit::Failure);
+            assert_eq!(String::from_utf8(stderr).unwrap(), expected);
+            assert!(stdout.is_empty());
+            assert!(!stage_path.exists());
+            assert!(!target_dir.join("tk").exists());
+            runner.assert_all_consumed();
+        }
     }
 
     #[test]
     fn perform_update_smoke_version_mismatch_leaves_target_untouched() {
-        let tmp = tempfile::tempdir().unwrap();
-        let target_dir = tmp.path();
-        let stage_name = predict_stage_name(0);
-        let stage_path = target_dir.join(&stage_name);
+        for reported_version in ["v9.9.9", "v0.6.0-rc1"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let target_dir = tmp.path();
+            fs::write(target_dir.join("tk"), b"old-bytes").unwrap();
+            let stage_name = predict_stage_name(0);
+            let stage_path = target_dir.join(&stage_name);
 
-        let runner = FakeRunner::new();
-        runner.expect_writing(
-            &["curl"],
-            ok_status_only(200),
-            stage_path.clone(),
-            b"bytes".to_vec(),
-        );
-        runner.expect(
-            &[stage_path.to_str().unwrap(), "--version"],
-            RunOutput {
-                exit_code: 0,
-                stdout: b"tk v9.9.9 (x86_64-linux-musl)\n".to_vec(),
-                stderr: Vec::new(),
-            },
-        );
+            let runner = FakeRunner::new();
+            runner.expect_writing(
+                &["curl"],
+                ok_status_only(200),
+                stage_path.clone(),
+                b"bytes".to_vec(),
+            );
+            runner.expect(
+                &[stage_path.to_str().unwrap(), "--version"],
+                RunOutput {
+                    exit_code: 0,
+                    stdout: format!("tk {reported_version} (x86_64-linux-musl)\n").into_bytes(),
+                    stderr: Vec::new(),
+                },
+            );
 
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let mut stdin = std::io::Cursor::new(Vec::new());
-        let clock = FakeClock::new(0);
-        let mut rng = StdRng::seed_from_u64(0);
-        let cwd = std::env::current_dir().unwrap();
-        let deps = make_deps(
-            &mut stdout,
-            &mut stderr,
-            &mut stdin,
-            &runner,
-            &clock,
-            &mut rng,
-            &cwd,
-        );
-        let code = rendered(
-            perform_update(deps, target_dir, "tk", TEST_TRIPLE, "v0.6.0"),
-            &mut stderr,
-        );
-        assert_eq!(code, Exit::Failure);
-        let s = String::from_utf8(stderr).unwrap();
-        assert!(s.contains("did not report expected version: v0.6.0"));
-        assert!(!target_dir.join("tk").exists());
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let mut stdin = std::io::Cursor::new(Vec::new());
+            let clock = FakeClock::new(0);
+            let mut rng = StdRng::seed_from_u64(0);
+            let cwd = std::env::current_dir().unwrap();
+            let deps = make_deps(
+                &mut stdout,
+                &mut stderr,
+                &mut stdin,
+                &runner,
+                &clock,
+                &mut rng,
+                &cwd,
+            );
+            let code = rendered(
+                perform_update(deps, target_dir, "tk", TEST_TRIPLE, "v0.6.0"),
+                &mut stderr,
+            );
+            assert_eq!(code, Exit::Failure);
+            let s = String::from_utf8(stderr).unwrap();
+            assert!(s.contains("did not report expected version: v0.6.0"));
+            assert_eq!(fs::read(target_dir.join("tk")).unwrap(), b"old-bytes");
+        }
     }
 
     #[test]
     fn perform_update_smoke_triple_mismatch_leaves_target_untouched() {
         let tmp = tempfile::tempdir().unwrap();
         let target_dir = tmp.path();
+        fs::write(target_dir.join("tk"), b"old-bytes").unwrap();
         let stage_name = predict_stage_name(0);
         let stage_path = target_dir.join(&stage_name);
 
@@ -1573,7 +1508,7 @@ mod tests {
         assert_eq!(code, Exit::Failure);
         let s = String::from_utf8(stderr).unwrap();
         assert!(s.contains("did not report expected triple: x86_64-linux-musl"));
-        assert!(!target_dir.join("tk").exists());
+        assert_eq!(fs::read(target_dir.join("tk")).unwrap(), b"old-bytes");
     }
 
     #[test]
@@ -1638,64 +1573,76 @@ mod tests {
     }
 
     #[test]
-    fn perform_update_manpage_unobserved_outcome_is_not_called_a_spawn_failure() {
-        let tmp = tempfile::tempdir().unwrap();
-        let target_dir = tmp.path();
-        let stage_name = predict_stage_name(0);
-        let stage_path = target_dir.join(&stage_name);
-        let target_path = target_dir.join("tk");
+    fn perform_update_manpage_process_errors_preserve_outcome_certainty() {
+        for (error, expected) in [
+            (
+                ProcError::ExecutableNotFound,
+                "tk self-update: manpage update failed; run `tk manpage --install` to retry: spawn failed: executable not found on PATH\n",
+            ),
+            (
+                ProcError::SpawnFailed,
+                "tk self-update: manpage update failed; run `tk manpage --install` to retry: spawn failed: failed to spawn child process\n",
+            ),
+            (
+                ProcError::OutcomeUnobserved,
+                "tk self-update: manpage update failed; run `tk manpage --install` to retry: child process started but its outcome could not be observed\n",
+            ),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let target_dir = tmp.path();
+            let stage_name = predict_stage_name(0);
+            let stage_path = target_dir.join(&stage_name);
+            let target_path = target_dir.join("tk");
 
-        let runner = FakeRunner::new();
-        runner.expect_writing(
-            &["curl"],
-            ok_status_only(200),
-            stage_path.clone(),
-            b"new-bytes".to_vec(),
-        );
-        runner.expect(
-            &[stage_path.to_str().unwrap(), "--version"],
-            RunOutput {
-                exit_code: 0,
-                stdout: b"tk v0.6.0 (x86_64-linux-musl)\n".to_vec(),
-                stderr: Vec::new(),
-            },
-        );
-        runner.expect_error(
-            &[target_path.to_str().unwrap(), "manpage", "--install"],
-            ProcError::OutcomeUnobserved,
-        );
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let mut stdin = std::io::Cursor::new(Vec::new());
-        let clock = FakeClock::new(0);
-        let mut rng = StdRng::seed_from_u64(0);
-        let cwd = std::env::current_dir().unwrap();
-        let deps = make_deps(
-            &mut stdout,
-            &mut stderr,
-            &mut stdin,
-            &runner,
-            &clock,
-            &mut rng,
-            &cwd,
-        );
+            let runner = FakeRunner::new();
+            runner.expect_writing(
+                &["curl"],
+                ok_status_only(200),
+                stage_path.clone(),
+                b"new-bytes".to_vec(),
+            );
+            runner.expect(
+                &[stage_path.to_str().unwrap(), "--version"],
+                RunOutput {
+                    exit_code: 0,
+                    stdout: b"tk v0.6.0 (x86_64-linux-musl)\n".to_vec(),
+                    stderr: Vec::new(),
+                },
+            );
+            runner.expect_error(
+                &[target_path.to_str().unwrap(), "manpage", "--install"],
+                error,
+            );
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let mut stdin = std::io::Cursor::new(Vec::new());
+            let clock = FakeClock::new(0);
+            let mut rng = StdRng::seed_from_u64(0);
+            let cwd = std::env::current_dir().unwrap();
+            let deps = make_deps(
+                &mut stdout,
+                &mut stderr,
+                &mut stdin,
+                &runner,
+                &clock,
+                &mut rng,
+                &cwd,
+            );
 
-        let code = rendered(
-            perform_update(deps, target_dir, "tk", TEST_TRIPLE, "v0.6.0"),
-            &mut stderr,
-        );
+            let code = rendered(
+                perform_update(deps, target_dir, "tk", TEST_TRIPLE, "v0.6.0"),
+                &mut stderr,
+            );
 
-        assert_eq!(code, Exit::Failure);
-        assert_eq!(
-            String::from_utf8(stderr).unwrap(),
-            "tk self-update: manpage update failed; run `tk manpage --install` to retry: child process started but its outcome could not be observed\n"
-        );
-        assert_eq!(
-            String::from_utf8(stdout).unwrap(),
-            "tk self-update: updated to v0.6.0\n"
-        );
-        assert_eq!(fs::read(&target_path).unwrap(), b"new-bytes");
-        runner.assert_all_consumed();
+            assert_eq!(code, Exit::Failure);
+            assert_eq!(String::from_utf8(stderr).unwrap(), expected);
+            assert_eq!(
+                String::from_utf8(stdout).unwrap(),
+                "tk self-update: updated to v0.6.0\n"
+            );
+            assert_eq!(fs::read(&target_path).unwrap(), b"new-bytes");
+            runner.assert_all_consumed();
+        }
     }
 
     #[test]
@@ -1710,20 +1657,6 @@ mod tests {
         for (triple, expected) in cases {
             assert_eq!(build_asset_name(triple), expected, "for {triple}");
         }
-    }
-
-    #[test]
-    fn commit_install_posix_atomically_replaces_target() {
-        let tmp = tempfile::tempdir().unwrap();
-        let target_dir = tmp.path();
-        fs::write(target_dir.join(".tk.tmp.aaaa"), "new-bytes").unwrap();
-        fs::write(target_dir.join("tk"), "old-bytes").unwrap();
-
-        let outcome = commit_install(target_dir, ".tk.tmp.aaaa", "tk", false);
-        outcome.expect("commit succeeds");
-        assert_eq!(fs::read(target_dir.join("tk")).unwrap(), b"new-bytes");
-        assert!(!target_dir.join(".tk.tmp.aaaa").exists());
-        assert!(!target_dir.join("tk.old").exists());
     }
 
     #[test]
@@ -1787,22 +1720,7 @@ mod tests {
         // No tk.exe.old.
 
         cleanup_stale_exe_at(&exe_path);
-    }
-
-    #[test]
-    fn smoke_output_contains_token_whole_word_only() {
-        assert!(smoke_output_contains_token(
-            b"tk v0.6.0 (x86_64-linux-musl)\n",
-            "v0.6.0"
-        ));
-        assert!(smoke_output_contains_token(
-            b"tk v0.6.0 (x86_64-linux-musl)\n",
-            "x86_64-linux-musl"
-        ));
-        // Prefix collision: "v0.6.0" should NOT match inside "v0.6.0-rc1"
-        assert!(!smoke_output_contains_token(b"tk v0.6.0-rc1\n", "v0.6.0"));
-        // Empty token never matches.
-        assert!(!smoke_output_contains_token(b"anything", ""));
+        assert_eq!(fs::read(&exe_path).unwrap(), b"current");
     }
 
     #[test]
@@ -1812,14 +1730,6 @@ mod tests {
         assert!(parse_semver("not-semver").is_err());
         assert!(parse_semver("0.5").is_err());
         assert!(parse_semver("0.5.0.1").is_err());
-    }
-
-    #[test]
-    fn parse_release_tag_rejects_empty_string() {
-        assert!(matches!(
-            parse_release_tag(br#"{"tag_name":""}"#),
-            Err(QueryError::MissingTag)
-        ));
     }
 
     #[test]

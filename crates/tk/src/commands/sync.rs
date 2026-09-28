@@ -555,10 +555,9 @@ mod tests {
         expect_git(&h, &store); // only git discovery; no gh call expected
         let code = run(h.deps(), &["sync"]);
         assert_eq!(code, Exit::Ok);
-        assert!(
-            String::from_utf8(h.stdout)
-                .unwrap()
-                .contains("Sync complete: 0 pulled, 0 applied.")
+        assert_eq!(
+            String::from_utf8(h.stdout).unwrap(),
+            "Sync complete: 0 pulled, 0 applied.\n"
         );
     }
 
@@ -622,7 +621,7 @@ mod tests {
     fn sync_github_drives_gh_through_the_factory() {
         // End-to-end wiring: command -> factory -> real GithubAdapter -> gh via
         // the same FakeRunner. An Adopted item with a pending update_ticket
-        // refreshes without overwriting the pending edit, then applies through gh.
+        // refreshes the working set, then applies through gh.
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_remote(
@@ -957,7 +956,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_skip_non_failed_reports_and_does_not_skip() {
+    fn sync_skip_non_failed_reports_refusal() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         backend_ticket(&conn, "t1", "tk-1", "1", 1);
@@ -1036,36 +1035,52 @@ mod tests {
     /// token and Display ID styled, continuation and `[class]` tag plain.
     #[test]
     fn sync_log_rows_style_the_state_token_and_the_display_id() {
-        let store = TmpStore::new("repo");
-        seed_list_view_log(
-            &store,
-            r#"{"detail":"HTTP 422: rejected","class":"validation"}"#,
-        );
+        for (styler, failure, pending, failed, id, continuation) in [
+            (
+                Styler::always(),
+                r#"{"detail":"HTTP 422: rejected","class":"validation"}"#,
+                "\x1b[90mpending\x1b[39m",
+                "\x1b[91mfailed\x1b[39m",
+                "\x1b[36mtk-1\x1b[39m",
+                "  └─ [validation] HTTP 422: rejected\n",
+            ),
+            (
+                Styler::plain(),
+                r#"{"detail":"HTTP 401: Bad credentials","class":"auth"}"#,
+                "pending",
+                "failed",
+                "tk-1",
+                "  └─ [auth] HTTP 401: Bad credentials\n",
+            ),
+        ] {
+            let store = TmpStore::new("repo");
+            seed_list_view_log(&store, failure);
 
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_git(&h, &store);
+            let cwd_path = cwd();
+            let mut h = Harness::new(&cwd_path, &store);
+            expect_git(&h, &store);
 
-        let code = run(h.deps_with(Styler::always()), &["sync", "log"]);
+            let code = run(h.deps_with(styler), &["sync", "log"]);
 
-        assert_eq!(code, Exit::Ok);
-        let out = String::from_utf8(h.stdout).unwrap();
-        assert!(
-            out.contains("\u{1b}[90mpending\u{1b}[39m"),
-            "pending should carry MUTATION_PENDING: {out:?}"
-        );
-        assert!(
-            out.contains("\u{1b}[91mfailed\u{1b}[39m"),
-            "failed should carry MUTATION_FAILED: {out:?}"
-        );
-        assert!(
-            out.contains("\u{1b}[36mtk-1\u{1b}[39m"),
-            "the Display ID should carry the cyan anchor: {out:?}"
-        );
-        assert!(
-            out.contains("  └─ [validation] HTTP 422: rejected\n"),
-            "the continuation and class tag stay plain: {out:?}"
-        );
+            assert_eq!(code, Exit::Ok);
+            let out = String::from_utf8(h.stdout).unwrap();
+            assert!(
+                out.contains(pending),
+                "pending should carry MUTATION_PENDING: {out:?}"
+            );
+            assert!(
+                out.contains(failed),
+                "failed should carry MUTATION_FAILED: {out:?}"
+            );
+            assert!(
+                out.contains(id),
+                "the Display ID should carry the cyan anchor: {out:?}"
+            );
+            assert!(
+                out.contains(continuation),
+                "the continuation and class tag stay plain: {out:?}"
+            );
+        }
     }
 
     /// Backend text reaches the row's failure continuation inert.
@@ -1207,36 +1222,6 @@ mod tests {
     }
 
     #[test]
-    fn sync_log_lists_classified_failure_with_class_tag() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        backend_ticket(&conn, "t1", "tk-1", "1", 1);
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 1,
-                payload_json: r#"{"status":"done"}"#,
-                state: MutationState::Failed,
-                failure_json: Some(r#"{"detail":"HTTP 401: Bad credentials","class":"auth"}"#),
-                ..FixtureMutation::new(MutationType::SetItemStatus, "t1")
-            },
-        )
-        .unwrap();
-        drop(conn);
-
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_git(&h, &store);
-        let code = run(h.deps(), &["sync", "log"]);
-        assert_eq!(code, Exit::Ok);
-        let out = String::from_utf8(h.stdout).unwrap();
-        assert!(
-            out.contains("  └─ [auth] HTTP 401: Bad credentials"),
-            "{out}"
-        );
-    }
-
-    #[test]
     fn sync_log_detail_renders_class_line_when_classified() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
@@ -1299,23 +1284,6 @@ mod tests {
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "Sync complete: 3 pulled, 2 applied, stopped at 9.\n"
-        );
-    }
-
-    #[test]
-    fn render_report_plain_when_no_stop() {
-        let mut out = Vec::new();
-        render_sync_report(
-            &mut out,
-            &SyncReport {
-                pulled_count: 0,
-                applied_count: 0,
-                stopped_at_sequence: None,
-            },
-        );
-        assert_eq!(
-            String::from_utf8(out).unwrap(),
-            "Sync complete: 0 pulled, 0 applied.\n"
         );
     }
 

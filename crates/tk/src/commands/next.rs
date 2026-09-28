@@ -258,16 +258,25 @@ mod tests {
 
     #[test]
     fn empty_store_reports_no_ready_ticket() {
-        let store = TmpStore::new("repo");
-        seed_store(&store);
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_open(&h, &store);
-        let code = run_rendered(&mut h, args(None));
-        assert_eq!(code, Exit::Failure);
-        let stderr = String::from_utf8(h.stderr).unwrap();
-        assert!(stderr.contains("tk next: no ready Tickets"));
-        assert!(!stderr.contains("Epic"));
+        for quiet in [false, true] {
+            let store = TmpStore::new("repo");
+            seed_store(&store);
+            let cwd_path = cwd();
+            let mut h = Harness::new(&cwd_path, &store);
+            expect_open(&h, &store);
+            let code = run_rendered(
+                &mut h,
+                Args {
+                    quiet,
+                    ..args(None)
+                },
+            );
+            assert_eq!(code, Exit::Failure);
+            assert!(h.stdout.is_empty());
+            let stderr = String::from_utf8(h.stderr).unwrap();
+            assert!(stderr.contains("tk next: no ready Tickets"));
+            assert!(!stderr.contains("Epic"));
+        }
     }
 
     #[test]
@@ -289,96 +298,58 @@ mod tests {
 
     #[test]
     fn rationale_lands_on_stderr_when_effective_priority_promotes() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        seed_ticket(&conn, "blocker", "tk-1", "P3", 1);
-        seed_ticket(&conn, "blocked-high", "tk-2", "P0", 2);
-        insert_dependency(&conn, "blocker", "blocked-high").unwrap();
-        seed_ticket(&conn, "ready", "tk-3", "P1", 3);
-        drop(conn);
+        for (quiet, expected) in [(false, "tk-1: blocker"), (true, "tk-1")] {
+            let store = TmpStore::new("repo");
+            let conn = seed_store(&store);
+            seed_ticket(&conn, "blocker", "tk-1", "P3", 1);
+            seed_ticket(&conn, "blocked-high", "tk-2", "P0", 2);
+            insert_dependency(&conn, "blocker", "blocked-high").unwrap();
+            seed_ticket(&conn, "ready", "tk-3", "P1", 3);
+            drop(conn);
 
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_open(&h, &store);
-        let code = run_rendered(&mut h, args(None));
-        assert_eq!(code, Exit::Ok);
-        let stdout = String::from_utf8(h.stdout).unwrap();
-        let stderr = String::from_utf8(h.stderr).unwrap();
-        assert_eq!(stdout.trim(), "tk-1: blocker");
-        assert!(
-            stderr.contains("tk-1: Effective Priority P0 (via tk-2)"),
-            "stderr={stderr:?}"
-        );
-    }
-
-    /// The rationale still lands on stderr under `-q`, unchanged from the
-    /// default mode: `-q` only replaces the stdout selection line.
-    #[test]
-    fn rationale_lands_on_stderr_under_quiet_too() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        seed_ticket(&conn, "blocker", "tk-1", "P3", 1);
-        seed_ticket(&conn, "blocked-high", "tk-2", "P0", 2);
-        insert_dependency(&conn, "blocker", "blocked-high").unwrap();
-        seed_ticket(&conn, "ready", "tk-3", "P1", 3);
-        drop(conn);
-
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_open(&h, &store);
-        let code = run_rendered(
-            &mut h,
-            Args {
-                quiet: true,
-                ..args(None)
-            },
-        );
-        assert_eq!(code, Exit::Ok);
-        let stdout = String::from_utf8(h.stdout).unwrap();
-        let stderr = String::from_utf8(h.stderr).unwrap();
-        assert_eq!(stdout.trim(), "tk-1");
-        assert!(
-            stderr.contains("tk-1: Effective Priority P0 (via tk-2)"),
-            "stderr={stderr:?}"
-        );
+            let cwd_path = cwd();
+            let mut h = Harness::new(&cwd_path, &store);
+            expect_open(&h, &store);
+            let code = run_rendered(
+                &mut h,
+                Args {
+                    quiet,
+                    ..args(None)
+                },
+            );
+            assert_eq!(code, Exit::Ok);
+            let stdout = String::from_utf8(h.stdout).unwrap();
+            let stderr = String::from_utf8(h.stderr).unwrap();
+            assert_eq!(stdout.trim(), expected);
+            assert!(
+                stderr.contains("tk-1: Effective Priority P0 (via tk-2)"),
+                "stderr={stderr:?}"
+            );
+        }
     }
 
     #[test]
     fn default_prints_display_id_and_title() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        seed_ticket_titled(&conn, "ready", "tk-2", "Design comments schema", "P2", 1);
-        drop(conn);
+        for (styler, expected) in [
+            (Styler::plain(), "tk-2: Design comments schema\n"),
+            (
+                Styler::always(),
+                "\x1b[36mtk-2\x1b[39m: Design comments schema\n",
+            ),
+        ] {
+            let store = TmpStore::new("repo");
+            let conn = seed_store(&store);
+            seed_ticket_titled(&conn, "ready", "tk-2", "Design comments schema", "P2", 1);
+            drop(conn);
 
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_open(&h, &store);
-        let code = run_rendered(&mut h, args(None));
-        assert_eq!(code, Exit::Ok);
-        let stdout = String::from_utf8(h.stdout).unwrap();
-        assert_eq!(stdout, "tk-2: Design comments schema\n");
-    }
-
-    #[test]
-    fn quiet_prints_the_bare_display_id_and_nothing_else() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        seed_ticket_titled(&conn, "ready", "tk-2", "Design comments schema", "P2", 1);
-        drop(conn);
-
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_open(&h, &store);
-        let code = run_rendered(
-            &mut h,
-            Args {
-                quiet: true,
-                ..args(None)
-            },
-        );
-        assert_eq!(code, Exit::Ok);
-        let stdout = String::from_utf8(h.stdout).unwrap();
-        assert_eq!(stdout, "tk-2\n");
+            let cwd_path = cwd();
+            let mut h = Harness::new(&cwd_path, &store);
+            expect_open(&h, &store);
+            let code = run_rendered_with(&mut h, styler, args(None));
+            assert_eq!(code, Exit::Ok);
+            let stdout = String::from_utf8(h.stdout).unwrap();
+            assert_eq!(stdout, expected);
+        }
     }
 
     /// The guard that matters: under a colour-forcing `Styler`, `-q` must stay
@@ -388,50 +359,31 @@ mod tests {
     /// not catch `-q` routing through the Styler (see `render_selection`).
     #[test]
     fn quiet_bypasses_the_styler_even_when_colour_is_forced() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        seed_ticket_titled(&conn, "ready", "tk-2", "Design comments schema", "P2", 1);
-        drop(conn);
+        for styler in [Styler::plain(), Styler::always()] {
+            let store = TmpStore::new("repo");
+            let conn = seed_store(&store);
+            seed_ticket_titled(&conn, "ready", "tk-2", "Design comments schema", "P2", 1);
+            drop(conn);
 
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_open(&h, &store);
-        let code = run_rendered_with(
-            &mut h,
-            Styler::always(),
-            Args {
-                quiet: true,
-                ..args(None)
-            },
-        );
-        assert_eq!(code, Exit::Ok);
-        let stdout = String::from_utf8(h.stdout).unwrap();
-        assert_eq!(stdout, "tk-2\n");
-        assert!(
-            !stdout.contains('\u{1b}'),
-            "-q must never carry an SGR escape: stdout={stdout:?}"
-        );
-    }
-
-    #[test]
-    fn default_opens_the_cyan_id_span_when_colour_is_forced() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        seed_ticket_titled(&conn, "ready", "tk-2", "Design comments schema", "P2", 1);
-        drop(conn);
-
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_open(&h, &store);
-        let code = run_rendered_with(&mut h, Styler::always(), args(None));
-        assert_eq!(code, Exit::Ok);
-        let stdout = String::from_utf8(h.stdout).unwrap();
-        assert_eq!(
-            stdout, "\u{1b}[36mtk-2\u{1b}[39m: Design comments schema\n",
-            "the cyan Ticket-ID span must close (39) before the separator so the \
-             title renders plain (ADR-0015 tk-171 amendment; ADR-0014 \
-             disjoint-family close)"
-        );
+            let cwd_path = cwd();
+            let mut h = Harness::new(&cwd_path, &store);
+            expect_open(&h, &store);
+            let code = run_rendered_with(
+                &mut h,
+                styler,
+                Args {
+                    quiet: true,
+                    ..args(None)
+                },
+            );
+            assert_eq!(code, Exit::Ok);
+            let stdout = String::from_utf8(h.stdout).unwrap();
+            assert_eq!(stdout, "tk-2\n");
+            assert!(
+                !stdout.contains('\u{1b}'),
+                "-q must never carry an SGR escape: stdout={stdout:?}"
+            );
+        }
     }
 
     /// A title carrying a control byte is sanitized at the output boundary
@@ -450,27 +402,6 @@ mod tests {
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert_eq!(stdout, "tk-2: bell\\x07ring\n");
-    }
-
-    #[test]
-    fn empty_case_is_unchanged_under_quiet() {
-        let store = TmpStore::new("repo");
-        seed_store(&store);
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_open(&h, &store);
-        let code = run_rendered(
-            &mut h,
-            Args {
-                quiet: true,
-                ..args(None)
-            },
-        );
-        assert_eq!(code, Exit::Failure);
-        let stdout = String::from_utf8(h.stdout).unwrap();
-        assert!(stdout.is_empty(), "stdout={stdout:?}");
-        let stderr = String::from_utf8(h.stderr).unwrap();
-        assert!(stderr.contains("tk next: no ready Tickets"));
     }
 
     /// A stdout writer that always fails with a chosen [`std::io::ErrorKind`],

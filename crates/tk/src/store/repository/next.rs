@@ -327,14 +327,11 @@ mod tests {
 
     #[test]
     fn skips_tickets_with_unresolved_dependencies() {
-        // `blocked` (tk-1) is the dependency target, so it must not appear
-        // in the ready set. The blocker (tk-3) inherits priority P4 from
-        // its blocked target — same as its own — so it does not outrank
-        // `ready` (tk-2, P2) via Effective Priority. tk-2 should win.
+        // The blocked P0 would win if readiness ignored its Dependency.
         let store = open_seeded();
-        seed(&store, "blocked", "tk-1", "P4", 1);
+        seed(&store, "blocked", "tk-1", "P0", 1);
         seed(&store, "ready", "tk-2", "P2", 2);
-        seed(&store, "blocker", "tk-3", "P4", 3);
+        seed_epic(&store, "blocker", "tk-3", 3);
         insert_dependency(&store.conn, "blocker", "blocked").unwrap();
 
         let ticket = next_ready_ticket(&store, NextOptions::default())
@@ -444,6 +441,8 @@ mod tests {
     fn rationale_is_absent_when_own_priority_equals_effective_priority() {
         let store = open_seeded();
         seed(&store, "ready", "tk-1", "P1", 1);
+        seed(&store, "goal", "tk-2", "P1", 2);
+        insert_dependency(&store.conn, "ready", "goal").unwrap();
         let ticket = next_ready_ticket(&store, NextOptions::default())
             .unwrap()
             .expect("a ready ticket");
@@ -551,13 +550,13 @@ mod tests {
 
     #[test]
     fn parked_ticket_is_never_selected_as_a_direct_candidate() {
-        // A parked P0 outranks an accepted P2 on raw Priority, but the final
-        // candidate filter (`ann.selection_state = 'accepted'`) excludes it, so
-        // the accepted P2 is selected. Guards the candidate-side filter, distinct
-        // from the `eff` contributor filter the sibling tests exercise.
+        // The accepted goal gives the parked blocker Effective Priority P0.
+        // Candidate selection must still exclude it in favor of ready work.
         let store = open_seeded();
         seed_parked(&store, "held", "tk-1", "P0", 1);
         seed(&store, "ready", "tk-2", "P2", 2);
+        seed(&store, "goal", "tk-3", "P0", 3);
+        insert_dependency(&store.conn, "held", "goal").unwrap();
 
         let ticket = next_ready_ticket(&store, NextOptions::default())
             .unwrap()

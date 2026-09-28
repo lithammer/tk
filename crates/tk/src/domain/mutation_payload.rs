@@ -109,12 +109,23 @@ mod tests {
 
     #[test]
     fn title_body_json_is_flat() {
-        let json = MutationPayload::UpdateTitleBody(TitleBody {
-            title: "T".into(),
-            body: "B".into(),
-        })
-        .to_json_string();
-        assert_eq!(json, r#"{"title":"T","body":"B"}"#);
+        for (title, body, expected) in [
+            ("T", "B", r#"{"title":"T","body":"B"}"#),
+            (
+                "Quote \" and backslash \\ and newline \n inside",
+                "",
+                r#"{"title":"Quote \" and backslash \\ and newline \n inside","body":""}"#,
+            ),
+        ] {
+            let original = TitleBody {
+                title: title.into(),
+                body: body.into(),
+            };
+            let json = MutationPayload::UpdateTitleBody(original.clone()).to_json_string();
+            assert_eq!(json, expected);
+            let restored: TitleBody = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored, original);
+        }
     }
 
     #[test]
@@ -146,35 +157,27 @@ mod tests {
 
     #[test]
     fn promotion_json_is_flat() {
-        let json = MutationPayload::Promotion(Promotion {
-            title: "T".into(),
-            body: "B".into(),
-            backend_kind: "github".into(),
-        })
-        .to_json_string();
-        assert_eq!(json, r#"{"title":"T","body":"B","backend_kind":"github"}"#);
-    }
-
-    #[test]
-    fn promotion_round_trips_with_free_text() {
-        let original = Promotion {
-            title: "Quote \" and backslash \\ and newline \n inside".into(),
-            body: String::new(),
-            backend_kind: "github".into(),
-        };
-        let json = serde_json::to_string(&original).unwrap();
-        let restored: Promotion = serde_json::from_str(&json).unwrap();
-        assert_eq!(restored, original);
-    }
-
-    #[test]
-    fn title_body_round_trips_with_free_text() {
-        let original = TitleBody {
-            title: "Quote \" and backslash \\ and newline \n inside".into(),
-            body: String::new(),
-        };
-        let json = serde_json::to_string(&original).unwrap();
-        let restored: TitleBody = serde_json::from_str(&json).unwrap();
-        assert_eq!(restored, original);
+        for (title, body, expected) in [
+            (
+                "T",
+                "B",
+                r#"{"title":"T","body":"B","backend_kind":"github"}"#,
+            ),
+            (
+                "Quote \" and backslash \\ and newline \n inside",
+                "",
+                r#"{"title":"Quote \" and backslash \\ and newline \n inside","body":"","backend_kind":"github"}"#,
+            ),
+        ] {
+            let original = Promotion {
+                title: title.into(),
+                body: body.into(),
+                backend_kind: "github".into(),
+            };
+            let json = MutationPayload::Promotion(original.clone()).to_json_string();
+            assert_eq!(json, expected);
+            let restored: Promotion = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored, original);
+        }
     }
 }

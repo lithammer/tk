@@ -690,8 +690,8 @@ mod tests {
     #[test]
     fn remove_dependency_is_a_noop_on_missing_edges() {
         let mut store = open_seeded();
-        seed_ticket(&store, "blocking", "tk-1", 1);
-        seed_ticket(&store, "blocked", "tk-2", 2);
+        seed_backend(&store, "blocking", "gh-1", "github", "1", 1);
+        seed_backend(&store, "blocked", "gh-2", "github", "2", 2);
 
         remove_dependency(
             &mut store,
@@ -702,5 +702,6 @@ mod tests {
             },
         )
         .unwrap();
+        assert!(mutation_types(&store.conn).unwrap().is_empty());
     }
 }

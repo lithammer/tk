@@ -74,9 +74,6 @@ pub fn parse(raw: &str) -> Result<ParsedMessage, ParseError> {
 /// Parse paragraphs from repeated `-m` flags by joining them with double
 /// newlines and feeding the result to [`parse`].
 pub fn parse_from_paragraphs(paragraphs: &[String]) -> Result<ParsedMessage, ParseError> {
-    if paragraphs.is_empty() {
-        return Err(ParseError::Empty);
-    }
     let combined = paragraphs.join("\n\n");
     parse(&combined)
 }
@@ -203,12 +200,6 @@ mod tests {
             parse_from_paragraphs(&["Title".into(), "Body p1".into(), "Body p2".into()]).unwrap();
         assert_eq!(parsed.title, "Title");
         assert_eq!(parsed.body, "Body p1\n\nBody p2");
-    }
-
-    #[test]
-    fn paragraphs_empty_slice_returns_empty() {
-        let err = parse_from_paragraphs(&[]).unwrap_err();
-        assert_eq!(err, ParseError::Empty);
     }
 
     #[test]

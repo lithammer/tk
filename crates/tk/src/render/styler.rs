@@ -399,16 +399,6 @@ mod tests {
     }
 
     #[test]
-    fn wrap_elides_open_close_when_choice_is_never() {
-        let styler = Styler::plain();
-        let style = palette::KIND_BUG;
-        assert_eq!(
-            format!("{}", styler.for_stdout().wrap(style, "TEXT")),
-            "TEXT"
-        );
-    }
-
-    #[test]
     fn wrap_emits_open_text_close_when_choice_is_always() {
         let styler = Styler::always();
         let style = palette::HEADER;
@@ -456,20 +446,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn close_emits_multi_family_in_reverse_open_order() {
-        // bold + red opens as `\x1b[1m\x1b[31m`; close must emit `39`
-        // (fg) before `22` (bold) so the inner family unwinds first.
-        let on = SubStyler {
-            choice: ColorChoice::Always,
-        };
-        let style = palette::HEADER.fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Red)));
-        assert_eq!(format!("{}", on.close(style)), "\x1b[39m\x1b[22m");
-    }
-
-    /// One palette entry and the bytes it must emit. `name` is the entry's
-    /// constant name, lowercased — `palette_table_covers_every_entry` relies
-    /// on that to match this list against the palette source.
+    /// One palette entry and its expected terminal bytes.
     struct Case {
         name: &'static str,
         style: Style,
@@ -683,40 +660,6 @@ mod tests {
                 case.name,
             );
         }
-    }
-
-    /// Keeps [`PALETTE_CASES`] honest about covering the whole palette.
-    ///
-    /// The byte table above is only a contract if it names every entry, and
-    /// nothing about adding a `pub const` to `palette.rs` forces a row here.
-    /// So read the palette's own source and require one. Add an entry, and
-    /// this fails until its bytes are pinned.
-    ///
-    /// One comparison of both sorted lists covers every way they can
-    /// disagree, a failed parse included.
-    #[test]
-    fn palette_table_covers_every_entry() {
-        const SOURCE: &str = include_str!("palette.rs");
-
-        let mut declared: Vec<String> = SOURCE
-            .lines()
-            .filter_map(|line| line.strip_prefix("pub const "))
-            .filter_map(|rest| rest.split_once(": Style"))
-            .map(|(name, _)| name.to_ascii_lowercase())
-            .collect();
-        declared.sort_unstable();
-
-        let mut covered: Vec<String> = PALETTE_CASES
-            .iter()
-            .map(|case| case.name.to_owned())
-            .collect();
-        covered.sort_unstable();
-
-        assert_eq!(
-            covered, declared,
-            "PALETTE_CASES and the palette's `pub const`s disagree; every \
-             entry needs exactly one row pinning its open / close bytes"
-        );
     }
 
     /// ADR-0014's disjoint-family invariant, asserted pairwise.

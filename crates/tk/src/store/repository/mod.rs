@@ -492,25 +492,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_item_ref_finds_by_alias() {
-        let conn = open_seeded();
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "t1",
-                display: "tk-1",
-                title: "Ticket",
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        insert_alias(&conn, "my-alias", "t1").unwrap();
-        let r = resolve_item_ref(&conn, "my-alias").unwrap().unwrap();
-        assert_eq!(r.id, "t1");
-    }
-
-    #[test]
     fn resolve_item_ref_returns_canonical_display() {
         let conn = open_seeded();
         insert_fixture_item(
@@ -526,6 +507,7 @@ mod tests {
         .unwrap();
         insert_alias(&conn, "alias", "t1").unwrap();
         let r = resolve_item_ref(&conn, "alias").unwrap().unwrap();
+        assert_eq!(r.id, "t1");
         assert_eq!(r.display_id, "tk-42");
     }
 
@@ -688,28 +670,6 @@ mod tests {
     }
 
     #[test]
-    fn remote_workflow_lock_excludes_other_handles_until_guard_drop() {
-        let store = TmpStore::new("repo");
-        seed_tk_db(&store);
-        let runner = fake_runner_for(&store);
-        let opened =
-            open_existing(&runner, &cwd(), &fixed_clock(), Some(&store.data_root)).unwrap();
-        let guard = opened.lock_remote_workflow().unwrap();
-        let lock_path = store.tk_dir().join("remote.lock");
-        let contender = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&lock_path)
-            .unwrap();
-
-        assert!(contender.try_lock().is_err());
-        drop(guard);
-        contender.try_lock().unwrap();
-        drop(contender);
-        assert!(lock_path.exists(), "the stable lock inode must be reused");
-    }
-
-    #[test]
     fn remote_workflow_lock_reports_contention_and_succeeds_after_drop() {
         let store = TmpStore::new("repo");
         seed_tk_db(&store);
@@ -733,7 +693,9 @@ mod tests {
             Err(RemoteWorkflowLockError::Busy)
         ));
         drop(first_guard);
-        let _second_guard = second.lock_remote_workflow().unwrap();
+        let second_guard = second.lock_remote_workflow().unwrap();
+        drop(second_guard);
+        assert!(store.tk_dir().join("remote.lock").exists());
     }
 
     #[test]

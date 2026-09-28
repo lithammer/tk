@@ -715,7 +715,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dependency_inside_the_operation_becomes_intent_in_either_creation_order() {
+    fn a_dependency_on_a_later_created_blocker_becomes_intent() {
         // The Blocking Item is created *after* the Blocked Item, so a planner
         // reading current Origins in creation order would reject this edge.
         // The whole operation is evaluated together (ADR-0035).

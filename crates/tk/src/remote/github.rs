@@ -2686,7 +2686,7 @@ mod tests {
             &["gh", "issue", "create", "--title", "T", "--body", "B"],
             RunOutput {
                 exit_code: 1,
-                stdout: b"https://github.example/o/r/issues/7\n".to_vec(),
+                stdout: b" https://github.example/o/r/issues/7\n".to_vec(),
                 stderr: b"a later CLI step failed".to_vec(),
             },
         );
@@ -2701,7 +2701,18 @@ mod tests {
 
     #[test]
     fn empty_and_malformed_success_receipts_are_indeterminate() {
-        for stdout in ["", "created #42", "https://github.com/o/r/pull/42"] {
+        for stdout in [
+            "",
+            "created #42",
+            "https://github.com/o/r/pull/42",
+            "http://github.com/o/r/issues/1",
+            "https://github.com/o/r/issues/0",
+            "https://github.com/o/r/issues/01",
+            "https://github.com/o/r/issues/1?x=y",
+            "https://user@github.com/o/r/issues/1",
+            "https://github.com/o/r/issues/1\nextra",
+            "https://github.com/o/r/issues/not-a-number",
+        ] {
             let runner = FakeRunner::new();
             runner.expect_exact(
                 &["gh", "issue", "create", "--title", "T", "--body", "B"],
@@ -2828,25 +2839,6 @@ mod tests {
         assert!(failure.detail.contains("outcome is unknown"));
         assert_eq!(failure.class, FailureClass::Unknown);
         runner.assert_all_consumed();
-    }
-
-    #[test]
-    fn receipt_parser_requires_a_canonical_github_issue_url() {
-        for invalid in [
-            b"http://github.com/o/r/issues/1".as_slice(),
-            b"https://github.com/o/r/issues/0",
-            b"https://github.com/o/r/issues/01",
-            b"https://github.com/o/r/issues/1?x=y",
-            b"https://user@github.com/o/r/issues/1",
-            b"https://github.com/o/r/issues/1\nextra",
-            b"https://github.com/o/r/issues/not-a-number",
-        ] {
-            assert_eq!(parse_create_receipt(invalid), None, "{invalid:?}");
-        }
-        assert_eq!(
-            parse_create_receipt(b" https://github.example/o/r/issues/12\n"),
-            Some(identity("https://github.example/o/r/issues/12"))
-        );
     }
 
     #[test]
