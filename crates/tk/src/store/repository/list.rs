@@ -333,12 +333,12 @@ mod tests {
         use crate::store::repository::{grep, next, plan, search, show};
 
         for (state, expected) in [
-            ("pending", true),
-            ("failed", true),
-            ("applying", true),
-            ("applied", false),
-            ("cancelled", false),
-            ("abandoned", false),
+            (MutationState::Pending, true),
+            (MutationState::Failed, true),
+            (MutationState::Applying, true),
+            (MutationState::Applied, false),
+            (MutationState::Cancelled, false),
+            (MutationState::Abandoned, false),
         ] {
             for backend in [false, true] {
                 let store = open_seeded();
@@ -361,7 +361,8 @@ mod tests {
                     FixtureMutation {
                         state,
                         payload_json: r#"{"backend_kind":"github","title":"Work","body":""}"#,
-                        failure_json: (state == "failed").then_some(r#"{"detail":"rejected"}"#),
+                        failure_json: (state == MutationState::Failed)
+                            .then_some(r#"{"detail":"rejected"}"#),
                         ..FixtureMutation::new(MutationType::PromoteTicket, "work")
                     },
                 )
@@ -980,7 +981,7 @@ mod tests {
             seed_mutation(
                 &store.conn,
                 seq,
-                state.text(),
+                state,
                 FixtureMutation::new(mutation_type, item_id),
             );
             expected.push((state, mutation_type, expect_pending, expect_failed));
@@ -1030,7 +1031,7 @@ mod tests {
                     other.text()
                 ),
             };
-            for state in ["pending", "failed"] {
+            for state in [MutationState::Pending, MutationState::Failed] {
                 seq += 1;
                 seed_mutation(
                     &store.conn,
@@ -1064,13 +1065,13 @@ mod tests {
         seed_mutation(
             &store.conn,
             1,
-            "pending",
+            MutationState::Pending,
             FixtureMutation::new(MutationType::PromoteTicket, "t1"),
         );
         seed_mutation(
             &store.conn,
             2,
-            "pending",
+            MutationState::Pending,
             FixtureMutation::new(MutationType::SetItemStatus, "t1"),
         );
         let rows = list_rows(&store, ListOptions::default()).unwrap();
@@ -1086,7 +1087,7 @@ mod tests {
         seed_mutation(
             &store.conn,
             1,
-            "failed",
+            MutationState::Failed,
             FixtureMutation {
                 item_class: ItemClass::Epic,
                 ..FixtureMutation::new(MutationType::UpdateEpic, "e1")
@@ -1119,7 +1120,7 @@ mod tests {
         seed_mutation(
             &store.conn,
             1,
-            "pending",
+            MutationState::Pending,
             FixtureMutation::new(MutationType::UpdateTicket, "child"),
         );
         let rows = list_rows(&store, ListOptions::default()).unwrap();

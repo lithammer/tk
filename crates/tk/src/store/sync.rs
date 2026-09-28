@@ -2193,7 +2193,7 @@ mod tests {
     use crate::store::testing::{
         FixtureFormerIdentity, FixtureItem, FixtureMutation, FixtureRemote, insert_dependency,
         insert_fixture_former_identity, insert_fixture_item, insert_fixture_mutation,
-        insert_fixture_remote, item_axes, item_count,
+        insert_fixture_remote, item_axes, item_count, state_of,
     };
     use rand::SeedableRng;
     use rand::rngs::StdRng;
@@ -2225,7 +2225,7 @@ mod tests {
             },
         )
         .unwrap();
-        for (sequence, state) in [(1, "applied"), (2, "skipped")] {
+        for (sequence, state) in [(1, MutationState::Applied), (2, MutationState::Skipped)] {
             insert_fixture_mutation(
                 &conn,
                 FixtureMutation {
@@ -2262,7 +2262,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 payload_json: r#"{"title":"T","body":""}"#,
-                state: "failed",
+                state: MutationState::Failed,
                 failure_json: Some(r#"{"detail":"boom"}"#),
                 ..FixtureMutation::new(MutationType::UpdateTicket, "older")
             },
@@ -2310,7 +2310,7 @@ mod tests {
             FixtureMutation {
                 sequence: 3,
                 payload_json: r#"{"title":"Original title","body":"Original body","backend_kind":"github"}"#,
-                state: "applying",
+                state: MutationState::Applying,
                 failure_json: Some(r#"{"detail":"prior"}"#),
                 promotion_operation_id: Some("op-1"),
                 ..FixtureMutation::new(MutationType::PromoteTicket, "t1")
@@ -2343,7 +2343,7 @@ mod tests {
             },
         )
         .unwrap();
-        for (sequence, state) in [(1, "applied"), (2, "pending")] {
+        for (sequence, state) in [(1, MutationState::Applied), (2, MutationState::Pending)] {
             insert_fixture_mutation(
                 &conn,
                 FixtureMutation {
@@ -2466,7 +2466,7 @@ mod tests {
                 FixtureMutation {
                     sequence: *sequence,
                     payload_json,
-                    state: state.text(),
+                    state: *state,
                     failure_json: if *state == MutationState::Failed {
                         Some(r#"{"detail":"x"}"#)
                     } else {
@@ -2549,7 +2549,7 @@ mod tests {
 
     #[test]
     fn refresh_preserves_content_for_pending_and_failed_content_mutations() {
-        for state in ["pending", "failed"] {
+        for state in [MutationState::Pending, MutationState::Failed] {
             let mut conn = open_seeded();
             seed_remote(&conn);
             backend_ticket(&conn, "t1", "gh-1", "1", 1);
@@ -2565,7 +2565,8 @@ mod tests {
                     sequence: 1,
                     payload_json: r#"{"title":"Local title","body":"Local body"}"#,
                     state,
-                    failure_json: (state == "failed").then_some(r#"{"detail":"prior"}"#),
+                    failure_json: (state == MutationState::Failed)
+                        .then_some(r#"{"detail":"prior"}"#),
                     ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
                 },
             )
@@ -2619,7 +2620,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 payload_json: r#"{"blocking_id":"other"}"#,
-                state: "pending",
+                state: MutationState::Pending,
                 ..FixtureMutation::new(MutationType::AddDependency, "t1")
             },
         )
@@ -2629,7 +2630,7 @@ mod tests {
             FixtureMutation {
                 sequence: 2,
                 payload_json: r#"{"title":"Local title","body":"Local body"}"#,
-                state: "pending",
+                state: MutationState::Pending,
                 ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
             },
         )
@@ -2639,7 +2640,7 @@ mod tests {
             FixtureMutation {
                 sequence: 3,
                 payload_json: r#"{"blocking_id":"later"}"#,
-                state: "pending",
+                state: MutationState::Pending,
                 ..FixtureMutation::new(MutationType::AddDependency, "t1")
             },
         )
@@ -2738,7 +2739,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 payload_json: r#"{"title":"Local title","body":"Local body"}"#,
-                state: "pending",
+                state: MutationState::Pending,
                 ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
             },
         )
@@ -2814,7 +2815,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 payload_json: r#"{"blocking_id":"other"}"#,
-                state: "failed",
+                state: MutationState::Failed,
                 failure_json: Some(r#"{"detail":"prior"}"#),
                 ..FixtureMutation::new(MutationType::AddDependency, "t1")
             },
@@ -2837,7 +2838,7 @@ mod tests {
 
     #[test]
     fn refresh_admits_content_after_content_mutation_is_terminal() {
-        for state in ["applied", "skipped"] {
+        for state in [MutationState::Applied, MutationState::Skipped] {
             let mut conn = open_seeded();
             seed_remote(&conn);
             backend_ticket(&conn, "t1", "gh-1", "1", 1);
@@ -2889,7 +2890,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 payload_json: r#"{"title":"Local title","body":""}"#,
-                state: "pending",
+                state: MutationState::Pending,
                 ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
             },
         )
@@ -2955,7 +2956,7 @@ mod tests {
                 sequence: 1,
                 item_class: ItemClass::Epic,
                 payload_json: r#"{"title":"Local epic title","body":"Local epic body"}"#,
-                state: "pending",
+                state: MutationState::Pending,
                 ..FixtureMutation::new(MutationType::UpdateEpic, "e1")
             },
         )
@@ -3019,7 +3020,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 payload_json: r#"{"status":"done"}"#,
-                state: "pending",
+                state: MutationState::Pending,
                 ..FixtureMutation::new(MutationType::SetItemStatus, "t1")
             },
         )
@@ -3458,10 +3459,10 @@ mod tests {
         let conn = open_seeded();
         backend_ticket(&conn, "t1", "gh-1", "1", 1);
         for (seq, state) in [
-            (3, "pending"),
-            (1, "failed"),
-            (2, "applied"),
-            (4, "skipped"),
+            (3, MutationState::Pending),
+            (1, MutationState::Failed),
+            (2, MutationState::Applied),
+            (4, MutationState::Skipped),
         ] {
             insert_fixture_mutation(
                 &conn,
@@ -3469,7 +3470,7 @@ mod tests {
                     sequence: seq,
                     payload_json: r#"{"title":"X","body":""}"#,
                     state,
-                    failure_json: if state == "failed" {
+                    failure_json: if state == MutationState::Failed {
                         Some(r#"{"detail":"prior"}"#)
                     } else {
                         None
@@ -3494,7 +3495,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 payload_json: r#"{"status":"done"}"#,
-                state: "pending",
+                state: MutationState::Pending,
                 ..FixtureMutation::new(MutationType::SetItemStatus, "t1")
             },
         )
@@ -3519,7 +3520,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 payload_json: r#"{"status":"done"}"#,
-                state: "pending",
+                state: MutationState::Pending,
                 ..FixtureMutation::new(MutationType::SetItemStatus, "t1")
             },
         )
@@ -3558,7 +3559,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 payload_json: r#"{"title":"T","body":"B","backend_kind":"github"}"#,
-                state: "pending",
+                state: MutationState::Pending,
                 ..FixtureMutation::new(MutationType::PromoteTicket, "t1")
             },
         )
@@ -3601,7 +3602,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 payload_json: r#"{"title":"T","body":"B","backend_kind":"github"}"#,
-                state: "pending",
+                state: MutationState::Pending,
                 ..FixtureMutation::new(MutationType::PromoteTicket, "t1")
             },
         )
@@ -3628,7 +3629,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 payload_json: r#"{"blocking_id":"blocking"}"#,
-                state: "pending",
+                state: MutationState::Pending,
                 ..FixtureMutation::new(MutationType::AddDependency, "blocked")
             },
         )
@@ -3821,7 +3822,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 payload_json: r#"{"blocking_id":"blocking"}"#,
-                state: "pending",
+                state: MutationState::Pending,
                 ..FixtureMutation::new(MutationType::AddDependency, "blocked")
             },
         )
@@ -3858,7 +3859,7 @@ mod tests {
             FixtureMutation {
                 sequence: 2,
                 payload_json: r#"{"status":"done"}"#,
-                state: "pending",
+                state: MutationState::Pending,
                 ..FixtureMutation::new(MutationType::SetItemStatus, "t1")
             },
         )
@@ -3898,7 +3899,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 payload_json: "{}",
-                state: "pending",
+                state: MutationState::Pending,
                 ..FixtureMutation::new(MutationType::AddExternalBlocker, "t1")
             },
         )
@@ -3924,7 +3925,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 payload_json: r#"{"status":"active"}"#,
-                state: "pending",
+                state: MutationState::Pending,
                 ..FixtureMutation::new(MutationType::SetItemStatus, "t1")
             },
         )
@@ -3955,7 +3956,7 @@ mod tests {
                 FixtureMutation {
                     sequence: seq,
                     payload_json: r#"{"title":"T","body":"B","backend_kind":"github"}"#,
-                    state: "pending",
+                    state: MutationState::Pending,
                     ..FixtureMutation::new(mutation_type, "t1")
                 },
             )
@@ -3989,7 +3990,7 @@ mod tests {
             FixtureMutation {
                 sequence,
                 payload_json: r#"{"title":"New","body":""}"#,
-                state: "pending",
+                state: MutationState::Pending,
                 ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
             },
         )
@@ -4065,7 +4066,7 @@ mod tests {
             FixtureMutation {
                 sequence: 3,
                 payload_json: r#"{"title":"A","body":""}"#,
-                state: "failed",
+                state: MutationState::Failed,
                 failure_json: Some(r#"{"detail":"prior"}"#),
                 ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
             },
@@ -4101,7 +4102,7 @@ mod tests {
             FixtureMutation {
                 sequence: 2,
                 payload_json: r#"{"title":"A","body":""}"#,
-                state: "failed",
+                state: MutationState::Failed,
                 failure_json: Some(r#"{"detail":"old reason"}"#),
                 ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
             },
@@ -4155,7 +4156,7 @@ mod tests {
             FixtureMutation {
                 sequence: 7,
                 payload_json: r#"{"title":"A","body":""}"#,
-                state: "applied",
+                state: MutationState::Applied,
                 ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
             },
         )
@@ -4193,7 +4194,7 @@ mod tests {
             FixtureMutation {
                 sequence,
                 payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
-                state: "pending",
+                state: MutationState::Pending,
                 promotion_operation_id: Some("op-1"),
                 ..FixtureMutation::new(MutationType::PromoteTicket, "t1")
             },
@@ -4219,12 +4220,8 @@ mod tests {
         )
         .unwrap();
 
-        let state: String = conn
-            .query_row("select state from mutations where sequence = 4", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(state, "applied");
+        let state = state_of(&conn, 4).unwrap();
+        assert_eq!(state, MutationState::Applied);
 
         let (display, origin, kind, key): (String, String, String, String) = conn
             .query_row(
@@ -4411,16 +4408,13 @@ mod tests {
             "the collision must surface, not be swallowed; got {err:?}"
         );
 
-        let state: String = conn
-            .query_row("select state from mutations where sequence = 4", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
+        let state = state_of(&conn, 4).unwrap();
         assert_ne!(
-            state, "applied",
+            state,
+            MutationState::Applied,
             "a Mutation with no receipt is not applied"
         );
-        assert_eq!(state, "applying");
+        assert_eq!(state, MutationState::Applying);
 
         let (display, origin): (String, String) = conn
             .query_row(
@@ -4470,12 +4464,8 @@ mod tests {
                 ref item_id,
             }) if item_id == "t1"
         ));
-        let state: String = conn
-            .query_row("select state from mutations where sequence = 4", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(state, "applying");
+        let state = state_of(&conn, 4).unwrap();
+        assert_eq!(state, MutationState::Applying);
     }
 
     #[test]
@@ -4527,12 +4517,8 @@ mod tests {
             other => panic!("expected OperationShapeMismatch, got {other:?}"),
         }
 
-        let state: String = conn
-            .query_row("select state from mutations where sequence = 5", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(state, "pending");
+        let state = state_of(&conn, 5).unwrap();
+        assert_eq!(state, MutationState::Pending);
     }
 
     // ---- mark_mutation_skipped ------------------------------------------
@@ -4546,7 +4532,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 payload_json: r#"{"title":"A","body":""}"#,
-                state: "failed",
+                state: MutationState::Failed,
                 failure_json: Some(r#"{"detail":"rejected"}"#),
                 ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
             },
@@ -4628,16 +4614,12 @@ mod tests {
             // A refusal must also leave the row as it found it: an error
             // return that still committed the transition would skip the
             // Mutation while telling the operator it had not.
-            let after: String = conn
-                .query_row("select state from mutations where sequence = 1", [], |r| {
-                    r.get(0)
-                })
-                .unwrap();
+            let after = state_of(&conn, 1).unwrap();
             let expected = match verdict {
                 SkipVerdict::Bypassed => MutationState::Skipped,
                 SkipVerdict::NotFailed | SkipVerdict::Promotion => state,
             };
-            assert_eq!(after, expected.text(), "state {state}: {why}");
+            assert_eq!(after, expected, "state {state}: {why}");
         }
     }
 
@@ -4660,7 +4642,7 @@ mod tests {
             (MutationType::PromoteTicket, ItemClass::Ticket),
             (MutationType::PromoteEpic, ItemClass::Epic),
         ] {
-            for prior_state in ["failed", "applying"] {
+            for prior_state in [MutationState::Failed, MutationState::Applying] {
                 let mut conn = open_seeded();
                 insert_fixture_item(
                     &conn,
@@ -4700,11 +4682,7 @@ mod tests {
                     ),
                 }
 
-                let stored_state: String = conn
-                    .query_row("select state from mutations where sequence = 1", [], |r| {
-                        r.get(0)
-                    })
-                    .unwrap();
+                let stored_state = state_of(&conn, 1).unwrap();
                 assert_eq!(stored_state, prior_state);
             }
         }
@@ -4739,7 +4717,7 @@ mod tests {
                 sequence: 1,
                 item_class,
                 payload_json: r#"{"status":"done"}"#,
-                state: "failed",
+                state: MutationState::Failed,
                 failure_json: Some(r#"{"detail":"rejected"}"#),
                 ..FixtureMutation::new(MutationType::SetItemStatus, "t1")
             },
@@ -4779,12 +4757,8 @@ mod tests {
         assert_eq!(closing_reason, None, "Closing Reason cleared");
         assert_eq!(updated_at, "2026-05-19T00:00:00Z");
 
-        let mutation_state: String = conn
-            .query_row("select state from mutations where sequence = 1", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(mutation_state, "skipped");
+        let mutation_state = state_of(&conn, 1).unwrap();
+        assert_eq!(mutation_state, MutationState::Skipped);
     }
 
     #[test]
@@ -4841,7 +4815,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 payload_json: r#"{"status":"done"}"#,
-                state: "failed",
+                state: MutationState::Failed,
                 failure_json: Some(r#"{"detail":"rejected"}"#),
                 ..FixtureMutation::new(MutationType::SetItemStatus, "t1")
             },
@@ -4911,7 +4885,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 payload_json: r#"{"status":"done"}"#,
-                state: "failed",
+                state: MutationState::Failed,
                 failure_json: Some(r#"{"detail":"rejected"}"#),
                 ..FixtureMutation::new(MutationType::SetItemStatus, "t1")
             },
@@ -4958,7 +4932,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 payload_json: r#"{"status":"active"}"#,
-                state: "failed",
+                state: MutationState::Failed,
                 failure_json: Some(r#"{"detail":"stale, non-closing"}"#),
                 ..FixtureMutation::new(MutationType::SetItemStatus, "t1")
             },
@@ -4969,7 +4943,7 @@ mod tests {
             FixtureMutation {
                 sequence: 2,
                 payload_json: r#"{"status":"done"}"#,
-                state: "failed",
+                state: MutationState::Failed,
                 failure_json: Some(r#"{"detail":"the real close"}"#),
                 ..FixtureMutation::new(MutationType::SetItemStatus, "t1")
             },
@@ -4986,17 +4960,8 @@ mod tests {
             .unwrap();
         assert_eq!(status, "done", "the real close still authorizes a retry");
 
-        let (skipped_state, closing_state): (String, String) = conn
-            .query_row(
-                "select \
-                    (select state from mutations where sequence = 1), \
-                    (select state from mutations where sequence = 2)",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(skipped_state, "skipped");
-        assert_eq!(closing_state, "failed");
+        assert_eq!(state_of(&conn, 1).unwrap(), MutationState::Skipped);
+        assert_eq!(state_of(&conn, 2).unwrap(), MutationState::Failed);
     }
 
     #[test]
@@ -5014,7 +4979,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 payload_json: r#"{"status":"done"}"#,
-                state: "failed",
+                state: MutationState::Failed,
                 failure_json: Some(r#"{"detail":"rejected"}"#),
                 ..FixtureMutation::new(MutationType::SetItemStatus, "t1")
             },
@@ -5029,12 +4994,8 @@ mod tests {
 
         // The Mutation stayed `failed`, proving the transaction rolled back
         // rather than committing the transition without its reopen.
-        let mutation_state: String = conn
-            .query_row("select state from mutations where sequence = 1", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(mutation_state, "failed");
+        let mutation_state = state_of(&conn, 1).unwrap();
+        assert_eq!(mutation_state, MutationState::Failed);
     }
 
     #[test]
@@ -5075,7 +5036,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 payload_json: r#"{"status":"done"}"#,
-                state: "failed",
+                state: MutationState::Failed,
                 failure_json: Some(r#"{"detail":"rejected"}"#),
                 ..FixtureMutation::new(MutationType::SetItemStatus, "t1")
             },
@@ -5088,12 +5049,8 @@ mod tests {
             other => panic!("expected ReopenRefusedByTrigger, got {other:?}"),
         }
 
-        let mutation_state: String = conn
-            .query_row("select state from mutations where sequence = 1", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(mutation_state, "failed");
+        let mutation_state = state_of(&conn, 1).unwrap();
+        assert_eq!(mutation_state, MutationState::Failed);
     }
 
     // ---- unresolved counts ----------------------------------------------
@@ -5238,7 +5195,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 payload_json: r#"{"title":"Local","body":"","backend_kind":"jira"}"#,
-                state: "pending",
+                state: MutationState::Pending,
                 ..FixtureMutation::new(MutationType::PromoteTicket, "t2")
             },
         )
@@ -5271,7 +5228,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 payload_json: r#"{"title":"Local","body":"","backend_kind":"gitlab"}"#,
-                state: "pending",
+                state: MutationState::Pending,
                 ..FixtureMutation::new(MutationType::PromoteTicket, "t1")
             },
         )
@@ -5341,7 +5298,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 payload_json: r#"{"title":"A","body":""}"#,
-                state: "failed",
+                state: MutationState::Failed,
                 failure_json: Some(r#"{"detail":"x"}"#),
                 ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
             },
@@ -5376,7 +5333,7 @@ mod tests {
             FixtureMutation {
                 sequence: 3,
                 payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
-                state: "applying",
+                state: MutationState::Applying,
                 promotion_operation_id: Some("op-1"),
                 ..FixtureMutation::new(MutationType::PromoteTicket, "t1")
             },
@@ -5423,7 +5380,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 payload_json: r#"{"title":"A","body":""}"#,
-                state: "pending",
+                state: MutationState::Pending,
                 ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
             },
         )
@@ -5433,7 +5390,7 @@ mod tests {
             FixtureMutation {
                 sequence: 4,
                 payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
-                state: "applying",
+                state: MutationState::Applying,
                 failure_json: Some(r#"{"detail":"unknown effect"}"#),
                 promotion_operation_id: Some("op-1"),
                 ..FixtureMutation::new(MutationType::PromoteTicket, "t4")
@@ -5445,7 +5402,7 @@ mod tests {
             FixtureMutation {
                 sequence: 2,
                 payload_json: r#"{"status":"done"}"#,
-                state: "failed",
+                state: MutationState::Failed,
                 failure_json: Some(r#"{"detail":"HTTP 422: rejected"}"#),
                 ..FixtureMutation::new(MutationType::SetItemStatus, "t2")
             },
@@ -5456,7 +5413,7 @@ mod tests {
             FixtureMutation {
                 sequence: 3,
                 payload_json: r#"{"title":"C","body":""}"#,
-                state: "skipped",
+                state: MutationState::Skipped,
                 ..FixtureMutation::new(MutationType::UpdateTicket, "t3")
             },
         )
@@ -5466,7 +5423,7 @@ mod tests {
             FixtureMutation {
                 sequence: 5,
                 payload_json: r#"{"title":"D","body":""}"#,
-                state: "cancelled",
+                state: MutationState::Cancelled,
                 ..FixtureMutation::new(MutationType::UpdateTicket, "t3")
             },
         )
@@ -5476,7 +5433,7 @@ mod tests {
             FixtureMutation {
                 sequence: 6,
                 payload_json: r#"{"title":"Withdrawn work","body":"","backend_kind":"github"}"#,
-                state: "abandoned",
+                state: MutationState::Abandoned,
                 failure_json: Some(r#"{"detail":"unknown effect"}"#),
                 promotion_operation_id: Some("op-2"),
                 ..FixtureMutation::new(MutationType::PromoteTicket, "t5")
@@ -5492,7 +5449,7 @@ mod tests {
             FixtureMutation {
                 sequence: 7,
                 payload_json: r#"{"title":"Landed","body":""}"#,
-                state: "applied",
+                state: MutationState::Applied,
                 ..FixtureMutation::new(MutationType::UpdateTicket, "t3")
             },
         )

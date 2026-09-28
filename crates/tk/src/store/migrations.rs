@@ -765,7 +765,7 @@ mod tests {
                 FixtureMutation {
                     sequence: 1,
                     payload_json: r#"{"status":"done"}"#,
-                    state: state.text(),
+                    state,
                     failure_json,
                     ..FixtureMutation::new(mutation_type, item_id)
                 },
@@ -808,7 +808,7 @@ mod tests {
                 FixtureMutation {
                     sequence: 1,
                     payload_json: r#"{"status":"done"}"#,
-                    state: "failed",
+                    state: MutationState::Failed,
                     failure_json: Some(r#"{"detail":"rejected"}"#),
                     ..FixtureMutation::new(mutation_type, item_id)
                 },
@@ -854,7 +854,7 @@ mod tests {
                     sequence: 1,
                     item_class: class,
                     payload_json: r#"{"status":"done"}"#,
-                    state: "failed",
+                    state: MutationState::Failed,
                     failure_json: Some(r#"{"detail":"rejected"}"#),
                     ..FixtureMutation::new(MutationType::SetItemStatus, item_id)
                 },
@@ -895,7 +895,7 @@ mod tests {
                 FixtureMutation {
                     sequence: 1,
                     payload_json: &payload,
-                    state: "failed",
+                    state: MutationState::Failed,
                     failure_json: Some(r#"{"detail":"rejected"}"#),
                     ..FixtureMutation::new(MutationType::SetItemStatus, item_id)
                 },
@@ -940,7 +940,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 payload_json: r#"{"status":"active"}"#,
-                state: "failed",
+                state: MutationState::Failed,
                 failure_json: Some(r#"{"detail":"rejected"}"#),
                 promotion_operation_id: Some("op-1"),
                 ..FixtureMutation::new(MutationType::SetItemStatus, item_id)
@@ -981,7 +981,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 payload_json: r#"{"status":"done"}"#,
-                state: "failed",
+                state: MutationState::Failed,
                 failure_json: Some(r#"{"detail":"rejected"}"#),
                 ..FixtureMutation::new(MutationType::SetItemStatus, "t2")
             },
@@ -1006,7 +1006,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 payload_json: r#"{"status":"done"}"#,
-                state: "failed",
+                state: MutationState::Failed,
                 failure_json: Some(r#"{"detail":"rejected"}"#),
                 ..FixtureMutation::new(MutationType::SetItemStatus, item_id)
             },
@@ -2036,7 +2036,7 @@ mod tests {
             FixtureMutation {
                 sequence: 4,
                 payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
-                state: "failed",
+                state: MutationState::Failed,
                 failure_json: Some(r#"{"detail":"rejected"}"#),
                 promotion_operation_id: Some("op-1"),
                 ..FixtureMutation::new(MutationType::PromoteTicket, "t1")
@@ -2387,7 +2387,7 @@ mod tests {
                 1,
                 MutationType::SetItemStatus,
                 TO_OPEN,
-                "pending",
+                MutationState::Pending,
                 None,
                 None,
             ),
@@ -2395,7 +2395,7 @@ mod tests {
                 2,
                 MutationType::SetItemStatus,
                 TO_ACTIVE,
-                "failed",
+                MutationState::Failed,
                 Some(REJECTION),
                 None,
             ),
@@ -2403,7 +2403,7 @@ mod tests {
                 3,
                 MutationType::SetItemStatus,
                 TO_DONE,
-                "pending",
+                MutationState::Pending,
                 None,
                 None,
             ),
@@ -2411,7 +2411,7 @@ mod tests {
                 4,
                 MutationType::SetItemStatus,
                 TO_OPEN,
-                "applied",
+                MutationState::Applied,
                 None,
                 None,
             ),
@@ -2419,7 +2419,7 @@ mod tests {
                 5,
                 MutationType::SetItemStatus,
                 TO_OPEN,
-                "skipped",
+                MutationState::Skipped,
                 None,
                 None,
             ),
@@ -2427,7 +2427,7 @@ mod tests {
                 6,
                 MutationType::SetItemStatus,
                 TO_OPEN,
-                "pending",
+                MutationState::Pending,
                 None,
                 Some("op-1"),
             ),
@@ -2435,7 +2435,7 @@ mod tests {
                 7,
                 MutationType::UpdateTicket,
                 AN_EDIT,
-                "pending",
+                MutationState::Pending,
                 None,
                 None,
             ),

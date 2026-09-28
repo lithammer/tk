@@ -593,7 +593,7 @@ mod tests {
             &store.conn,
             FixtureMutation {
                 sequence: 1,
-                state: "applied",
+                state: MutationState::Applied,
                 ..FixtureMutation::new(MutationType::UpdateTicket, "t")
             },
         )
@@ -615,7 +615,7 @@ mod tests {
             &store.conn,
             FixtureMutation {
                 sequence: 1,
-                state: "pending",
+                state: MutationState::Pending,
                 ..FixtureMutation::new(MutationType::PromoteTicket, "t")
             },
         )

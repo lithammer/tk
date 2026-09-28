@@ -74,6 +74,7 @@ pub fn search_rows(store: &Store, query: &str) -> Result<Vec<ListRow>, rusqlite:
 mod tests {
     use super::super::list::{ListOptions, list_rows};
     use super::*;
+    use crate::domain::mutation_state::MutationState;
     use crate::domain::mutation_type::MutationType;
     use crate::domain::status::ItemStatus;
     use crate::store::migrations;
@@ -265,7 +266,7 @@ mod tests {
             &store.conn,
             FixtureMutation {
                 sequence: 1,
-                state: "pending",
+                state: MutationState::Pending,
                 ..FixtureMutation::new(MutationType::SetItemStatus, "t1")
             },
         )
@@ -291,25 +292,25 @@ mod tests {
         seed_mutation(
             &store.conn,
             1,
-            "pending",
+            MutationState::Pending,
             FixtureMutation::new(MutationType::UpdateTicket, "pending-edit"),
         );
         seed_mutation(
             &store.conn,
             2,
-            "failed",
+            MutationState::Failed,
             FixtureMutation::new(MutationType::UpdateTicket, "failed-edit"),
         );
         seed_mutation(
             &store.conn,
             3,
-            "pending",
+            MutationState::Pending,
             FixtureMutation::new(MutationType::PromoteTicket, "promo-only"),
         );
         seed_mutation(
             &store.conn,
             4,
-            "failed",
+            MutationState::Failed,
             FixtureMutation::new(MutationType::PromoteTicket, "promo-only"),
         );
 

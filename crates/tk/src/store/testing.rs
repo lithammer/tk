@@ -22,6 +22,7 @@ use tempfile::TempDir;
 use crate::domain::backend_operation::BackendItemIdentity;
 use crate::domain::item_class::ItemClass;
 use crate::domain::lifecycle::Lifecycle;
+use crate::domain::mutation_state::MutationState;
 use crate::domain::mutation_type::MutationType;
 use crate::domain::work_state::WorkState;
 use crate::store::migrations;
@@ -360,6 +361,14 @@ pub fn mutation_count(conn: &Connection) -> rusqlite::Result<i64> {
     conn.query_row("select count(*) from mutations", [], |r| r.get(0))
 }
 
+pub fn state_of(conn: &Connection, sequence: i64) -> rusqlite::Result<MutationState> {
+    conn.query_row(
+        "select state from mutations where sequence = ?1",
+        params![sequence],
+        |r| r.get(0),
+    )
+}
+
 /// The two stored Item Status axes for one Item, as the read-back every
 /// transition test needs: a writer that lands the right Lifecycle while
 /// forgetting its Work State clear leaves a row that renders correctly
@@ -438,13 +447,7 @@ pub struct FixtureMutation<'a> {
     pub item_id: &'a str,
     pub item_class: ItemClass,
     pub payload_json: &'a str,
-    /// Stored `mutations.state` spelling, raw where the two fields above are
-    /// typed. Nothing checks it before SQLite does, so a misspelling fails the
-    /// CHECK at insert instead of failing the build. Whether it should be a
-    /// [`MutationState`] is still open.
-    ///
-    /// [`MutationState`]: crate::domain::mutation_state::MutationState
-    pub state: &'a str,
+    pub state: MutationState,
     pub failure_json: Option<&'a str>,
     pub created_at: &'a str,
     pub state_changed_at: &'a str,
@@ -471,7 +474,7 @@ impl<'a> FixtureMutation<'a> {
             item_id,
             item_class: ItemClass::Ticket,
             payload_json: "{}",
-            state: "pending",
+            state: MutationState::Pending,
             failure_json: None,
             created_at: "2026-05-09T00:00:00.000Z",
             state_changed_at: "2026-05-09T00:00:00.000Z",
@@ -481,13 +484,18 @@ impl<'a> FixtureMutation<'a> {
 }
 
 /// Seed a Mutation with the failure detail required by the failed-state CHECK.
-pub fn seed_mutation(conn: &Connection, sequence: i64, state: &str, mutation: FixtureMutation<'_>) {
+pub fn seed_mutation(
+    conn: &Connection,
+    sequence: i64,
+    state: MutationState,
+    mutation: FixtureMutation<'_>,
+) {
     insert_fixture_mutation(
         conn,
         FixtureMutation {
             sequence,
             state,
-            failure_json: (state == "failed").then_some(r#"{"detail":"prior"}"#),
+            failure_json: (state == MutationState::Failed).then_some(r#"{"detail":"prior"}"#),
             ..mutation
         },
     )

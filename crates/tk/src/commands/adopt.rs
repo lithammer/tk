@@ -323,6 +323,7 @@ mod tests {
     use crate::domain::backend_operation::BackendItemIdentity;
     use crate::domain::item_class::ItemClass;
     use crate::domain::lifecycle::Lifecycle;
+    use crate::domain::mutation_state::MutationState;
     use crate::domain::mutation_type::MutationType;
     use crate::domain::work_state::WorkState;
     use crate::proc::{ProcError, RunOutput};
@@ -443,7 +444,7 @@ mod tests {
             FixtureMutation {
                 sequence: 9,
                 payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
-                state: "applying",
+                state: MutationState::Applying,
                 promotion_operation_id: Some("op-1"),
                 ..FixtureMutation::new(MutationType::PromoteTicket, "t1")
             },
@@ -1274,7 +1275,7 @@ mod tests {
             FixtureMutation {
                 sequence: 3,
                 payload_json: r#"{"blocking_id":"blocker"}"#,
-                state: "applied",
+                state: MutationState::Applied,
                 ..FixtureMutation::new(MutationType::AddDependency, "stable")
             },
         )
@@ -1284,7 +1285,7 @@ mod tests {
             FixtureMutation {
                 sequence: 4,
                 payload_json: r#"{"blocking_id":"blocker"}"#,
-                state: "pending",
+                state: MutationState::Pending,
                 ..FixtureMutation::new(MutationType::AddDependency, "stable")
             },
         )
@@ -1851,7 +1852,7 @@ mod tests {
             FixtureMutation {
                 sequence: 4,
                 payload_json: r#"{"title":"Local title","body":"Local body","backend_kind":"github"}"#,
-                state: "pending",
+                state: MutationState::Pending,
                 promotion_operation_id: Some("op-1"),
                 ..FixtureMutation::new(MutationType::PromoteTicket, "stable")
             },

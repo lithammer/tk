@@ -1314,7 +1314,7 @@ mod tests {
     use crate::store::repository::resolve_item_ref;
     use crate::store::testing::{
         FixtureItem, FixtureMutation, apply_promotion_receipt, insert_dependency,
-        insert_fixture_item, insert_fixture_mutation, mutation_count,
+        insert_fixture_item, insert_fixture_mutation, mutation_count, state_of,
     };
     use rand::SeedableRng;
     use rand::rngs::StdRng;
@@ -1880,7 +1880,7 @@ mod tests {
         id: &str,
         display: &str,
         sequence: i64,
-        state: &str,
+        state: MutationState,
         item_class: ItemClass,
         operation_id: Option<&str>,
     ) {
@@ -1907,7 +1907,7 @@ mod tests {
         conn: &Connection,
         item_id: &str,
         sequence: i64,
-        state: &str,
+        state: MutationState,
         item_class: ItemClass,
         operation_id: Option<&str>,
     ) {
@@ -1918,8 +1918,11 @@ mod tests {
                 item_class,
                 payload_json: r#"{"title":"Original title","body":"Original body","backend_kind":"github"}"#,
                 state,
-                failure_json: (state == "failed" || state == "applying" || state == "abandoned")
-                    .then_some(r#"{"detail":"prior"}"#),
+                failure_json: matches!(
+                    state,
+                    MutationState::Failed | MutationState::Applying | MutationState::Abandoned
+                )
+                .then_some(r#"{"detail":"prior"}"#),
                 promotion_operation_id: operation_id,
                 ..FixtureMutation::new(item_class.promotion_mutation_type(), item_id)
             },
@@ -1932,7 +1935,7 @@ mod tests {
         .unwrap();
     }
 
-    fn seed_update_mutation(conn: &Connection, state: &str) {
+    fn seed_update_mutation(conn: &Connection, state: MutationState) {
         insert_fixture_item(
             conn,
             FixtureItem {
@@ -1952,7 +1955,11 @@ mod tests {
 
     #[test]
     fn recoverable_promotion_loads_each_nonterminal_state() {
-        for state in ["pending", "failed", "applying"] {
+        for state in [
+            MutationState::Pending,
+            MutationState::Failed,
+            MutationState::Applying,
+        ] {
             let conn = open_seeded();
             seed_recovery(
                 &conn,
@@ -1965,7 +1972,7 @@ mod tests {
             );
             let target = recoverable_promotion(&conn, "t1").unwrap();
             assert_eq!(target.sequence, 4);
-            assert_eq!(target.state.text(), state);
+            assert_eq!(target.state, state);
             assert_eq!(target.outgoing_display_id, "tk-1");
             assert_eq!(target.promotion.title, "Original title");
             assert_eq!(target.operation_id, "op-1");
@@ -1975,7 +1982,15 @@ mod tests {
     #[test]
     fn recoverable_promotion_rejects_missing_operation_and_duplicate_rows() {
         let conn = open_seeded();
-        seed_recovery(&conn, "t1", "tk-1", 4, "applying", ItemClass::Ticket, None);
+        seed_recovery(
+            &conn,
+            "t1",
+            "tk-1",
+            4,
+            MutationState::Applying,
+            ItemClass::Ticket,
+            None,
+        );
         assert!(matches!(
             recoverable_promotion(&conn, "t1"),
             Err(RecoveryPromotionError::MissingOperationId(4))
@@ -1985,7 +2000,7 @@ mod tests {
             FixtureMutation {
                 sequence: 5,
                 payload_json: r#"{"title":"T","body":"","backend_kind":"github"}"#,
-                state: "pending",
+                state: MutationState::Pending,
                 promotion_operation_id: Some("op-2"),
                 ..FixtureMutation::new(MutationType::PromoteTicket, "t1")
             },
@@ -2008,7 +2023,15 @@ mod tests {
             (ItemClass::Epic, "update_epic"),
         ] {
             let mut conn = open_seeded();
-            seed_recovery(&conn, "item", "tk-1", 4, "applying", class, Some("op-1"));
+            seed_recovery(
+                &conn,
+                "item",
+                "tk-1",
+                4,
+                MutationState::Applying,
+                class,
+                Some("op-1"),
+            );
             let target = recoverable_promotion(&conn, "item").unwrap();
             let workflow = RemoteWorkflowGuard::for_test();
             reconcile_promotion(
@@ -2066,7 +2089,7 @@ mod tests {
             "item",
             "tk-1",
             4,
-            "applying",
+            MutationState::Applying,
             ItemClass::Ticket,
             Some("op-1"),
         );
@@ -2089,7 +2112,11 @@ mod tests {
 
     #[test]
     fn reconcile_refuses_an_earlier_nonterminal_but_allows_terminal_history() {
-        for state in ["pending", "failed", "applying"] {
+        for state in [
+            MutationState::Pending,
+            MutationState::Failed,
+            MutationState::Applying,
+        ] {
             let mut conn = open_seeded();
             seed_recovery(
                 &conn,
@@ -2105,7 +2132,7 @@ mod tests {
                 "target",
                 "tk-2",
                 4,
-                "applying",
+                MutationState::Applying,
                 ItemClass::Ticket,
                 Some("op-1"),
             );
@@ -2125,7 +2152,7 @@ mod tests {
         }
         // `skipped` is absent because the `mutations` CHECK forbids it for a
         // Promotion; cancellation is a Promotion's terminal omission.
-        for state in ["applied", "cancelled"] {
+        for state in [MutationState::Applied, MutationState::Cancelled] {
             let mut conn = open_seeded();
             seed_recovery(
                 &conn,
@@ -2141,7 +2168,7 @@ mod tests {
                 "target",
                 "tk-2",
                 4,
-                "applying",
+                MutationState::Applying,
                 ItemClass::Ticket,
                 Some("op-1"),
             );
@@ -2162,13 +2189,13 @@ mod tests {
     #[test]
     fn reconcile_cannot_jump_an_earlier_nonpromotion_mutation() {
         let mut conn = open_seeded();
-        seed_update_mutation(&conn, "pending");
+        seed_update_mutation(&conn, MutationState::Pending);
         seed_recovery(
             &conn,
             "target",
             "tk-2",
             4,
-            "applying",
+            MutationState::Applying,
             ItemClass::Ticket,
             Some("op-1"),
         );
@@ -2209,7 +2236,7 @@ mod tests {
     fn retry_returns_a_target_to_pending_without_moving_the_cursor() {
         // `pending` is the idempotent re-run; `applying` is the state the
         // command exists for.
-        for state in ["pending", "applying"] {
+        for state in [MutationState::Pending, MutationState::Applying] {
             let mut conn = open_seeded();
             seed_recovery(
                 &conn,
@@ -2242,7 +2269,7 @@ mod tests {
             "target",
             "tk-1",
             4,
-            "failed",
+            MutationState::Failed,
             ItemClass::Ticket,
             Some("op-1"),
         );
@@ -2272,7 +2299,11 @@ mod tests {
 
     #[test]
     fn retry_refuses_every_earlier_nonterminal_state() {
-        for state in ["pending", "failed", "applying"] {
+        for state in [
+            MutationState::Pending,
+            MutationState::Failed,
+            MutationState::Applying,
+        ] {
             let mut conn = open_seeded();
             seed_recovery(
                 &conn,
@@ -2288,7 +2319,7 @@ mod tests {
                 "target",
                 "tk-2",
                 4,
-                "applying",
+                MutationState::Applying,
                 ItemClass::Ticket,
                 Some("op-2"),
             );
@@ -2300,27 +2331,23 @@ mod tests {
                 Err(RecoveryPromotionError::EarlierNonterminal {
                     sequence: 1,
                     state: actual
-                }) if actual.text() == state
+                }) if actual == state
             ));
-            let target_state: String = conn
-                .query_row("select state from mutations where sequence = 4", [], |r| {
-                    r.get(0)
-                })
-                .unwrap();
-            assert_eq!(target_state, "applying");
+            let target_state = state_of(&conn, 4).unwrap();
+            assert_eq!(target_state, MutationState::Applying);
         }
     }
 
     #[test]
     fn retry_cannot_jump_an_earlier_nonpromotion_mutation() {
         let mut conn = open_seeded();
-        seed_update_mutation(&conn, "failed");
+        seed_update_mutation(&conn, MutationState::Failed);
         seed_recovery(
             &conn,
             "target",
             "tk-2",
             4,
-            "applying",
+            MutationState::Applying,
             ItemClass::Ticket,
             Some("op-1"),
         );
@@ -2354,7 +2381,7 @@ mod tests {
             "first",
             "tk-1",
             2,
-            "pending",
+            MutationState::Pending,
             ItemClass::Ticket,
             Some("op-1"),
         );
@@ -2363,7 +2390,7 @@ mod tests {
             "second",
             "tk-2",
             4,
-            "failed",
+            MutationState::Failed,
             ItemClass::Ticket,
             Some("op-2"),
         );
@@ -2408,7 +2435,7 @@ mod tests {
             "target",
             "tk-1",
             4,
-            "applying",
+            MutationState::Applying,
             ItemClass::Ticket,
             Some("op-1"),
         );
@@ -2427,13 +2454,7 @@ mod tests {
             ),
             Err(RecoveryPromotionError::RemoteChanged { .. })
         ));
-        assert_eq!(
-            conn.query_row("select state from mutations where sequence = 4", [], |r| {
-                r.get::<_, String>(0)
-            })
-            .unwrap(),
-            "applying"
-        );
+        assert_eq!(state_of(&conn, 4).unwrap(), MutationState::Applying);
 
         conn.execute("update remotes set backend_kind = 'github'", [])
             .unwrap();
@@ -2483,7 +2504,7 @@ mod tests {
                 "target",
                 "tk-1",
                 4,
-                "applying",
+                MutationState::Applying,
                 ItemClass::Ticket,
                 Some("op-1"),
             );
@@ -2523,12 +2544,12 @@ mod tests {
                 ),
                 "{id} should claim the identity, got {err:?}"
             );
-            let state: String = conn
-                .query_row("select state from mutations where sequence = 4", [], |r| {
-                    r.get(0)
-                })
-                .unwrap();
-            assert_eq!(state, "applying", "{id}: the Promotion is untouched");
+            let state = state_of(&conn, 4).unwrap();
+            assert_eq!(
+                state,
+                MutationState::Applying,
+                "{id}: the Promotion is untouched"
+            );
         }
     }
 
@@ -2540,7 +2561,7 @@ mod tests {
             "target",
             "tk-1",
             4,
-            "applying",
+            MutationState::Applying,
             ItemClass::Ticket,
             Some("op-1"),
         );
@@ -2564,12 +2585,8 @@ mod tests {
             ),
             Err(RecoveryPromotionError::TargetNotLocal { sequence: 4 })
         ));
-        let state: String = conn
-            .query_row("select state from mutations where sequence = 4", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(state, "applying");
+        let state = state_of(&conn, 4).unwrap();
+        assert_eq!(state, MutationState::Applying);
     }
 
     #[test]
@@ -2580,7 +2597,7 @@ mod tests {
             "target",
             "tk-1",
             4,
-            "applying",
+            MutationState::Applying,
             ItemClass::Ticket,
             Some("op-1"),
         );
@@ -2681,7 +2698,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 payload_json: r#"{"title":"T","body":"","backend_kind":"jira"}"#,
-                state: "pending",
+                state: MutationState::Pending,
                 ..FixtureMutation::new(MutationType::PromoteTicket, "t1")
             },
         )
@@ -2754,7 +2771,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 payload_json: r#"{"title":"T","body":"","backend_kind":"github"}"#,
-                state: "applying",
+                state: MutationState::Applying,
                 promotion_operation_id: Some("op-1"),
                 ..FixtureMutation::new(MutationType::PromoteTicket, "t1")
             },
@@ -2963,7 +2980,7 @@ mod tests {
         conn: &Connection,
         sequence: i64,
         item_id: &str,
-        state: &str,
+        state: MutationState,
         op: Option<&str>,
     ) {
         insert_fixture_mutation(
@@ -2972,7 +2989,7 @@ mod tests {
                 sequence,
                 payload_json: r#"{"title":"T","body":""}"#,
                 state,
-                failure_json: (state == "failed").then_some(r#"{"detail":"boom"}"#),
+                failure_json: (state == MutationState::Failed).then_some(r#"{"detail":"boom"}"#),
                 promotion_operation_id: op,
                 ..FixtureMutation::new(MutationType::UpdateTicket, item_id)
             },
@@ -2984,8 +3001,8 @@ mod tests {
     fn a_fully_applied_operation_has_no_unresolved_mutations() {
         let conn = open_seeded();
         seed_ticket(&conn, "t1", "tk-1", 1);
-        seed_mutation(&conn, 1, "t1", "applied", Some("op-1"));
-        seed_mutation(&conn, 2, "t1", "applied", Some("op-1"));
+        seed_mutation(&conn, 1, "t1", MutationState::Applied, Some("op-1"));
+        seed_mutation(&conn, 2, "t1", MutationState::Applied, Some("op-1"));
 
         assert!(
             unresolved_in_operation(&conn, "op-1").unwrap().is_empty(),
@@ -2998,10 +3015,10 @@ mod tests {
         let conn = open_seeded();
         seed_ticket(&conn, "t1", "tk-1", 1);
         seed_ticket(&conn, "t2", "tk-2", 2);
-        seed_mutation(&conn, 1, "t1", "pending", None);
-        seed_mutation(&conn, 2, "t2", "failed", Some("other"));
-        seed_mutation(&conn, 3, "t1", "failed", Some("op-1"));
-        seed_mutation(&conn, 4, "t1", "pending", Some("op-1"));
+        seed_mutation(&conn, 1, "t1", MutationState::Pending, None);
+        seed_mutation(&conn, 2, "t2", MutationState::Failed, Some("other"));
+        seed_mutation(&conn, 3, "t1", MutationState::Failed, Some("op-1"));
+        seed_mutation(&conn, 4, "t1", MutationState::Pending, Some("op-1"));
 
         assert_eq!(
             unresolved_in_operation(&conn, "op-1").unwrap(),
@@ -3059,15 +3076,6 @@ mod tests {
         .unwrap();
     }
 
-    fn state_of(conn: &Connection, sequence: i64) -> MutationState {
-        conn.query_row(
-            "select state from mutations where sequence = ?1",
-            params![sequence],
-            |r| r.get(0),
-        )
-        .unwrap()
-    }
-
     fn cancel(
         conn: &mut Connection,
         item_id: &str,
@@ -3086,7 +3094,7 @@ mod tests {
             "e1",
             "tk-1",
             1,
-            "failed",
+            MutationState::Failed,
             ItemClass::Epic,
             Some("op-1"),
         );
@@ -3095,7 +3103,7 @@ mod tests {
             "c1",
             "tk-2",
             2,
-            "pending",
+            MutationState::Pending,
             ItemClass::Ticket,
             Some("op-1"),
         );
@@ -3110,8 +3118,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["tk-1", "tk-2"]
         );
-        assert_eq!(state_of(&conn, 1), MutationState::Cancelled);
-        assert_eq!(state_of(&conn, 2), MutationState::Cancelled);
+        assert_eq!(state_of(&conn, 1).unwrap(), MutationState::Cancelled);
+        assert_eq!(state_of(&conn, 2).unwrap(), MutationState::Cancelled);
     }
 
     #[test]
@@ -3122,7 +3130,7 @@ mod tests {
             "t1",
             "tk-1",
             1,
-            "failed",
+            MutationState::Failed,
             ItemClass::Ticket,
             Some("op-1"),
         );
@@ -3143,7 +3151,7 @@ mod tests {
             "t1",
             "tk-1",
             1,
-            "failed",
+            MutationState::Failed,
             ItemClass::Ticket,
             Some("op-1"),
         );
@@ -3170,7 +3178,7 @@ mod tests {
             "e1",
             "tk-1",
             1,
-            "failed",
+            MutationState::Failed,
             ItemClass::Epic,
             Some("op-1"),
         );
@@ -3200,9 +3208,9 @@ mod tests {
 
         let report = cancel(&mut conn, "e1").unwrap();
 
-        assert_eq!(state_of(&conn, 2), MutationState::Cancelled);
+        assert_eq!(state_of(&conn, 2).unwrap(), MutationState::Cancelled);
         assert_eq!(
-            state_of(&conn, 3),
+            state_of(&conn, 3).unwrap(),
             MutationState::Pending,
             "clearing Epic Membership resolves without the Epic's address"
         );
@@ -3227,7 +3235,7 @@ mod tests {
             "t1",
             "tk-1",
             1,
-            "failed",
+            MutationState::Failed,
             ItemClass::Ticket,
             Some("op-1"),
         );
@@ -3236,7 +3244,7 @@ mod tests {
             "t2",
             "tk-2",
             2,
-            "pending",
+            MutationState::Pending,
             ItemClass::Ticket,
             Some("op-2"),
         );
@@ -3251,9 +3259,9 @@ mod tests {
 
         let report = cancel(&mut conn, "t1").unwrap();
 
-        assert_eq!(state_of(&conn, 3), MutationState::Cancelled);
+        assert_eq!(state_of(&conn, 3).unwrap(), MutationState::Cancelled);
         assert_eq!(
-            state_of(&conn, 2),
+            state_of(&conn, 2).unwrap(),
             MutationState::Pending,
             "cancellation is one hop: another item's Promotion survives"
         );
@@ -3275,15 +3283,15 @@ mod tests {
             "t1",
             "tk-1",
             1,
-            "pending",
+            MutationState::Pending,
             ItemClass::Ticket,
             Some("op-1"),
         );
-        seed_mutation(&conn, 2, "t1", "pending", Some("op-1"));
+        seed_mutation(&conn, 2, "t1", MutationState::Pending, Some("op-1"));
 
         let report = cancel(&mut conn, "t1").unwrap();
 
-        assert_eq!(state_of(&conn, 2), MutationState::Cancelled);
+        assert_eq!(state_of(&conn, 2).unwrap(), MutationState::Cancelled);
         assert_eq!(
             report
                 .withdrawn
@@ -3302,7 +3310,7 @@ mod tests {
             "t1",
             "tk-1",
             1,
-            "failed",
+            MutationState::Failed,
             ItemClass::Ticket,
             Some("op-1"),
         );
@@ -3311,16 +3319,16 @@ mod tests {
             "t2",
             "tk-2",
             2,
-            "applying",
+            MutationState::Applying,
             ItemClass::Ticket,
             Some("op-1"),
         );
 
         let report = cancel(&mut conn, "t1").unwrap();
 
-        assert_eq!(state_of(&conn, 1), MutationState::Cancelled);
+        assert_eq!(state_of(&conn, 1).unwrap(), MutationState::Cancelled);
         assert_eq!(
-            state_of(&conn, 2),
+            state_of(&conn, 2).unwrap(),
             MutationState::Abandoned,
             "an unobserved creation is withdrawn into its own state"
         );
@@ -3350,14 +3358,14 @@ mod tests {
             "t1",
             "tk-1",
             1,
-            "applying",
+            MutationState::Applying,
             ItemClass::Ticket,
             Some("op-1"),
         );
 
         let report = cancel(&mut conn, "t1").unwrap();
 
-        assert_eq!(state_of(&conn, 1), MutationState::Abandoned);
+        assert_eq!(state_of(&conn, 1).unwrap(), MutationState::Abandoned);
         assert!(report.cancelled_promotions.is_empty());
         assert_eq!(report.abandoned_promotions.len(), 1);
         assert_eq!(
@@ -3375,17 +3383,24 @@ mod tests {
             "t1",
             "tk-1",
             1,
-            "abandoned",
+            MutationState::Abandoned,
             ItemClass::Ticket,
             Some("op-1"),
         );
-        seed_promotion_mutation(&conn, "t1", 2, "abandoned", ItemClass::Ticket, Some("op-2"));
+        seed_promotion_mutation(
+            &conn,
+            "t1",
+            2,
+            MutationState::Abandoned,
+            ItemClass::Ticket,
+            Some("op-2"),
+        );
         seed_recovery(
             &conn,
             "t2",
             "tk-2",
             3,
-            "failed",
+            MutationState::Failed,
             ItemClass::Ticket,
             Some("op-3"),
         );
@@ -3412,11 +3427,18 @@ mod tests {
             "t1",
             "tk-1",
             1,
-            "abandoned",
+            MutationState::Abandoned,
             ItemClass::Ticket,
             Some("op-1"),
         );
-        seed_promotion_mutation(&conn, "t1", 2, "cancelled", ItemClass::Ticket, Some("op-2"));
+        seed_promotion_mutation(
+            &conn,
+            "t1",
+            2,
+            MutationState::Cancelled,
+            ItemClass::Ticket,
+            Some("op-2"),
+        );
 
         let warned = abandoned_promotions(&conn, &["t1".to_owned()]).unwrap();
 
@@ -3438,16 +3460,16 @@ mod tests {
             "t1",
             "tk-1",
             1,
-            "applying",
+            MutationState::Applying,
             ItemClass::Ticket,
             Some("op-1"),
         );
-        seed_mutation(&conn, 2, "t1", "pending", Some("op-1"));
+        seed_mutation(&conn, 2, "t1", MutationState::Pending, Some("op-1"));
 
         let report = cancel(&mut conn, "t1").unwrap();
 
         assert_eq!(
-            state_of(&conn, 2),
+            state_of(&conn, 2).unwrap(),
             MutationState::Cancelled,
             "collateral was never attempted, so it is cancelled rather than abandoned"
         );
@@ -3470,7 +3492,7 @@ mod tests {
             "e1",
             "tk-1",
             1,
-            "applied",
+            MutationState::Applied,
             ItemClass::Epic,
             Some("op-1"),
         );
@@ -3479,7 +3501,7 @@ mod tests {
             "c1",
             "tk-2",
             2,
-            "failed",
+            MutationState::Failed,
             ItemClass::Ticket,
             Some("op-1"),
         );
@@ -3494,8 +3516,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["tk-1"]
         );
-        assert_eq!(state_of(&conn, 1), MutationState::Applied);
-        assert_eq!(state_of(&conn, 2), MutationState::Cancelled);
+        assert_eq!(state_of(&conn, 1).unwrap(), MutationState::Applied);
+        assert_eq!(state_of(&conn, 2).unwrap(), MutationState::Cancelled);
     }
 
     #[test]
@@ -3508,7 +3530,7 @@ mod tests {
             "t1",
             "tk-1",
             1,
-            "failed",
+            MutationState::Failed,
             ItemClass::Ticket,
             Some("op-1"),
         );
@@ -3534,7 +3556,7 @@ mod tests {
                 rejection: DependencyRejection::BackendBlockedLocalBlocking,
             }]
         );
-        assert_eq!(state_of(&conn, 1), MutationState::Failed);
+        assert_eq!(state_of(&conn, 1).unwrap(), MutationState::Failed);
     }
 
     #[test]
@@ -3547,7 +3569,7 @@ mod tests {
             "t1",
             "tk-1",
             1,
-            "failed",
+            MutationState::Failed,
             ItemClass::Ticket,
             Some("op-1"),
         );
@@ -3556,7 +3578,7 @@ mod tests {
             "t2",
             "tk-2",
             2,
-            "pending",
+            MutationState::Pending,
             ItemClass::Ticket,
             Some("op-1"),
         );
@@ -3564,8 +3586,8 @@ mod tests {
 
         cancel(&mut conn, "t1").unwrap();
 
-        assert_eq!(state_of(&conn, 1), MutationState::Cancelled);
-        assert_eq!(state_of(&conn, 2), MutationState::Cancelled);
+        assert_eq!(state_of(&conn, 1).unwrap(), MutationState::Cancelled);
+        assert_eq!(state_of(&conn, 2).unwrap(), MutationState::Cancelled);
     }
 
     #[test]
@@ -3573,22 +3595,22 @@ mod tests {
         // ADR-0037's ordering rule exists to keep Backend effects ordered, and
         // cancellation opens no Adapter, so it is exempt (ADR-0038).
         let mut conn = open_seeded();
-        seed_update_mutation(&conn, "pending");
+        seed_update_mutation(&conn, MutationState::Pending);
         seed_recovery(
             &conn,
             "t1",
             "tk-1",
             4,
-            "failed",
+            MutationState::Failed,
             ItemClass::Ticket,
             Some("op-1"),
         );
 
         cancel(&mut conn, "t1").unwrap();
 
-        assert_eq!(state_of(&conn, 4), MutationState::Cancelled);
+        assert_eq!(state_of(&conn, 4).unwrap(), MutationState::Cancelled);
         assert_eq!(
-            state_of(&conn, 1),
+            state_of(&conn, 1).unwrap(),
             MutationState::Pending,
             "an unrelated older Mutation is untouched"
         );
@@ -3605,7 +3627,7 @@ mod tests {
             "e1",
             "tk-1",
             1,
-            "applied",
+            MutationState::Applied,
             ItemClass::Epic,
             Some("op-1"),
         );
@@ -3614,7 +3636,7 @@ mod tests {
             "c1",
             "tk-2",
             2,
-            "failed",
+            MutationState::Failed,
             ItemClass::Ticket,
             Some("op-1"),
         );
@@ -3629,8 +3651,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["tk-2"]
         );
-        assert_eq!(state_of(&conn, 2), MutationState::Cancelled);
-        assert_eq!(state_of(&conn, 1), MutationState::Applied);
+        assert_eq!(state_of(&conn, 2).unwrap(), MutationState::Cancelled);
+        assert_eq!(state_of(&conn, 1).unwrap(), MutationState::Applied);
     }
 
     #[test]
@@ -3641,7 +3663,7 @@ mod tests {
             "t1",
             "tk-1",
             1,
-            "applied",
+            MutationState::Applied,
             ItemClass::Ticket,
             Some("op-1"),
         );
@@ -3662,7 +3684,7 @@ mod tests {
             "t1",
             "tk-1",
             1,
-            "cancelled",
+            MutationState::Cancelled,
             ItemClass::Ticket,
             Some("op-1"),
         );
@@ -3707,7 +3729,7 @@ mod tests {
     fn a_human_curated_terminal_omission_counts_as_resolved() {
         // The operation is no longer waiting on a Skipped or Cancelled
         // Mutation; a human already decided its outcome (ADR-0038).
-        for state in ["skipped", "cancelled"] {
+        for state in [MutationState::Skipped, MutationState::Cancelled] {
             let conn = open_seeded();
             seed_ticket(&conn, "t1", "tk-1", 1);
             seed_mutation(&conn, 1, "t1", state, Some("op-1"));

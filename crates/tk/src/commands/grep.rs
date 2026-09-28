@@ -298,6 +298,7 @@ mod tests {
     use super::*;
     use crate::clock::FakeClock;
     use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
+    use crate::domain::mutation_state::MutationState;
     use crate::domain::mutation_type::MutationType;
     use crate::proc::{FakeRunner, RunOutput};
     use crate::render::Styler;
@@ -1034,7 +1035,11 @@ mod tests {
 
     #[test]
     fn list_omits_pending_promotion_metadata_in_each_unresolved_state() {
-        for state in ["pending", "failed", "applying"] {
+        for state in [
+            MutationState::Pending,
+            MutationState::Failed,
+            MutationState::Applying,
+        ] {
             let store = TmpStore::new("repo");
             let conn = seed_store(&store);
             insert_fixture_item(
@@ -1053,7 +1058,8 @@ mod tests {
                 FixtureMutation {
                     sequence: 1,
                     state,
-                    failure_json: (state == "failed").then_some(r#"{"detail":"prior"}"#),
+                    failure_json: (state == MutationState::Failed)
+                        .then_some(r#"{"detail":"prior"}"#),
                     ..FixtureMutation::new(MutationType::PromoteTicket, "t1")
                 },
             )

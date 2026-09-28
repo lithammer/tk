@@ -1150,7 +1150,7 @@ mod tests {
     use crate::store::testing::{
         FixtureItem, FixtureMutation, FixtureRemote, TmpStore, commit_promotion, insert_alias,
         insert_dependency, insert_fixture_item, insert_fixture_mutation, insert_fixture_remote,
-        mutation_count,
+        mutation_count, state_of,
     };
     use rusqlite::Connection;
     use std::path::Path;
@@ -1875,12 +1875,8 @@ mod tests {
              Re-run with '--force' only after confirming it is the object this Promotion created.\n"
         );
         assert_eq!(item_state(&conn, "t1"), ("tk-1".into(), "local".into()));
-        let state: String = conn
-            .query_row("select state from mutations where sequence = 1", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(state, "applying");
+        let state = state_of(&conn, 1).unwrap();
+        assert_eq!(state, MutationState::Applying);
     }
 
     #[test]
@@ -2112,12 +2108,8 @@ mod tests {
         assert_eq!(code, Exit::Failure);
         assert!(h.err().contains("indeterminate Backend creation outcome"));
         assert!(h.err().contains("tk promote reconcile"));
-        let state: String = conn
-            .query_row("select state from mutations where sequence = 1", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(state, "applying");
+        let state = state_of(&conn, 1).unwrap();
+        assert_eq!(state, MutationState::Applying);
     }
 
     // ---- cancel ----------------------------------------------------------
@@ -2753,12 +2745,8 @@ mod tests {
         assert_eq!(code, Exit::Ok, "stderr={}", h.err());
         assert_eq!(h.out(), "Promoted Ticket: tk-1 -> gh-42\n");
         assert_eq!(item_state(&conn, "t1"), ("gh-42".into(), "backend".into()));
-        let state: String = conn
-            .query_row("select state from mutations where sequence = 1", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(state, "applied");
+        let state = state_of(&conn, 1).unwrap();
+        assert_eq!(state, MutationState::Applied);
     }
 
     #[test]
@@ -3066,7 +3054,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 payload_json: r#"{"title":"Local work","body":"","backend_kind":"github"}"#,
-                state: "applying",
+                state: MutationState::Applying,
                 failure_json: Some(r#"{"detail":"gh timed out"}"#),
                 promotion_operation_id: Some("op-old"),
                 ..FixtureMutation::new(MutationType::PromoteTicket, "t0")
@@ -3092,13 +3080,10 @@ mod tests {
              Sync stopped: Mutation 1 has an indeterminate Backend creation outcome\n\
              Inspect it with 'tk sync log 1'. Then use 'tk promote reconcile tk-9 <backend-key>' if the Backend object exists, 'tk promote retry tk-9' only when creating it again is safe, or 'tk promote cancel tk-9' to withdraw the Promotion Operation, leaving any object it created untracked.\n"
         );
-        let state: String = conn
-            .query_row("select state from mutations where sequence = 2", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
+        let state = state_of(&conn, 2).unwrap();
         assert_eq!(
-            state, "pending",
+            state,
+            MutationState::Pending,
             "the Promotion is durable behind the barrier"
         );
     }
@@ -3178,7 +3163,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 payload_json: r#"{"title":"Edited","body":""}"#,
-                state: "failed",
+                state: MutationState::Failed,
                 failure_json: Some(r#"{"detail":"HTTP 403"}"#),
                 ..FixtureMutation::new(MutationType::UpdateTicket, "adopted")
             },
