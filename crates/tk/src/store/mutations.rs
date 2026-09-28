@@ -888,7 +888,7 @@ mod tests {
         .unwrap();
     }
 
-    fn seed_promotion(conn: &Connection, item_id: &str, state: &str, backend_kind: &str) {
+    fn seed_promotion(conn: &Connection, item_id: &str, state: MutationState, backend_kind: &str) {
         let payload = MutationPayload::Promotion(Promotion {
             title: "Local".into(),
             body: String::new(),
@@ -900,7 +900,7 @@ mod tests {
             FixtureMutation {
                 payload_json: &payload,
                 state,
-                failure_json: (state == "failed").then_some(r#"{"detail":"boom"}"#),
+                failure_json: (state == MutationState::Failed).then_some(r#"{"detail":"boom"}"#),
                 promotion_operation_id: Some("promo-1"),
                 ..FixtureMutation::new(MutationType::PromoteTicket, item_id)
             },
@@ -947,7 +947,7 @@ mod tests {
             },
         )
         .unwrap();
-        seed_promotion(&conn, "t1", "pending", "github");
+        seed_promotion(&conn, "t1", MutationState::Pending, "github");
 
         assert_eq!(
             resolve_backend_binding(&conn, "t1").unwrap(),
@@ -961,7 +961,7 @@ mod tests {
     fn a_failed_promotion_still_leaves_the_item_pending_promotion() {
         let conn = open_seeded();
         seed_local_ticket(&conn, "t1", "tk-1");
-        seed_promotion(&conn, "t1", "failed", "github");
+        seed_promotion(&conn, "t1", MutationState::Failed, "github");
 
         assert_eq!(
             resolve_backend_binding(&conn, "t1").unwrap(),
@@ -975,7 +975,7 @@ mod tests {
     fn an_applying_promotion_still_leaves_the_item_pending_promotion() {
         let conn = open_seeded();
         seed_local_ticket(&conn, "t1", "tk-1");
-        seed_promotion(&conn, "t1", "applying", "github");
+        seed_promotion(&conn, "t1", MutationState::Applying, "github");
 
         assert_eq!(
             resolve_backend_binding(&conn, "t1").unwrap(),
@@ -991,7 +991,7 @@ mod tests {
         // `cancelled` is withdrawn intent; a Local Item behind either is plain
         // Local. A Promotion never reaches `skipped` — the `mutations` CHECK
         // forbids it (ADR-0038).
-        for state in ["applied", "cancelled"] {
+        for state in [MutationState::Applied, MutationState::Cancelled] {
             let conn = open_seeded();
             seed_local_ticket(&conn, "t1", "tk-1");
             seed_promotion(&conn, "t1", state, "github");
@@ -1132,7 +1132,7 @@ mod tests {
             conn,
             FixtureMutation {
                 payload_json: &payload,
-                state: state.text(),
+                state,
                 failure_json,
                 promotion_operation_id: mutation_type.is_promotion().then_some("promo-1"),
                 ..FixtureMutation::new(mutation_type, "t1")

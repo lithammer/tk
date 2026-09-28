@@ -583,7 +583,7 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                state: "pending",
+                state: MutationState::Pending,
                 ..FixtureMutation::new(MutationType::UpdateTicket, "target")
             },
         )
@@ -792,17 +792,17 @@ mod tests {
         for mutation in [
             FixtureMutation {
                 sequence: 1,
-                state: "applied",
+                state: MutationState::Applied,
                 ..FixtureMutation::new(MutationType::UpdateTicket, "target")
             },
             FixtureMutation {
                 sequence: 2,
-                state: "pending",
+                state: MutationState::Pending,
                 ..FixtureMutation::new(MutationType::UpdateTicket, "target")
             },
             FixtureMutation {
                 sequence: 3,
-                state: "failed",
+                state: MutationState::Failed,
                 failure_json: Some(r#"{"detail":"HTTP 422: rejected"}"#),
                 ..FixtureMutation::new(MutationType::SetItemStatus, "target")
             },
@@ -811,18 +811,18 @@ mod tests {
             FixtureMutation {
                 sequence: 4,
                 payload_json: r#"{"blocking_id":"target"}"#,
-                state: "pending",
+                state: MutationState::Pending,
                 ..FixtureMutation::new(MutationType::RemoveDependency, "blocked")
             },
             FixtureMutation {
                 sequence: 5,
-                state: "skipped",
+                state: MutationState::Skipped,
                 failure_json: Some(r#"{"detail":"backend said no"}"#),
                 ..FixtureMutation::new(MutationType::SetItemStatus, "target")
             },
             FixtureMutation {
                 sequence: 6,
-                state: "cancelled",
+                state: MutationState::Cancelled,
                 ..FixtureMutation::new(MutationType::UpdateTicket, "target")
             },
         ] {
@@ -904,7 +904,7 @@ mod tests {
             FixtureMutation {
                 sequence: 1,
                 item_class: ItemClass::Epic,
-                state: "applied",
+                state: MutationState::Applied,
                 promotion_operation_id: Some("op-1"),
                 ..FixtureMutation::new(MutationType::PromoteEpic, "target")
             },
@@ -916,7 +916,7 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 2,
-                state: "cancelled",
+                state: MutationState::Cancelled,
                 promotion_operation_id: Some("op-1"),
                 ..FixtureMutation::new(MutationType::PromoteTicket, "member")
             },
@@ -927,7 +927,7 @@ mod tests {
             FixtureMutation {
                 sequence: 3,
                 payload_json: r#"{"epic_id":"target"}"#,
-                state: "failed",
+                state: MutationState::Failed,
                 failure_json: Some(r#"{"detail":"sub-issues unavailable"}"#),
                 promotion_operation_id: Some("op-1"),
                 ..FixtureMutation::new(MutationType::AddTicketToEpic, "member")
@@ -969,12 +969,12 @@ mod tests {
     fn detach_refuses_to_split_an_operation_whose_promotion_is_unresolved() {
         for (state, remedy) in [
             (
-                "pending",
+                MutationState::Pending,
                 "Run 'tk sync' to let Mutation 1 resolve, 'tk promote reconcile repo-1 <backend-key>' if the Backend object already exists, \
                  or 'tk promote cancel repo-1' to withdraw the Promotion Operation. Then detach again.",
             ),
             (
-                "applying",
+                MutationState::Applying,
                 "Its Backend creation outcome was never observed: use 'tk promote reconcile repo-1 <backend-key>' if the Backend object exists, \
                  'tk promote retry repo-1' only when creating it again is safe, or 'tk promote cancel repo-1' to withdraw the Promotion Operation, \
                  leaving any object it created untracked. Then detach again.",
@@ -1019,7 +1019,7 @@ mod tests {
                 FixtureMutation {
                     sequence: 2,
                     payload_json: r#"{"epic_id":"target"}"#,
-                    state: "pending",
+                    state: MutationState::Pending,
                     promotion_operation_id: Some("op-1"),
                     ..FixtureMutation::new(MutationType::AddTicketToEpic, "child")
                 },
@@ -1044,7 +1044,7 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(origin, "backend");
-            assert_eq!(states(&mutation_rows(&conn)), [state, "pending"]);
+            assert_eq!(states(&mutation_rows(&conn)), [state.text(), "pending"]);
         }
     }
 
@@ -1078,7 +1078,7 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                state: "applying",
+                state: MutationState::Applying,
                 failure_json: Some(r#"{"detail":"timed out"}"#),
                 promotion_operation_id: Some("op-1"),
                 ..FixtureMutation::new(MutationType::PromoteTicket, "other")
@@ -1089,7 +1089,7 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 2,
-                state: "pending",
+                state: MutationState::Pending,
                 ..FixtureMutation::new(MutationType::UpdateTicket, "target")
             },
         )

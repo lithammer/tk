@@ -74,6 +74,7 @@ fn render<W: Write + ?Sized>(
 mod tests {
     use super::*;
     use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
+    use crate::domain::mutation_state::MutationState;
     use crate::domain::mutation_type::MutationType;
     use crate::store::testing::{
         FixtureItem, FixtureMutation, TmpStore, insert_dependency, insert_external_blocker,
@@ -364,7 +365,7 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                state: "pending",
+                state: MutationState::Pending,
                 ..FixtureMutation::new(MutationType::SetItemStatus, "done")
             },
         )

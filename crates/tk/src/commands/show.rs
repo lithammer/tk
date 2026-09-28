@@ -963,7 +963,7 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 7,
-                state: "failed",
+                state: MutationState::Failed,
                 failure_json: Some(r#"{"detail":"boom"}"#),
                 ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
             },
@@ -973,7 +973,7 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 4,
-                state: "skipped",
+                state: MutationState::Skipped,
                 ..FixtureMutation::new(MutationType::AddDependency, "t1")
             },
         )

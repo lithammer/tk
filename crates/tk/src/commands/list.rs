@@ -906,7 +906,7 @@ mod tests {
         seed_mutation(
             &conn,
             1,
-            "pending",
+            MutationState::Pending,
             FixtureMutation::new(MutationType::UpdateTicket, "child"),
         );
         drop(conn);
@@ -988,25 +988,25 @@ mod tests {
         seed_mutation(
             &conn,
             1,
-            "pending",
+            MutationState::Pending,
             FixtureMutation::new(MutationType::UpdateTicket, "row-pending"),
         );
         seed_mutation(
             &conn,
             2,
-            "failed",
+            MutationState::Failed,
             FixtureMutation::new(MutationType::UpdateTicket, "row-failed"),
         );
         seed_mutation(
             &conn,
             3,
-            "pending",
+            MutationState::Pending,
             FixtureMutation::new(MutationType::UpdateTicket, "row-both"),
         );
         seed_mutation(
             &conn,
             4,
-            "failed",
+            MutationState::Failed,
             FixtureMutation::new(MutationType::SetItemStatus, "row-both"),
         );
         drop(conn);
@@ -1083,7 +1083,7 @@ mod tests {
         seed_mutation(
             &conn,
             1,
-            "pending",
+            MutationState::Pending,
             FixtureMutation::new(MutationType::UpdateTicket, "t1"),
         );
         drop(conn);
@@ -1125,7 +1125,7 @@ mod tests {
         seed_mutation(
             &conn,
             1,
-            "failed",
+            MutationState::Failed,
             FixtureMutation {
                 item_class: ItemClass::Epic,
                 ..FixtureMutation::new(MutationType::UpdateEpic, "e1")
@@ -1181,13 +1181,13 @@ mod tests {
         seed_mutation(
             &conn,
             1,
-            "pending",
+            MutationState::Pending,
             FixtureMutation::new(MutationType::UpdateTicket, "blocked"),
         );
         seed_mutation(
             &conn,
             2,
-            "failed",
+            MutationState::Failed,
             FixtureMutation::new(MutationType::SetItemStatus, "blocked"),
         );
         drop(conn);
@@ -1260,7 +1260,7 @@ mod tests {
         seed_mutation(
             &conn,
             3,
-            "pending",
+            MutationState::Pending,
             FixtureMutation::new(MutationType::UpdateTicket, "promoted"),
         );
         drop(conn);
@@ -1333,7 +1333,7 @@ mod tests {
         seed_mutation(
             &conn,
             1,
-            "pending",
+            MutationState::Pending,
             FixtureMutation::new(MutationType::UpdateTicket, "child"),
         );
         drop(conn);
@@ -1375,7 +1375,7 @@ mod tests {
         seed_mutation(
             &conn,
             1,
-            "failed",
+            MutationState::Failed,
             FixtureMutation::new(MutationType::UpdateTicket, "t1"),
         );
         drop(conn);
@@ -1399,8 +1399,8 @@ mod tests {
     #[test]
     fn sync_banner_styles_the_state_token() {
         for (state, mutation_type, sgr) in [
-            ("failed", MutationType::UpdateTicket, "91"),
-            ("applying", MutationType::PromoteTicket, "33"),
+            (MutationState::Failed, MutationType::UpdateTicket, "91"),
+            (MutationState::Applying, MutationType::PromoteTicket, "33"),
         ] {
             let store = TmpStore::new("repo");
             let conn = seed_store(&store);
@@ -1454,7 +1454,7 @@ mod tests {
         seed_mutation(
             &conn,
             1,
-            "applying",
+            MutationState::Applying,
             FixtureMutation::new(MutationType::PromoteTicket, "t1"),
         );
         drop(conn);
@@ -1489,7 +1489,7 @@ mod tests {
         seed_mutation(
             &conn,
             1,
-            "failed",
+            MutationState::Failed,
             FixtureMutation::new(MutationType::PromoteTicket, "t1"),
         );
         drop(conn);
@@ -1534,7 +1534,7 @@ mod tests {
         seed_mutation(
             &conn,
             1,
-            "pending",
+            MutationState::Pending,
             FixtureMutation::new(MutationType::UpdateTicket, "t1"),
         );
         drop(conn);
@@ -1597,7 +1597,7 @@ mod tests {
         seed_mutation(
             &conn,
             1,
-            "failed",
+            MutationState::Failed,
             FixtureMutation::new(MutationType::UpdateTicket, "d1"),
         );
         drop(conn);
@@ -1653,7 +1653,7 @@ mod tests {
         seed_mutation(
             &conn,
             1,
-            "pending",
+            MutationState::Pending,
             FixtureMutation::new(MutationType::UpdateTicket, "d1"),
         );
         drop(conn);
@@ -1783,7 +1783,7 @@ Mutation Log: 1 pending
         seed_mutation(
             &conn,
             1,
-            "failed",
+            MutationState::Failed,
             FixtureMutation::new(MutationType::UpdateTicket, "loose"),
         );
         drop(conn);
