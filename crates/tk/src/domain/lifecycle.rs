@@ -50,19 +50,8 @@ mod tests {
     }
 
     #[test]
-    fn text_matches_the_storage_spellings() {
-        // These spellings and migration 011's `items.status` CHECK must
-        // change together in one commit, or every row fails to decode.
-        assert_eq!(Lifecycle::Open.text(), "open");
-        assert_eq!(Lifecycle::Done.text(), "done");
-    }
-
-    #[test]
     fn every_variant_round_trips_through_its_storage_spelling() {
-        // The payload-side counterpart to `text_matches_the_storage_spellings`:
-        // `LifecycleChange` carries `Lifecycle` straight into `payload_json`, so a
-        // drift between the serde spelling and `text()` would decode one Backend
-        // Adapter's write as a different Lifecycle than it wrote.
+        // LifecycleChange payloads and items.status must use the same spellings.
         for (variant, text) in [(Lifecycle::Open, "open"), (Lifecycle::Done, "done")] {
             assert_eq!(variant.text(), text);
             assert_eq!(

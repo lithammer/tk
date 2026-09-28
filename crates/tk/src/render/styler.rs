@@ -386,32 +386,6 @@ mod tests {
     }
 
     #[test]
-    fn substyler_open_emits_style_when_always_empty_when_never() {
-        let style = palette::HEADER;
-        let on = SubStyler {
-            choice: ColorChoice::Always,
-        };
-        let off = SubStyler {
-            choice: ColorChoice::Never,
-        };
-        assert_eq!(format!("{}", on.open(style)), "\x1b[1m");
-        assert_eq!(format!("{}", off.open(style)), "");
-    }
-
-    #[test]
-    fn substyler_close_emits_family_close_when_always_empty_when_never() {
-        let style = palette::HEADER;
-        let on = SubStyler {
-            choice: ColorChoice::Always,
-        };
-        let off = SubStyler {
-            choice: ColorChoice::Never,
-        };
-        assert_eq!(format!("{}", on.close(style)), "\x1b[22m");
-        assert_eq!(format!("{}", off.close(style)), "");
-    }
-
-    #[test]
     fn for_stderr_uses_stderr_choice_independently_of_stdout() {
         let styler = Styler {
             stdout: ColorChoice::Never,

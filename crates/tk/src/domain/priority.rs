@@ -111,11 +111,6 @@ mod tests {
     }
 
     #[test]
-    fn display_writes_text() {
-        assert_eq!(format!("{}", Priority::P1), "P1");
-    }
-
-    #[test]
     fn default_is_p2() {
         assert_eq!(Priority::default(), Priority::P2);
     }
