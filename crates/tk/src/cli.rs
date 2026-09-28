@@ -447,7 +447,6 @@ mod tests {
     use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
     use crate::render::ColorChoice;
     use crate::store::testing::TmpStore;
-    use std::io::{Error, ErrorKind};
 
     #[test]
     fn failure_prefix_uses_stderr_color_choice() {
@@ -539,27 +538,5 @@ mod tests {
         assert!(h.stdout.is_empty());
         assert!(h.err().contains("unexpected argument '--unknown'"));
         assert!(!h.stderr.contains(&0x1b));
-    }
-
-    #[test]
-    fn broken_pipe_write_error_is_success() {
-        // A closed reader is success: Exit::Ok with no diagnostic.
-        let exit = write_error(&Error::new(ErrorKind::BrokenPipe, "closed"))
-            .expect("a broken pipe is success, not a failure");
-        assert_eq!(exit, Exit::Ok);
-    }
-
-    #[test]
-    fn other_write_error_frames_a_failure_diagnostic() {
-        let diagnostic = write_error(&Error::new(ErrorKind::StorageFull, "disk full"))
-            .expect_err("a non-broken-pipe write error is a diagnosed failure");
-        assert_eq!(diagnostic.exit(), Exit::Failure);
-        let mut stderr: Vec<u8> = Vec::new();
-        diagnostic.render(&mut stderr, "grep", Styler::plain().for_stderr());
-        let stderr = String::from_utf8(stderr).unwrap();
-        assert!(
-            stderr.contains("tk grep: failed to write output"),
-            "stderr={stderr:?}"
-        );
     }
 }

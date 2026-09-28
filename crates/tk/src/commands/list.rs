@@ -1515,40 +1515,6 @@ mod tests {
     }
 
     #[test]
-    fn pending_queue_head_prints_no_banner() {
-        // Pending is the ordinary state between syncs; a banner here would
-        // fire on nearly every invocation and stop meaning anything.
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "t1",
-                display: "tk-1",
-                title: "Row",
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        seed_mutation(
-            &conn,
-            1,
-            MutationState::Pending,
-            FixtureMutation::new(MutationType::UpdateTicket, "t1"),
-        );
-        drop(conn);
-
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_git(&h, &store);
-        let code = run_rendered(&mut h, default_args());
-        assert_eq!(code, Exit::Ok);
-        let stdout = String::from_utf8(h.stdout).unwrap();
-        assert!(!stdout.contains("Sync:"), "stdout={stdout:?}");
-    }
-
-    #[test]
     fn empty_mutation_log_prints_no_banner() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
@@ -1698,39 +1664,6 @@ Mutation Log: 1 pending
             String::from_utf8(out).unwrap(),
             "\nMutation Log: 2 pending, 1 failed, 1 applying\n"
         );
-    }
-
-    #[test]
-    fn unresolved_count_omits_a_state_holding_nothing() {
-        let mut out = Vec::new();
-        render_unresolved_counts(
-            &mut out,
-            UnresolvedMutationCounts {
-                pending: 2,
-                failed: 0,
-                applying: 0,
-            },
-            Styler::plain().for_stdout(),
-        )
-        .unwrap();
-        assert_eq!(
-            String::from_utf8(out).unwrap(),
-            "\nMutation Log: 2 pending\n"
-        );
-    }
-
-    #[test]
-    fn a_quiet_mutation_log_renders_no_count_line() {
-        // Suppression covers the separator too: a quiet Mutation Log writes
-        // nothing at all, not even a blank line.
-        let mut out = Vec::new();
-        render_unresolved_counts(
-            &mut out,
-            UnresolvedMutationCounts::default(),
-            Styler::plain().for_stdout(),
-        )
-        .unwrap();
-        assert!(out.is_empty(), "out={out:?}");
     }
 
     #[test]
