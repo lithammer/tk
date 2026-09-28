@@ -18,31 +18,11 @@ use crate::proc::ProcError;
 
 use super::adapter::{Adapter, AdapterReadError, ApplyError};
 
-/// Scripted response for one [`Adapter::adopt_ticket`] call.
-#[derive(Debug)]
-pub enum AdoptResponse {
-    /// Success — the fake returns this canonical Ticket.
-    Item(AdoptedItem),
-    /// Environment failure — returns this bare error tag.
-    EnvFailure(ProcError),
-}
-
 /// Scripted response for one [`Adapter::pull`] call.
 #[derive(Debug)]
 pub enum PullResponse {
     /// Success — the fake pairs these fields with the requested working set.
     Items(Vec<BackendItemRefresh>),
-    /// Adapter-level rejection with this detail.
-    RecordedFailure(String),
-    /// Environment failure — returns this bare error tag.
-    EnvFailure(ProcError),
-}
-
-/// Scripted response for one [`Adapter::inspect_item`] call.
-#[derive(Debug)]
-pub enum InspectionResponse {
-    /// Success — the fake returns canonical identity, content, and Ticket Kind.
-    Item(BackendItemInspection),
     /// Adapter-level rejection with this detail.
     RecordedFailure(String),
     /// Environment failure — returns this bare error tag.
@@ -79,9 +59,8 @@ pub enum CreateResponse {
 /// Each directional script is consumed in order. Overflowing any script panics
 /// so a test that under-declared its interactions fails loudly.
 pub struct FakeAdapter {
-    adopt_script: VecDeque<AdoptResponse>,
     pull_script: VecDeque<PullResponse>,
-    inspection_script: VecDeque<InspectionResponse>,
+    inspection_script: VecDeque<BackendItemInspection>,
     edit_script: VecDeque<EditResponse>,
     create_script: VecDeque<CreateResponse>,
     /// Recorded edit invocations in call order — populated on every path,
@@ -89,8 +68,6 @@ pub struct FakeAdapter {
     pub captured_edits: Vec<BackendEdit>,
     /// Recorded creation invocations in call order.
     pub captured_creates: Vec<BackendCreate>,
-    /// Inputs passed to `adopt_ticket`, in call order.
-    pub captured_adopt_inputs: Vec<String>,
     /// Complete Backend key sets passed to Pull, in call order.
     pub captured_pull_keys: Vec<Vec<String>>,
     /// Backend keys passed to `inspect_item`, in call order.
@@ -107,25 +84,17 @@ impl FakeAdapter {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            adopt_script: VecDeque::new(),
             pull_script: VecDeque::new(),
             inspection_script: VecDeque::new(),
             edit_script: VecDeque::new(),
             create_script: VecDeque::new(),
             captured_edits: Vec::new(),
             captured_creates: Vec::new(),
-            captured_adopt_inputs: Vec::new(),
             captured_pull_keys: Vec::new(),
             captured_inspection_keys: Vec::new(),
             capabilities: PromotionCapabilities::none(),
             capability_error: None,
         }
-    }
-
-    #[must_use]
-    pub fn with_adopts(mut self, script: Vec<AdoptResponse>) -> Self {
-        self.adopt_script = script.into();
-        self
     }
 
     #[must_use]
@@ -135,7 +104,7 @@ impl FakeAdapter {
     }
 
     #[must_use]
-    pub fn with_inspections(mut self, script: Vec<InspectionResponse>) -> Self {
+    pub fn with_inspections(mut self, script: Vec<BackendItemInspection>) -> Self {
         self.inspection_script = script.into();
         self
     }
@@ -180,16 +149,8 @@ impl Adapter for FakeAdapter {
         BackendKind::Github
     }
 
-    fn adopt_ticket(&mut self, input: &str) -> Result<AdoptedItem, AdapterReadError> {
-        self.captured_adopt_inputs.push(input.to_string());
-        let response = self
-            .adopt_script
-            .pop_front()
-            .expect("FakeAdapter: adopt script exhausted");
-        match response {
-            AdoptResponse::Item(item) => Ok(item),
-            AdoptResponse::EnvFailure(err) => Err(AdapterReadError::Env(err)),
-        }
+    fn adopt_ticket(&mut self, _input: &str) -> Result<AdoptedItem, AdapterReadError> {
+        panic!("FakeAdapter: unexpected Adopt call");
     }
 
     fn pull(&mut self, items: &[BackendItemAddress]) -> Result<BackendPull, AdapterReadError> {
@@ -223,15 +184,10 @@ impl Adapter for FakeAdapter {
 
     fn inspect_item(&mut self, key: &str) -> Result<BackendItemInspection, AdapterReadError> {
         self.captured_inspection_keys.push(key.to_string());
-        let response = self
+        Ok(self
             .inspection_script
             .pop_front()
-            .expect("FakeAdapter: inspection script exhausted");
-        match response {
-            InspectionResponse::Item(item) => Ok(item),
-            InspectionResponse::RecordedFailure(detail) => Err(AdapterReadError::Failed(detail)),
-            InspectionResponse::EnvFailure(err) => Err(AdapterReadError::Env(err)),
-        }
+            .expect("FakeAdapter: inspection script exhausted"))
     }
 
     fn apply_edit(&mut self, edit: &BackendEdit) -> Result<BackendEditOutcome, ApplyError> {
@@ -289,17 +245,6 @@ mod tests {
     use crate::domain::mutation_payload::TitleBody;
     use crate::domain::ticket_kind::TicketKind;
 
-    fn adopted_item(backend_key: &str, display_id: &str) -> AdoptedItem {
-        AdoptedItem {
-            backend_key: backend_key.into(),
-            display_id: display_id.into(),
-            ticket_kind: TicketKind::Task,
-            title: "Title".into(),
-            body: "Body".into(),
-            status: Lifecycle::Open,
-        }
-    }
-
     fn refresh(title: &str) -> BackendItemRefresh {
         BackendItemRefresh {
             title: title.into(),
@@ -350,16 +295,6 @@ mod tests {
     }
 
     #[test]
-    fn adopt_returns_scripted_item_and_captures_input() {
-        let mut fake =
-            FakeAdapter::new().with_adopts(vec![AdoptResponse::Item(adopted_item("1", "gh-1"))]);
-        let got = fake.adopt_ticket("owner/repo#1").unwrap();
-        assert_eq!(got.display_id, "gh-1");
-        assert_eq!(got.ticket_kind, TicketKind::Task);
-        assert_eq!(fake.captured_adopt_inputs, ["owner/repo#1"]);
-    }
-
-    #[test]
     fn pull_returns_scripted_fields_and_captures_the_working_set() {
         let mut fake =
             FakeAdapter::new().with_pulls(vec![PullResponse::Items(vec![refresh("Refreshed")])]);
@@ -377,8 +312,7 @@ mod tests {
 
     #[test]
     fn inspection_returns_scripted_identity_and_captures_key() {
-        let mut fake = FakeAdapter::new()
-            .with_inspections(vec![InspectionResponse::Item(inspection("Inspected"))]);
+        let mut fake = FakeAdapter::new().with_inspections(vec![inspection("Inspected")]);
         let got = fake
             .inspect_item("https://github.com/o/r/issues/42")
             .unwrap();
@@ -391,23 +325,6 @@ mod tests {
     }
 
     #[test]
-    fn inspection_failure_variants_remain_distinct() {
-        let mut fake = FakeAdapter::new().with_inspections(vec![
-            InspectionResponse::RecordedFailure("HTTP 502".into()),
-            InspectionResponse::EnvFailure(ProcError::SpawnFailed),
-        ]);
-        assert!(matches!(
-            fake.inspect_item("42"),
-            Err(AdapterReadError::Failed(detail)) if detail == "HTTP 502"
-        ));
-        assert!(matches!(
-            fake.inspect_item("42"),
-            Err(AdapterReadError::Env(ProcError::SpawnFailed))
-        ));
-        assert_eq!(fake.captured_inspection_keys, ["42", "42"]);
-    }
-
-    #[test]
     fn pull_recorded_failure_returns_failed_with_detail() {
         let mut fake = FakeAdapter::new()
             .with_pulls(vec![PullResponse::RecordedFailure("gh: HTTP 502".into())]);
@@ -416,17 +333,6 @@ mod tests {
             AdapterReadError::Failed(detail) => assert!(detail.contains("HTTP 502")),
             AdapterReadError::Env(e) => panic!("expected Failed, got Env({e:?})"),
         }
-    }
-
-    #[test]
-    fn adopt_env_failure_returns_bare_error() {
-        let mut fake = FakeAdapter::new().with_adopts(vec![AdoptResponse::EnvFailure(
-            ProcError::ExecutableNotFound,
-        )]);
-        assert!(matches!(
-            fake.adopt_ticket("1").unwrap_err(),
-            AdapterReadError::Env(ProcError::ExecutableNotFound)
-        ));
     }
 
     #[test]

@@ -1142,9 +1142,7 @@ mod tests {
     use crate::domain::ticket_kind::TicketKind;
     use crate::proc::RunOutput;
     use crate::promotion::plan::ItemRef;
-    use crate::remote::fake::{
-        CreateResponse, EditResponse, FakeAdapter, InspectionResponse, PullResponse,
-    };
+    use crate::remote::fake::{CreateResponse, EditResponse, FakeAdapter, PullResponse};
     use crate::render::Styler;
     use crate::store::sync::{LoadApplicableError, PersistMutationOutcomeError, RefreshStoreError};
     use crate::store::testing::{
@@ -1289,7 +1287,7 @@ mod tests {
         .unwrap()
     }
 
-    fn inspection(display_id: &str, key: &str, title: &str, body: &str) -> InspectionResponse {
+    fn inspection(display_id: &str, key: &str, title: &str, body: &str) -> BackendItemInspection {
         inspection_with_kind(display_id, key, title, body, TicketKind::Task)
     }
 
@@ -1299,8 +1297,8 @@ mod tests {
         title: &str,
         body: &str,
         ticket_kind: TicketKind,
-    ) -> InspectionResponse {
-        InspectionResponse::Item(BackendItemInspection {
+    ) -> BackendItemInspection {
+        BackendItemInspection {
             identity: BackendItemIdentity {
                 backend_key: key.into(),
                 display_id: display_id.into(),
@@ -1308,7 +1306,7 @@ mod tests {
             title: title.into(),
             body: body.into(),
             ticket_kind,
-        })
+        }
     }
 
     fn refresh(title: &str, body: &str, status: Lifecycle) -> BackendItemRefresh {
@@ -3284,8 +3282,7 @@ mod tests {
             "a refused preflight writes nothing"
         );
         assert!(
-            fake.captured_adopt_inputs.is_empty()
-                && fake.captured_pull_keys.is_empty()
+            fake.captured_pull_keys.is_empty()
                 && fake.captured_edits.is_empty()
                 && fake.captured_creates.is_empty(),
             "a refused preflight calls no Backend"
