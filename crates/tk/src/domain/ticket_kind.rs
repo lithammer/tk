@@ -6,11 +6,9 @@
 
 use std::fmt;
 
-/// The category of a Ticket. `TicketKind::Task` is the default for `tk add`
-/// until `--bug` is implemented.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+/// The category of a Ticket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TicketKind {
-    #[default]
     Task,
     Bug,
 }
@@ -53,11 +51,6 @@ mod tests {
     #[test]
     fn display_writes_text() {
         assert_eq!(format!("{}", TicketKind::Bug), "bug");
-    }
-
-    #[test]
-    fn default_is_task() {
-        assert_eq!(TicketKind::default(), TicketKind::Task);
     }
 
     #[test]

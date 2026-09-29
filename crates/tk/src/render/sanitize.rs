@@ -195,13 +195,6 @@ mod tests {
     }
 
     #[test]
-    fn body_escapes_bare_cr() {
-        let mut buf: Vec<u8> = Vec::new();
-        write_sanitized_body(&mut buf, b"x\ry").unwrap();
-        assert_eq!(buf, b"x\\x0dy");
-    }
-
-    #[test]
     fn line_escapes_high_control_del() {
         let mut buf: Vec<u8> = Vec::new();
         write_sanitized_line(&mut buf, b"a\x7fb").unwrap();

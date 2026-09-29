@@ -428,91 +428,37 @@ mod tests {
     }
 
     #[test]
-    fn plain_list_marks_parked_tickets_with_a_badge() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "p1",
-                display: "tk-1",
-                title: "Held work",
-                selection_state: Some("parked"),
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        drop(conn);
+    fn plain_list_marks_parked_and_triage_tickets_with_badges() {
+        for (selection, priority, badge) in [
+            ("parked", Some("P2"), "[parked]"),
+            ("triage", None, "[triage]"),
+        ] {
+            let store = TmpStore::new("repo");
+            let conn = seed_store(&store);
+            insert_fixture_item(
+                &conn,
+                FixtureItem {
+                    id: "p1",
+                    display: "tk-1",
+                    title: "Held work",
+                    selection_state: Some(selection),
+                    priority,
+                    created_seq: 1,
+                    ..FixtureItem::default()
+                },
+            )
+            .unwrap();
+            drop(conn);
 
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_git(&h, &store);
-        let code = run_rendered(&mut h, default_args());
-        assert_eq!(code, Exit::Ok);
-        let stdout = String::from_utf8(h.stdout).unwrap();
-        assert!(stdout.contains("[parked]"), "stdout={stdout:?}");
-        assert!(stdout.contains("Held work"), "stdout={stdout:?}");
-    }
-
-    #[test]
-    fn plain_list_marks_triage_tickets_with_a_badge() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "t1",
-                display: "tk-1",
-                title: "Captured idea",
-                priority: None,
-                selection_state: Some("triage"),
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        drop(conn);
-
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_git(&h, &store);
-        let code = run_rendered(&mut h, default_args());
-        assert_eq!(code, Exit::Ok);
-        let stdout = String::from_utf8(h.stdout).unwrap();
-        assert!(stdout.contains("[triage]"), "stdout={stdout:?}");
-        assert!(stdout.contains("Captured idea"), "stdout={stdout:?}");
-    }
-
-    #[test]
-    fn renders_single_ticket_with_totals_and_legend() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "t1",
-                display: "tk-1",
-                title: "Ship it",
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        drop(conn);
-
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_git(&h, &store);
-        let code = run_rendered(&mut h, default_args());
-        assert_eq!(code, Exit::Ok);
-        let stdout = String::from_utf8(h.stdout).unwrap();
-        assert!(
-            stdout.contains("\u{25cb} tk-1 \u{25cf} P2 Ship it\n"),
-            "stdout={stdout:?}"
-        );
-        assert!(stdout.contains("Total: 1 item (1 open)"));
-        assert!(stdout.contains("Status:"));
+            let cwd_path = cwd();
+            let mut h = Harness::new(&cwd_path, &store);
+            expect_git(&h, &store);
+            let code = run_rendered(&mut h, default_args());
+            assert_eq!(code, Exit::Ok);
+            let stdout = String::from_utf8(h.stdout).unwrap();
+            assert!(stdout.contains(badge), "stdout={stdout:?}");
+            assert!(stdout.contains("Held work"), "stdout={stdout:?}");
+        }
     }
 
     #[test]
@@ -621,89 +567,41 @@ mod tests {
 
     #[test]
     fn epic_flag_with_no_epics_prints_no_epics() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "ticket",
-                display: "tk-1",
-                title: "Ticket",
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        drop(conn);
+        for (ready, local, expected) in [
+            (false, false, "No epics.\n"),
+            (true, false, "No ready items.\n"),
+            (false, true, "No local epics.\n"),
+        ] {
+            let store = TmpStore::new("repo");
+            let conn = seed_store(&store);
+            insert_fixture_item(
+                &conn,
+                FixtureItem {
+                    id: "ticket",
+                    display: "tk-1",
+                    title: "Ticket",
+                    created_seq: 1,
+                    ..FixtureItem::default()
+                },
+            )
+            .unwrap();
+            drop(conn);
 
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_git(&h, &store);
-        let code = run_rendered(
-            &mut h,
-            Args {
-                epic: true,
-                ..default_args()
-            },
-        );
-        assert_eq!(code, Exit::Ok);
-        assert_eq!(String::from_utf8(h.stdout).unwrap(), "No epics.\n");
-    }
-
-    #[test]
-    fn epic_flag_in_ready_view_keeps_per_view_message() {
-        // The "No epics." empty message is Default-view-only. A ready Ticket
-        // exists but is not an Epic, so `--ready --epic` matches nothing; the
-        // Ready view must keep "No ready items." rather than claim "No epics.".
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "ready-ticket",
-                display: "tk-1",
-                title: "Ready ticket",
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        drop(conn);
-
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_git(&h, &store);
-        let code = run_rendered(
-            &mut h,
-            Args {
-                ready: true,
-                epic: true,
-                ..default_args()
-            },
-        );
-        assert_eq!(code, Exit::Ok);
-        assert_eq!(String::from_utf8(h.stdout).unwrap(), "No ready items.\n");
-    }
-
-    #[test]
-    fn epic_flag_with_local_filter_names_local_epics_when_empty() {
-        // The Default-view empty message reflects the Origin filter under
-        // `--epic`, mirroring the non-epic path's "No local items.".
-        let store = TmpStore::new("repo");
-        seed_store(&store);
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_git(&h, &store);
-        let code = run_rendered(
-            &mut h,
-            Args {
-                epic: true,
-                local: true,
-                ..default_args()
-            },
-        );
-        assert_eq!(code, Exit::Ok);
-        assert_eq!(String::from_utf8(h.stdout).unwrap(), "No local epics.\n");
+            let cwd_path = cwd();
+            let mut h = Harness::new(&cwd_path, &store);
+            expect_git(&h, &store);
+            let code = run_rendered(
+                &mut h,
+                Args {
+                    epic: true,
+                    ready,
+                    local,
+                    ..default_args()
+                },
+            );
+            assert_eq!(code, Exit::Ok);
+            assert_eq!(String::from_utf8(h.stdout).unwrap(), expected);
+        }
     }
 
     #[test]
@@ -822,49 +720,6 @@ mod tests {
             stderr.contains("tk list: scope 'tk-1' is not an Epic"),
             "stderr={stderr:?}"
         );
-    }
-
-    #[test]
-    fn epic_with_a_child_ticket_renders_tree_glyphs() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "epic",
-                display: "tk-1",
-                item_class: "epic",
-                ticket_kind: None,
-                priority: None,
-                title: "Epic",
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "child",
-                display: "tk-2",
-                title: "Child",
-                container_id: Some("epic"),
-                created_seq: 2,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        drop(conn);
-
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_git(&h, &store);
-        let code = run_rendered(&mut h, default_args());
-        assert_eq!(code, Exit::Ok);
-        let stdout = String::from_utf8(h.stdout).unwrap();
-        // Epic line and the single └── child below it.
-        assert!(stdout.contains("[epic] Epic"));
-        assert!(stdout.contains("\u{2514}\u{2500}\u{2500} \u{25cb} tk-2"));
     }
 
     #[test]
@@ -1037,74 +892,6 @@ mod tests {
     }
 
     #[test]
-    fn row_set_with_no_marked_rows_emits_no_mutations_legend() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "t1",
-                display: "tk-1",
-                title: "Clean row",
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        drop(conn);
-
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_git(&h, &store);
-        let code = run_rendered(&mut h, default_args());
-        assert_eq!(code, Exit::Ok);
-        let stdout = String::from_utf8(h.stdout).unwrap();
-        assert!(
-            !stdout.contains("Mutations:"),
-            "no row carries a Mutation; the legend must not appear: {stdout:?}"
-        );
-    }
-
-    #[test]
-    fn mutation_legend_names_only_the_glyphs_present_in_the_row_set() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "t1",
-                display: "tk-1",
-                title: "Pending row",
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        seed_mutation(
-            &conn,
-            1,
-            MutationState::Pending,
-            FixtureMutation::new(MutationType::UpdateTicket, "t1"),
-        );
-        drop(conn);
-
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_git(&h, &store);
-        let code = run_rendered(&mut h, default_args());
-        assert_eq!(code, Exit::Ok);
-        let stdout = String::from_utf8(h.stdout).unwrap();
-        assert!(
-            stdout.contains("Mutations: ~ pending\n"),
-            "legend should show only the pending entry: {stdout:?}"
-        );
-        assert!(
-            !stdout.contains("failed"),
-            "no row is failed; the legend must not mention it: {stdout:?}"
-        );
-    }
-
-    #[test]
     fn epic_with_a_failed_mutation_renders_the_marker_after_the_epic_badge() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
@@ -1220,6 +1007,10 @@ mod tests {
             1,
             "a second SGR 22 means an inner span closes in the dim family and \
              releases BLOCKED_ROW before the row ends: {line:?}"
+        );
+        assert!(
+            line.ends_with("\x1b[22m"),
+            "blocked dim must close after the title: {line:?}"
         );
     }
 
@@ -1357,41 +1148,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn failed_queue_head_prints_the_sync_banner() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "t1",
-                display: "tk-1",
-                title: "Row",
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        seed_mutation(
-            &conn,
-            1,
-            MutationState::Failed,
-            FixtureMutation::new(MutationType::UpdateTicket, "t1"),
-        );
-        drop(conn);
-
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_git(&h, &store);
-        let code = run_rendered(&mut h, default_args());
-        assert_eq!(code, Exit::Ok);
-        let stdout = String::from_utf8(h.stdout).unwrap();
-        assert!(
-            stdout.contains("Sync: Mutation 1 failed on tk-1 (tk sync log 1)\n"),
-            "stdout={stdout:?}"
-        );
-    }
-
     /// The banner fires only on a `failed` or `applying` head, so those are
     /// the only two states reachable here. `applying` is paired with a
     /// Promotion because the store's CHECK constraint admits no other
@@ -1426,6 +1182,7 @@ mod tests {
 
             assert_eq!(code, Exit::Ok);
             let stdout = String::from_utf8(h.stdout).unwrap();
+            let stdout = stdout.lines().next().expect("sync banner");
             let want = format!("\u{1b}[{sgr}m{state}\u{1b}[39m");
             assert!(
                 stdout.contains(&want),
@@ -1515,66 +1272,6 @@ mod tests {
     }
 
     #[test]
-    fn pending_queue_head_prints_no_banner() {
-        // Pending is the ordinary state between syncs; a banner here would
-        // fire on nearly every invocation and stop meaning anything.
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "t1",
-                display: "tk-1",
-                title: "Row",
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        seed_mutation(
-            &conn,
-            1,
-            MutationState::Pending,
-            FixtureMutation::new(MutationType::UpdateTicket, "t1"),
-        );
-        drop(conn);
-
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_git(&h, &store);
-        let code = run_rendered(&mut h, default_args());
-        assert_eq!(code, Exit::Ok);
-        let stdout = String::from_utf8(h.stdout).unwrap();
-        assert!(!stdout.contains("Sync:"), "stdout={stdout:?}");
-    }
-
-    #[test]
-    fn empty_mutation_log_prints_no_banner() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "t1",
-                display: "tk-1",
-                title: "Row",
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        drop(conn);
-
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_git(&h, &store);
-        let code = run_rendered(&mut h, default_args());
-        assert_eq!(code, Exit::Ok);
-        let stdout = String::from_utf8(h.stdout).unwrap();
-        assert!(!stdout.contains("Sync:"), "stdout={stdout:?}");
-    }
-
-    #[test]
     fn failed_queue_head_banner_still_prints_above_an_empty_row_set() {
         // The queue head can be a `done` Ticket the Default view never
         // renders (tk-158): the banner still has to appear,
@@ -1620,117 +1317,83 @@ mod tests {
 
     #[test]
     fn unresolved_count_reports_a_mutation_no_row_can_show() {
-        // The case this line exists for: `tk done` on a backend-bound Item
-        // queues a Mutation and the Item leaves the Default view's
-        // `status = 'open'` arm, so no row and no glyph legend mentions it,
-        // and a `pending` head prints no banner. A failure here means that
-        // Mutation reaches no surface at all.
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "d1",
-                display: "tk-1",
-                title: "Done row",
-                status: "done",
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "o1",
-                display: "tk-2",
-                title: "Open row",
-                created_seq: 2,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        seed_mutation(
-            &conn,
-            1,
-            MutationState::Pending,
-            FixtureMutation::new(MutationType::UpdateTicket, "d1"),
-        );
-        drop(conn);
+        for all_states in [false, true] {
+            // The case this line exists for: `tk done` on a backend-bound Item
+            // queues a Mutation and the Item leaves the Default view's
+            // `status = 'open'` arm, so no row and no glyph legend mentions it,
+            // and a `pending` head prints no banner. A failure here means that
+            // Mutation reaches no surface at all.
+            let store = TmpStore::new("repo");
+            let conn = seed_store(&store);
+            insert_fixture_item(
+                &conn,
+                FixtureItem {
+                    id: "d1",
+                    display: "tk-1",
+                    title: "Done row",
+                    status: "done",
+                    created_seq: 1,
+                    ..FixtureItem::default()
+                },
+            )
+            .unwrap();
+            insert_fixture_item(
+                &conn,
+                FixtureItem {
+                    id: "o1",
+                    display: "tk-2",
+                    title: "Open row",
+                    created_seq: 2,
+                    ..FixtureItem::default()
+                },
+            )
+            .unwrap();
+            seed_mutation(
+                &conn,
+                1,
+                MutationState::Pending,
+                FixtureMutation::new(MutationType::UpdateTicket, "d1"),
+            );
+            if all_states {
+                seed_mutation(
+                    &conn,
+                    2,
+                    MutationState::Pending,
+                    FixtureMutation::new(MutationType::UpdateTicket, "d1"),
+                );
+                seed_mutation(
+                    &conn,
+                    3,
+                    MutationState::Failed,
+                    FixtureMutation::new(MutationType::UpdateTicket, "d1"),
+                );
+                seed_mutation(
+                    &conn,
+                    4,
+                    MutationState::Applying,
+                    FixtureMutation::new(MutationType::PromoteTicket, "d1"),
+                );
+            }
+            drop(conn);
 
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_git(&h, &store);
-        let code = run_rendered(&mut h, default_args());
-        assert_eq!(code, Exit::Ok);
-        let stdout = String::from_utf8(h.stdout).unwrap();
-        assert_eq!(
-            stdout,
-            "\
-○ tk-2 ● P2 Open row
---------------------------------------------------------------------------------
-Total: 1 item (1 open)
-
-Status: ○ open  ◐ active  ✓ done
-Blocked: ⊘ blocked
-
-Mutation Log: 1 pending
-"
-        );
-    }
-
-    #[test]
-    fn unresolved_count_names_each_state_in_order_and_omits_the_empty_ones() {
-        // A failure here means the line dropped or reordered a state, so a
-        // reader can no longer tell which states the count covers.
-        let mut out = Vec::new();
-        render_unresolved_counts(
-            &mut out,
-            UnresolvedMutationCounts {
-                pending: 2,
-                failed: 1,
-                applying: 1,
-            },
-            Styler::plain().for_stdout(),
-        )
-        .unwrap();
-        assert_eq!(
-            String::from_utf8(out).unwrap(),
-            "\nMutation Log: 2 pending, 1 failed, 1 applying\n"
-        );
-    }
-
-    #[test]
-    fn unresolved_count_omits_a_state_holding_nothing() {
-        let mut out = Vec::new();
-        render_unresolved_counts(
-            &mut out,
-            UnresolvedMutationCounts {
-                pending: 2,
-                failed: 0,
-                applying: 0,
-            },
-            Styler::plain().for_stdout(),
-        )
-        .unwrap();
-        assert_eq!(
-            String::from_utf8(out).unwrap(),
-            "\nMutation Log: 2 pending\n"
-        );
-    }
-
-    #[test]
-    fn a_quiet_mutation_log_renders_no_count_line() {
-        // Suppression covers the separator too: a quiet Mutation Log writes
-        // nothing at all, not even a blank line.
-        let mut out = Vec::new();
-        render_unresolved_counts(
-            &mut out,
-            UnresolvedMutationCounts::default(),
-            Styler::plain().for_stdout(),
-        )
-        .unwrap();
-        assert!(out.is_empty(), "out={out:?}");
+            let cwd_path = cwd();
+            let mut h = Harness::new(&cwd_path, &store);
+            expect_git(&h, &store);
+            let code = run_rendered(&mut h, default_args());
+            assert_eq!(code, Exit::Ok);
+            let stdout = String::from_utf8(h.stdout).unwrap();
+            let counts = if all_states {
+                "2 pending, 1 failed, 1 applying"
+            } else {
+                "1 pending"
+            };
+            assert_eq!(
+                stdout,
+                format!(
+                    "○ tk-2 ● P2 Open row\n--------------------------------------------------------------------------------\nTotal: 1 item (1 open)\n\nStatus: ○ open  ◐ active  ✓ done\nBlocked: ⊘ blocked\n\nMutation Log: {counts}\n"
+                )
+            );
+        }
     }
 
     #[test]

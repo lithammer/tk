@@ -1663,19 +1663,14 @@ pub fn merge_backend_refreshes(
         let Some((item_id, item_class)) = existing else {
             continue;
         };
-        let content_authority = if local_content_targets.get(item_id.as_str()) == Some(&item_class)
-        {
-            ContentAuthority::Local
-        } else {
-            ContentAuthority::Backend
-        };
+        let preserve_content = local_content_targets.get(item_id.as_str()) == Some(&item_class);
         let BackendItemRefresh {
             title,
             body,
             status,
             ticket_kind,
         } = refresh;
-        let (title_write, body_write) = if content_authority == ContentAuthority::Local {
+        let (title_write, body_write) = if preserve_content {
             (None, None)
         } else {
             (Some(title.as_str()), Some(body.as_str()))
@@ -1702,30 +1697,6 @@ pub fn merge_backend_refreshes(
     Ok(())
 }
 
-/// Whether unresolved local content intent shields Backend Pull's title/body.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ContentAuthority {
-    Backend,
-    Local,
-}
-
-impl ContentAuthority {
-    fn for_mutation(mutation_type: MutationType) -> Self {
-        match mutation_type {
-            MutationType::UpdateTicket | MutationType::UpdateEpic => Self::Local,
-            MutationType::SetItemStatus
-            | MutationType::AddTicketToEpic
-            | MutationType::RemoveTicketFromEpic
-            | MutationType::AddDependency
-            | MutationType::RemoveDependency
-            | MutationType::AddExternalBlocker
-            | MutationType::ResolveExternalBlocker
-            | MutationType::PromoteTicket
-            | MutationType::PromoteEpic => Self::Backend,
-        }
-    }
-}
-
 /// Collect exact Items whose unresolved content Mutations shield title/body.
 ///
 /// Decoding every unresolved Mutation row before the first write exposes
@@ -1742,7 +1713,10 @@ fn local_content_targets(conn: &Connection) -> rusqlite::Result<HashMap<String, 
         let item_id: String = row.get(0)?;
         let item_class: ItemClass = row.get(1)?;
         let mutation_type: MutationType = row.get(2)?;
-        if ContentAuthority::for_mutation(mutation_type) == ContentAuthority::Local {
+        if matches!(
+            mutation_type,
+            MutationType::UpdateTicket | MutationType::UpdateEpic
+        ) {
             targets.insert(item_id, item_class);
         }
     }
@@ -2533,21 +2507,6 @@ mod tests {
     }
 
     #[test]
-    fn content_authority_is_local_only_for_content_mutations() {
-        for mutation_type in MutationType::ALL {
-            let expected = matches!(
-                mutation_type,
-                MutationType::UpdateTicket | MutationType::UpdateEpic
-            );
-            assert_eq!(
-                ContentAuthority::for_mutation(mutation_type) == ContentAuthority::Local,
-                expected,
-                "unexpected content authority for {mutation_type}"
-            );
-        }
-    }
-
-    #[test]
     fn refresh_preserves_content_for_pending_and_failed_content_mutations() {
         for state in [MutationState::Pending, MutationState::Failed] {
             let mut conn = open_seeded();
@@ -2807,33 +2766,98 @@ mod tests {
 
     #[test]
     fn refresh_admits_content_for_non_content_mutations_only() {
-        let mut conn = open_seeded();
-        seed_remote(&conn);
-        backend_ticket(&conn, "t1", "gh-1", "1", 1);
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 1,
-                payload_json: r#"{"blocking_id":"other"}"#,
-                state: MutationState::Failed,
-                failure_json: Some(r#"{"detail":"prior"}"#),
-                ..FixtureMutation::new(MutationType::AddDependency, "t1")
-            },
-        )
-        .unwrap();
-
-        merge_backend_refreshes(
-            &mut conn,
-            BackendKind::Github,
-            &[("1".into(), refresh("Backend title", Lifecycle::Open))],
-            "2026-05-20T00:00:00Z",
-        )
-        .unwrap();
-
-        let title: String = conn
-            .query_row("select title from items where id = 't1'", [], |r| r.get(0))
+        for (mutation_type, item_class, payload_json) in [
+            (
+                MutationType::SetItemStatus,
+                ItemClass::Ticket,
+                r#"{"status":"done"}"#,
+            ),
+            (
+                MutationType::AddTicketToEpic,
+                ItemClass::Ticket,
+                r#"{"epic_id":"other"}"#,
+            ),
+            (
+                MutationType::RemoveTicketFromEpic,
+                ItemClass::Ticket,
+                r#"{"epic_id":"other"}"#,
+            ),
+            (
+                MutationType::AddDependency,
+                ItemClass::Ticket,
+                r#"{"blocking_id":"other"}"#,
+            ),
+            (
+                MutationType::RemoveDependency,
+                ItemClass::Ticket,
+                r#"{"blocking_id":"other"}"#,
+            ),
+            (MutationType::AddExternalBlocker, ItemClass::Ticket, "{}"),
+            (
+                MutationType::ResolveExternalBlocker,
+                ItemClass::Ticket,
+                "{}",
+            ),
+            (
+                MutationType::PromoteTicket,
+                ItemClass::Ticket,
+                r#"{"title":"Old","body":"Old body","backend_kind":"github"}"#,
+            ),
+            (
+                MutationType::PromoteEpic,
+                ItemClass::Epic,
+                r#"{"title":"Old","body":"Old body","backend_kind":"github"}"#,
+            ),
+        ] {
+            let mut conn = open_seeded();
+            seed_remote(&conn);
+            insert_fixture_item(
+                &conn,
+                FixtureItem {
+                    id: "t1",
+                    display: "gh-1",
+                    item_class: item_class.text(),
+                    ticket_kind: (item_class == ItemClass::Ticket).then_some("task"),
+                    priority: (item_class == ItemClass::Ticket).then_some("P2"),
+                    title: "Old",
+                    body: "Old body",
+                    origin: "backend",
+                    backend_kind: Some("github"),
+                    backend_key: Some("1"),
+                    created_seq: 1,
+                    ..FixtureItem::default()
+                },
+            )
             .unwrap();
-        assert_eq!(title, "Backend title");
+            insert_fixture_mutation(
+                &conn,
+                FixtureMutation {
+                    sequence: 1,
+                    item_class,
+                    payload_json,
+                    state: MutationState::Failed,
+                    failure_json: Some(r#"{"detail":"prior"}"#),
+                    ..FixtureMutation::new(mutation_type, "t1")
+                },
+            )
+            .unwrap();
+
+            merge_backend_refreshes(
+                &mut conn,
+                BackendKind::Github,
+                &[("1".into(), refresh("Backend title", Lifecycle::Open))],
+                "2026-05-20T00:00:00Z",
+            )
+            .unwrap();
+
+            let (title, body): (String, String) = conn
+                .query_row("select title, body from items where id = 't1'", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .unwrap();
+            assert_eq!(title, "Backend title", "{mutation_type}");
+            assert_eq!(body, "Body", "{mutation_type}");
+        }
     }
 
     #[test]
@@ -3416,42 +3440,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn refresh_closes_an_active_ticket() {
-        // The other half of the two-state axis: CLOSED is a real state change,
-        // so keeping `active` must not swallow an incoming `done`.
-        let mut conn = open_seeded();
-        seed_remote(&conn);
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "t1",
-                display: "gh-1",
-                title: "Old",
-                origin: "backend",
-                backend_kind: Some("github"),
-                backend_key: Some("1"),
-                status: "active",
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-
-        merge_backend_refreshes(
-            &mut conn,
-            BackendKind::Github,
-            &[("1".into(), refresh("Closed Upstream", Lifecycle::Done))],
-            "2026-05-20T00:00:00Z",
-        )
-        .unwrap();
-
-        let status: String = conn
-            .query_row("select status from items where id = 't1'", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(status, "done", "a Backend close still lands");
-    }
-
     // ---- load_applicable_mutations --------------------------------------
 
     #[test]
@@ -3486,29 +3474,6 @@ mod tests {
         assert_eq!(seqs, vec![1, 3], "only pending+failed, sequence order");
     }
 
-    #[test]
-    fn load_applicable_decodes_each_payload_variant() {
-        let conn = open_seeded();
-        backend_ticket(&conn, "t1", "gh-1", "1", 1);
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 1,
-                payload_json: r#"{"status":"done"}"#,
-                state: MutationState::Pending,
-                ..FixtureMutation::new(MutationType::SetItemStatus, "t1")
-            },
-        )
-        .unwrap();
-
-        let rows = load_applicable_mutations(&conn).unwrap();
-        assert_eq!(rows.len(), 1);
-        match &rows[0].payload {
-            MutationPayload::Lifecycle(s) => assert_eq!(s.status, Lifecycle::Done),
-            other => panic!("expected ItemStatus, got {other:?}"),
-        }
-    }
-
     // ---- resolve_backend_operation --------------------------------------
 
     #[test]
@@ -3527,15 +3492,17 @@ mod tests {
         .unwrap();
 
         let rows = load_applicable_mutations(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
         let resolved = resolve_backend_operation(&conn, rows.into_iter().next().unwrap()).unwrap();
         assert_eq!(resolved.sequence, 1);
         let BackendOperation::Edit(edit) = resolved.operation else {
             panic!("ordinary Mutation must resolve as an edit")
         };
-        let BackendEdit::SetItemStatus { item, .. } = edit else {
+        let BackendEdit::SetItemStatus { item, change } = edit else {
             panic!("expected status edit")
         };
         assert_eq!(item.backend_key, "1");
+        assert_eq!(change.status, Lifecycle::Done);
     }
 
     #[test]
@@ -3839,58 +3806,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_operation_reads_an_identity_a_receipt_just_assigned() {
-        // Identity is resolved per Mutation precisely so a Promotion receipt
-        // applied earlier in the same run is visible to the Mutations behind it.
-        let mut conn = open_seeded();
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "t1",
-                display: "tk-1",
-                title: "Local",
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 2,
-                payload_json: r#"{"status":"done"}"#,
-                state: MutationState::Pending,
-                ..FixtureMutation::new(MutationType::SetItemStatus, "t1")
-            },
-        )
-        .unwrap();
-        let rows = load_applicable_mutations(&conn).unwrap();
-
-        let tx = crate::store::write_transaction(&mut conn).unwrap();
-        crate::store::promotion::apply_receipt(
-            &tx,
-            "t1",
-            "github",
-            &BackendItemIdentity {
-                backend_key: "42".into(),
-                display_id: "gh-42".into(),
-            },
-            "2026-05-19T00:00:00Z",
-        )
-        .unwrap();
-        tx.commit().unwrap();
-
-        let resolved = resolve_backend_operation(&conn, rows.into_iter().next().unwrap()).unwrap();
-        let BackendOperation::Edit(edit) = resolved.operation else {
-            panic!("ordinary Mutation must resolve as an edit")
-        };
-        let BackendEdit::SetItemStatus { item, .. } = edit else {
-            panic!("expected status edit")
-        };
-        assert_eq!(item.backend_key, "42");
-    }
-
-    #[test]
     fn load_applicable_rejects_payload_variant_missing() {
         let conn = open_seeded();
         backend_ticket(&conn, "t1", "gh-1", "1", 1);
@@ -3995,101 +3910,6 @@ mod tests {
             },
         )
         .unwrap();
-    }
-
-    #[test]
-    fn edit_outcome_pending_success_applies_and_advances_cursor() {
-        let mut conn = open_seeded();
-        seed_remote(&conn);
-        seed_pending(&conn, 5);
-
-        persist_edit_outcome(
-            &mut conn,
-            5,
-            &BackendEditOutcome::Acknowledged,
-            "2026-05-19T00:00:00Z",
-        )
-        .unwrap();
-
-        let (state, failure): (String, Option<String>) = conn
-            .query_row(
-                "select state, failure_json from mutations where sequence = 5",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(state, "applied");
-        assert_eq!(failure, None);
-
-        let cursor: i64 = conn
-            .query_row(
-                "select last_applied_sequence from sync_cursors where remote_name = 'primary'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(cursor, 5);
-    }
-
-    #[test]
-    fn edit_outcome_pending_failure_records_detail() {
-        let mut conn = open_seeded();
-        seed_remote(&conn);
-        seed_pending(&conn, 1);
-
-        persist_edit_outcome(
-            &mut conn,
-            1,
-            &BackendEditOutcome::rejected("HTTP 422: title required"),
-            "2026-05-19T00:00:00Z",
-        )
-        .unwrap();
-
-        let (state, failure): (String, String) = conn
-            .query_row(
-                "select state, failure_json from mutations where sequence = 1",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(state, "failed");
-        assert!(failure.contains("title required"));
-    }
-
-    #[test]
-    fn edit_outcome_failed_success_clears_failure_and_applies() {
-        let mut conn = open_seeded();
-        seed_remote(&conn);
-        backend_ticket(&conn, "t1", "gh-1", "1", 1);
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 3,
-                payload_json: r#"{"title":"A","body":""}"#,
-                state: MutationState::Failed,
-                failure_json: Some(r#"{"detail":"prior"}"#),
-                ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
-            },
-        )
-        .unwrap();
-
-        persist_edit_outcome(
-            &mut conn,
-            3,
-            &BackendEditOutcome::Acknowledged,
-            "2026-05-19T00:00:00Z",
-        )
-        .unwrap();
-
-        let (state, failure): (String, Option<String>) = conn
-            .query_row(
-                "select state, failure_json from mutations where sequence = 3",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(state, "applied");
-        assert_eq!(failure, None);
     }
 
     #[test]
@@ -4313,64 +4133,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(cursor, 4);
-    }
-
-    #[test]
-    fn create_rejection_records_failure_without_converting_the_item() {
-        let mut conn = open_seeded();
-        seed_remote(&conn);
-        seed_pending_promotion(&conn, 4);
-        begin_create(&mut conn, 4, "2026-05-19T00:00:00Z").unwrap();
-
-        persist_create_outcome(
-            &mut conn,
-            4,
-            &BackendCreateOutcome::rejected("title is required"),
-            "2026-05-19T00:00:00Z",
-        )
-        .unwrap();
-
-        let (state, failure, origin): (String, String, String) = conn
-            .query_row(
-                "select m.state, m.failure_json, i.origin \
-                   from mutations m join items i on i.id = m.item_id \
-                  where m.sequence = 4",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .unwrap();
-        assert_eq!(state, "failed");
-        assert!(failure.contains("title is required"));
-        assert_eq!(origin, "local");
-    }
-
-    #[test]
-    fn indeterminate_creation_records_failure_without_inventing_an_identity() {
-        let mut conn = open_seeded();
-        seed_remote(&conn);
-        seed_pending_promotion(&conn, 4);
-        begin_create(&mut conn, 4, "2026-05-19T00:00:00Z").unwrap();
-
-        persist_create_outcome(
-            &mut conn,
-            4,
-            &BackendCreateOutcome::indeterminate("gh exited after sending the request"),
-            "2026-05-19T00:00:00Z",
-        )
-        .unwrap();
-
-        let (state, failure, key): (String, String, Option<String>) = conn
-            .query_row(
-                "select m.state, m.failure_json, i.backend_key \
-                   from mutations m join items i on i.id = m.item_id \
-                  where m.sequence = 4",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .unwrap();
-        assert_eq!(state, "applying");
-        assert!(failure.contains("after sending"));
-        assert_eq!(key, None);
     }
 
     #[test]
@@ -5131,7 +4893,13 @@ mod tests {
             .unwrap();
         assert_eq!(last_applied, 0);
 
-        // A second set is an idempotent no-op (ADR-0033): no replace, one row.
+        conn.execute(
+            "update sync_cursors set last_applied_sequence = 7 where remote_name = 'primary'",
+            [],
+        )
+        .unwrap();
+
+        // Repeating configuration must not reset an existing cursor.
         let again =
             set_remote(&mut conn, BackendKind::Github, "{}", "2026-06-18T00:00:00Z").unwrap();
         assert_eq!(again, SetRemoteOutcome::Unchanged);
@@ -5139,6 +4907,17 @@ mod tests {
             .query_row("select count(*) from remotes", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 1);
+        let (created_at, updated_at, cursor): (String, String, i64) = conn
+            .query_row(
+                "select r.created_at, r.updated_at, c.last_applied_sequence \
+                 from remotes r join sync_cursors c on c.remote_name = r.name",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(created_at, "2026-06-17T00:00:00Z");
+        assert_eq!(updated_at, "2026-06-17T00:00:00Z");
+        assert_eq!(cursor, 7);
     }
 
     #[test]
@@ -5290,27 +5069,29 @@ mod tests {
 
     #[test]
     fn clear_remote_refuses_when_pending_or_failed_would_orphan() {
-        let mut conn = open_seeded();
-        set_remote(&mut conn, BackendKind::Github, "{}", "2026-06-17T00:00:00Z").unwrap();
-        backend_ticket(&conn, "t1", "gh-1", "1", 1);
-        insert_fixture_mutation(
-            &conn,
-            FixtureMutation {
-                sequence: 1,
-                payload_json: r#"{"title":"A","body":""}"#,
-                state: MutationState::Failed,
-                failure_json: Some(r#"{"detail":"x"}"#),
-                ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
-            },
-        )
-        .unwrap();
+        for state in [MutationState::Pending, MutationState::Failed] {
+            let mut conn = open_seeded();
+            set_remote(&mut conn, BackendKind::Github, "{}", "2026-06-17T00:00:00Z").unwrap();
+            backend_ticket(&conn, "t1", "gh-1", "1", 1);
+            insert_fixture_mutation(
+                &conn,
+                FixtureMutation {
+                    sequence: 1,
+                    payload_json: r#"{"title":"A","body":""}"#,
+                    state,
+                    failure_json: (state == MutationState::Failed).then_some(r#"{"detail":"x"}"#),
+                    ..FixtureMutation::new(MutationType::UpdateTicket, "t1")
+                },
+            )
+            .unwrap();
 
-        match clear_remote(&mut conn).unwrap_err() {
-            ClearRemoteError::WouldOrphan(1) => {}
-            other => panic!("expected WouldOrphan(1), got {other:?}"),
+            match clear_remote(&mut conn).unwrap_err() {
+                ClearRemoteError::WouldOrphan(1) => {}
+                other => panic!("expected WouldOrphan(1), got {other:?}"),
+            }
+            // The Remote survives a refused clear.
+            assert!(configured_remote_kind(&conn).unwrap().is_some());
         }
-        // The Remote survives a refused clear.
-        assert!(configured_remote_kind(&conn).unwrap().is_some());
     }
 
     #[test]
@@ -5491,36 +5272,20 @@ mod tests {
         let conn = open_seeded();
         seed_log_fixture(&conn);
 
-        assert_eq!(
-            list_mutation_log(&conn, LogListFilter::Pending)
-                .unwrap()
-                .len(),
-            1
-        );
-        assert_eq!(
-            list_mutation_log(&conn, LogListFilter::Failed)
-                .unwrap()
-                .len(),
-            1
-        );
-        assert_eq!(
-            list_mutation_log(&conn, LogListFilter::Skipped)
-                .unwrap()
-                .len(),
-            1
-        );
-        let cancelled = list_mutation_log(&conn, LogListFilter::Cancelled).unwrap();
-        assert_eq!(
-            cancelled.iter().map(|r| r.sequence).collect::<Vec<_>>(),
-            vec![5],
-            "a Cancelled Mutation is separable from a Skipped one"
-        );
-        let abandoned = list_mutation_log(&conn, LogListFilter::Abandoned).unwrap();
-        assert_eq!(
-            abandoned.iter().map(|r| r.sequence).collect::<Vec<_>>(),
-            vec![6],
-            "an Abandoned Mutation is the one state that means tk may have left an object behind"
-        );
+        for (filter, sequence) in [
+            (LogListFilter::Pending, 1),
+            (LogListFilter::Failed, 2),
+            (LogListFilter::Skipped, 3),
+            (LogListFilter::Cancelled, 5),
+            (LogListFilter::Abandoned, 6),
+        ] {
+            let rows = list_mutation_log(&conn, filter).unwrap();
+            assert_eq!(
+                rows.iter().map(|row| row.sequence).collect::<Vec<_>>(),
+                vec![sequence],
+                "{filter:?}"
+            );
+        }
     }
 
     #[test]

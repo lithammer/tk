@@ -469,8 +469,7 @@ mod tests {
     use super::*;
     use crate::domain::backend_kind::BackendKind;
     use crate::domain::backend_outcome::FailureClass;
-    use crate::domain::lifecycle::Lifecycle;
-    use crate::domain::mutation_payload::{DependencyRef, EpicRef, LifecycleChange, TitleBody};
+    use crate::domain::mutation_payload::TitleBody;
     use crate::store::migrations;
     use crate::store::testing::{
         FixtureItem, FixtureMutation, FixtureRemote, insert_fixture_item, insert_fixture_mutation,
@@ -571,190 +570,63 @@ mod tests {
 
     #[test]
     fn append_writes_pending_row_with_serialized_title_body() {
-        let conn = open_seeded();
-        seed_backend_ticket(&conn, "t1", "tk-1", 1);
+        for operation in [None, Some("promo-1")] {
+            let conn = open_seeded();
+            seed_backend_ticket(&conn, "t1", "tk-1", 1);
 
-        let tx = conn.unchecked_transaction().unwrap();
-        append(
-            &tx,
-            AppendRequest {
-                mutation_type: MutationType::UpdateTicket,
-                item_id: "t1",
-                item_class: ItemClass::Ticket,
-                payload: &MutationPayload::UpdateTitleBody(TitleBody {
-                    title: "New title".into(),
-                    body: "New body".into(),
-                }),
-                promotion_operation_id: None,
-                now_iso: "2026-05-09T00:00:00.000Z",
-            },
-        )
-        .unwrap();
-        tx.commit().unwrap();
-
-        let (mtype, item_id, item_class, payload, state, failure, promotion_operation_id): (
-            String,
-            String,
-            String,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-        ) = conn
-            .query_row(
-                "select mutation_type, item_id, item_class, payload_json, state, failure_json, \
-                        promotion_operation_id \
-                 from mutations where sequence = 1",
-                [],
-                |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                        r.get(5)?,
-                        r.get(6)?,
-                    ))
+            let tx = conn.unchecked_transaction().unwrap();
+            append(
+                &tx,
+                AppendRequest {
+                    mutation_type: MutationType::UpdateTicket,
+                    item_id: "t1",
+                    item_class: ItemClass::Ticket,
+                    payload: &MutationPayload::UpdateTitleBody(TitleBody {
+                        title: "New title".into(),
+                        body: "New body".into(),
+                    }),
+                    promotion_operation_id: operation,
+                    now_iso: "2026-05-09T00:00:00.000Z",
                 },
             )
             .unwrap();
-        assert_eq!(mtype, "update_ticket");
-        assert_eq!(item_id, "t1");
-        assert_eq!(item_class, "ticket");
-        assert_eq!(payload, r#"{"title":"New title","body":"New body"}"#);
-        assert_eq!(state, "pending");
-        assert_eq!(failure, None);
-        assert_eq!(promotion_operation_id, None);
-    }
+            tx.commit().unwrap();
 
-    #[test]
-    fn append_writes_the_supplied_promotion_operation_id() {
-        let conn = open_seeded();
-        seed_backend_ticket(&conn, "t1", "tk-1", 1);
-
-        let tx = conn.unchecked_transaction().unwrap();
-        append(
-            &tx,
-            AppendRequest {
-                mutation_type: MutationType::UpdateTicket,
-                item_id: "t1",
-                item_class: ItemClass::Ticket,
-                payload: &MutationPayload::UpdateTitleBody(TitleBody {
-                    title: "New title".into(),
-                    body: "New body".into(),
-                }),
-                promotion_operation_id: Some("promo-1"),
-                now_iso: "2026-05-09T00:00:00.000Z",
-            },
-        )
-        .unwrap();
-        tx.commit().unwrap();
-
-        let stored: Option<String> = conn
-            .query_row(
-                "select promotion_operation_id from mutations where sequence = 1",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(stored.as_deref(), Some("promo-1"));
-    }
-
-    #[test]
-    fn append_serializes_epic_ref_for_add_ticket_to_epic() {
-        let conn = open_seeded();
-        seed_backend_ticket(&conn, "t1", "tk-1", 1);
-
-        let tx = conn.unchecked_transaction().unwrap();
-        append(
-            &tx,
-            AppendRequest {
-                mutation_type: MutationType::AddTicketToEpic,
-                item_id: "t1",
-                item_class: ItemClass::Ticket,
-                payload: &MutationPayload::EpicRef(EpicRef {
-                    epic_id: "epic-internal-id".into(),
-                }),
-                promotion_operation_id: None,
-                now_iso: "2026-05-09T00:00:00.000Z",
-            },
-        )
-        .unwrap();
-        tx.commit().unwrap();
-
-        let payload: String = conn
-            .query_row(
-                "select payload_json from mutations where sequence = 1",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(payload, r#"{"epic_id":"epic-internal-id"}"#);
-    }
-
-    #[test]
-    fn append_serializes_lifecycle_change_payload() {
-        let conn = open_seeded();
-        seed_backend_ticket(&conn, "t1", "tk-1", 1);
-
-        let tx = conn.unchecked_transaction().unwrap();
-        append(
-            &tx,
-            AppendRequest {
-                mutation_type: MutationType::SetItemStatus,
-                item_id: "t1",
-                item_class: ItemClass::Ticket,
-                payload: &MutationPayload::Lifecycle(LifecycleChange {
-                    status: Lifecycle::Done,
-                }),
-                promotion_operation_id: None,
-                now_iso: "2026-05-09T00:00:00.000Z",
-            },
-        )
-        .unwrap();
-        tx.commit().unwrap();
-
-        let payload: String = conn
-            .query_row(
-                "select payload_json from mutations where sequence = 1",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(payload, r#"{"status":"done"}"#);
-    }
-
-    #[test]
-    fn append_serializes_dependency_ref_payload() {
-        let conn = open_seeded();
-        seed_backend_ticket(&conn, "t1", "tk-1", 1);
-
-        let tx = conn.unchecked_transaction().unwrap();
-        append(
-            &tx,
-            AppendRequest {
-                mutation_type: MutationType::AddDependency,
-                item_id: "t1",
-                item_class: ItemClass::Ticket,
-                payload: &MutationPayload::DependencyRef(DependencyRef {
-                    blocking_id: "blocker-id".into(),
-                }),
-                promotion_operation_id: None,
-                now_iso: "2026-05-09T00:00:00.000Z",
-            },
-        )
-        .unwrap();
-        tx.commit().unwrap();
-
-        let payload: String = conn
-            .query_row(
-                "select payload_json from mutations where sequence = 1",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(payload, r#"{"blocking_id":"blocker-id"}"#);
+            let (mtype, item_id, item_class, payload, state, failure, promotion_operation_id): (
+                String,
+                String,
+                String,
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+            ) = conn
+                .query_row(
+                    "select mutation_type, item_id, item_class, payload_json, state, failure_json, \
+                            promotion_operation_id \
+                     from mutations where sequence = 1",
+                    [],
+                    |r| {
+                        Ok((
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            r.get(4)?,
+                            r.get(5)?,
+                            r.get(6)?,
+                        ))
+                    },
+                )
+                .unwrap();
+            assert_eq!(mtype, "update_ticket");
+            assert_eq!(item_id, "t1");
+            assert_eq!(item_class, "ticket");
+            assert_eq!(payload, r#"{"title":"New title","body":"New body"}"#);
+            assert_eq!(state, "pending");
+            assert_eq!(failure, None);
+            assert_eq!(promotion_operation_id.as_deref(), operation);
+        }
     }
 
     #[test]
@@ -815,63 +687,14 @@ mod tests {
             .query_row("select count(*) from mutations", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 3);
-    }
-
-    #[test]
-    fn append_advances_the_mutation_sequence_counter() {
-        let conn = open_seeded();
-        seed_backend_ticket(&conn, "t1", "tk-1", 1);
-
-        let initial: i64 = conn
+        let counter: i64 = conn
             .query_row(
                 "select value from sequences where name = 'mutation_seq'",
                 [],
-                |r| r.get(0),
+                |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(initial, 0);
-
-        let tx = conn.unchecked_transaction().unwrap();
-        append(
-            &tx,
-            AppendRequest {
-                mutation_type: MutationType::UpdateTicket,
-                item_id: "t1",
-                item_class: ItemClass::Ticket,
-                payload: &MutationPayload::UpdateTitleBody(TitleBody {
-                    title: "X".into(),
-                    body: String::new(),
-                }),
-                promotion_operation_id: None,
-                now_iso: "2026-05-09T00:00:00.000Z",
-            },
-        )
-        .unwrap();
-        append(
-            &tx,
-            AppendRequest {
-                mutation_type: MutationType::UpdateTicket,
-                item_id: "t1",
-                item_class: ItemClass::Ticket,
-                payload: &MutationPayload::UpdateTitleBody(TitleBody {
-                    title: "Y".into(),
-                    body: String::new(),
-                }),
-                promotion_operation_id: None,
-                now_iso: "2026-05-09T00:00:00.000Z",
-            },
-        )
-        .unwrap();
-        tx.commit().unwrap();
-
-        let after: i64 = conn
-            .query_row(
-                "select value from sequences where name = 'mutation_seq'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(after, 2);
+        assert_eq!(counter, 3);
     }
 
     fn seed_local_ticket(conn: &Connection, id: &str, display: &str) {
@@ -934,55 +757,31 @@ mod tests {
 
     #[test]
     fn a_pending_promotion_takes_its_backend_from_the_payload_not_the_remote() {
-        // The whole point of recording the Backend on the payload (ADR-0036):
-        // resolving Pending Promotion never consults Remote configuration, so a
-        // Remote that disagrees with the frozen intent cannot change the answer.
-        let conn = open_seeded();
-        seed_local_ticket(&conn, "t1", "tk-1");
-        insert_fixture_remote(
-            &conn,
-            FixtureRemote {
-                backend_kind: "jira",
-                ..FixtureRemote::default()
-            },
-        )
-        .unwrap();
-        seed_promotion(&conn, "t1", MutationState::Pending, "github");
+        for state in [
+            MutationState::Pending,
+            MutationState::Failed,
+            MutationState::Applying,
+        ] {
+            // Frozen Promotion intent owns its Backend even if the Remote changes.
+            let conn = open_seeded();
+            seed_local_ticket(&conn, "t1", "tk-1");
+            insert_fixture_remote(
+                &conn,
+                FixtureRemote {
+                    backend_kind: "jira",
+                    ..FixtureRemote::default()
+                },
+            )
+            .unwrap();
+            seed_promotion(&conn, "t1", state, "github");
 
-        assert_eq!(
-            resolve_backend_binding(&conn, "t1").unwrap(),
-            BackendBinding::PendingPromotion {
-                backend_kind: "github".into()
-            }
-        );
-    }
-
-    #[test]
-    fn a_failed_promotion_still_leaves_the_item_pending_promotion() {
-        let conn = open_seeded();
-        seed_local_ticket(&conn, "t1", "tk-1");
-        seed_promotion(&conn, "t1", MutationState::Failed, "github");
-
-        assert_eq!(
-            resolve_backend_binding(&conn, "t1").unwrap(),
-            BackendBinding::PendingPromotion {
-                backend_kind: "github".into()
-            }
-        );
-    }
-
-    #[test]
-    fn an_applying_promotion_still_leaves_the_item_pending_promotion() {
-        let conn = open_seeded();
-        seed_local_ticket(&conn, "t1", "tk-1");
-        seed_promotion(&conn, "t1", MutationState::Applying, "github");
-
-        assert_eq!(
-            resolve_backend_binding(&conn, "t1").unwrap(),
-            BackendBinding::PendingPromotion {
-                backend_kind: "github".into()
-            }
-        );
+            assert_eq!(
+                resolve_backend_binding(&conn, "t1").unwrap(),
+                BackendBinding::PendingPromotion {
+                    backend_kind: "github".into()
+                }
+            );
+        }
     }
 
     #[test]

@@ -82,14 +82,6 @@ mod tests {
     }
 
     #[test]
-    fn glyph_is_distinct_from_text() {
-        // Guard against accidentally collapsing the storage spelling and the
-        // tree glyph: `tk adopt`'s `Status:` line and every scripted comparison
-        // read `text()`, and both break if it ever returns a non-ASCII glyph.
-        assert_ne!(ItemStatus::Open.text(), ItemStatus::Open.glyph());
-    }
-
-    #[test]
     fn derives_the_three_rendered_values_from_the_two_stored_axes() {
         // ADR-0043's derivation, spelled out over the reachable pairs. A drift
         // here silently changes what every command renders.

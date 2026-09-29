@@ -205,62 +205,75 @@ fn corrupt(column: &str, value: &str) -> FromSqlError {
 mod tests {
     use super::*;
 
-    #[test]
-    fn from_sql_accepts_the_check_constrained_spellings() {
-        // Pins the legal spelling set at the decode boundary; a drift between
-        // these and the V1 CHECK constraints is store corruption.
+    fn assert_decodes<T>(spelling: &'static [u8], expected: T)
+    where
+        T: FromSql + Copy + PartialEq + std::fmt::Debug,
+    {
         assert_eq!(
-            BackendKind::column_result(ValueRef::Text(b"github")).unwrap(),
-            BackendKind::Github
-        );
-        assert_eq!(
-            ItemClass::column_result(ValueRef::Text(b"epic")).unwrap(),
-            ItemClass::Epic
-        );
-        assert_eq!(
-            TicketKind::column_result(ValueRef::Text(b"bug")).unwrap(),
-            TicketKind::Bug
-        );
-        assert_eq!(
-            Priority::column_result(ValueRef::Text(b"P3")).unwrap(),
-            Priority::P3
-        );
-        assert_eq!(
-            SelectionState::column_result(ValueRef::Text(b"parked")).unwrap(),
-            SelectionState::Parked
-        );
-        assert_eq!(
-            Origin::column_result(ValueRef::Text(b"backend")).unwrap(),
-            Origin::Backend
-        );
-        assert_eq!(
-            MutationState::column_result(ValueRef::Text(b"skipped")).unwrap(),
-            MutationState::Skipped
-        );
-        assert_eq!(
-            MutationType::column_result(ValueRef::Text(b"set_item_status")).unwrap(),
-            MutationType::SetItemStatus
+            T::column_result(ValueRef::Text(spelling)).unwrap(),
+            expected,
+            "stored spelling {:?}",
+            std::str::from_utf8(spelling).unwrap()
         );
     }
 
     #[test]
-    fn round_trips_through_text_and_from_sql() {
-        // Going through `text()` rather than a literal per variant catches
-        // one-sided drift a paired literal assertion would miss. A failure
-        // means `text()` and the `FromSql` arm disagree for some variant;
-        // fix whichever drifted.
-        for v in [Lifecycle::Open, Lifecycle::Done] {
-            assert_eq!(
-                Lifecycle::column_result(ValueRef::Text(v.text().as_bytes())).unwrap(),
-                v
-            );
-        }
-        for v in [WorkState::Idle, WorkState::Active] {
-            assert_eq!(
-                WorkState::column_result(ValueRef::Text(v.text().as_bytes())).unwrap(),
-                v
-            );
-        }
+    fn from_sql_accepts_the_check_constrained_spellings() {
+        // Keep literals independent from `text()` so decoder and encoder
+        // drift cannot agree with each other and hide a broken SQL mapping.
+        assert_decodes(b"github", BackendKind::Github);
+        assert_decodes(b"jira", BackendKind::Jira);
+
+        assert_decodes(b"ticket", ItemClass::Ticket);
+        assert_decodes(b"epic", ItemClass::Epic);
+
+        assert_decodes(b"task", TicketKind::Task);
+        assert_decodes(b"bug", TicketKind::Bug);
+
+        assert_decodes(b"P0", Priority::P0);
+        assert_decodes(b"P1", Priority::P1);
+        assert_decodes(b"P2", Priority::P2);
+        assert_decodes(b"P3", Priority::P3);
+        assert_decodes(b"P4", Priority::P4);
+
+        assert_decodes(b"triage", SelectionState::Triage);
+        assert_decodes(b"accepted", SelectionState::Accepted);
+        assert_decodes(b"parked", SelectionState::Parked);
+
+        assert_decodes(b"local", Origin::Local);
+        assert_decodes(b"backend", Origin::Backend);
+
+        assert_decodes(b"pending", MutationState::Pending);
+        assert_decodes(b"failed", MutationState::Failed);
+        assert_decodes(b"applying", MutationState::Applying);
+        assert_decodes(b"skipped", MutationState::Skipped);
+        assert_decodes(b"cancelled", MutationState::Cancelled);
+        assert_decodes(b"abandoned", MutationState::Abandoned);
+        assert_decodes(b"applied", MutationState::Applied);
+
+        assert_decodes(b"update_ticket", MutationType::UpdateTicket);
+        assert_decodes(b"update_epic", MutationType::UpdateEpic);
+        assert_decodes(b"set_item_status", MutationType::SetItemStatus);
+        assert_decodes(b"add_ticket_to_epic", MutationType::AddTicketToEpic);
+        assert_decodes(
+            b"remove_ticket_from_epic",
+            MutationType::RemoveTicketFromEpic,
+        );
+        assert_decodes(b"add_dependency", MutationType::AddDependency);
+        assert_decodes(b"remove_dependency", MutationType::RemoveDependency);
+        assert_decodes(b"add_external_blocker", MutationType::AddExternalBlocker);
+        assert_decodes(
+            b"resolve_external_blocker",
+            MutationType::ResolveExternalBlocker,
+        );
+        assert_decodes(b"promote_ticket", MutationType::PromoteTicket);
+        assert_decodes(b"promote_epic", MutationType::PromoteEpic);
+
+        assert_decodes(b"open", Lifecycle::Open);
+        assert_decodes(b"done", Lifecycle::Done);
+
+        assert_decodes(b"idle", WorkState::Idle);
+        assert_decodes(b"active", WorkState::Active);
     }
 
     #[test]

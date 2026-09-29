@@ -147,7 +147,7 @@ mod tests {
     }
 
     #[test]
-    fn triage_without_priority_points_at_the_flag() {
+    fn triage_without_priority_reports_missing_priority() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         seed_ticket(&conn, "t1", "tk-1", "triage", None);

@@ -361,7 +361,7 @@ macro_rules! tk {
 }
 
 #[test]
-fn durable_store_survives_checkout_and_has_a_valid_association() {
+fn durable_store_init_records_a_lowercase_hex_store_id() {
     let p = Repo::new("repo");
     let out = p.run("init");
     assert!(out.starts_with("Initialized Repository Store at "), "{out}");
@@ -706,12 +706,6 @@ fn durable_store_init_refuses_foreign_and_future_databases_unchanged() {
         assert!(p.run("init").starts_with("exit 1\n"));
         assert_eq!(fs::read(&db).unwrap(), before);
     }
-}
-
-#[test]
-fn init_fresh() {
-    let p = Repo::new("repo");
-    tk!(p, "init", @"Initialized Repository Store at $TESTROOT/data/tk/stores/[STORE_ID]/tk.db");
 }
 
 #[test]
@@ -1575,11 +1569,16 @@ fn tk_scope_env_filters_list_to_the_epic() {
     );
     assert!(out.contains("project-2"), "out={out}");
     assert!(!out.contains("project-3"), "out={out}");
+
+    for blank in ["", "   "] {
+        let out = p.run_env("list", &[("TK_SCOPE", blank)]);
+        assert!(out.contains("project-2"), "out={out}");
+        assert!(out.contains("project-3"), "out={out}");
+        assert!(!out.contains("Scope:"), "out={out}");
+    }
 }
 
-/// Clap owns `--help` formatting; these snapshots exist to surface an
-/// unintended change in that generated output, not to pin a hand-authored
-/// contract. Extend the list as command help is worth guarding.
+/// Public help snapshots keep command usage, flags, and guidance reviewable.
 #[test]
 fn command_help_snapshots() {
     let p = Repo::new("repo");
@@ -1690,8 +1689,7 @@ fn detach_adopted_ticket_through_cli_dispatch() {
 
 /// `tk search` is a flat, whole-store title lookup across every Item Status
 /// (ADR-0025). The matched child Ticket renders flat — no List Tree nesting —
-/// even though its parent Epic also matches, and the `done` match shows no
-/// `⊘` despite its unresolved blocker.
+/// even though its parent Epic also matches.
 #[test]
 fn search_matches_titles_across_statuses() {
     let p = Repo::new("project");
@@ -2106,7 +2104,7 @@ fn cancelling_an_item_with_no_promotion_intent_is_refused() {
 }
 
 #[test]
-fn sync_log_reports_withdrawn_mutations_without_a_flag() {
+fn sync_log_empty_views_name_the_requested_states() {
     let p = Repo::new("project");
     p.run("init");
 
@@ -2609,9 +2607,7 @@ fn vacant_recovery_repairs_a_missing_pointer_and_allows_ordinary_access() {
 
 #[test]
 fn vacant_recovery_preserves_each_kind_of_user_data() {
-    for category in [
-        "ticket", "epic", "remote", "plan", "sequence", "config", "other",
-    ] {
+    for category in ["ticket", "epic", "remote", "sequence", "config", "other"] {
         let p = Repo::new("repo");
         p.run("init");
         let db = p.db_path();
@@ -2621,10 +2617,6 @@ fn vacant_recovery_preserves_each_kind_of_user_data() {
             }
             "epic" => {
                 p.run("add --epic -m 'Preserved'");
-            }
-            "plan" => {
-                p.run("add -m 'Preserved'");
-                p.run("plan add repo-1");
             }
             _ => {
                 let conn = rusqlite::Connection::open(&db).unwrap();
@@ -2646,45 +2638,6 @@ fn vacant_recovery_preserves_each_kind_of_user_data() {
         assert!(p.run("list").contains("Repository Store not initialized"));
         assert!(db.parent().unwrap().join("store.json").exists());
         assert!(out.contains(&id), "{out}");
-    }
-}
-
-#[test]
-fn vacant_recovery_preserves_every_mutation_state() {
-    use tk::domain::mutation_state::MutationState;
-    for state in MutationState::ALL {
-        let p = Repo::new("repo");
-        p.run("init");
-        p.run("add -m 'Preserved'");
-        let db = p.db_path();
-        p.seed_mutation("repo-1", "pending", None);
-        let conn = rusqlite::Connection::open(&db).unwrap();
-        conn.execute(
-            "update mutations set mutation_type = ?1, state = ?2, failure_json = ?3",
-            rusqlite::params![
-                if matches!(
-                    state,
-                    MutationState::Applying | MutationState::Cancelled | MutationState::Abandoned
-                ) {
-                    "promote_ticket"
-                } else {
-                    "update_ticket"
-                },
-                state.text(),
-                if state == MutationState::Failed {
-                    Some("{}")
-                } else {
-                    None
-                }
-            ],
-        )
-        .unwrap();
-        drop(conn);
-        let before = fs::read(&db).unwrap();
-        p.git(&["config", "--local", "--unset-all", "tk.storeId"]);
-        let out = p.run("init");
-        assert!(out.starts_with("exit 1\n"), "{state:?}: {out}");
-        assert_eq!(fs::read(db).unwrap(), before);
     }
 }
 

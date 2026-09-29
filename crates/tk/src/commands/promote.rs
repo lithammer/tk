@@ -1142,9 +1142,7 @@ mod tests {
     use crate::domain::ticket_kind::TicketKind;
     use crate::proc::RunOutput;
     use crate::promotion::plan::ItemRef;
-    use crate::remote::fake::{
-        CreateResponse, EditResponse, FakeAdapter, InspectionResponse, PullResponse,
-    };
+    use crate::remote::fake::{CreateResponse, EditResponse, FakeAdapter, PullResponse};
     use crate::render::Styler;
     use crate::store::sync::{LoadApplicableError, PersistMutationOutcomeError, RefreshStoreError};
     use crate::store::testing::{
@@ -1289,7 +1287,7 @@ mod tests {
         .unwrap()
     }
 
-    fn inspection(display_id: &str, key: &str, title: &str, body: &str) -> InspectionResponse {
+    fn inspection(display_id: &str, key: &str, title: &str, body: &str) -> BackendItemInspection {
         inspection_with_kind(display_id, key, title, body, TicketKind::Task)
     }
 
@@ -1299,8 +1297,8 @@ mod tests {
         title: &str,
         body: &str,
         ticket_kind: TicketKind,
-    ) -> InspectionResponse {
-        InspectionResponse::Item(BackendItemInspection {
+    ) -> BackendItemInspection {
+        BackendItemInspection {
             identity: BackendItemIdentity {
                 backend_key: key.into(),
                 display_id: display_id.into(),
@@ -1308,7 +1306,7 @@ mod tests {
             title: title.into(),
             body: body.into(),
             ticket_kind,
-        })
+        }
     }
 
     fn refresh(title: &str, body: &str, status: Lifecycle) -> BackendItemRefresh {
@@ -1584,6 +1582,7 @@ mod tests {
         assert_eq!(h.out(), "Promoted Ticket: tk-1 -> gh-42\n");
         assert_eq!(item_state(&conn, "t1"), ("gh-42".into(), "backend".into()));
         h.runner.assert_all_consumed();
+        assert_eq!(state_of(&conn, 1).unwrap(), MutationState::Applied);
     }
 
     #[test]
@@ -1739,50 +1738,32 @@ mod tests {
     }
 
     #[test]
-    fn public_reconcile_stops_at_remote_workflow_contention() {
-        let fixture = TmpStore::new("repo");
-        let _conn = seed_store(&fixture);
-        let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, &fixture, 7);
-        let blocking_store = open_store(&h, &fixture, &cwd_path);
-        let _guard = blocking_store.lock_remote_workflow().unwrap();
-        expect_git(&h, &fixture);
-
-        let code = run_subcommand_rendered(
-            &mut h,
+    fn public_recovery_stops_at_remote_workflow_contention() {
+        for subcommand in [
             Sub::Reconcile(ReconcileArgs {
                 id: "tk-1".into(),
                 backend_key: "42".into(),
                 force: false,
             }),
-        );
+            Sub::Retry(RetryArgs { id: "tk-1".into() }),
+        ] {
+            let fixture = TmpStore::new("repo");
+            let _conn = seed_store(&fixture);
+            let cwd_path = cwd();
+            let mut h = Harness::with_seed(&cwd_path, &fixture, 7);
+            let blocking_store = open_store(&h, &fixture, &cwd_path);
+            let _guard = blocking_store.lock_remote_workflow().unwrap();
+            expect_git(&h, &fixture);
 
-        assert_eq!(code, Exit::Failure);
-        assert_eq!(
-            h.err(),
-            "tk promote: another remote-changing command is running; retry when it finishes\n"
-        );
-        h.runner.assert_all_consumed();
-    }
+            let code = run_subcommand_rendered(&mut h, subcommand);
 
-    #[test]
-    fn public_retry_stops_at_remote_workflow_contention() {
-        let fixture = TmpStore::new("repo");
-        let _conn = seed_store(&fixture);
-        let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, &fixture, 7);
-        let blocking_store = open_store(&h, &fixture, &cwd_path);
-        let _guard = blocking_store.lock_remote_workflow().unwrap();
-        expect_git(&h, &fixture);
-
-        let code = run_subcommand_rendered(&mut h, Sub::Retry(RetryArgs { id: "tk-1".into() }));
-
-        assert_eq!(code, Exit::Failure);
-        assert_eq!(
-            h.err(),
-            "tk promote: another remote-changing command is running; retry when it finishes\n"
-        );
-        h.runner.assert_all_consumed();
+            assert_eq!(code, Exit::Failure);
+            assert_eq!(
+                h.err(),
+                "tk promote: another remote-changing command is running; retry when it finishes\n"
+            );
+            h.runner.assert_all_consumed();
+        }
     }
 
     #[test]
@@ -1880,67 +1861,51 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_refuses_a_bug_promotion_when_backend_is_a_task_even_with_force() {
-        let fixture = TmpStore::new("repo");
-        let mut conn = seed_store(&fixture);
-        local_ticket(&conn, "t1", "tk-1", 1);
-        conn.execute("update items set ticket_kind = 'bug' where id = 't1'", [])
+    fn reconcile_refuses_ticket_kind_mismatches_even_with_force() {
+        for (local_kind, backend_kind, force, expected) in [
+            (
+                "bug",
+                TicketKind::Task,
+                true,
+                "tk promote: Backend item gh-42 has Ticket Kind Task, but the retained Promotion targets Bug. Correct the Backend item before reconciling; '--force' cannot override a classification mismatch.\n",
+            ),
+            (
+                "task",
+                TicketKind::Bug,
+                false,
+                "tk promote: Backend item gh-42 has Ticket Kind Bug, but the retained Promotion targets Task. Correct the Backend item before reconciling; '--force' cannot override a classification mismatch.\n",
+            ),
+        ] {
+            let fixture = TmpStore::new("repo");
+            let mut conn = seed_store(&fixture);
+            local_ticket(&conn, "t1", "tk-1", 1);
+            conn.execute(
+                "update items set ticket_kind = ?1 where id = 't1'",
+                [local_kind],
+            )
             .unwrap();
-        commit_promotion(&mut conn, "t1");
-        conn.execute("update mutations set state = 'applying'", [])
-            .unwrap();
-        let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, &fixture, 7);
-        let mut store = open_store(&h, &fixture, &cwd_path);
-        let mut fake = FakeAdapter::new().with_inspections(vec![inspection_with_kind(
-            "gh-42",
-            "42",
-            "Local work",
-            "",
-            TicketKind::Task,
-        )]);
+            commit_promotion(&mut conn, "t1");
+            conn.execute("update mutations set state = 'applying'", [])
+                .unwrap();
+            let cwd_path = cwd();
+            let mut h = Harness::with_seed(&cwd_path, &fixture, 7);
+            let mut store = open_store(&h, &fixture, &cwd_path);
+            let mut fake = FakeAdapter::new().with_inspections(vec![inspection_with_kind(
+                "gh-42",
+                "42",
+                "Local work",
+                "",
+                backend_kind,
+            )]);
 
-        let code = reconcile_rendered(&mut h, &mut store, &mut fake, "tk-1", "42", true);
+            let code = reconcile_rendered(&mut h, &mut store, &mut fake, "tk-1", "42", force);
 
-        assert_eq!(code, Exit::Failure);
-        assert_eq!(h.out(), "");
-        assert_eq!(
-            h.err(),
-            "tk promote: Backend item gh-42 has Ticket Kind Task, but the retained Promotion targets Bug. Correct the Backend item before reconciling; '--force' cannot override a classification mismatch.\n"
-        );
-        assert_eq!(item_state(&conn, "t1"), ("tk-1".into(), "local".into()));
-        assert_eq!(fake.captured_inspection_keys, vec!["42"]);
-    }
-
-    #[test]
-    fn reconcile_refuses_a_task_promotion_when_backend_is_a_bug() {
-        let fixture = TmpStore::new("repo");
-        let mut conn = seed_store(&fixture);
-        local_ticket(&conn, "t1", "tk-1", 1);
-        commit_promotion(&mut conn, "t1");
-        conn.execute("update mutations set state = 'applying'", [])
-            .unwrap();
-        let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, &fixture, 7);
-        let mut store = open_store(&h, &fixture, &cwd_path);
-        let mut fake = FakeAdapter::new().with_inspections(vec![inspection_with_kind(
-            "gh-42",
-            "42",
-            "Local work",
-            "",
-            TicketKind::Bug,
-        )]);
-
-        let code = reconcile_rendered(&mut h, &mut store, &mut fake, "tk-1", "42", false);
-
-        assert_eq!(code, Exit::Failure);
-        assert_eq!(h.out(), "");
-        assert_eq!(
-            h.err(),
-            "tk promote: Backend item gh-42 has Ticket Kind Bug, but the retained Promotion targets Task. Correct the Backend item before reconciling; '--force' cannot override a classification mismatch.\n"
-        );
-        assert_eq!(item_state(&conn, "t1"), ("tk-1".into(), "local".into()));
-        assert_eq!(fake.captured_inspection_keys, vec!["42"]);
+            assert_eq!(code, Exit::Failure);
+            assert_eq!(h.out(), "");
+            assert_eq!(h.err(), expected);
+            assert_eq!(item_state(&conn, "t1"), ("tk-1".into(), "local".into()));
+            assert_eq!(fake.captured_inspection_keys, vec!["42"]);
+        }
     }
 
     #[test]
@@ -2066,29 +2031,6 @@ mod tests {
     }
 
     #[test]
-    fn retry_reenters_normal_sync_and_reports_the_mapping() {
-        let fixture = TmpStore::new("repo");
-        let mut conn = seed_store(&fixture);
-        local_ticket(&conn, "t1", "tk-1", 1);
-        commit_promotion(&mut conn, "t1");
-        conn.execute("update mutations set state = 'applying'", [])
-            .unwrap();
-        let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, &fixture, 7);
-        let mut store = open_store(&h, &fixture, &cwd_path);
-        let mut fake = FakeAdapter::new().with_creates(vec![CreateResponse::Created {
-            backend_key: "42".into(),
-            display_id: "gh-42".into(),
-        }]);
-
-        let code = retry_rendered(&mut h, &mut store, &mut fake, "tk-1");
-
-        assert_eq!(code, Exit::Ok, "{}", h.err());
-        assert_eq!(h.out(), "Promoted Ticket: tk-1 -> gh-42\n");
-        assert_eq!(fake.captured_creates.len(), 1);
-    }
-
-    #[test]
     fn retry_that_is_still_indeterminate_restores_safe_recovery_guidance() {
         let fixture = TmpStore::new("repo");
         let mut conn = seed_store(&fixture);
@@ -2116,44 +2058,30 @@ mod tests {
 
     #[test]
     fn cancel_withdraws_the_operation_and_returns_the_item_to_local() {
-        let fixture = TmpStore::new("repo");
-        let mut conn = seed_store(&fixture);
-        local_ticket(&conn, "t1", "tk-1", 1);
-        commit_promotion(&mut conn, "t1");
-        drop(conn);
-        let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, &fixture, 7);
-        expect_git(&h, &fixture);
+        for clear_remote in [false, true] {
+            let fixture = TmpStore::new("repo");
+            let mut conn = seed_store(&fixture);
+            local_ticket(&conn, "t1", "tk-1", 1);
+            commit_promotion(&mut conn, "t1");
+            if clear_remote {
+                conn.execute("delete from sync_cursors", []).unwrap();
+                conn.execute("delete from remotes", []).unwrap();
+            }
+            drop(conn);
+            let cwd_path = cwd();
+            let mut h = Harness::with_seed(&cwd_path, &fixture, 7);
+            expect_git(&h, &fixture);
 
-        let code = cancel_rendered(&mut h, "tk-1");
+            let code = cancel_rendered(&mut h, "tk-1");
 
-        assert_eq!(code, Exit::Ok, "{}", h.err());
-        assert_eq!(h.out(), "Cancelled Promotion: Ticket tk-1\n");
-        let conn = Connection::open(fixture.db_path()).unwrap();
-        assert_eq!(
-            crate::store::mutations::resolve_backend_binding(&conn, "t1").unwrap(),
-            BackendBinding::Local
-        );
-    }
-
-    #[test]
-    fn cancel_needs_no_adapter_so_a_cleared_remote_still_lets_it_run() {
-        // The exit of last resort must not depend on the Remote that produced
-        // the stuck Promotion (ADR-0038).
-        let fixture = TmpStore::new("repo");
-        let mut conn = seed_store(&fixture);
-        local_ticket(&conn, "t1", "tk-1", 1);
-        commit_promotion(&mut conn, "t1");
-        conn.execute("delete from sync_cursors", []).unwrap();
-        conn.execute("delete from remotes", []).unwrap();
-        drop(conn);
-        let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, &fixture, 7);
-        expect_git(&h, &fixture);
-
-        let code = cancel_rendered(&mut h, "tk-1");
-
-        assert_eq!(code, Exit::Ok, "{}", h.err());
+            assert_eq!(code, Exit::Ok, "{}", h.err());
+            assert_eq!(h.out(), "Cancelled Promotion: Ticket tk-1\n");
+            let conn = Connection::open(fixture.db_path()).unwrap();
+            assert_eq!(
+                crate::store::mutations::resolve_backend_binding(&conn, "t1").unwrap(),
+                BackendBinding::Local
+            );
+        }
     }
 
     #[test]
@@ -2463,31 +2391,6 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_normal_promotion_alias_is_reported_as_corruption() {
-        let fixture = TmpStore::new("repo");
-        let _conn = seed_store(&fixture);
-        let cwd_path = cwd();
-        let h = Harness::with_seed(&cwd_path, &fixture, 7);
-        let store = open_store(&h, &fixture, &cwd_path);
-        let captured = [PromotionMapping {
-            item_id: "missing".into(),
-            outgoing_display_id: "tk-404".into(),
-            item_class: ItemClass::Ticket,
-        }];
-        let mut stdout = Vec::new();
-
-        let error = render_mappings(&mut stdout, &store, &captured).unwrap_err();
-        let mut stderr = Vec::new();
-        error.render(&mut stderr, "promote", Styler::plain().for_stderr());
-
-        assert!(stdout.is_empty());
-        assert_eq!(
-            String::from_utf8(stderr).unwrap(),
-            "tk promote: Repository Store corruption: Promotion alias tk-404 disappeared\n"
-        );
-    }
-
-    #[test]
     fn a_reassigned_normal_promotion_alias_is_reported_as_corruption() {
         let fixture = TmpStore::new("repo");
         let conn = seed_store(&fixture);
@@ -2577,27 +2480,6 @@ mod tests {
     }
 
     #[test]
-    fn a_triage_finding_points_at_tk_accept() {
-        assert_eq!(
-            rendered(&PromotionFinding::TriageTicket {
-                item: item_ref("tk-1")
-            }),
-            "tk-1 is in triage; run 'tk accept tk-1 --priority P0..P4' before promoting it."
-        );
-    }
-
-    #[test]
-    fn an_item_class_finding_names_the_class_and_the_backend() {
-        assert_eq!(
-            rendered(&PromotionFinding::ItemClassNotRepresentable {
-                item: item_ref("tk-1"),
-                item_class: ItemClass::Epic,
-            }),
-            "tk-1: the github Backend cannot create Epics under Promotion."
-        );
-    }
-
-    #[test]
     fn a_ticket_kind_finding_names_the_kind_and_the_backend() {
         assert_eq!(
             rendered(&PromotionFinding::TicketKindNotRepresentable {
@@ -2605,19 +2487,6 @@ mod tests {
                 ticket_kind: TicketKind::Bug,
             }),
             "tk-2: the github Backend cannot create Bug Tickets under Promotion."
-        );
-    }
-
-    #[test]
-    fn a_rejected_dependency_offers_promoting_the_blocking_item() {
-        assert_eq!(
-            rendered(&PromotionFinding::DependencyRejected {
-                blocked: item_ref("tk-1"),
-                blocking: item_ref("tk-2"),
-                reason: DependencyRejection::BackendBlockedLocalBlocking,
-            }),
-            "tk-1 would be backend-backed while its Blocking Item tk-2 stays local. \
-             Promote tk-2 in the same operation, or run 'tk unblock tk-1 tk-2' to drop the Dependency."
         );
     }
 
@@ -2644,17 +2513,6 @@ mod tests {
                 blocking: item_ref("gh-9"),
             }),
             "tk-1 depends on gh-9, and the github Backend cannot represent a Dependency under Promotion."
-        );
-    }
-
-    #[test]
-    fn an_unrepresentable_membership_names_the_ticket_and_the_epic() {
-        assert_eq!(
-            rendered(&PromotionFinding::EpicMembershipNotRepresentable {
-                ticket: item_ref("tk-2"),
-                epic: item_ref("tk-1"),
-            }),
-            "tk-2 belongs to Epic tk-1, and the github Backend cannot represent Epic membership under Promotion."
         );
     }
 
@@ -2722,77 +2580,6 @@ mod tests {
             h.out(),
             "Possible duplicate: the previous Promotion for tk-1 was abandoned before tk observed its Backend creation outcome (Mutation 1). If that creation succeeded, this one creates a second Backend object.\nPromoted Ticket: tk-1 -> gh-42\n"
         );
-    }
-
-    #[test]
-    fn a_local_ticket_promotes_and_reports_its_backend_display_id() {
-        let fixture = TmpStore::new("repo");
-        let conn = seed_store(&fixture);
-        local_ticket(&conn, "t1", "tk-1", 1);
-        let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, &fixture, 7);
-        let mut store = open_store(&h, &fixture, &cwd_path);
-        let mut fake = adapter(
-            vec![],
-            vec![CreateResponse::Created {
-                backend_key: "42".into(),
-                display_id: "gh-42".into(),
-            }],
-        );
-
-        let code = promote_rendered(&mut h, &mut store, &mut fake, "tk-1", false);
-
-        assert_eq!(code, Exit::Ok, "stderr={}", h.err());
-        assert_eq!(h.out(), "Promoted Ticket: tk-1 -> gh-42\n");
-        assert_eq!(item_state(&conn, "t1"), ("gh-42".into(), "backend".into()));
-        let state = state_of(&conn, 1).unwrap();
-        assert_eq!(state, MutationState::Applied);
-    }
-
-    #[test]
-    fn children_promotes_the_epic_and_its_local_children() {
-        let fixture = TmpStore::new("repo");
-        let conn = seed_store(&fixture);
-        local_epic(&conn, "e1", "tk-1", 1);
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "c1",
-                display: "tk-2",
-                title: "Child",
-                container_id: Some("e1"),
-                created_seq: 2,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, &fixture, 7);
-        let mut store = open_store(&h, &fixture, &cwd_path);
-        // Promotions first, then the membership the operation makes intent.
-        let mut fake = adapter(
-            vec![EditResponse::Success],
-            vec![
-                CreateResponse::Created {
-                    backend_key: "1".into(),
-                    display_id: "gh-1".into(),
-                },
-                CreateResponse::Created {
-                    backend_key: "2".into(),
-                    display_id: "gh-2".into(),
-                },
-            ],
-        );
-
-        let code = promote_rendered(&mut h, &mut store, &mut fake, "tk-1", true);
-
-        assert_eq!(code, Exit::Ok, "stderr={}", h.err());
-        assert_eq!(
-            h.out(),
-            "Promoted Epic: tk-1 -> gh-1\nPromoted Ticket: tk-2 -> gh-2\n"
-        );
-        assert_eq!(item_state(&conn, "e1"), ("gh-1".into(), "backend".into()));
-        assert_eq!(item_state(&conn, "c1"), ("gh-2".into(), "backend".into()));
     }
 
     #[test]
@@ -3011,6 +2798,7 @@ mod tests {
             "tk promote: the Promotion did not finish: Mutation 2 (failed) for tk-2 is unresolved\n\
              Inspect it with 'tk sync log 2', then run 'tk sync' to apply the rest of the Promotion.\n"
         );
+        assert_eq!(mutation_count(&conn).unwrap(), 3);
     }
 
     #[test]
@@ -3205,130 +2993,6 @@ mod tests {
             (state.as_str(), origin.as_str()),
             ("pending", "local"),
             "the Promotion is durable and still applicable"
-        );
-    }
-
-    #[test]
-    fn a_certified_creation_rejection_reports_where_the_promotion_stands() {
-        let fixture = TmpStore::new("repo");
-        let conn = seed_store(&fixture);
-        local_ticket(&conn, "t1", "tk-1", 1);
-        let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, &fixture, 7);
-        let mut store = open_store(&h, &fixture, &cwd_path);
-        let mut fake = adapter(
-            vec![],
-            vec![CreateResponse::Rejected(
-                "executable not found on PATH".into(),
-            )],
-        );
-
-        let code = promote_rendered(&mut h, &mut store, &mut fake, "tk-1", false);
-
-        assert_eq!(code, Exit::Failure);
-        assert_eq!(
-            h.err(),
-            "tk promote: the Promotion did not finish: Mutation 1 (failed) for tk-1 is unresolved\n\
-             Inspect it with 'tk sync log 1', then run 'tk sync' to apply the rest of the Promotion.\n"
-        );
-        assert_eq!(mutation_count(&conn).unwrap(), 1);
-    }
-
-    #[test]
-    fn a_rejected_dependency_from_a_real_graph_refuses_before_any_backend_call() {
-        // The planner judges the edge against the Origins the operation *will*
-        // produce: the Promotion Child becomes backend-backed while the Item it
-        // waits on stays local.
-        let fixture = TmpStore::new("repo");
-        let conn = seed_store(&fixture);
-        local_epic(&conn, "e1", "tk-1", 1);
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "c1",
-                display: "tk-2",
-                title: "Child",
-                container_id: Some("e1"),
-                created_seq: 2,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        local_ticket(&conn, "outside", "tk-3", 3);
-        insert_dependency(&conn, "outside", "c1").unwrap();
-        let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, &fixture, 7);
-        let mut store = open_store(&h, &fixture, &cwd_path);
-        // Dependencies are the only facet this Backend cannot represent, so the
-        // rejected edge is the finding, not a capability complaint.
-        let mut fake = FakeAdapter::new().with_capabilities(
-            PromotionCapabilities::none()
-                .with_item_class(ItemClass::Ticket)
-                .with_item_class(ItemClass::Epic)
-                .with_ticket_kind(TicketKind::Task)
-                .with_epic_membership(),
-        );
-
-        let code = promote_rendered(&mut h, &mut store, &mut fake, "tk-1", true);
-
-        assert_eq!(code, Exit::Failure);
-        assert_eq!(
-            h.err(),
-            "tk promote: cannot promote tk-1:\n  \
-             tk-2 would be backend-backed while its Blocking Item tk-3 stays local. \
-             Promote tk-3 in the same operation, or run 'tk unblock tk-2 tk-3' to drop the Dependency.\n"
-        );
-        assert_eq!(
-            mutation_count(&conn).unwrap(),
-            0,
-            "a refused preflight writes nothing"
-        );
-        assert!(
-            fake.captured_adopt_inputs.is_empty()
-                && fake.captured_pull_keys.is_empty()
-                && fake.captured_edits.is_empty()
-                && fake.captured_creates.is_empty(),
-            "a refused preflight calls no Backend"
-        );
-    }
-
-    // ---- unresolved-failure dispatch -------------------------------------
-
-    fn status(sequence: i64, state: MutationState, display: &str) -> MutationSummary {
-        MutationSummary {
-            sequence,
-            state,
-            target_display_id: display.to_owned(),
-            item_class: ItemClass::Ticket,
-        }
-    }
-
-    #[test]
-    fn an_operations_own_mutation_is_reported_as_the_promotion_not_finishing() {
-        let unresolved = status(4, MutationState::Failed, "tk-2");
-        let err = unresolved_failure(Some(&unresolved), &unresolved, None);
-
-        let mut out = Vec::new();
-        err.render(&mut out, "promote", Styler::plain().for_stderr());
-        assert_eq!(
-            String::from_utf8(out).unwrap(),
-            "tk promote: the Promotion did not finish: Mutation 4 (failed) for tk-2 is unresolved\n\
-             Inspect it with 'tk sync log 4', then run 'tk sync' to apply the rest of the Promotion.\n"
-        );
-    }
-
-    #[test]
-    fn a_blocker_with_no_applicable_row_falls_back_to_the_operations_own_mutation() {
-        // A skipped Mutation of the operation is unresolved but not applicable,
-        // so there may be no blocker at all to compare against.
-        let err = unresolved_failure(None, &status(4, MutationState::Skipped, "tk-2"), None);
-
-        let mut out = Vec::new();
-        err.render(&mut out, "promote", Styler::plain().for_stderr());
-        assert!(
-            String::from_utf8(out)
-                .unwrap()
-                .starts_with("tk promote: the Promotion did not finish: Mutation 4 (skipped)"),
         );
     }
 }

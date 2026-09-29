@@ -20,10 +20,9 @@ use std::fmt;
 /// decision (and carries no Priority); `Parked` is accepted work intentionally
 /// held out of automatic selection. Triage and parked Tickets are excluded
 /// from `tk next` and do not contribute Effective Priority.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SelectionState {
     Triage,
-    #[default]
     Accepted,
     Parked,
 }
@@ -56,13 +55,6 @@ mod tests {
     #[test]
     fn display_writes_text() {
         assert_eq!(format!("{}", SelectionState::Parked), "parked");
-    }
-
-    #[test]
-    fn default_is_accepted() {
-        // Normal `tk add` and Backend Pull both land on accepted; the default
-        // must not drift to a non-selectable state.
-        assert_eq!(SelectionState::default(), SelectionState::Accepted);
     }
 
     #[test]

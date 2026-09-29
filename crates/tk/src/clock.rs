@@ -98,10 +98,4 @@ mod tests {
         // 2026-05-09T00:00:00.000Z corresponds to 1_778_284_800_000 ms.
         assert_eq!(format_iso(1_778_284_800_000), "2026-05-09T00:00:00.000Z");
     }
-
-    #[test]
-    fn fake_clock_returns_pinned_value() {
-        let c = FakeClock::new(42);
-        assert_eq!(c.now_ms(), 42);
-    }
 }

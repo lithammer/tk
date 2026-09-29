@@ -276,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn parent_flag_attaches_ticket_to_epic_and_renders_parent_line() {
+    fn parent_flag_renders_the_epic_confirmation() {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
@@ -347,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_message_reports_usage_error() {
+    fn empty_message_reports_failure() {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
@@ -360,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_message_returns_exit_2_with_usage_hint() {
+    fn missing_message_returns_usage_error() {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();

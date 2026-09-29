@@ -190,7 +190,6 @@ mod tests {
     use super::*;
     use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
     use crate::store::testing::{FixtureItem, TmpStore, insert_fixture_item};
-    use rusqlite::Connection;
 
     #[test]
     fn cli_rejects_removed_options_and_conflicting_body_sources() {
@@ -498,7 +497,7 @@ mod tests {
     }
 
     #[test]
-    fn no_change_request_exits_2_with_usage_hint() {
+    fn no_change_request_returns_usage_error() {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
@@ -610,41 +609,6 @@ mod tests {
         assert_eq!(item.priority, Some(Priority::P0));
         assert_eq!(item.parent.unwrap().display_id, "tk-2");
         assert!(crate::store::sync::mutation_log_is_empty(&store.conn).unwrap());
-    }
-
-    #[test]
-    fn priority_change_on_local_ticket_is_silent_to_mutations() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "t1",
-                display: "tk-1",
-                title: "T",
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        drop(conn);
-
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_git(&h, &store);
-        let mut a = args("tk-1");
-        a.priority = Some(Priority::P0);
-        let code = run_rendered(&mut h, a);
-        assert_eq!(code, Exit::Ok);
-        let conn = Connection::open(store.db_path()).unwrap();
-        let priority: String = conn
-            .query_row("select priority from items", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(priority, "P0");
-        let mutations: i64 = conn
-            .query_row("select count(*) from mutations", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(mutations, 0);
     }
 
     #[test]

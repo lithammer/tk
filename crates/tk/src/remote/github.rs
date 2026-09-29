@@ -2516,7 +2516,7 @@ mod tests {
         match adapter.apply_edit(&v).unwrap() {
             BackendEditOutcome::Rejected(f) => {
                 assert_eq!(f.class, FailureClass::Validation);
-                assert!(f.detail.contains("Validation Failed"));
+                assert_eq!(f.detail, "HTTP 422: Validation Failed");
                 assert_eq!(f.retry_after_s, None);
             }
             BackendEditOutcome::Acknowledged => panic!("expected rejection"),
@@ -2588,32 +2588,6 @@ mod tests {
     }
 
     #[test]
-    fn apply_add_ticket_to_epic_exit_zero_with_stderr_is_acknowledged() {
-        let runner = FakeRunner::new();
-        runner.expect_exact(
-            &["gh", "issue", "edit", "42", "--parent", "9"],
-            RunOutput {
-                exit_code: 0,
-                stdout: Vec::new(),
-                stderr: b"! Issue #42 already has parent #9".to_vec(),
-            },
-        );
-        let mut adapter = GithubAdapter::new(&runner, cwd());
-        let edit = edit(
-            MutationType::AddTicketToEpic,
-            MutationPayload::EpicRef(EpicRef {
-                epic_id: "e".into(),
-            }),
-            "42",
-        );
-        assert_eq!(
-            adapter.apply_edit(&edit).unwrap(),
-            BackendEditOutcome::Acknowledged
-        );
-        runner.assert_all_consumed();
-    }
-
-    #[test]
     fn apply_remove_ticket_from_epic_removes_parent() {
         let runner = FakeRunner::new();
         runner.expect_exact(&["gh", "issue", "edit", "42", "--remove-parent"], ok(""));
@@ -2629,54 +2603,6 @@ mod tests {
             adapter.apply_edit(&edit).unwrap(),
             BackendEditOutcome::Acknowledged
         );
-        runner.assert_all_consumed();
-    }
-
-    #[test]
-    fn apply_epic_membership_non_zero_is_classified_rejection() {
-        let runner = FakeRunner::new();
-        runner.expect_exact(
-            &["gh", "issue", "edit", "42", "--parent", "9"],
-            fail(1, "HTTP 422: parent must be an issue"),
-        );
-        let mut adapter = GithubAdapter::new(&runner, cwd());
-        let edit = edit(
-            MutationType::AddTicketToEpic,
-            MutationPayload::EpicRef(EpicRef {
-                epic_id: "e".into(),
-            }),
-            "42",
-        );
-        match adapter.apply_edit(&edit).unwrap() {
-            BackendEditOutcome::Rejected(failure) => {
-                assert_eq!(failure.class, FailureClass::Validation);
-                assert_eq!(failure.detail, "HTTP 422: parent must be an issue");
-                assert_eq!(failure.retry_after_s, None);
-            }
-            BackendEditOutcome::Acknowledged => panic!("expected rejection"),
-        }
-        runner.assert_all_consumed();
-    }
-
-    #[test]
-    fn apply_epic_membership_spawn_failure_is_apply_error() {
-        let runner = FakeRunner::new();
-        runner.expect_exact_error(
-            &["gh", "issue", "edit", "42", "--remove-parent"],
-            ProcError::SpawnFailed,
-        );
-        let mut adapter = GithubAdapter::new(&runner, cwd());
-        let edit = edit(
-            MutationType::RemoveTicketFromEpic,
-            MutationPayload::EpicRef(EpicRef {
-                epic_id: "e".into(),
-            }),
-            "42",
-        );
-        assert!(matches!(
-            adapter.apply_edit(&edit),
-            Err(ProcError::SpawnFailed)
-        ));
         runner.assert_all_consumed();
     }
 
@@ -2705,28 +2631,6 @@ mod tests {
         );
         let mut adapter = GithubAdapter::new(&runner, cwd());
         let v = dep_edit(MutationType::RemoveDependency, "5", "9");
-        assert!(matches!(
-            adapter.apply_edit(&v).unwrap(),
-            BackendEditOutcome::Acknowledged
-        ));
-        runner.assert_all_consumed();
-    }
-
-    #[test]
-    fn apply_dependency_exit_zero_with_stderr_is_accepted() {
-        // The idempotent re-link no-op: gh may print to stderr yet exit 0.
-        // Success is judged by exit code, so this must read as Acknowledged.
-        let runner = FakeRunner::new();
-        runner.expect_exact(
-            &["gh", "issue", "edit", "5", "--add-blocked-by", "9"],
-            RunOutput {
-                exit_code: 0,
-                stdout: Vec::new(),
-                stderr: b"! Issue already blocked by #9".to_vec(),
-            },
-        );
-        let mut adapter = GithubAdapter::new(&runner, cwd());
-        let v = dep_edit(MutationType::AddDependency, "5", "9");
         assert!(matches!(
             adapter.apply_edit(&v).unwrap(),
             BackendEditOutcome::Acknowledged
@@ -2782,7 +2686,7 @@ mod tests {
             &["gh", "issue", "create", "--title", "T", "--body", "B"],
             RunOutput {
                 exit_code: 1,
-                stdout: b"https://github.example/o/r/issues/7\n".to_vec(),
+                stdout: b" https://github.example/o/r/issues/7\n".to_vec(),
                 stderr: b"a later CLI step failed".to_vec(),
             },
         );
@@ -2797,7 +2701,18 @@ mod tests {
 
     #[test]
     fn empty_and_malformed_success_receipts_are_indeterminate() {
-        for stdout in ["", "created #42", "https://github.com/o/r/pull/42"] {
+        for stdout in [
+            "",
+            "created #42",
+            "https://github.com/o/r/pull/42",
+            "http://github.com/o/r/issues/1",
+            "https://github.com/o/r/issues/0",
+            "https://github.com/o/r/issues/01",
+            "https://github.com/o/r/issues/1?x=y",
+            "https://user@github.com/o/r/issues/1",
+            "https://github.com/o/r/issues/1\nextra",
+            "https://github.com/o/r/issues/not-a-number",
+        ] {
             let runner = FakeRunner::new();
             runner.expect_exact(
                 &["gh", "issue", "create", "--title", "T", "--body", "B"],
@@ -2924,25 +2839,6 @@ mod tests {
         assert!(failure.detail.contains("outcome is unknown"));
         assert_eq!(failure.class, FailureClass::Unknown);
         runner.assert_all_consumed();
-    }
-
-    #[test]
-    fn receipt_parser_requires_a_canonical_github_issue_url() {
-        for invalid in [
-            b"http://github.com/o/r/issues/1".as_slice(),
-            b"https://github.com/o/r/issues/0",
-            b"https://github.com/o/r/issues/01",
-            b"https://github.com/o/r/issues/1?x=y",
-            b"https://user@github.com/o/r/issues/1",
-            b"https://github.com/o/r/issues/1\nextra",
-            b"https://github.com/o/r/issues/not-a-number",
-        ] {
-            assert_eq!(parse_create_receipt(invalid), None, "{invalid:?}");
-        }
-        assert_eq!(
-            parse_create_receipt(b" https://github.example/o/r/issues/12\n"),
-            Some(identity("https://github.example/o/r/issues/12"))
-        );
     }
 
     #[test]

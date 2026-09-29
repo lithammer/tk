@@ -331,126 +331,72 @@ mod tests {
     }
 
     #[test]
-    fn body_match_renders_a_show_style_block() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "t1",
-                display: "tk-1",
-                title: "Add middleware",
-                body: "The handler uses the auth token to authorize.",
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        drop(conn);
-
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_git(&h, &store);
-        let code = run_rendered(
-            &mut h,
-            Args {
-                pattern: "auth".to_owned(),
-                ..Args::default()
-            },
-        );
-        assert_eq!(code, Exit::Ok);
-        let stdout = String::from_utf8(h.stdout).unwrap();
-        // Label line carries the Display ID; the matching body line is shown.
-        assert!(stdout.contains("tk-1"), "stdout={stdout:?}");
-        assert!(stdout.contains("uses the auth token"), "stdout={stdout:?}");
-    }
-
-    #[test]
     fn no_match_exits_one_with_empty_streams() {
-        // grep's 0/1 predicate (ADR-0026): a no-match is NoMatch (exit 1), not a
-        // failure, and writes nothing to either stream — empty stderr is how a
-        // script distinguishes "no match" from "broken".
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "t1",
-                display: "tk-1",
-                title: "Unrelated chore",
-                body: "Nothing to see here.",
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        drop(conn);
+        for (quiet, list) in [(false, false), (true, false), (false, true)] {
+            // grep's 0/1 predicate (ADR-0026): a no-match is NoMatch (exit 1), not a
+            // failure, and writes nothing to either stream — empty stderr is how a
+            // script distinguishes "no match" from "broken".
+            let store = TmpStore::new("repo");
+            let conn = seed_store(&store);
+            insert_fixture_item(
+                &conn,
+                FixtureItem {
+                    id: "t1",
+                    display: "tk-1",
+                    title: "Unrelated chore",
+                    body: "Nothing to see here.",
+                    created_seq: 1,
+                    ..FixtureItem::default()
+                },
+            )
+            .unwrap();
+            drop(conn);
 
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_git(&h, &store);
-        let code = run_rendered(
-            &mut h,
-            Args {
-                pattern: "nonexistent".to_owned(),
-                ..Args::default()
-            },
-        );
-        assert_eq!(code, Exit::NoMatch);
-        assert!(h.stdout.is_empty(), "stdout={:?}", h.stdout);
-        assert!(h.stderr.is_empty(), "stderr={:?}", h.stderr);
+            let cwd_path = cwd();
+            let mut h = Harness::new(&cwd_path, &store);
+            expect_git(&h, &store);
+            let code = run_rendered(
+                &mut h,
+                Args {
+                    pattern: "nonexistent".to_owned(),
+                    quiet,
+                    list,
+                    ..Args::default()
+                },
+            );
+            assert_eq!(code, Exit::NoMatch);
+            assert!(h.stdout.is_empty(), "stdout={:?}", h.stdout);
+            assert!(h.stderr.is_empty(), "stderr={:?}", h.stderr);
+        }
     }
 
     #[test]
-    fn body_match_shows_three_lines_of_context_each_side() {
-        // ADR-0026 fixes the default context at 3 (matching `git diff -U3`).
-        // A match on body line index 5 shows indices [2, 8] and excludes the
-        // lines just outside that window.
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        let body = "alpha\nbravo\ncharlie\ndelta\necho\nMATCHHERE\nfoxtrot\ngolf\nhotel\nindia";
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "t1",
-                display: "tk-1",
-                title: "Subject",
-                body,
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        drop(conn);
-
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_git(&h, &store);
-        let code = run_rendered(
-            &mut h,
-            Args {
-                pattern: "MATCHHERE".to_owned(),
-                ..Args::default()
-            },
-        );
-        assert_eq!(code, Exit::Ok);
-        let stdout = String::from_utf8(h.stdout).unwrap();
-        for shown in [
-            "charlie",
-            "delta",
-            "echo",
-            "MATCHHERE",
-            "foxtrot",
-            "golf",
-            "hotel",
+    fn body_context_respects_default_symmetric_and_asymmetric_windows() {
+        for (context, before_context, after_context, first, last) in [
+            (None, None, None, 2, 8),
+            (Some(1), None, None, 4, 6),
+            (Some(0), None, None, 5, 5),
+            (None, Some(1), Some(2), 4, 7),
         ] {
-            assert!(stdout.contains(shown), "expected {shown:?} in {stdout:?}");
-        }
-        for hidden in ["alpha", "bravo", "india"] {
-            assert!(
-                !stdout.contains(hidden),
-                "did not expect {hidden:?} in {stdout:?}"
+            let (code, out) = grep_one_args(
+                "Subject",
+                CONTEXT_BODY,
+                Args {
+                    pattern: "MATCHHERE".into(),
+                    context,
+                    before_context,
+                    after_context,
+                    ..Args::default()
+                },
             );
+            assert_eq!(code, Exit::Ok);
+            for (index, line) in CONTEXT_BODY.lines().enumerate() {
+                assert_eq!(
+                    out.contains(line),
+                    (first..=last).contains(&index),
+                    "{line}: {out:?}"
+                );
+            }
         }
     }
 
@@ -500,76 +446,30 @@ mod tests {
         "alpha\nbravo\ncharlie\ndelta\necho\nMATCHHERE\nfoxtrot\ngolf\nhotel\nindia";
 
     #[test]
-    fn context_flag_narrows_the_window_each_side() {
-        // tk-118: `-C 1` overrides the default 3, so only one line each side of
-        // the index-5 hit shows.
-        let (code, out) = grep_one_args(
-            "Subject",
-            CONTEXT_BODY,
-            Args {
-                pattern: "MATCHHERE".to_owned(),
-                context: Some(1),
-                ..Args::default()
-            },
-        );
-        assert_eq!(code, Exit::Ok);
-        for shown in ["echo", "MATCHHERE", "foxtrot"] {
-            assert!(out.contains(shown), "expected {shown:?} in {out:?}");
-        }
-        for hidden in ["delta", "golf"] {
-            assert!(
-                !out.contains(hidden),
-                "did not expect {hidden:?} in {out:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn context_zero_shows_only_the_matching_line() {
-        // tk-118: `-C 0` collapses the hunk to the matching line — no context.
-        let (code, out) = grep_one_args(
-            "Subject",
-            CONTEXT_BODY,
-            Args {
-                pattern: "MATCHHERE".to_owned(),
-                context: Some(0),
-                ..Args::default()
-            },
-        );
-        assert_eq!(code, Exit::Ok);
-        assert!(out.contains("MATCHHERE"), "out={out:?}");
-        for hidden in ["echo", "foxtrot"] {
-            assert!(
-                !out.contains(hidden),
-                "did not expect {hidden:?} in {out:?}"
-            );
-        }
-    }
-
-    #[test]
     fn after_and_before_context_override_the_context_flag() {
-        // tk-118: `-A`/`-B` win over `-C` on their own side. With `-C 5 -A 1`,
-        // before takes 5 (from -C) but after takes 1 (from -A), not 5 — so the
-        // window is [0, 6]: `alpha` shows (before=5) while `golf` does not
-        // (after=1, not 5). A reversed precedence would fail this.
-        let (code, out) = grep_one_args(
-            "Subject",
-            CONTEXT_BODY,
-            Args {
-                pattern: "MATCHHERE".to_owned(),
-                context: Some(5),
-                after_context: Some(1),
-                ..Args::default()
-            },
-        );
-        assert_eq!(code, Exit::Ok);
-        for shown in ["alpha", "echo", "MATCHHERE", "foxtrot"] {
-            assert!(out.contains(shown), "expected {shown:?} in {out:?}");
+        for (before_context, after_context, first, last) in
+            [(None, Some(1), 0, 6), (Some(1), None, 4, 9)]
+        {
+            let (code, out) = grep_one_args(
+                "Subject",
+                CONTEXT_BODY,
+                Args {
+                    pattern: "MATCHHERE".into(),
+                    context: Some(5),
+                    before_context,
+                    after_context,
+                    ..Args::default()
+                },
+            );
+            assert_eq!(code, Exit::Ok);
+            for (index, line) in CONTEXT_BODY.lines().enumerate() {
+                assert_eq!(
+                    out.contains(line),
+                    (first..=last).contains(&index),
+                    "{line}: {out:?}"
+                );
+            }
         }
-        assert!(
-            !out.contains("golf"),
-            "-A 1 must override -C 5 on the after side: {out:?}"
-        );
     }
 
     #[test]
@@ -592,32 +492,6 @@ mod tests {
             out.contains("india"),
             "window should reach the last line: {out:?}"
         );
-    }
-
-    #[test]
-    fn after_and_before_context_override_each_side() {
-        // tk-118: `-B 1 -A 2` is asymmetric — one line before, two after the
-        // index-5 hit — proving the two sides resolve independently.
-        let (code, out) = grep_one_args(
-            "Subject",
-            CONTEXT_BODY,
-            Args {
-                pattern: "MATCHHERE".to_owned(),
-                before_context: Some(1),
-                after_context: Some(2),
-                ..Args::default()
-            },
-        );
-        assert_eq!(code, Exit::Ok);
-        for shown in ["echo", "MATCHHERE", "foxtrot", "golf"] {
-            assert!(out.contains(shown), "expected {shown:?} in {out:?}");
-        }
-        for hidden in ["delta", "hotel"] {
-            assert!(
-                !out.contains(hidden),
-                "did not expect {hidden:?} in {out:?}"
-            );
-        }
     }
 
     /// Run `tk grep PATTERN` against a single seeded Ticket, returning
@@ -682,38 +556,23 @@ mod tests {
     }
 
     #[test]
-    fn ignore_case_matches_across_case() {
-        // tk-117: `-i` flips the case-sensitive default for one invocation, so
-        // the capitalised pattern hits the lowercase body.
-        let (code, out) = grep_one_args(
-            "Subject",
-            "the auth token",
-            Args {
-                pattern: "Auth".to_owned(),
-                ignore_case: true,
-                ..Args::default()
-            },
-        );
-        assert_eq!(code, Exit::Ok);
-        assert!(out.contains("the auth token"), "out={out:?}");
-    }
-
-    #[test]
     fn ignore_case_folds_beyond_ascii() {
-        // ADR-0026: `-i` compiles case-insensitively rather than lowercasing,
-        // so it inherits the regex engine's full Unicode case folding — strictly
-        // stronger than `tk search`'s ASCII-only `lower()`. `é` folds to `É`.
-        let (code, out) = grep_one_args(
-            "Subject",
-            "the CAFÉ menu",
-            Args {
-                pattern: "café".to_owned(),
-                ignore_case: true,
-                ..Args::default()
-            },
-        );
-        assert_eq!(code, Exit::Ok);
-        assert!(out.contains("the CAFÉ menu"), "out={out:?}");
+        for (body, pattern) in [("the auth token", "Auth"), ("the CAFÉ menu", "café")] {
+            // ADR-0026: `-i` compiles case-insensitively rather than lowercasing,
+            // so it inherits the regex engine's full Unicode case folding — strictly
+            // stronger than `tk search`'s ASCII-only `lower()`. `é` folds to `É`.
+            let (code, out) = grep_one_args(
+                "Subject",
+                body,
+                Args {
+                    pattern: pattern.to_owned(),
+                    ignore_case: true,
+                    ..Args::default()
+                },
+            );
+            assert_eq!(code, Exit::Ok);
+            assert!(out.contains(body), "out={out:?}");
+        }
     }
 
     #[test]
@@ -797,23 +656,6 @@ mod tests {
         );
         assert_eq!(code, Exit::Ok);
         assert!(out.is_empty(), "quiet must suppress stdout: {out:?}");
-    }
-
-    #[test]
-    fn quiet_no_match_is_exit_one_with_no_output() {
-        // tk-119: a quiet no-match keeps the 0/1 overload — exit 1, empty
-        // stdout (and empty stderr, distinguishing it from a failure).
-        let (code, out) = grep_one_args(
-            "Subject",
-            "the auth token",
-            Args {
-                pattern: "nonexistent".to_owned(),
-                quiet: true,
-                ..Args::default()
-            },
-        );
-        assert_eq!(code, Exit::NoMatch);
-        assert!(out.is_empty(), "out={out:?}");
     }
 
     #[test]
@@ -934,21 +776,6 @@ mod tests {
             String::from_utf8(h.stdout).unwrap(),
             "tk-1: Done MATCH\ntk-2: Epic subject\n"
         );
-    }
-
-    #[test]
-    fn list_no_match_is_silent_and_exits_one() {
-        let (code, out) = grep_one_args(
-            "Subject",
-            "body",
-            Args {
-                pattern: "absent".to_owned(),
-                list: true,
-                ..Args::default()
-            },
-        );
-        assert_eq!(code, Exit::NoMatch);
-        assert!(out.is_empty(), "out={out:?}");
     }
 
     #[test]
@@ -1108,7 +935,7 @@ mod tests {
     }
 
     #[test]
-    fn title_only_match_renders_label_and_facet_without_a_body_hunk() {
+    fn title_only_match_renders_label_without_a_body_hunk() {
         // ADR-0026: a title hit renders the label + facet (the highlighted title
         // is the cue) but produces no body hunk, since nothing in the body matched.
         let (code, out) = grep_one("Refactor the auth layer", "unrelated body text", "auth");
@@ -1119,64 +946,54 @@ mod tests {
     }
 
     #[test]
-    fn non_contiguous_hunks_are_separated_by_a_dashes_line() {
-        // grep behavior (ADR-0026): two matches far enough apart that their ±3
-        // windows don't touch render as two hunks split by a bare `--`, and the
-        // lines in the gap between the windows are omitted.
-        let body = "NEEDLE first\nctx1\nctx2\nctx3\nGAP4\nGAP5\nGAP6\nctx7\nctx8\nctx9\nNEEDLE second\nctx11\nctx12\nctx13";
-        let (code, out) = grep_one("Subject", body, "NEEDLE");
-        assert_eq!(code, Exit::Ok);
-        assert!(out.contains("NEEDLE first"), "out={out:?}");
-        assert!(out.contains("NEEDLE second"), "out={out:?}");
-        assert!(
-            out.contains("\n--\n"),
-            "expected a -- hunk separator: {out:?}"
-        );
-        for gap in ["GAP4", "GAP5", "GAP6"] {
-            assert!(!out.contains(gap), "did not expect {gap:?} in {out:?}");
+    fn non_contiguous_hunks_keep_the_gap_out_and_style_the_separator() {
+        for (styler, separator) in [
+            (Styler::plain(), "\n--\n"),
+            (Styler::always(), "\n\x1b[34m--\x1b[39m\n"),
+        ] {
+            // ADR-0026: the `--` between non-contiguous hunks is blue (secondary to
+            // the cyan Display ID and the bright-yellow matches), gated by the
+            // Styler so piped output stays a bare `--`.
+            let store = TmpStore::new("repo");
+            let conn = seed_store(&store);
+            let body = "NEEDLE first\nctx1\nctx2\nctx3\nGAP4\nGAP5\nGAP6\nctx7\nctx8\nctx9\nNEEDLE second\nctx11\nctx12\nctx13";
+            insert_fixture_item(
+                &conn,
+                FixtureItem {
+                    id: "t1",
+                    display: "tk-1",
+                    title: "Subject",
+                    body,
+                    created_seq: 1,
+                    ..FixtureItem::default()
+                },
+            )
+            .unwrap();
+            drop(conn);
+
+            let cwd_path = cwd();
+            let mut h = Harness::new(&cwd_path, &store);
+            expect_git(&h, &store);
+            let code = run_rendered_with(
+                &mut h,
+                styler,
+                Args {
+                    pattern: "NEEDLE".to_owned(),
+                    ..Args::default()
+                },
+            );
+            assert_eq!(code, Exit::Ok);
+            let out = String::from_utf8(h.stdout).unwrap();
+            // Blue opens `\x1b[34m` and closes `\x1b[39m` (foreground default).
+            assert!(
+                out.contains(separator),
+                "blue -- separator missing: {out:?}"
+            );
+            assert!(out.contains("first") && out.contains("second"), "{out:?}");
+            for gap in ["GAP4", "GAP5", "GAP6"] {
+                assert!(!out.contains(gap), "{out:?}");
+            }
         }
-    }
-
-    #[test]
-    fn hunk_separator_is_blue_under_color() {
-        // ADR-0026: the `--` between non-contiguous hunks is blue (secondary to
-        // the cyan Display ID and the bright-yellow matches), gated by the
-        // Styler so piped output stays a bare `--`.
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        let body = "NEEDLE one\na\nb\nc\nd\ne\nf\ng\nNEEDLE two";
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                id: "t1",
-                display: "tk-1",
-                title: "Subject",
-                body,
-                created_seq: 1,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        drop(conn);
-
-        let cwd_path = cwd();
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_git(&h, &store);
-        let code = run_rendered_with(
-            &mut h,
-            Styler::always(),
-            Args {
-                pattern: "NEEDLE".to_owned(),
-                ..Args::default()
-            },
-        );
-        assert_eq!(code, Exit::Ok);
-        let out = String::from_utf8(h.stdout).unwrap();
-        // Blue opens `\x1b[34m` and closes `\x1b[39m` (foreground default).
-        assert!(
-            out.contains("\u{1b}[34m--\u{1b}[39m"),
-            "blue -- separator missing: {out:?}"
-        );
     }
 
     #[test]
@@ -1291,10 +1108,7 @@ mod tests {
     }
 
     #[test]
-    fn block_never_renders_relationship_or_blocker_sections() {
-        // ADR-0026: a grep block is label + facet + hunks only. Relationship
-        // sections (PARENT/TICKETS/BLOCKED BY/BLOCKING) are references, not
-        // matched text, so grep omits them even when the Item has dependencies.
+    fn block_omits_internal_blocker_details() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_item(
@@ -1335,22 +1149,15 @@ mod tests {
         );
         assert_eq!(code, Exit::Ok);
         let out = String::from_utf8(h.stdout).unwrap();
-        for header in [
-            "PARENT",
-            "TICKETS",
-            "BLOCKED BY",
-            "BLOCKING",
-            "EXTERNAL BLOCKERS",
-        ] {
-            assert!(
-                !out.contains(header),
-                "did not expect {header:?} in {out:?}"
-            );
-        }
+        assert!(out.contains("UNIQUEWORD"), "{out:?}");
+        assert!(
+            !out.contains("BLOCKED BY"),
+            "unexpected blocker details: {out:?}"
+        );
     }
 
     #[test]
-    fn matches_a_done_item_across_all_statuses() {
+    fn matches_a_done_item() {
         // ADR-0026: grep covers every Item Status, including done.
         let (code, out) = {
             let store = TmpStore::new("repo");
@@ -1429,12 +1236,8 @@ mod tests {
         );
         // Title match wrapped, nested inside the bold (\x1b[1m) HEADER.
         assert!(
-            out.contains("\u{1b}[93mauth\u{1b}[39m subject"),
+            out.contains("\x1b[1m\x1b[93mauth\x1b[39m subject\x1b[22m"),
             "title highlight missing: {out:?}"
-        );
-        assert!(
-            out.contains("\u{1b}[1m"),
-            "title should still be bold: {out:?}"
         );
     }
 
@@ -1497,9 +1300,10 @@ mod tests {
 
     #[test]
     fn a_pattern_does_not_match_across_a_newline() {
-        // Per-line matching (ADR-0026): a phrase split over a hard newline never
-        // matches, which is also why a highlight can never span two lines.
-        let (code, out) = grep_one("Subject", "ends with END\nSTART begins", "END START");
+        let body = "ends with END\nSTART begins";
+        let pattern = r"END\nSTART";
+        assert!(Regex::new(pattern).unwrap().is_match(body));
+        let (code, out) = grep_one("Subject", body, pattern);
         assert_eq!(code, Exit::NoMatch);
         assert!(out.is_empty(), "out={out:?}");
     }

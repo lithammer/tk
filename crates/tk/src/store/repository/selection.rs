@@ -416,6 +416,11 @@ mod tests {
         let (priority, selection, _) = selection_of(&store, "t");
         assert_eq!(priority.as_deref(), Some("P1"));
         assert_eq!(selection, "accepted");
+        let mutations: i64 = store
+            .conn
+            .query_row("select count(*) from mutations", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mutations, 0);
     }
 
     #[test]
@@ -513,6 +518,11 @@ mod tests {
         let (priority, selection, _) = selection_of(&store, "t");
         assert_eq!(priority.as_deref(), Some("P1"));
         assert_eq!(selection, "parked");
+        let mutations: i64 = store
+            .conn
+            .query_row("select count(*) from mutations", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mutations, 0);
     }
 
     #[test]
@@ -622,6 +632,11 @@ mod tests {
         let (priority, selection, _) = selection_of(&store, "t");
         assert_eq!(priority.as_deref(), Some("P1"));
         assert_eq!(selection, "accepted");
+        let mutations: i64 = store
+            .conn
+            .query_row("select count(*) from mutations", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mutations, 0);
     }
 
     #[test]
@@ -653,32 +668,6 @@ mod tests {
             unpark_ticket(&mut store, &clock, "t"),
             Err(UnparkError::Triage)
         ));
-    }
-
-    #[test]
-    fn unpark_emits_no_mutation() {
-        let mut store = open_seeded();
-        seed(&store, "t", "parked", Some("P2"));
-        let clock = FakeClock::new(1_778_284_800_000);
-        unpark_ticket(&mut store, &clock, "t").unwrap();
-        let mutations: i64 = store
-            .conn
-            .query_row("select count(*) from mutations", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(mutations, 0, "Selection State changes never emit Mutations");
-    }
-
-    #[test]
-    fn park_emits_no_mutation() {
-        let mut store = open_seeded();
-        seed(&store, "t", "accepted", Some("P2"));
-        let clock = FakeClock::new(1_778_284_800_000);
-        park_ticket(&mut store, &clock, "t").unwrap();
-        let mutations: i64 = store
-            .conn
-            .query_row("select count(*) from mutations", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(mutations, 0, "Selection State changes never emit Mutations");
     }
 
     #[test]
@@ -714,18 +703,5 @@ mod tests {
             mutations, 0,
             "Selection State stays local even for a Backend Ticket"
         );
-    }
-
-    #[test]
-    fn accept_emits_no_mutation() {
-        let mut store = open_seeded();
-        seed(&store, "t", "triage", None);
-        let clock = FakeClock::new(1_778_284_800_000);
-        accept_ticket(&mut store, &clock, "t", Some(Priority::P1)).unwrap();
-        let mutations: i64 = store
-            .conn
-            .query_row("select count(*) from mutations", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(mutations, 0, "Selection State changes never emit Mutations");
     }
 }

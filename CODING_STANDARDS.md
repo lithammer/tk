@@ -28,6 +28,17 @@ CLI output, exit codes, SQL schema, and ADR-0017 messages are contracts.
 Change them deliberately. When a change revises a recorded decision,
 update its ADR in the same change.
 
+## Tests
+
+Keep each contract's main proof at its owning boundary. A second layer needs
+a distinct risk, such as argument wiring, process failure, or transaction
+rollback. Carry unique assertions into the keeper before removing a test.
+
+Make the condition under test decide the result. A blocked Ticket must
+otherwise win selection; a timestamp must differ from the stored value;
+a preservation test needs existing data. Before asserting that output or
+rows are absent, check the expected outcome and prove the intended path ran.
+
 ## Code Documentation
 
 Document public APIs and important private boundaries where they carry

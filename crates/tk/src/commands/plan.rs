@@ -277,9 +277,20 @@ mod tests {
                 assert!(output.contains("\x1b[31m[bug]\x1b[39m"), "{output:?}");
                 assert_eq!(output.contains("\x1b[33mP1\x1b[39m"), priority.is_some());
                 assert_eq!(output.contains("\x1b[2m"), status != ItemStatus::Done);
-                assert!(
-                    !output.contains("\x1b[0m"),
-                    "inner styles must preserve the row dim"
+                let row = output
+                    .lines()
+                    .find(|line| line.contains("tk-1"))
+                    .expect("Ticket row");
+                assert!(!row.contains("\x1b[0m"), "{row:?}");
+                assert_eq!(
+                    row.matches("\x1b[22m").count(),
+                    usize::from(status != ItemStatus::Done),
+                    "{row:?}"
+                );
+                assert_eq!(
+                    row.ends_with("\x1b[22m"),
+                    status != ItemStatus::Done,
+                    "{row:?}"
                 );
             }
         }

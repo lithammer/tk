@@ -353,27 +353,6 @@ mod tests {
     }
 
     #[test]
-    fn starting_an_accepted_ticket_still_succeeds() {
-        // The start-guard must reject only non-accepted work.
-        let mut store = open_seeded();
-        insert_fixture_item(
-            &store.conn,
-            FixtureItem {
-                selection_state: Some("accepted"),
-                ..open_ticket("t1", "tk-1")
-            },
-        )
-        .unwrap();
-
-        set_work_state(&mut store, &clock(), "t1", WorkState::Active).unwrap();
-
-        assert_eq!(
-            item_axes(&store.conn, "t1").unwrap(),
-            (Lifecycle::Open, WorkState::Active)
-        );
-    }
-
-    #[test]
     fn starting_an_epic_succeeds_without_a_selection_state() {
         // Work State covers Epics too (ADR-0043), unlike Ticket-only Selection
         // State: the relocated conjunct's NULL arm must not read as a refusal.

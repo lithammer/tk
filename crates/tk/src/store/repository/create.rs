@@ -344,6 +344,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(selection.as_deref(), Some("accepted"));
+        let mutations: i64 = store
+            .conn
+            .query_row("select count(*) from mutations", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mutations, 0);
     }
 
     #[test]
@@ -498,31 +503,5 @@ mod tests {
         assert!(priority.is_none());
         // Epics stay outside Selection State (ADR-0027).
         assert!(selection.is_none());
-    }
-
-    #[test]
-    fn local_creates_emit_no_mutations() {
-        let mut store = open_seeded();
-        let clock = FakeClock::new(1_778_284_800_000);
-        let mut rng = fixed_rng();
-
-        create_local_ticket(
-            &mut store,
-            &clock,
-            &mut rng,
-            CreateLocalTicketInput {
-                kind: TicketKind::Task,
-                selection: NewTicketSelection::Accepted(Priority::P2),
-                parent_id: None,
-                title: "Local",
-                body: "",
-            },
-        )
-        .unwrap();
-        let mutations: i64 = store
-            .conn
-            .query_row("select count(*) from mutations", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(mutations, 0);
     }
 }

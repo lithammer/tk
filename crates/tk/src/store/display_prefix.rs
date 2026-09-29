@@ -101,12 +101,9 @@ mod tests {
 
     #[test]
     fn empty_becomes_tk_dash() {
-        assert_eq!(derive(""), "tk-");
-    }
-
-    #[test]
-    fn all_punctuation_becomes_tk_dash() {
-        assert_eq!(derive("---"), "tk-");
+        for input in ["", "---"] {
+            assert_eq!(derive(input), "tk-");
+        }
     }
 
     #[test]
