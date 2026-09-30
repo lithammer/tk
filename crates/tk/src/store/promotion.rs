@@ -1228,42 +1228,6 @@ pub fn abandoned_promotions(
     Ok(out)
 }
 
-/// The earliest Promotion of `operation_id` still awaiting an outcome.
-///
-/// Detach asks this of every Mutation it would withdraw. A nonterminal
-/// Promotion is the state ADR-0038 protects: withdrawing one Mutation of that
-/// operation could leave an Epic upstream with its children gone, so the
-/// operator resolves the Promotion first. Once every Promotion of the
-/// operation is terminal, no prospective identity is left to split and the
-/// operation's remaining intent withdraws like any other.
-///
-/// The earliest is the one that must resolve first, and its state decides
-/// which exits exist: only an `applying` Promotion may be retried, while
-/// ordinary sync still carries a `pending` or `failed` one (ADR-0037).
-pub fn unresolved_promotion(
-    conn: &Connection,
-    operation_id: &str,
-) -> rusqlite::Result<Option<MutationSummary>> {
-    conn.query_row(
-        "select m.sequence, m.state, i.display_value, i.item_class \
-           from mutations m join items i on i.id = m.item_id \
-          where m.promotion_operation_id = ?1 \
-            and m.mutation_type in ('promote_ticket', 'promote_epic') \
-            and m.state in ('pending', 'failed', 'applying') \
-          order by m.sequence asc limit 1",
-        params![operation_id],
-        |r| {
-            Ok(MutationSummary {
-                sequence: r.get(0)?,
-                state: r.get(1)?,
-                target_display_id: r.get(2)?,
-                item_class: r.get(3)?,
-            })
-        },
-    )
-    .optional()
-}
-
 /// The Mutations of `operation_id` still awaiting an outcome, in Mutation
 /// Sequence order.
 ///
