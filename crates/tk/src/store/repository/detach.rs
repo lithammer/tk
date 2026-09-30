@@ -1,6 +1,6 @@
 //! Atomic Repository Store transition for `tk detach` (ADR-0047).
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use thiserror::Error;
 
 use crate::domain::backend_binding::BackendBinding;
@@ -13,7 +13,6 @@ use crate::domain::item_class::ItemClass;
 use crate::domain::mutation_state::MutationState;
 use crate::domain::mutation_type::MutationType;
 use crate::store::mutations::{self, BackendBindingError};
-use crate::store::promotion;
 use crate::store::sequences::SequenceError;
 use crate::store::sync::MutationSummary;
 
@@ -148,7 +147,7 @@ pub fn detach(
     let affected = affected_mutations(&tx, &reference.id)?;
     for mutation in &affected {
         if let Some(operation_id) = mutation.promotion_operation_id.as_deref()
-            && let Some(promotion) = promotion::unresolved_promotion(&tx, operation_id)?
+            && let Some(promotion) = unresolved_promotion(&tx, operation_id)?
         {
             return Err(DetachError::UnresolvedPromotionOperation {
                 sequence: mutation.sequence,
@@ -241,6 +240,34 @@ pub fn detach(
         item_class: reference.item_class,
         withdrawn,
     })
+}
+
+/// Detach must not split an operation still owed a Backend identity (ADR-0047).
+/// Once all its Promotions are terminal, its remaining Mutations may be
+/// withdrawn. The earliest unresolved Promotion names the next recovery step;
+/// its state decides which exits are safe (ADR-0037).
+fn unresolved_promotion(
+    conn: &rusqlite::Connection,
+    operation_id: &str,
+) -> rusqlite::Result<Option<MutationSummary>> {
+    conn.query_row(
+        "select m.sequence, m.state, i.display_value, i.item_class \
+           from mutations m join items i on i.id = m.item_id \
+          where m.promotion_operation_id = ?1 \
+            and m.mutation_type in ('promote_ticket', 'promote_epic') \
+            and m.state in ('pending', 'failed', 'applying') \
+          order by m.sequence asc limit 1",
+        params![operation_id],
+        |r| {
+            Ok(MutationSummary {
+                sequence: r.get(0)?,
+                state: r.get(1)?,
+                target_display_id: r.get(2)?,
+                item_class: r.get(3)?,
+            })
+        },
+    )
+    .optional()
 }
 
 fn backend_item_blocked_by_local(

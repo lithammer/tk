@@ -101,6 +101,10 @@ small boundary module after the second caller proves the shape.
   Detach, Former Backend Identity provenance, and the uniqueness invariant
   spanning active and former Backend ownership
   ([ADR 0047](./docs/adr/0047-detach-retains-reversible-backend-history.md)).
+  `store/repository/detach.rs` owns the private read for the earliest unresolved
+  Promotion in an affected Mutation's Promotion Operation. Only Detach uses
+  this read: it serves Detach's refusal to split an operation still owed a
+  Backend identity, not the post-sync operation-resolution report.
   `store/promotion.rs` exposes the SQL half of `tk promote` — the preflight
   graph read, the one-transaction outbox commit, receipt application, and the
   operation-scoped post-sync Mutation Log read. Promotion recovery also lives
