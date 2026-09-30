@@ -9,7 +9,7 @@ transition to `done`, and rendered by `tk show`; it never reaches a
 Backend in v1.
 
 A closing reason reads like a comment, and v1 defers Comments
-(CONTEXT.md; the `mutations` Mutation Type list; ADR-0021). Treating it as
+(GLOSSARY.md; the `mutations` Mutation Type list; ADR-0021). Treating it as
 a Local Field removes that conflict instead of blocking the Ticket on
 the Comments slice: Priority is the precedent — local-only, unsynced,
 shown by `tk show`.

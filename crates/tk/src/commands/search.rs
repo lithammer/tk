@@ -401,7 +401,7 @@ mod tests {
             !stdout.contains("Mutation Log:"),
             "search shares the row markers and their legend but carries no \
              Mutation Log chrome, because a lookup returns the Items asked for \
-             and nothing ambient (CONTEXT.md). This line appearing means \
+             and nothing ambient (GLOSSARY.md). This line appearing means \
              `tk list`'s queue count was folded into render_chrome, which \
              search shares: {stdout:?}"
         );

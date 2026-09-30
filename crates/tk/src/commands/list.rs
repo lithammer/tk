@@ -287,7 +287,7 @@ fn render<W: Write + ?Sized>(
 ///
 /// Lives here rather than in [`render_chrome`] because `commands/search.rs`
 /// shares that function, and a lookup returns the Items asked for and nothing
-/// ambient (CONTEXT.md).
+/// ambient (GLOSSARY.md).
 fn render_unresolved_counts<W: Write + ?Sized>(
     stdout: &mut W,
     unresolved: UnresolvedMutationCounts,
@@ -297,7 +297,7 @@ fn render_unresolved_counts<W: Write + ?Sized>(
         return Ok(());
     }
 
-    // Ordered as `MutationState::ALL` and CONTEXT.md's Unresolved Mutation
+    // Ordered as `MutationState::ALL` and GLOSSARY.md's Unresolved Mutation
     // definition are, not failed-first like the row markers.
     let by_state = [
         (unresolved.pending, MutationState::Pending),

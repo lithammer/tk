@@ -48,7 +48,7 @@ Cancellation). Exactly one was missing.
 ### An unobserved withdrawal is a distinct terminal state
 
 `cancelled` means withdrawn intent that created nothing — that is what ADR-0038
-decided and what CONTEXT.md defines. Writing it on a row that may have created
+decided and what GLOSSARY.md defines. Writing it on a row that may have created
 a Backend object would make Promotion Cancellation's own definition untrue,
 which is verbatim the argument ADR-0038 used against recording withdrawn intent
 as `skipped`. `abandoned` keeps both meanings intact:

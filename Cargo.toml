@@ -30,10 +30,10 @@ pedantic = { level = "deny", priority = -1 }
 
 # tk's domain-qualified names (Repository Store, Workspace Scope, Display ID)
 # produce types like `store::Store`, `mutation::Mutation`. Renaming for the
-# lint would erase the vocabulary that CONTEXT.md keeps in lockstep.
+# lint would erase the vocabulary that GLOSSARY.md keeps in lockstep.
 module_name_repetitions = "allow"
 
-# Doc comments anchor in CONTEXT.md prose — "Repository Store", "Display ID",
+# Doc comments anchor in GLOSSARY.md prose — "Repository Store", "Display ID",
 # "Workspace Scope" appear constantly and are vocabulary, not code symbols.
 # Backticking each occurrence would noisy them up without aiding navigation.
 doc_markdown = "allow"

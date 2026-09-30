@@ -1,7 +1,7 @@
 # Agent Notes
 
 - Read [README.md](./README.md) for the project overview.
-- Read [CONTEXT.md](./CONTEXT.md) — domain language and model — before changing
+- Read [GLOSSARY.md](./GLOSSARY.md) — domain language and model — before changing
   domain language.
 - Read [ARCHITECTURE.md](./ARCHITECTURE.md) — module map, boundaries, and
   Repository Store invariants — before changing module boundaries or those

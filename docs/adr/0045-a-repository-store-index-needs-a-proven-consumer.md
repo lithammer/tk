@@ -45,7 +45,7 @@ are all keyed by `start_id`; the outer query already requires an `accepted`
 candidate, so a trimmed seed's rows only ever fed an Effective Priority that
 was discarded; every accepted candidate still seeds itself, so the inner
 `join eff` loses no row; and `prop_edge` is untouched, so Effective Priority
-still propagates through `triage` and `parked` intermediates. CONTEXT.md's rule
+still propagates through `triage` and `parked` intermediates. GLOSSARY.md's rule
 that non-accepted Tickets are excluded as candidates is what puts the trimmed
 seeds out of reach, and it makes the seed set exactly the candidate set.
 

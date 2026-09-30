@@ -86,7 +86,7 @@ revision" caveat is withdrawn.
 
 ### Assignee leaves the model
 
-This decision removes Assignee from CONTEXT.md and man/tk.1; no code held it.
+This decision removes Assignee from GLOSSARY.md and man/tk.1; no code held it.
 The one live consumer of an assignee is the wayfinder skill, which claims a
 ticket by assigning it to the human driving the map. That claim is a
 tracker-level operation, not an assignee: GitHub spells it `--add-assignee
@@ -180,7 +180,7 @@ requires, and tk-19 touches exactly that code.
 
 ## Consequences
 
-- CONTEXT.md: Local Field loses "in v1"; Shared Field and Reserved
+- GLOSSARY.md: Local Field loses "in v1"; Shared Field and Reserved
   Representation enter the glossary; Label and Assignee leave it, together
   with the Relationships, dialogue, and flagged-ambiguity lines that carried
   them; the V1 Mutation Type list drops the two External Blocker types.

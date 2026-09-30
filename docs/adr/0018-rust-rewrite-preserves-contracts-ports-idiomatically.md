@@ -21,7 +21,7 @@ these, not the `.zig` files (one reference implementation of them):
   Mutation Failure record (0016).
 - **The test corpus** — the CLI byte-output and exit-code contract, encoded
   black-box (txtar scenarios + command-handler + migration tests).
-- **`CONTEXT.md`** — the domain vocabulary. Tests do not catch prose drift, so
+- **`GLOSSARY.md`** — the domain vocabulary. Tests do not catch prose drift, so
   the Rust names must keep terms such as Repository Store, Display ID,
   Mutation, and Backend Adapter.
 

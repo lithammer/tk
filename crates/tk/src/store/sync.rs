@@ -1551,7 +1551,7 @@ fn legacy_adopt_backend_key(backend_kind: BackendKind, adopted: &AdoptedItem) ->
 /// How many **Unresolved Mutations** the Mutation Log holds, one count per
 /// state.
 ///
-/// Unresolved is `pending`, `failed`, or `applying` (CONTEXT.md) — every
+/// Unresolved is `pending`, `failed`, or `applying` (GLOSSARY.md) — every
 /// Mutation still waiting on a Backend. The three fields are that definition,
 /// compile-checked: widening the set means adding a field here.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1901,7 +1901,7 @@ pub enum ClearRemoteError {
     #[error("no Remote configured")]
     NotConfigured,
     /// Pending or failed Mutations still target the Backend; removing the
-    /// Remote would orphan them (CONTEXT.md). Carries the count for the
+    /// Remote would orphan them (GLOSSARY.md). Carries the count for the
     /// verbatim diagnostic.
     #[error(
         "{0} pending or failed Mutation(s) would be orphaned; resolve them before clearing the Remote. Run 'tk sync' to apply them, or 'tk sync --skip <mutation-id>' to bypass a failed one"
@@ -1915,7 +1915,7 @@ pub enum ClearRemoteError {
     )]
     WouldOrphanPromotion { count: i64, promotion: i64 },
     /// A creation whose outcome tk never observed is unresolved intent against
-    /// this Remote, so tk refuses to clear it (CONTEXT.md). Carries the Mutation
+    /// this Remote, so tk refuses to clear it (GLOSSARY.md). Carries the Mutation
     /// Sequence for the verbatim diagnostic.
     #[error(
         "Mutation {0} has an indeterminate Backend creation outcome; resolve it before clearing the Remote. Run 'tk promote reconcile <id> <backend-key>' if the Backend object exists, 'tk promote retry <id>' only when creating it again is safe, or 'tk promote cancel <id>' to withdraw the Promotion Operation, leaving any object it created untracked"
@@ -1925,7 +1925,7 @@ pub enum ClearRemoteError {
 
 /// Remove the v1 singleton Remote and its Sync Cursor, inside one IMMEDIATE
 /// transaction, but only when no pending or failed Mutations would be orphaned
-/// (ADR-0033, CONTEXT.md).
+/// (ADR-0033, GLOSSARY.md).
 ///
 /// Deletes `sync_cursors` before `remotes` because the
 /// `sync_cursors.remote_name` foreign key is `on delete restrict`. Backend
@@ -4819,7 +4819,7 @@ mod tests {
 
     #[test]
     fn unresolved_counts_split_by_state_and_ignore_terminal_rows() {
-        // Pins the membership of Unresolved Mutation (CONTEXT.md): pending,
+        // Pins the membership of Unresolved Mutation (GLOSSARY.md): pending,
         // failed and applying count; every terminal state does not. A failure
         // here means `tk list`'s footer count has silently changed which
         // Mutations it reports to the reader.

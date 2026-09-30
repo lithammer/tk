@@ -215,7 +215,7 @@ pub enum CommitPlanError {
 /// [`generate_internal_id`] — the same opaque-ID scheme `items.id` uses,
 /// reused rather than inventing a second one — and stamps every appended
 /// Mutation with it (ADR-0036), so a caller can later ask whether every
-/// Mutation belonging to it resolved (CONTEXT.md Promotion Operation).
+/// Mutation belonging to it resolved (GLOSSARY.md Promotion Operation).
 /// Drafts are appended in plan order, which is what makes the resulting
 /// ascending Mutation Sequence order match the plan's contract order: `append`
 /// allocates sequences as it goes.
@@ -277,7 +277,7 @@ pub enum ApplyReceiptError {
 /// Convert the Local Item `item_id` into a Backend Item using the identity its
 /// Promotion receipt carries: store `backend_kind` / `receipt.backend_key`,
 /// replace the Display ID with `receipt.display_id`, and keep the outgoing
-/// Display ID resolvable as an Alias (CONTEXT.md Promotion).
+/// Display ID resolvable as an Alias (GLOSSARY.md Promotion).
 ///
 /// Selection State, Priority, status, title, and body are Local Fields that
 /// survive Promotion untouched; leaving `status` out of the `items` update also
@@ -674,7 +674,7 @@ pub fn reconcile_promotion(
         now,
     )?;
     if force_convergence {
-        // Convergence intent is current local title and body (CONTEXT.md
+        // Convergence intent is current local title and body (GLOSSARY.md
         // Promotion Reconciliation), and Promotion leaves both untouched, so
         // the read is the same either side of the receipt.
         let (title, body): (String, String) = tx.query_row(
@@ -1269,7 +1269,7 @@ pub fn unresolved_promotion(
 ///
 /// An empty result is the success condition for one `tk promote`: overall
 /// success requires every Mutation in the requested Promotion Operation to
-/// resolve (CONTEXT.md Promotion Operation). Comparing a non-empty result
+/// resolve (GLOSSARY.md Promotion Operation). Comparing a non-empty result
 /// against [`crate::store::sync::earliest_applicable_mutation`] separates a
 /// Promotion queued behind an older Mutation from one of the operation's own
 /// Mutations being rejected.
@@ -1449,7 +1449,7 @@ mod tests {
     #[test]
     fn an_accepted_ticket_stays_accepted_through_promotion() {
         // Both Selection States a Ticket may carry into Promotion survive it
-        // (CONTEXT.md Promotion); `parked` is covered above, and `accepted` is
+        // (GLOSSARY.md Promotion); `parked` is covered above, and `accepted` is
         // the one the default path takes.
         let mut conn = open_seeded();
         insert_fixture_item(

@@ -11,7 +11,7 @@ appears as a stored field or on `tk show` / `tk list` output. When
 the selected **Ticket**'s **Effective Priority** is lower than its
 own **Priority**, `tk next` may render a stderr rationale line so a
 non-obvious pick is explainable without a follow-up `tk show`. See
-the `Effective Priority` entry in [CONTEXT.md](../../CONTEXT.md) for
+the `Effective Priority` entry in [GLOSSARY.md](../../GLOSSARY.md) for
 the definition and propagation rules.
 
 ## Considered Options
@@ -63,7 +63,7 @@ agents the reason.
 - Rationale rendering is optional. If walking back to the
   contributing **Blocked Item** turns out to be awkward in SQL (for
   example when the contribution comes through several **Epic** hops),
-  the rationale may be omitted; CONTEXT.md says "may render," not
+  the rationale may be omitted; GLOSSARY.md says "may render," not
   "must."
 - When multiple reachable **Tickets** share the candidate's
   **Effective Priority**, the rationale names the one with the lowest

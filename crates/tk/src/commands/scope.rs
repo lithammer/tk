@@ -6,7 +6,7 @@
 //! state. Resolution is Epic-only: a value that resolves to a Ticket is a
 //! typed error, surfaced by the command via [`resolver::ResolveEpicError`].
 //!
-//! The command layer owns Scope resolution (per CONTEXT.md); the store-facing
+//! The command layer owns Scope resolution (per GLOSSARY.md); the store-facing
 //! selection accepts an already-resolved Epic id.
 
 use crate::cli::CommandError;

@@ -22,7 +22,7 @@ construction and helper effects within the helper's stated purpose.
 
 ## Contracts
 
-Review behavior against CONTEXT.md, ARCHITECTURE.md, and the relevant ADRs.
+Review behavior against GLOSSARY.md, ARCHITECTURE.md, and the relevant ADRs.
 
 CLI output, exit codes, SQL schema, and ADR-0017 messages are contracts.
 Change them deliberately. When a change revises a recorded decision,

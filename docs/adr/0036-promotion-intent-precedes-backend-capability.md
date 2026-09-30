@@ -31,7 +31,7 @@ still local; that is the whole point of the operation. The rule that decides
 whether a current-state write also appends backend intent therefore stops
 reading Origin and reads a derived **Pending Promotion** state instead: an Item
 appends Mutations when it is a Backend Item, or when it is a Local Item whose
-Promotion is already in the Mutation Log. CONTEXT.md's **Mutation** and
+Promotion is already in the Mutation Log. GLOSSARY.md's **Mutation** and
 **Ticket Mutation** entries and the "Origin gates Mutations" paragraph in
 ARCHITECTURE.md are amended to match.
 
