@@ -1,6 +1,6 @@
 //! Work State: the local axis ADR-0043 splits out of `items.status`.
 //!
-//! A **Local Field** (CONTEXT.md) covering Tickets and Epics alike — never
+//! A **Local Field** (GLOSSARY.md) covering Tickets and Epics alike — never
 //! applied to a Backend, never recorded as a Mutation. Its counterpart is
 //! the Backend-shared [`crate::domain::lifecycle`]; ADR-0043 records how
 //! Item Status derives from the pair.

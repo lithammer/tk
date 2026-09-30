@@ -7,7 +7,7 @@
 //! - `tk remote set jira` is refused in v1 — `jira` parses to a real
 //!   [`BackendKind`] but no Jira Backend Adapter exists yet (Usage, exit 2).
 //! - `tk remote clear` removes the Remote only when no pending or failed
-//!   Mutations would be orphaned (CONTEXT.md).
+//!   Mutations would be orphaned (GLOSSARY.md).
 //! - bare `tk remote` shows the configured kind.
 //!
 //! Per ADR-0032, [`run`] returns `Result<Exit, CommandError>` and the dispatch

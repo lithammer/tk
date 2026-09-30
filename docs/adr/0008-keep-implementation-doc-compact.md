@@ -5,7 +5,7 @@ contracts. It does not keep detailed plans after a feature ships.
 
 Future work belongs in Local Tickets so it appears in `tk list` and `tk next`
 and can carry implementation detail in the Ticket body. Durable product
-language belongs in `CONTEXT.md`. Command reference belongs in command help,
+language belongs in `GLOSSARY.md`. Command reference belongs in command help,
 `man/tk.1`, and tests. Design decisions belong in ADRs. Agent-facing rules
 belong in `AGENTS.md`. Once a slice lands, remove its checklist from
 `ARCHITECTURE.md` unless it still explains an active boundary or invariant.

@@ -2,7 +2,7 @@
 //! because its Promotion is already durable, or is Local with no Promotion
 //! intent at all.
 //!
-//! Names CONTEXT.md's **Pending Promotion** — "a Local Ticket or Local Epic
+//! Names GLOSSARY.md's **Pending Promotion** — "a Local Ticket or Local Epic
 //! with durable Promotion intent that has not yet received its backend
 //! identity" — as a value. ADR-0036 makes it the question a write path asks
 //! instead of Origin: an Item appends Mutations when it is a Backend Item *or*

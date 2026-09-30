@@ -91,7 +91,7 @@ pub const MUTATION_APPLYING: Style = fg(AnsiColor::Yellow);
 
 /// An Abandoned Mutation — a Promotion withdrawn before tk recorded a
 /// Backend identity, so a Backend object may exist that tk cannot address.
-/// Magenta, because CONTEXT.md singles it out as the one Withdrawn Mutation
+/// Magenta, because GLOSSARY.md singles it out as the one Withdrawn Mutation
 /// that still asks something of the reader. Not red: nothing was refused
 /// here either.
 pub const MUTATION_ABANDONED: Style = fg(AnsiColor::Magenta);

@@ -4,10 +4,10 @@ This document maps how the tk codebase is organized — which directory
 owns which role, and the durable invariants the Repository Store preserves.
 It is intentionally compact: per [ADR
 0008](./docs/adr/0008-keep-implementation-doc-compact.md), shipped slice
-checklists should not live here once code, tests, command help, `CONTEXT.md`,
+checklists should not live here once code, tests, command help, `GLOSSARY.md`,
 and ADRs carry the durable contracts. Onboarding pointers live in
 `README.md`; review conventions live in `CODING_STANDARDS.md`; agent
-navigation lives in `AGENTS.md`; domain vocabulary lives in `CONTEXT.md`; the
+navigation lives in `AGENTS.md`; domain vocabulary lives in `GLOSSARY.md`; the
 command reference lives in `tk --help`, `tk <command> --help`, and
 `man/tk.1`. The manual combines the clap command tree with authored sections;
 its generated output is checked in and embedded in the binary. See

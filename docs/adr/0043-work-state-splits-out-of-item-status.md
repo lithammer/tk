@@ -22,7 +22,7 @@ merged pull request that closes the underlying issue can land `done` on a row
 an operator is still working. This decision splits the column:
 `items.status` keeps only the shared lifecycle, `work_state` becomes a new
 **Local Field**, and **Item Status** — the three-valued `open` / `active` /
-`done` view CONTEXT.md defines and every command prints — becomes a
+`done` view GLOSSARY.md defines and every command prints — becomes a
 value derived from the two.
 
 What the Adapter cannot express is narrower than what GitHub cannot
@@ -51,7 +51,7 @@ unlike Ticket-only **Selection State** (ADR-0027). Only the relocated `active`
 because **Selection State** is what that conjunct reads. **Item Status**
 stops being a stored column and becomes a pure function of the two:
 `done` when **Lifecycle** is `done`; otherwise `active` when **Work State**
-is `active`, else `open`. CONTEXT.md's **Item Status** entry keeps its three
+is `active`, else `open`. GLOSSARY.md's **Item Status** entry keeps its three
 values — users still see three; only the storage and sync prose move.
 
 Inverting the derivation this way — rather than narrowing **Item Status** to
@@ -204,7 +204,7 @@ can only refuse one already produced.
   predicate spelling `status = 'open'` to mean *not started* stays valid SQL
   and silently widens: after the split an in-progress Ticket satisfies it, so
   `tk list --ready` lists work already underway and `tk next` recommends it,
-  violating CONTEXT.md's rule that a Ticket is ready only when its **Item
+  violating GLOSSARY.md's rule that a Ticket is ready only when its **Item
   Status** is `open`. Every such site needs `and work_state = 'idle'`. The
   `triage` and `parked` arms are the exception that shows why: they pair
   `status = 'open'` with a non-`accepted` **Selection State**, which the

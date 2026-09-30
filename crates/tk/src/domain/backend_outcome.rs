@@ -30,7 +30,7 @@ pub enum BackendCreateOutcome {
     Indeterminate(Failure),
 }
 
-/// Backend Adapter classification of a [`Failure`] (ADR-0016 / CONTEXT.md
+/// Backend Adapter classification of a [`Failure`] (ADR-0016 / GLOSSARY.md
 /// Adapter Failure).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

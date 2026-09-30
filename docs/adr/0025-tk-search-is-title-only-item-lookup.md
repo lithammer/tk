@@ -41,7 +41,7 @@ second verb.
 ## Consequences
 
 - **`tk search`** is whole-store, all-statuses, and title-only, which makes it
-  the first sanctioned lookup for `done` work. CONTEXT.md's done-browsing
+  the first sanctioned lookup for `done` work. GLOSSARY.md's done-browsing
   deferral is updated: general done-browsing through **`tk next`** /
   **`tk list`** stays deferred, but finding a specific completed item by title
   is supported.

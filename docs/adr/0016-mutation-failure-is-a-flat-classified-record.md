@@ -62,7 +62,7 @@ fixed contract and the recovery work unblocks with the vocabulary it needs.
   reason ADR-0009 rejected it: subprocess CLIs collapse causes into
   "non-zero exit + stderr," and the per-variant fields are imagined until
   an adapter makes them observable.
-- **Append-only `mutation_failures` history table.** Rejected: CONTEXT.md
+- **Append-only `mutation_failures` history table.** Rejected: GLOSSARY.md
   defines a Mutation Failure as the *latest* structured failure; a
   history table needs a migration and FK, and recovery workflows consume
   only the latest classification.
@@ -81,7 +81,7 @@ fixed contract and the recovery work unblocks with the vocabulary it needs.
 
 ## Amendment (tk-34): the graduation lands in the first adapter
 
-tk-11 shipped this ADR and the CONTEXT.md Adapter Failure entry but
+tk-11 shipped this ADR and the GLOSSARY.md Adapter Failure entry but
 deferred the code (a design ticket). tk-34, the GitHub Backend Adapter,
 is the "whichever ticket first does" this ADR named, and it settles the
 two questions left open here:

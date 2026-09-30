@@ -3,7 +3,7 @@
 //!
 //! Each command surface lives in its own submodule and operates against the
 //! shared [`Store`] handle. The split mirrors the operation taxonomy used
-//! by CONTEXT.md (Repository Store §2) and keeps each per-operation SQL
+//! by GLOSSARY.md (Repository Store §2) and keeps each per-operation SQL
 //! batch grep-able in a small file rather than buried in a monolithic
 //! module.
 //!

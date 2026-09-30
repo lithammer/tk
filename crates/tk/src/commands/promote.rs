@@ -1,5 +1,5 @@
 //! `tk promote` — convert a Local Ticket or Local Epic into a backend-backed
-//! object through the configured Remote (CONTEXT.md Promotion).
+//! object through the configured Remote (GLOSSARY.md Promotion).
 //!
 //! One `tk promote <id>` invocation is one Promotion Operation. The whole
 //! operation is preflighted against a Repository Store snapshot before a byte
@@ -733,7 +733,7 @@ fn target_item(graph: &PromotionGraph) -> &GraphItem {
 
 /// Print one line per Item whose Display ID a Promotion receipt replaced.
 ///
-/// The outgoing Display ID must remain an Alias for the same Item (CONTEXT.md
+/// The outgoing Display ID must remain an Alias for the same Item (GLOSSARY.md
 /// Promotion). Missing or reassigned Aliases are Repository Store corruption,
 /// but one finding does not hide later mappings that did land during the same
 /// sync. An unreadable Store stops reporting because later resolutions would
