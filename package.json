@@ -1,0 +1,10 @@
+{
+  "name": "tk-pi",
+  "private": true,
+  "pi": {
+    "extensions": ["./.pi/extensions/tk-prime.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}

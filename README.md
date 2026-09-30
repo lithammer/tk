@@ -46,6 +46,16 @@ Run `cargo build --release`; the binary is written to `target/release/tk`.
 For changes to command help or the manual, follow
 [Editing the manual](man/README.md).
 
+## Pi extension
+
+Install the extension with [Pi](https://pi.dev):
+
+```sh
+pi install git:github.com/lithammer/tk
+```
+
+Add `--local` to install it for only the current project.
+
 ## Quick start
 
 ```sh
