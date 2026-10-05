@@ -5,7 +5,7 @@
 //! derivation (an Item is *blocked* when it has any unresolved Dependency
 //! or unresolved External Blocker). The command-side renderer owns the
 //! tree glyph and the compact plain-text row shape, so the query returns
-//! a typed [`ListRow`] per match rather than a pre-rendered string.
+//! typed [`ListRow`]s for matches and their Epic context, not rendered strings.
 
 use rusqlite::params;
 
@@ -35,8 +35,7 @@ pub struct ListRow {
     pub status: ItemStatus,
     /// Internal stable ID of the parent Epic, if any.
     pub container_id: Option<String>,
-    /// Local-only Selection State; `None` for Epics (ADR-0027). Drives the dim
-    /// `[parked]` list badge.
+    /// Ticket-only Selection State; `None` for Epics (ADR-0027).
     pub selection_state: Option<SelectionState>,
     pub has_unresolved_blocker: bool,
     /// Pending non-Promotion Mutations, including edits queued behind a
@@ -47,17 +46,18 @@ pub struct ListRow {
     pub has_failed_mutation: bool,
 }
 
-/// Item-selection mode for `tk list`.
+/// Item-selection mode for `tk list`. Every view retains Epics as context
+/// for matching child Tickets, regardless of the Epic's Lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ListView {
-    /// Open + Active items (no Done unless under a matching Epic in another view).
+    /// Open and active Items.
     #[default]
     Default,
-    /// Tickets that are open and free of unresolved blockers.
+    /// Open, idle, accepted Tickets with no unresolved blockers.
     Ready,
-    /// Open or Active Tickets blocked by Dependency or External Blocker.
+    /// Open or active Tickets with unresolved blockers, excluding triage.
     Blocked,
-    /// Items with status = active.
+    /// Items with active Work State.
     Active,
     /// Open Tickets in triage (captured, not yet accepted).
     Triage,
@@ -84,8 +84,7 @@ pub enum ListOriginFilter {
     #[default]
     Any,
     Local,
-    /// User-facing flag is `--remote`; storage column is `backend`. The
-    /// public name matches the CLI flag.
+    /// `--remote` selects stored Origin `backend`.
     Remote,
 }
 
@@ -218,8 +217,6 @@ select id, display_value, item_class, ticket_kind, priority, title, \
    and ( \
        parent.self_matches \
        or ( \
-           ?1 in ('ready', 'blocked', 'active', 'triage', 'parked') \
-           and \
            parent.item_class = 'epic' \
            and exists ( \
                select 1 \
@@ -551,44 +548,73 @@ mod tests {
             },
         )
         .unwrap();
-        // Parent Epic surfaces alongside the child Ticket; the renderer
-        // uses the parent to plot the tree.
         assert!(display_ids(&rows).contains(&"tk-1"));
         assert!(display_ids(&rows).contains(&"tk-2"));
     }
 
     #[test]
-    fn ready_view_still_surfaces_a_done_epic_parent() {
-        // Characterizes what LIST_ROWS_SQL does today, not what it should
-        // do: the epic-parent-inclusion branch above carries no status
-        // predicate on the parent, so a `done` Epic with a ready child still
-        // surfaces here (tk-163). If this test starts failing, tk-163 added
-        // that predicate on purpose — invert the assertion, don't chase a
-        // regression.
-        let store = open_seeded();
-        seed_epic(&store, "epic", "tk-1", "done", 1);
-        insert_fixture_item(
-            &store.conn,
-            FixtureItem {
-                id: "child",
-                display: "tk-2",
-                title: "Child",
-                container_id: Some("epic"),
-                created_seq: 2,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
-        let rows = list_rows(
-            &store,
-            ListOptions {
-                view: ListView::Ready,
-                ..ListOptions::default()
-            },
-        )
-        .unwrap();
-        assert!(display_ids(&rows).contains(&"tk-1"));
-        assert!(display_ids(&rows).contains(&"tk-2"));
+    fn every_view_keeps_done_epics_as_context() {
+        for (view, work_state, selection_state, priority) in [
+            (ListView::Default, "idle", "accepted", Some("P2")),
+            (ListView::Ready, "idle", "accepted", Some("P2")),
+            (ListView::Blocked, "idle", "accepted", Some("P2")),
+            (ListView::Active, "active", "accepted", Some("P2")),
+            (ListView::Triage, "idle", "triage", None),
+            (ListView::Parked, "idle", "parked", Some("P2")),
+        ] {
+            let store = open_seeded();
+            seed_epic(&store, "epic", "tk-1", "done", 1);
+            insert_fixture_item(
+                &store.conn,
+                FixtureItem {
+                    id: "child",
+                    display: "tk-2",
+                    title: "Child",
+                    container_id: Some("epic"),
+                    work_state: Some(work_state),
+                    selection_state: Some(selection_state),
+                    priority,
+                    created_seq: 2,
+                    ..FixtureItem::default()
+                },
+            )
+            .unwrap();
+            seed_epic(&store, "finished", "tk-4", "done", 4);
+            insert_fixture_item(
+                &store.conn,
+                FixtureItem {
+                    id: "done-child",
+                    display: "tk-3",
+                    title: "Done child",
+                    container_id: Some("finished"),
+                    status: "done",
+                    selection_state: Some(selection_state),
+                    priority,
+                    created_seq: 3,
+                    ..FixtureItem::default()
+                },
+            )
+            .unwrap();
+            seed_epic(&store, "empty", "tk-5", "done", 5);
+            insert_external_blocker(&store.conn, "parent-blocker", "epic", None).unwrap();
+            if view == ListView::Blocked {
+                insert_external_blocker(&store.conn, "child-blocker", "child", None).unwrap();
+                insert_external_blocker(&store.conn, "done-blocker", "done-child", None).unwrap();
+            }
+
+            let rows = list_rows(
+                &store,
+                ListOptions {
+                    view,
+                    ..ListOptions::default()
+                },
+            )
+            .unwrap();
+
+            assert_eq!(display_ids(&rows), ["tk-1", "tk-2"], "{view:?}");
+            assert_eq!(rows[0].status, ItemStatus::Done, "{view:?}");
+            assert_eq!(rows[1].container_id.as_deref(), Some("epic"), "{view:?}");
+        }
     }
 
     #[test]
@@ -637,12 +663,11 @@ mod tests {
     }
 
     #[test]
-    fn epic_class_filter_keeps_parent_epic_in_ready_view() {
-        // The epic-parent-inclusion branch surfaces an Epic whose child is
-        // ready; the class filter drops the child Ticket but keeps the Epic,
-        // so `--ready --epic` answers "which Epics contain ready work?".
+    fn epic_class_filter_keeps_done_parent_context() {
+        // Apply the Epic class filter to output rows, not to children used
+        // to qualify context.
         let store = open_seeded();
-        seed_epic(&store, "epic", "tk-1", "open", 1);
+        seed_epic(&store, "epic", "tk-1", "done", 1);
         insert_fixture_item(
             &store.conn,
             FixtureItem {
@@ -655,27 +680,27 @@ mod tests {
             },
         )
         .unwrap();
-        let rows = list_rows(
-            &store,
-            ListOptions {
-                view: ListView::Ready,
-                class: ListClassFilter::Epic,
-                ..ListOptions::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(display_ids(&rows), vec!["tk-1"]);
+
+        for view in [ListView::Default, ListView::Ready] {
+            let rows = list_rows(
+                &store,
+                ListOptions {
+                    view,
+                    class: ListClassFilter::Epic,
+                    ..ListOptions::default()
+                },
+            )
+            .unwrap();
+
+            assert_eq!(display_ids(&rows), ["tk-1"], "{view:?}");
+        }
     }
 
     #[test]
-    fn ready_epic_origin_filter_applies_to_child_subquery() {
-        // The epic-parent-inclusion branch re-applies the Origin filter to the
-        // child (`child.origin = ?2`), so under `--ready --epic --local` a Local
-        // Epic surfaces only when it has a ready *Local* child — not merely any
-        // ready child. Both Epics here are Local (they pass the parent Origin
-        // filter); they differ only in the Origin of their ready child.
+    fn epic_context_requires_a_child_matching_the_origin_filter() {
+        // A child outside the Origin filter must not qualify its Epic for context.
         let store = open_seeded();
-        seed_epic(&store, "epic-local-child", "tk-1", "open", 1);
+        seed_epic(&store, "epic-local-child", "tk-1", "done", 1);
         insert_fixture_item(
             &store.conn,
             FixtureItem {
@@ -688,7 +713,7 @@ mod tests {
             },
         )
         .unwrap();
-        seed_epic(&store, "epic-backend-child", "tk-3", "open", 3);
+        seed_epic(&store, "epic-backend-child", "tk-3", "done", 3);
         insert_fixture_item(
             &store.conn,
             FixtureItem {
@@ -705,17 +730,20 @@ mod tests {
         )
         .unwrap();
 
-        let rows = list_rows(
-            &store,
-            ListOptions {
-                view: ListView::Ready,
-                class: ListClassFilter::Epic,
-                origin: ListOriginFilter::Local,
-                scope: None,
-            },
-        )
-        .unwrap();
-        assert_eq!(display_ids(&rows), vec!["tk-1"]);
+        for view in [ListView::Default, ListView::Ready] {
+            let rows = list_rows(
+                &store,
+                ListOptions {
+                    view,
+                    class: ListClassFilter::Epic,
+                    origin: ListOriginFilter::Local,
+                    scope: None,
+                },
+            )
+            .unwrap();
+
+            assert_eq!(display_ids(&rows), ["tk-1"], "{view:?}");
+        }
     }
 
     #[test]
@@ -734,7 +762,6 @@ mod tests {
             },
         )
         .unwrap();
-        // An unrelated Epic and a top-level Ticket must be excluded.
         seed_epic(&store, "other-epic", "tk-3", "open", 3);
         seed_ticket(&store, "loose", "tk-4", "open", 4);
 
@@ -814,9 +841,6 @@ mod tests {
 
     #[test]
     fn ready_excludes_parked_tickets() {
-        // Mirror of `ready_excludes_triage_tickets`: the ready arm keys on
-        // `selection_state = 'accepted'`, so parked (held) work is no more
-        // selectable than triage (tk-75 AC).
         let store = open_seeded();
         seed_ticket(&store, "accepted", "tk-1", "open", 1);
         seed_parked(&store, "parked", "tk-2", 2);
@@ -833,10 +857,8 @@ mod tests {
 
     #[test]
     fn ready_excludes_an_active_ticket() {
-        // The ready arm used to spell "not started" as `status = 'open'`; after
-        // ADR-0043 split the column that predicate also matches work under way,
-        // so the arm carries `work_state = 'idle'` too. Without it `tk list
-        // --ready` lists a Ticket someone is already working.
+        // Open Lifecycle alone does not imply readiness; Work State must be
+        // idle (ADR-0043).
         let store = open_seeded();
         seed_ticket(&store, "idle", "tk-1", "open", 1);
         seed_ticket(&store, "working", "tk-2", "active", 2);
@@ -870,9 +892,6 @@ mod tests {
 
     #[test]
     fn blocked_includes_parked_with_unresolved_blocker() {
-        // tk-75 AC: `tk list --blocked` surfaces parked Tickets that carry an
-        // unresolved blocker, alongside accepted ones (the blocked arm matches
-        // `selection_state <> 'triage'`).
         let store = open_seeded();
         seed_parked(&store, "parked", "tk-1", 1);
         seed_epic(&store, "blocker", "tk-2", "open", 2);
@@ -1031,9 +1050,8 @@ mod tests {
 
     #[test]
     fn pending_promotion_with_a_later_edit_sets_pending() {
-        // `is_backend_bound()` is true for a Pending Promotion, so nothing
-        // filters this Local Item's later edit out — it is unsent work
-        // exactly as pending as one queued behind a Backend Item.
+        // Edits queued behind a Pending Promotion still need Mutation markers
+        // (ADR-0041).
         let store = open_seeded();
         seed_ticket(&store, "t1", "tk-1", "open", 1);
         seed_mutation(

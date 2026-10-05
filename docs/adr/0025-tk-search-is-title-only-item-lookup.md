@@ -82,6 +82,21 @@ dimming a closed item with `⊘` would still misrepresent it as pending. Only
 the "why this is safe" reasoning was wrong; the "what `render_row` does"
 decision stands.
 
-Whether a `done` Epic should surface as a container in a filtered
-**`tk list`** view at all — a question this ADR never considered — is
-tk-163's to decide.
+## Resolution (gh-58): done Epics remain grouping context
+
+Every **`tk list`** view, including default, retains an **Epic** as context
+when it has a matching child **Ticket**, even if the Epic is `done`. This
+preserves **Epic Membership** without hiding matching work. Closing an Epic
+neither closes its children nor removes their membership.
+
+No list view matches done Tickets. A done Epic without matching children
+stays hidden. **Scope** confines rows to the selected Epic and its children;
+other filters still apply. **Origin** filters apply to both parent and
+child; an excluded parent leaves matching children at top level. `--epic`
+keeps containers while hiding their matching children: `--ready --epic`
+lists Epics containing ready Tickets, including done Epics.
+
+Totals count all displayed Items, including Epic context, by **Item Status**.
+A done Epic uses its normal row: `✓`, any Mutation markers (ADR-0040), and
+no blocked styling. No context label is added. Epic context does not affect
+Ticket readiness or **`tk next`** selection.

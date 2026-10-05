@@ -1,11 +1,16 @@
 The default view shows open and active Tickets and Epics. Epics render as
 top-level rows, child Tickets render under their Epic with tree glyphs, and
-unparented Tickets render as top-level rows.
+unparented Tickets render as top-level rows. Every view retains an Epic as
+context when it has a matching child Ticket, even when the Epic is done.
+Done Tickets and done Epics without matching children stay hidden.
+Totals count all displayed Items, including contextual Epics.
 .PP
 .B \-\-ready
-shows open Tickets with no unresolved Dependencies or External Blockers.
+shows open, idle, accepted Tickets with no unresolved Dependencies or
+External Blockers.
 .B \-\-blocked
-shows open or active Tickets with unresolved Dependencies or External Blockers.
+shows open or active Tickets with unresolved Dependencies or External
+Blockers, excluding triage.
 .B \-\-active
 shows active Tickets and Epics, retaining inactive Epics as containers for
 active child Tickets.
@@ -19,10 +24,14 @@ intentionally held. The view flags are mutually exclusive.
 shows only items with Local Origin, including Pending Promotions.
 .B \-\-remote
 shows only items with Backend Origin. A Pending Promotion retains Local
-Origin until tk records its Backend identity.
+Origin until tk records its Backend identity. Origin filters apply to both
+parent and child; a matching Ticket whose Epic is excluded renders at top level.
 .PP
 .B \-\-epic
 restricts the listing to Epics and composes with any view or Origin filter.
+It may retain a container while hiding its matching child Tickets, so
+.B tk list \-\-ready \-\-epic
+lists Epics containing ready Tickets, including done Epics.
 .PP
 .B \-\-epic
 and the positional
