@@ -30,18 +30,15 @@ use crate::store::sync::{
 
 /// Flags for `tk list`.
 ///
-/// Seven `bool`s exceed pedantic's `struct_excessive_bools` cap, but clap's
-/// derive API needs one field per `--flag`; collapsing into an enum would
-/// fight clap's help generation. The `conflicts_with*` attrs make the
-/// invalid combinations unrepresentable at the parser layer; `--epic` is
-/// an orthogonal class filter and carries none.
+/// Clap needs one field per flag. The parser rejects conflicting flags;
+/// `--epic` composes with any view or Origin filter.
 #[derive(Debug, ClapArgs)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Args {
-    /// Show ready Tickets (open, no unresolved blockers).
+    /// Show open, idle, accepted Tickets with no unresolved blockers.
     #[arg(long, conflicts_with_all = ["blocked", "active"])]
     pub ready: bool,
-    /// Show blocked Tickets (open/active with unresolved blockers).
+    /// Show open or active Tickets with unresolved blockers, excluding triage.
     #[arg(long, conflicts_with_all = ["ready", "active"])]
     pub blocked: bool,
     /// Show active Tickets and Epics.
@@ -107,20 +104,10 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     Ok(Exit::Ok)
 }
 
-/// Render the chrome above the List Tree — the Scope hint, then the Mutation
-/// Log queue-head banner — and fence it from the tree with one blank line.
-///
-/// The List Tree is bounded below by `render_chrome`'s rule line
-/// (`item_row.rs`) and above by this fence. Banners accumulate into one
-/// buffer, so an empty buffer *is* the no-banner case: nothing reaches
-/// stdout, and an unscoped `tk list` over a quiet Mutation Log opens on its
-/// first tree row or on `empty_message`.
-///
-/// Appending the fence to the block separates only while every banner
-/// renderer ends its own line; one that wrote unterminated bytes would have
-/// the fence terminate that line instead.
-///
-/// ARCHITECTURE.md records which side each command writes the line on.
+/// Write the Scope hint, then the Mutation Log banner, followed by one blank
+/// line. Write nothing when neither applies. Each banner must end its line
+/// so the final newline separates the block from the tree or empty message.
+/// ARCHITECTURE.md records the separator rules.
 fn render_banners<W: Write + ?Sized>(
     stdout: &mut W,
     scope_display_id: Option<&str>,
@@ -169,33 +156,14 @@ fn banner_worthy(head: &MutationSummary) -> bool {
     matches!(head.state, MutationState::Failed | MutationState::Applying)
 }
 
-/// One-line banner naming the Mutation Log's queue head: its Mutation
-/// Sequence, state, and target Display ID, pointing at `tk sync log
-/// <sequence>` for detail.
+/// Name the global Mutation Log queue head, even when its Item is outside
+/// Scope. Report its Mutation Sequence, state, and target Display ID, not a
+/// cause or Item count. Callers must pass a head that cleared `banner_worthy`.
 ///
-/// Callers pass a head that has cleared `banner_worthy`.
-///
-/// Never claims a cause: `sync_cursors` has no last-error column, and an
-/// Apply that fails on the environment leaves its row `pending` with no
-/// outcome written, so the store cannot tell "sync could not reach the
-/// Backend" from "sync has not run yet" — the common case. The banner says
-/// where the queue is stuck, not why.
-///
-/// Never carries an item count: a store-wide rollup would count Items that
-/// Scope, `--local` / `--remote`, and `--epic` deliberately exclude, against
-/// ADR-0022's consequence that "`tk list` prints a hint when scoped so a
-/// filtered tree never reads as the full store".
-///
-/// Naming the queue head is a statement about the Mutation Log, not the rows
-/// in view — so under an active Scope the banner may correctly name an Item
-/// outside that Scope, directly beneath the `Scope:` hint. That is not a bug.
-///
-/// Never restates recovery guidance: `unresolved_failure` in
-/// `commands/promote.rs` owns the verbatim ADR-0017 wording for `tk promote
-/// reconcile` / `retry` / `cancel`. This banner only points at `tk sync log`.
-///
-/// Promotion failures appear here too. Their rows carry a Pending Promotion
-/// label; the Mutation glyphs remain reserved for other Mutations (ADR-0041).
+/// Point at `tk sync log <sequence>` for detail; `unresolved_failure` in
+/// `commands/promote.rs` owns Promotion recovery guidance (ADR-0017).
+/// Promotion failures belong here too, though their row label is distinct
+/// from other Mutation markers (ADR-0041).
 fn render_sync_banner<W: Write + ?Sized>(
     stdout: &mut W,
     head: &MutationSummary,
@@ -257,8 +225,6 @@ fn render<W: Write + ?Sized>(
     if rows.is_empty() {
         writeln!(stdout, "{}", empty_message(options))?;
     } else {
-        // Walk roots first; embed children inline so the renderer can lay
-        // out a tree without a second pass over the row vector.
         let mut markers = MutationMarkers::default();
         for row in rows {
             if parent_is_in_rows(rows, row) {
@@ -270,7 +236,6 @@ fn render<W: Write + ?Sized>(
         render_chrome(stdout, rows, markers, styler)?;
     }
 
-    // One exit, so the trailer follows whichever body ran.
     render_unresolved_counts(stdout, unresolved, styler)
 }
 
@@ -348,9 +313,6 @@ fn parent_is_in_rows(rows: &[ListRow], row: &ListRow) -> bool {
 }
 
 fn empty_message(options: ListOptions<'_>) -> &'static str {
-    // Only the Default view distinguishes Epic-vs-Any and Origin in its empty
-    // message; the Ready / Blocked / Active views keep their per-view phrasing
-    // because Epics may still exist there but simply contain no matching child.
     match options.view {
         ListView::Default => match (options.class, options.origin) {
             (ListClassFilter::Epic, ListOriginFilter::Local) => "No local epics.",
@@ -386,8 +348,6 @@ mod tests {
         run_rendered_with(h, Styler::plain(), args)
     }
 
-    /// [`run_rendered`] with an explicit `Styler` so the colour-output test
-    /// can exercise `Styler::always()`.
     fn run_rendered_with(h: &mut Harness<'_>, styler: Styler, args: Args) -> Exit {
         let mut deps = h.deps_with(styler);
         match run(&mut deps, args) {
@@ -617,7 +577,7 @@ mod tests {
     }
 
     #[test]
-    fn scope_filters_to_epic_and_prints_a_hint() {
+    fn scope_to_a_done_epic_keeps_its_context_and_prints_a_hint() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_item(
@@ -628,6 +588,7 @@ mod tests {
                 item_class: "epic",
                 ticket_kind: None,
                 priority: None,
+                status: "done",
                 title: "Epic",
                 created_seq: 1,
                 ..FixtureItem::default()
@@ -662,6 +623,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
+
         let code = run_rendered(
             &mut h,
             Args {
@@ -669,15 +631,16 @@ mod tests {
                 ..default_args()
             },
         );
+
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         insta::assert_snapshot!(stdout, @"
         Scope: tk-1 (Epic + child Tickets)
 
-        ○ tk-1 [epic] Epic
+        ✓ tk-1 [epic] Epic
         └── ○ tk-2 ● P2 Child
         --------------------------------------------------------------------------------
-        Total: 2 items (2 open)
+        Total: 2 items (1 open, 1 done)
 
         Status: ○ open  ◐ active  ✓ done
         Blocked: ⊘ blocked
@@ -724,12 +687,6 @@ mod tests {
 
     #[test]
     fn nested_child_row_reaches_the_legend_through_render_children() {
-        // `render`'s top-level loop and `render_children` each merge their own
-        // `MutationMarkers` into the running total (list.rs's fold has two
-        // call sites, unlike search.rs's one). This Epic is open, so its
-        // child nests under it instead of falling through to top level the
-        // way the orphaned-child test's `done` Epic does — the only path
-        // that exercises the `render_children` half of the fold.
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_item(
@@ -788,9 +745,6 @@ mod tests {
 
     #[test]
     fn mutation_markers_pin_exact_byte_placement_and_spare_clean_rows() {
-        // A substring check proves a marker glyph appears somewhere in the
-        // line, not that it sits in the right place in a renderer shared
-        // with `tk search`; this pins the full row set's bytes instead.
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_item(
@@ -1085,13 +1039,8 @@ mod tests {
 
     #[test]
     fn orphaned_child_of_an_excluded_epic_still_reaches_the_legend() {
-        // The default view excludes a `done` Epic outright (no matching-child
-        // fallback the way `--ready`/`--blocked`/etc. have one), so its open
-        // child reaches `render` with its parent absent from `rows` and falls
-        // through to top level — the case `render_mutation_legend`'s fold
-        // assumes never drops a row's flags. A failure here means a row was
-        // rendered whose flags the legend never saw — the fold's premise
-        // broken.
+        // Origin filtering must not lose the child's markers when its Epic
+        // is excluded and the child renders at top level.
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_item(
@@ -1104,6 +1053,9 @@ mod tests {
                 priority: None,
                 status: "done",
                 title: "Done epic",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("99"),
                 created_seq: 1,
                 ..FixtureItem::default()
             },
@@ -1132,10 +1084,19 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
-        let code = run_rendered(&mut h, default_args());
+
+        let code = run_rendered(
+            &mut h,
+            Args {
+                local: true,
+                ..default_args()
+            },
+        );
+
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(!stdout.contains("Done epic"), "stdout={stdout:?}");
+        assert!(stdout.contains("Total: 1 item (1 open)"), "{stdout}");
         let line = stdout
             .lines()
             .find(|l| l.contains("tk-2"))
@@ -1318,11 +1279,8 @@ mod tests {
     #[test]
     fn unresolved_count_reports_a_mutation_no_row_can_show() {
         for all_states in [false, true] {
-            // The case this line exists for: `tk done` on a backend-bound Item
-            // queues a Mutation and the Item leaves the Default view's
-            // `status = 'open'` arm, so no row and no glyph legend mentions it,
-            // and a `pending` head prints no banner. A failure here means that
-            // Mutation reaches no surface at all.
+            // The trailer must count Mutations hidden by the view, even when
+            // a pending head prints no banner.
             let store = TmpStore::new("repo");
             let conn = seed_store(&store);
             insert_fixture_item(
@@ -1398,12 +1356,8 @@ mod tests {
 
     #[test]
     fn queue_head_banner_renders_below_the_scope_hint_and_may_name_an_out_of_scope_item() {
-        // The banner describes the Mutation Log, not the rows in view, so it
-        // may correctly name an Item the active Scope excludes. This is also
-        // the only reachable path where both banners stack, so it pins the
-        // fence's shape: the two banners adjacent, then exactly one blank
-        // line, then the tree — a failure here means the fence or the pairing
-        // regressed.
+        // The banner describes the whole Mutation Log, even under Scope.
+        // Both banners must precede the tree with one blank line after them.
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_item(
@@ -1481,10 +1435,7 @@ mod tests {
 
     #[test]
     fn scoped_empty_list_still_opens_on_the_empty_message_after_the_fence() {
-        // A scoped list with no matching rows short-circuits to
-        // `empty_message` before the footer renders. A failure here means the
-        // fence stopped covering that path, leaving the `Scope:` hint flush
-        // against the empty message.
+        // One blank line must separate the Scope hint from an empty message.
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_item(

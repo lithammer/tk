@@ -50,11 +50,15 @@ The priority used to order a candidate **Ticket** in **`tk next`**, derived from
 _Avoid_: Inherited Priority, Critical Path Priority, Derived Priority
 
 **List Tree**:
-The default **`tk list`** view that renders **Epics** and their child **Tickets** as a tree.
+The **`tk list`** view that renders **Epics** and their child **Tickets** as a
+tree. An **Epic** may appear as grouping context for matching child
+**Tickets** without matching the view itself.
 _Avoid_: Flat List
 
 **Epic**:
-A backend-agnostic grouping of related **Tickets** that can be tracked and worked as one unit.
+A backend-agnostic grouping of related **Tickets** that can be tracked and
+worked as one unit. Its **Lifecycle** is independent of each child **Ticket**'s
+**Lifecycle**.
 _Avoid_: Batch, Ticket Group, Umbrella
 
 **Epic Membership**:
@@ -858,9 +862,9 @@ _Avoid_: ticket, tickets
   a script — and is unstyled whatever the colour policy. Neither mode
   changes the **Effective Priority** rationale, which stays on stderr.
 - Done-item browsing through **`tk next`** is deferred; **`tk next`** selects
-  ready **Tickets** only and never surfaces a `done` item. **`tk list --ready`**
-  (and `--blocked`, `--active`, `--triage`, `--parked`) can surface a `done`
-  **Epic** as a container when it has a matching child **Ticket**.
+  ready **Tickets** only and never surfaces a `done` item. Every **`tk list`**
+  view can surface a `done` **Epic** as a container when it has a matching
+  child **Ticket**.
   **`tk search`** is the sanctioned path for finding a specific `done`
   **Ticket** or **Epic** by title, since it matches every **Item Status**.
 - **`tk list`** takes an optional positional `<epic-id>` argument; absent it, **`tk list`** reads `TK_SCOPE`, then renders the whole **Repository Store**.
@@ -1160,9 +1164,8 @@ _Avoid_: ticket, tickets
   not police; the external CLI's own failure is the diagnostic. Silently keeping
   such a relationship local was rejected, since nothing would then tell the user
   their request was dropped.
-- Whether a `done` **Epic** should surface as a container in the filtered
-  **`tk list`** views was never considered when Epic-parent inclusion was
-  designed — open (tk-163): it does today, because the inclusion rule tests
-  only that the **Epic** has a matching child. ADR-0025's amendment records
-  that its byte-safety premise was wrong; the rendering decision that premise
-  was justifying stands.
+- Whether a `done` **Epic** can still supply grouping context in **List
+  Tree** was left open (tk-163, now gh-58) — resolved: **Lifecycle** and
+  **Epic Membership** are independent. A done Epic remains the containing
+  Epic of its child **Tickets**; showing it as context does not make it
+  matching work. ADR-0025 records the list-view policy.

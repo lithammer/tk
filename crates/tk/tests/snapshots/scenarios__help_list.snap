@@ -10,8 +10,8 @@ Arguments:
   [EPIC_ID]  Scope the listing to this Epic and its child Tickets. Falls back to the `TK_SCOPE` environment variable
 
 Options:
-      --ready    Show ready Tickets (open, no unresolved blockers)
-      --blocked  Show blocked Tickets (open/active with unresolved blockers)
+      --ready    Show open, idle, accepted Tickets with no unresolved blockers
+      --blocked  Show open or active Tickets with unresolved blockers, excluding triage
       --active   Show active Tickets and Epics
       --triage   Show triage Tickets (captured, not yet accepted)
       --parked   Show parked Tickets (accepted, held out of automatic selection)
