@@ -43,7 +43,7 @@ Empty state does not hide an available command.
 Each section lists commands with short inline descriptions. Prime supplies
 context, not a way of working: it does not prescribe agent habits, Git
 housekeeping, or a sequence of commands. One tool-state requirement remains:
-run `tk start <id>` when starting work, so `tk next` excludes the Item and
+run `tk start <id>` before working on an Item, so `tk next` excludes it and
 other agents see it as active. Detailed semantics belong in command help and
 the full reference.
 
