@@ -15,7 +15,7 @@
 - `tk add --parent <epic-id> -F -` - Create a Ticket under an Epic.
 - `tk update <id> --title "New title"` - Change the title.
 - `tk update <id> --body-file -` - Replace the body from stdin.
-- `tk start <id>` - Required when starting work; marks the Item active.
+- `tk start <id>` - Mark an Item active; required before working on it.
 - `tk stop <id>` - Return an Item to idle.
 - `tk done <id>` - Mark an Item complete.
 
