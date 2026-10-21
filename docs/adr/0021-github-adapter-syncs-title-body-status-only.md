@@ -9,6 +9,11 @@
 > Representation; ADR-0049 records the contract it follows and takes over the
 > label and assignee decisions this ADR left with tk-21 (now gh-68).
 
+> **Amended by ADR-0054.** The `bug` Label fallback and the
+> repository-ownership read below are gone: Bug and Epic Promotion require
+> native Issue Types, and the revisit this ADR assigned to gh-49 no longer
+> applies.
+
 The v1 GitHub Backend Adapter (tk-34) maps item *fields* between tk and a
 GitHub repository, chiefly through the `gh issue` subcommands:
 

@@ -1,5 +1,9 @@
 # Backend-visible facets follow a shared-authority rule
 
+> **Amended by ADR-0054.** Item Class joins relationships as push-only by
+> structure, and Priority crosses from Local to Shared through GitHub's native
+> Priority field rather than reserved labels.
+
 gh-68 asked whether a Ticket should carry comments, labels, and assignees, and
 whether Work State should show on a Backend. Six open Tickets hang on the
 answer, and three of them — Priority on GitHub (gh-69), execution mode
