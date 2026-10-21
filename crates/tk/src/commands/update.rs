@@ -28,7 +28,7 @@ pub struct Args {
     /// Replace the body from a UTF-8 file, or '-' for stdin; empty input clears it.
     #[arg(long, value_name = "PATH")]
     pub body_file: Option<String>,
-    /// Set Priority (P0..P4). Tickets only.
+    /// Set Priority (P0..P3). Tickets only.
     #[arg(short = 'p', long, value_name = "PRIORITY")]
     pub priority: Option<Priority>,
     /// Set the containing Epic by Display ID or Alias. Tickets only.

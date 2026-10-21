@@ -1079,7 +1079,7 @@ fn parking_and_unparking_flow() {
     let park_triage = p.run("park project-2");
     assert!(
         park_triage.contains(
-            "tk park: 'project-2' is in triage; accept it first with 'tk accept project-2 --priority P0..P4'"
+            "tk park: 'project-2' is in triage; accept it first with 'tk accept project-2 --priority P0..P3'"
         ),
         "park_triage={park_triage}"
     );
@@ -1184,7 +1184,7 @@ fn lifecycle_guards_respect_selection_state() {
     let start_triage = p.run("start project-1");
     assert!(
         start_triage.contains(
-            "tk start: 'project-1' is in triage; accept it first with 'tk accept project-1 --priority P0..P4'"
+            "tk start: 'project-1' is in triage; accept it first with 'tk accept project-1 --priority P0..P3'"
         ),
         "start_triage={start_triage}"
     );
@@ -2685,7 +2685,7 @@ fn vacant_recovery_inspects_every_backup_without_changing_it() {
                 conn.execute_batch(match contents {
                     "future" => "insert into schema_migrations values (999, 'now'); pragma user_version = 999",
                     "missing_table" => "drop table plan_members",
-                    "old_vacant" => "drop table plan_members; delete from schema_migrations where version = 17; pragma user_version = 16",
+                    "old_vacant" => "drop table plan_members; delete from schema_migrations where version > 16; pragma user_version = 16",
                     _ => unreachable!(),
                 }).unwrap();
             }

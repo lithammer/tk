@@ -12,6 +12,6 @@ Options:
       --bug                  Create a bug Ticket (conflicts with --epic)
       --epic                 Create an Epic (conflicts with --bug, --priority, --parent)
   -P, --parent <EPIC>        Place the new Ticket under an Epic by Display ID or Alias
-  -p, --priority <PRIORITY>  Set Priority (P0..P4). Tickets only
+  -p, --priority <PRIORITY>  Set Priority (P0..P3). Tickets only
       --triage               Capture the Ticket in triage with no Priority, pending a decision (conflicts with --priority and --epic)
   -h, --help                 Print help

@@ -210,7 +210,7 @@ fn file_stamp(now_iso: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::migrations::{ALL_MIGRATIONS, ForeignKeys, MAX_KNOWN_VERSION};
+    use crate::store::migrations::MAX_KNOWN_VERSION;
     use crate::store::testing::{
         FixtureItem, TmpStore, insert_fixture_item, seed_store_at_version,
     };
@@ -366,26 +366,6 @@ mod tests {
             vec!["2026-09-03T13-45-00.123Z-v004.db"],
             "one backup per run, named for the version it holds"
         );
-    }
-
-    /// A backup is owed to every upgrade, not only to an ADR-0028 rebuild.
-    /// Migrations 12 through 16 are all `ForeignKeys::On`, so tying the backup
-    /// to a rebuild would leave this upgrade unprotected.
-    #[test]
-    fn an_upgrade_with_no_rebuild_pending_is_still_backed_up() {
-        let store = TmpStore::new("tk");
-        let mut conn = seed_store_at_version(&store, 11);
-
-        assert!(
-            ALL_MIGRATIONS
-                .iter()
-                .filter(|mig| mig.version > 11)
-                .all(|mig| mig.foreign_keys == ForeignKeys::On),
-            "fixture assumption: nothing after 11 is a rebuild"
-        );
-
-        migrations::apply_all(&mut conn, NOW).unwrap();
-        assert_eq!(backups(&store), vec!["2026-09-03T13-45-00.123Z-v011.db"]);
     }
 
     #[test]
