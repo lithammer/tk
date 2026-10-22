@@ -93,7 +93,7 @@ Create an Epic (conflicts with \-\-bug, \-\-priority, \-\-parent)
 Place the new Ticket under an Epic by Display ID or Alias
 .TP
 \fB\-p\fR, \fB\-\-priority\fR \fI<PRIORITY>\fR
-Set Priority (P0..P4). Tickets only
+Set Priority (P0..P3). Tickets only
 .TP
 \fB\-\-triage\fR
 Capture the Ticket in triage with no Priority, pending a decision (conflicts with \-\-priority and \-\-epic)
@@ -126,7 +126,7 @@ prints:
 .nf
 Created Ticket: <display-id> - <title>
 Kind: task|bug
-Priority: P0|P1|P2|P3|P4
+Priority: P0|P1|P2|P3
 Status: open
 Parent: <epic-display-id>
 .fi
@@ -175,7 +175,7 @@ Accept a triage Ticket into ranked, selectable work
 \fBArguments and options\fR
 .TP
 \fB\-p\fR, \fB\-\-priority\fR \fI<PRIORITY>\fR
-Priority to assign while accepting (P0..P4); required for a triage Ticket
+Priority to assign while accepting (P0..P3); required for a triage Ticket
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help
@@ -1074,7 +1074,7 @@ Replace the body with literal text; an empty value clears it
 Replace the body from a UTF\-8 file, or \*(Aq\-\*(Aq for stdin; empty input clears it
 .TP
 \fB\-p\fR, \fB\-\-priority\fR \fI<PRIORITY>\fR
-Set Priority (P0..P4). Tickets only
+Set Priority (P0..P3). Tickets only
 .TP
 \fB\-P\fR, \fB\-\-parent\fR \fI<EPIC>\fR
 Set the containing Epic by Display ID or Alias. Tickets only

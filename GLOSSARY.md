@@ -42,7 +42,7 @@ stores or shows it as a label.
 _Avoid_: Label, Reserved Label, Adapter Encoding
 
 **Priority**:
-A local-only ranking for a **Ticket**: `P0`, `P1`, `P2`, `P3`, or `P4`.
+A local-only ranking for a **Ticket**: `P0`, `P1`, `P2`, or `P3`.
 _Avoid_: Severity
 
 **Effective Priority**:

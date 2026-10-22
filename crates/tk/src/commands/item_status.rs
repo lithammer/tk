@@ -117,7 +117,7 @@ pub fn transition(
         ))),
         Err(SetStatusError::TriageNotStartable) => Err(CommandError::failure(format!(
             "'{id}' is in triage; accept it first with \
-             'tk accept {id} --priority P0..P4'"
+             'tk accept {id} --priority P0..P3'"
         ))),
         Err(SetStatusError::ParkedNotStartable) => Err(CommandError::failure(format!(
             "'{id}' is parked; unpark it first with 'tk unpark {id}'"
@@ -328,7 +328,7 @@ mod tests {
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(
             stderr.contains(
-                "tk start: 'tk-1' is in triage; accept it first with 'tk accept tk-1 --priority P0..P4'"
+                "tk start: 'tk-1' is in triage; accept it first with 'tk accept tk-1 --priority P0..P3'"
             ),
             "stderr={stderr:?}"
         );

@@ -163,5 +163,5 @@ lands; that notice is a separate decision, because a success-path line from the
 store-open path is a category of output ADR-0032 removed from the command
 handlers and would have to reintroduce deliberately.
 
-**This does not replace the copy-fidelity tests.** Those catch a lossy copy
-before release; this catches what they missed, after. Both stay.
+**This does not replace the pre-release copy check** (ADR-0028). That catches
+a lossy copy before release; this catches what it missed, after. Both stay.

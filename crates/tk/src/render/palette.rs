@@ -149,11 +149,8 @@ pub const PRIORITY_P1: Style = fg(AnsiColor::Yellow);
 /// Priority P2 (placeholder — uncoloured).
 pub const PRIORITY_P2: Style = Style::new();
 
-/// Priority P3 (placeholder — uncoloured).
+/// Priority P3 — lowest (placeholder — uncoloured).
 pub const PRIORITY_P3: Style = Style::new();
-
-/// Priority P4 — lowest (placeholder — uncoloured).
-pub const PRIORITY_P4: Style = Style::new();
 
 /// `tk grep` matched-text highlight (ADR-0026). Bright yellow — the one vivid
 /// colour the palette does not otherwise spend, so a highlighted word can never
@@ -196,7 +193,6 @@ pub fn priority_style(priority: Priority) -> Style {
         Priority::P1 => PRIORITY_P1,
         Priority::P2 => PRIORITY_P2,
         Priority::P3 => PRIORITY_P3,
-        Priority::P4 => PRIORITY_P4,
     }
 }
 

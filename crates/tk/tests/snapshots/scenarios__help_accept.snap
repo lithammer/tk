@@ -10,5 +10,5 @@ Arguments:
   <ID>  Display ID or Alias of the Ticket to accept
 
 Options:
-  -p, --priority <PRIORITY>  Priority to assign while accepting (P0..P4); required for a triage Ticket
+  -p, --priority <PRIORITY>  Priority to assign while accepting (P0..P3); required for a triage Ticket
   -h, --help                 Print help

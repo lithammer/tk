@@ -425,7 +425,7 @@ mod tests {
         let store = open_seeded();
         seed_epic(&store, "epic", "tk-1", 1);
         seed_child(&store, "child", "tk-2", "P1", "epic", 2);
-        seed(&store, "blocker", "tk-3", "P4", 3);
+        seed(&store, "blocker", "tk-3", "P3", 3);
         insert_dependency(&store.conn, "blocker", "child").unwrap();
         let outcome = next_ready_ticket(
             &store,

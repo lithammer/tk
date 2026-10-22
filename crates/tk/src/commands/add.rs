@@ -43,7 +43,7 @@ pub struct Args {
     /// Place the new Ticket under an Epic by Display ID or Alias.
     #[arg(short = 'P', long, value_name = "EPIC")]
     pub parent: Option<String>,
-    /// Set Priority (P0..P4). Tickets only.
+    /// Set Priority (P0..P3). Tickets only.
     #[arg(short = 'p', long, value_name = "PRIORITY")]
     pub priority: Option<Priority>,
     /// Capture the Ticket in triage with no Priority, pending a decision

@@ -84,3 +84,21 @@ must be set before `BEGIN`, but `apply_one` runs every migration inside
   silently vanish. `items_next_idx` is deliberately absent from that list:
   migration 012 dropped it because no query plan reached it, and a rebuild
   must not restore it (ADR-0045).
+- A trigger on another table that names `items` in its body, such as
+  `former_backend_identity_not_owned_by_another_active_item`, must be dropped
+  before `drop table items` and recreated after the rename. SQLite re-parses
+  it during the rename and fails while `items` is absent (migration 018).
+
+## Amendment: a rebuild is verified before merge, not retained as a test
+
+The Decision says "Every rebuild ships a copy-fidelity test." A shipped
+migration is frozen and runs once per Store, so after release nothing edits
+the copy list and the test guards a file no one touches. The check that
+matters happens while the migration is still being written.
+
+Each rebuild is verified before merge: seed a Store one version back with a
+distinct value in every column, migrate, and compare every value, index, and
+trigger against the seed. Throw the check away afterwards. Keep the test only
+when a rebuild needs a regression guard beyond its first run.
+`split_rebuild_copies_every_local_field_verbatim` stays as the example of the
+shape. The Store Backup (ADR-0048) covers a lossy copy that slips through.

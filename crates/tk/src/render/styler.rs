@@ -553,12 +553,6 @@ mod tests {
             on_close: "",
         },
         Case {
-            name: "priority_p4",
-            style: palette::PRIORITY_P4,
-            on_open: "",
-            on_close: "",
-        },
-        Case {
             // Bright-black foreground, NOT dim: its close must be `39`
             // (reset foreground), not `22`, so nesting inside the dimmed
             // BLOCKED_ROW span leaves the row dim intact (ADR-0014).

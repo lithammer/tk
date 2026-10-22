@@ -77,7 +77,6 @@ impl FromSql for Priority {
             "P1" => Ok(Self::P1),
             "P2" => Ok(Self::P2),
             "P3" => Ok(Self::P3),
-            "P4" => Ok(Self::P4),
             other => Err(corrupt("priority", other)),
         }
     }
@@ -234,7 +233,6 @@ mod tests {
         assert_decodes(b"P1", Priority::P1);
         assert_decodes(b"P2", Priority::P2);
         assert_decodes(b"P3", Priority::P3);
-        assert_decodes(b"P4", Priority::P4);
 
         assert_decodes(b"triage", SelectionState::Triage);
         assert_decodes(b"accepted", SelectionState::Accepted);

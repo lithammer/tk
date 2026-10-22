@@ -20,7 +20,7 @@ pub struct Args {
     /// Display ID or Alias of the Ticket to accept.
     #[arg(value_name = "ID")]
     pub id: String,
-    /// Priority to assign while accepting (P0..P4); required for a triage
+    /// Priority to assign while accepting (P0..P3); required for a triage
     /// Ticket.
     #[arg(short = 'p', long, value_name = "PRIORITY")]
     pub priority: Option<Priority>,
@@ -65,7 +65,7 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
             id = args.id
         ))),
         Err(AcceptError::PriorityRequired) => Err(CommandError::failure(format!(
-            "'{id}' is in triage and needs a Priority (use --priority P0..P4)",
+            "'{id}' is in triage and needs a Priority (use --priority P0..P3)",
             id = args.id
         ))),
         Err(AcceptError::PriorityOnAccepted) => Err(CommandError::failure(format!(
