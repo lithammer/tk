@@ -279,8 +279,8 @@ pub enum ApplyReceiptError {
 /// replace the Display ID with `receipt.display_id`, and keep the outgoing
 /// Display ID resolvable as an Alias (GLOSSARY.md Promotion).
 ///
-/// Selection State, Priority, status, title, and body are Local Fields that
-/// survive Promotion untouched; leaving `status` out of the `items` update also
+/// Selection State, Priority, status, title, and body survive Promotion
+/// untouched; leaving `status` out of the `items` update also
 /// keeps the `items_no_escape_from_done` trigger (which fires `before update of
 /// status`) out of this path.
 ///
@@ -1390,8 +1390,9 @@ mod tests {
 
     #[test]
     fn local_fields_survive_promotion() {
-        // Selection State and Priority are Local Fields (ADR-0027) that
-        // Promotion preserves; status/title/body are not the receipt's to move.
+        // Selection State is a Local Field (ADR-0027) and Priority a Shared one
+        // (ADR-0054); Promotion preserves both. Status/title/body are not the
+        // receipt's to move.
         let mut conn = open_seeded();
         local_ticket(&conn, "t1", "tk-1");
 

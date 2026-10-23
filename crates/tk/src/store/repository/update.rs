@@ -4,8 +4,8 @@
 //! `begin immediate` transaction the read used, writes only the changed
 //! columns, and — for a backend-bound Item — emits one Mutation per changed
 //! field-group (title/body becomes a single full snapshot; parent change is
-//! `remove_ticket_from_epic` plus `add_ticket_to_epic` in that order; priority
-//! is a stored change only — Backend Adapters do not consume Priority).
+//! `remove_ticket_from_epic` plus `add_ticket_to_epic` in that order; a
+//! priority change is `set_ticket_priority`, ADR-0054).
 //!
 //! Title/body names one Item, so the Ticket's own Backend Binding gates it. A
 //! membership Mutation names two, so it is emitted only when Ticket and Epic
@@ -21,7 +21,7 @@ use rusqlite::{OptionalExtension, params};
 use crate::clock::Clock;
 use crate::domain::backend_binding::BackendBinding;
 use crate::domain::item_class::ItemClass;
-use crate::domain::mutation_payload::{EpicRef, MutationPayload, TitleBody};
+use crate::domain::mutation_payload::{EpicRef, MutationPayload, PriorityChange, TitleBody};
 use crate::domain::mutation_type::MutationType;
 use crate::domain::priority::Priority;
 use crate::domain::selection_state::SelectionState;
@@ -268,6 +268,19 @@ pub fn update_item<C: Clock + ?Sized>(
                         title: effective_title.to_owned(),
                         body: effective_body.to_owned(),
                     }),
+                    promotion_operation_id: None,
+                    now_iso: &now_iso,
+                },
+            )?;
+        }
+        if let Some(priority) = new_priority {
+            mutations::append(
+                &tx,
+                mutations::AppendRequest {
+                    mutation_type: MutationType::SetTicketPriority,
+                    item_id: req.id,
+                    item_class: req.item_class,
+                    payload: &MutationPayload::Priority(PriorityChange { priority }),
                     promotion_operation_id: None,
                     now_iso: &now_iso,
                 },
@@ -605,7 +618,7 @@ mod tests {
     }
 
     #[test]
-    fn priority_change_does_not_emit_mutation_even_on_backend_ticket() {
+    fn priority_change_on_a_backend_ticket_emits_a_set_ticket_priority_mutation() {
         let mut store = open_seeded();
         seed_backend_ticket(&store, "t1", "tk-1", 1);
 
@@ -627,11 +640,16 @@ mod tests {
             })
             .unwrap();
         assert_eq!(priority, "P0");
-        let mutations: i64 = store
+        let (mutation_type, payload): (String, String) = store
             .conn
-            .query_row("select count(*) from mutations", [], |r| r.get(0))
+            .query_row(
+                "select mutation_type, payload_json from mutations",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .unwrap();
-        assert_eq!(mutations, 0);
+        assert_eq!(mutation_type, "set_ticket_priority");
+        assert_eq!(payload, r#"{"priority":"P0"}"#);
     }
 
     #[test]

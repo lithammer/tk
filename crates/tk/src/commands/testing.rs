@@ -138,6 +138,7 @@ pub(crate) fn expect_github_pull(
     let response = serde_json::to_vec(&json!({
         "data": {
             "item_0": {
+                "issueFields": priority_fields(),
                 "item": {
                     "__typename": "Issue",
                     "number": number,
@@ -172,15 +173,8 @@ pub(crate) fn expect_github_pull(
     );
 }
 
-/// Queue the repository read and Issue Type page that resolve `type_name` to
-/// `type_id` for an Epic or Bug requirement.
-pub(crate) fn expect_github_issue_type(
-    h: &Harness<'_>,
-    owner: &str,
-    name: &str,
-    type_name: &str,
-    type_id: &str,
-) {
+/// Queue the `gh repo view` read that names the repository for taxonomy reads.
+fn expect_repo_view(h: &Harness<'_>, owner: &str, name: &str) {
     h.runner.expect_exact(
         &["gh", "repo", "view", "--json", "id,nameWithOwner,url"],
         RunOutput {
@@ -194,6 +188,32 @@ pub(crate) fn expect_github_issue_type(
             stderr: Vec::new(),
         },
     );
+}
+
+/// The account's Priority field: `F_PRIORITY`, with the options `Urgent`..`Low`
+/// as `O_P0`..`O_P3`.
+fn priority_fields() -> serde_json::Value {
+    json!({
+        "nodes": [{"id": "F_PRIORITY", "name": "Priority", "options": [
+            {"id": "O_P0", "name": "Urgent"},
+            {"id": "O_P1", "name": "High"},
+            {"id": "O_P2", "name": "Medium"},
+            {"id": "O_P3", "name": "Low"},
+        ]}],
+        "pageInfo": {"hasNextPage": false},
+    })
+}
+
+/// Queue the repository read and Issue Type page that resolve `type_name` to
+/// `type_id` for an Epic or Bug requirement.
+pub(crate) fn expect_github_issue_type(
+    h: &Harness<'_>,
+    owner: &str,
+    name: &str,
+    type_name: &str,
+    type_id: &str,
+) {
+    expect_repo_view(h, owner, name);
     h.runner.expect_exact_with_stdin(
         &GRAPHQL_ARGV,
         &crate::remote::github::issue_types_request_body(owner, name),
@@ -211,18 +231,46 @@ pub(crate) fn expect_github_issue_type(
     );
 }
 
-/// Queue one typed `createIssue` mutation that returns issue `number`.
-pub(crate) fn expect_github_typed_create(
+/// Queue the repository read and issue field read that resolve the Priority
+/// field for a Ticket requirement (see `priority_fields`).
+pub(crate) fn expect_github_priority_field(h: &Harness<'_>, owner: &str, name: &str) {
+    expect_repo_view(h, owner, name);
+    h.runner.expect_exact_with_stdin(
+        &GRAPHQL_ARGV,
+        &crate::remote::github::issue_fields_request_body(owner, name),
+        RunOutput {
+            exit_code: 0,
+            stdout: serde_json::to_vec(&json!({
+                "data": {"repository": {"issueFields": priority_fields()}},
+            }))
+            .unwrap(),
+            stderr: Vec::new(),
+        },
+    );
+}
+
+/// Queue one `createIssue` mutation that returns issue `number`. `priority`
+/// is the Priority option ID set in the same call, as `expect_github_priority_field`
+/// names them.
+pub(crate) fn expect_github_create(
     h: &Harness<'_>,
     owner: &str,
     name: &str,
-    title: &str,
-    type_id: &str,
+    issue: (&str, &str),
+    type_id: Option<&str>,
+    priority: Option<&str>,
     number: i64,
 ) {
+    let (title, body) = issue;
     h.runner.expect_exact_with_stdin(
         &GRAPHQL_ARGV,
-        &crate::remote::github::create_typed_issue_request_body("R_1", title, "", type_id),
+        &crate::remote::github::create_issue_request_body(
+            "R_1",
+            title,
+            body,
+            type_id,
+            priority.map(|option_id| ("F_PRIORITY", option_id)),
+        ),
         RunOutput {
             exit_code: 0,
             stdout: serde_json::to_vec(&json!({

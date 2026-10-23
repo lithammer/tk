@@ -275,8 +275,8 @@ an item appends backend-applicable Mutations in the same transaction as the
 visible state change once it is backend-bound — already a Backend item, or a
 Local item whose Promotion is durable in the Mutation Log, whose later
 Mutations are therefore ordered behind that Promotion. A Local item with no
-Promotion intent updates current state only. Priority remains a Local Field and
-does not emit Mutations.
+Promotion intent updates current state only. A Priority change emits
+`set_ticket_priority` under the same gate (ADR-0054).
 
 `done` is terminal in v1 per
 [ADR 0006](./docs/adr/0006-done-is-terminal-in-v1.md). `items.status` changes

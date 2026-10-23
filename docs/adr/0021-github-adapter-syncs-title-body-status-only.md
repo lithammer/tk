@@ -12,7 +12,8 @@
 > **Amended by ADR-0054.** The `bug` Label fallback and the
 > repository-ownership read below are gone: Bug and Epic Promotion require
 > native Issue Types, and the revisit this ADR assigned to gh-49 no longer
-> applies.
+> applies. Every Promotion now uses the `createIssue` mutation, and Priority
+> is a Shared Field the Adapter pushes and reads.
 
 The v1 GitHub Backend Adapter (tk-34) maps item *fields* between tk and a
 GitHub repository, chiefly through the `gh issue` subcommands:
@@ -62,10 +63,9 @@ couple representation and creation in one mutation.
 
 Bug Promotion therefore uses one direct GraphQL `createIssue` path with the
 native Issue Type proved during preflight. Apply resolves that type's current
-ID. Task Promotion retains its shipped `gh issue create` path; ADR-0054 moves
-Epic Promotion onto the `createIssue` path as well. `gh issue create --type`
-is not the goal: `gh` 2.100.0 has no issue field flags, and `createIssue`
-takes the type and fields in one call.
+ID. ADR-0054 moves Task and Epic Promotion onto the `createIssue` path as
+well. `gh issue create --type` is not the goal: `gh` 2.100.0 has no issue
+field flags, and `createIssue` takes the type and fields in one call.
 
 The GitHub Adapter chooses direct GraphQL by operation contract, not transport
 uniformity. It uses GraphQL when a Backend operation needs exact batching,
