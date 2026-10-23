@@ -133,7 +133,8 @@ impl RunSyncError {
                 | LoadApplicableError::OperationShapeMismatch { .. }
                 | LoadApplicableError::MissingBackendIdentity { .. }
                 | LoadApplicableError::CounterpartClassMismatch { .. }
-                | LoadApplicableError::MissingTicketKind { .. },
+                | LoadApplicableError::MissingTicketKind { .. }
+                | LoadApplicableError::MissingPriority { .. },
             )
             | Self::Outcome(
                 PersistMutationOutcomeError::PayloadJson { .. }
@@ -358,6 +359,7 @@ mod tests {
     fn refresh(title: &str) -> BackendItemRefresh {
         BackendItemRefresh {
             ticket_kind: Some(TicketKind::Task),
+            priority: None,
             title: title.into(),
             body: String::new(),
             status: Lifecycle::Open,
@@ -748,16 +750,42 @@ mod tests {
         )
         .unwrap();
         let runner = FakeRunner::new();
-        runner.expect_exact_error(
-            &[
-                "gh",
-                "issue",
-                "create",
-                "--title",
+        let ok = |stdout: &str| crate::proc::RunOutput {
+            exit_code: 0,
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        };
+        let graphql = [
+            "gh",
+            "api",
+            "graphql",
+            "--hostname",
+            "github.com",
+            "-H",
+            "Content-Type: application/json",
+            "--input",
+            "-",
+        ];
+        runner.expect_exact(
+            &["gh", "repo", "view", "--json", "id,nameWithOwner,url"],
+            ok(r#"{"id":"R_1","nameWithOwner":"o/r","url":"https://github.com/o/r"}"#),
+        );
+        runner.expect_exact_with_stdin(
+            &graphql,
+            &crate::remote::github::issue_fields_request_body("o", "r"),
+            ok(
+                r#"{"data":{"repository":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]}],"pageInfo":{"hasNextPage":false}}}}}"#,
+            ),
+        );
+        runner.expect_exact_with_stdin_error(
+            &graphql,
+            &crate::remote::github::create_issue_request_body(
+                "R_1",
                 "Local work",
-                "--body",
                 "",
-            ],
+                None,
+                Some(("F1", "O2")),
+            ),
             ProcError::OutcomeUnobserved,
         );
         let cwd = std::env::current_dir().unwrap();
@@ -882,6 +910,7 @@ mod tests {
                 body: "Stale Backend body".into(),
                 status: Lifecycle::Done,
                 ticket_kind: Some(TicketKind::Task),
+                priority: None,
             }],
             vec![EditResponse::Success],
         );

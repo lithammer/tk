@@ -593,15 +593,7 @@ mod tests {
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         h.runner.expect_exact_error(
-            &[
-                "gh",
-                "issue",
-                "create",
-                "--title",
-                "Local work",
-                "--body",
-                "",
-            ],
+            &["gh", "repo", "view", "--json", "id,nameWithOwner,url"],
             ProcError::ExecutableNotFound,
         );
 

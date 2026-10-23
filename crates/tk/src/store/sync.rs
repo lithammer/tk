@@ -30,7 +30,7 @@ use crate::domain::binding_display_provenance::BindingDisplayProvenance;
 use crate::domain::item_class::ItemClass;
 use crate::domain::lifecycle::Lifecycle;
 use crate::domain::mutation_payload::{
-    DependencyRef, EpicRef, LifecycleChange, MutationPayload, Promotion, TitleBody,
+    DependencyRef, EpicRef, LifecycleChange, MutationPayload, PriorityChange, Promotion, TitleBody,
 };
 use crate::domain::mutation_state::MutationState;
 use crate::domain::mutation_type::MutationType;
@@ -639,6 +639,11 @@ pub enum LoadApplicableError {
         mutation_type: MutationType,
         item_id: String,
     },
+    #[error("mutation {mutation_type} requires Priority for Item {item_id}")]
+    MissingPriority {
+        mutation_type: MutationType,
+        item_id: String,
+    },
 }
 
 /// One applicable Mutation Log entry, decoded but not yet bound to a backend
@@ -760,6 +765,15 @@ pub fn resolve_backend_operation(
                 change,
             })
         }
+        (MutationType::SetTicketPriority, MutationPayload::Priority(change)) => {
+            if item_class != ItemClass::Ticket {
+                return Err(shape_error());
+            }
+            BackendOperation::Edit(BackendEdit::SetTicketPriority {
+                ticket: target()?,
+                change,
+            })
+        }
         (MutationType::AddDependency, MutationPayload::DependencyRef(dependency)) => {
             BackendOperation::Edit(BackendEdit::AddDependency {
                 blocked: target()?,
@@ -800,19 +814,29 @@ pub fn resolve_backend_operation(
                 return Err(shape_error());
             }
             let Promotion { title, body, .. } = promotion;
-            let ticket_kind = conn
-                .query_row(
-                    "select ticket_kind from items where id = ?1",
-                    params![item_id],
-                    |row| row.get::<_, Option<TicketKind>>(0),
-                )?
-                .ok_or_else(|| LoadApplicableError::MissingTicketKind {
+            let (ticket_kind, priority) = conn.query_row(
+                "select ticket_kind, priority from items where id = ?1",
+                params![item_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<TicketKind>>(0)?,
+                        row.get::<_, Option<Priority>>(1)?,
+                    ))
+                },
+            )?;
+            let ticket_kind =
+                ticket_kind.ok_or_else(|| LoadApplicableError::MissingTicketKind {
                     mutation_type,
                     item_id: item_id.clone(),
                 })?;
+            let priority = priority.ok_or_else(|| LoadApplicableError::MissingPriority {
+                mutation_type,
+                item_id: item_id.clone(),
+            })?;
             BackendOperation::Create(BackendCreate::Ticket {
                 snapshot: TitleBody { title, body },
                 ticket_kind,
+                priority,
             })
         }
         (MutationType::PromoteEpic, MutationPayload::Promotion(promotion)) => {
@@ -915,6 +939,9 @@ fn decode_mutation_payload(
         ),
         Mt::SetItemStatus => MutationPayload::Lifecycle(
             serde_json::from_str::<LifecycleChange>(payload_text).map_err(malformed)?,
+        ),
+        Mt::SetTicketPriority => MutationPayload::Priority(
+            serde_json::from_str::<PriorityChange>(payload_text).map_err(malformed)?,
         ),
         Mt::AddDependency | Mt::RemoveDependency => MutationPayload::DependencyRef(
             serde_json::from_str::<DependencyRef>(payload_text).map_err(malformed)?,
@@ -1397,6 +1424,7 @@ pub fn mark_mutation_skipped(
             }
         }
         MutationType::SetItemStatus
+        | MutationType::SetTicketPriority
         | MutationType::UpdateTicket
         | MutationType::UpdateEpic
         | MutationType::AddTicketToEpic
@@ -1650,7 +1678,7 @@ pub fn merge_backend_refreshes(
     }
     ensure_refresh_remote(&tx, expected_kind)?;
     ensure_backend_cohort(&tx, expected_kind)?;
-    let local_content_targets = local_content_targets(&tx)?;
+    let shields = local_shields(&tx)?;
     for (key, refresh) in refreshes {
         let existing: Option<(String, ItemClass)> = tx
             .query_row(
@@ -1663,13 +1691,15 @@ pub fn merge_backend_refreshes(
         let Some((item_id, item_class)) = existing else {
             continue;
         };
-        let preserve_content = local_content_targets.get(item_id.as_str()) == Some(&item_class);
+        let preserve_content = shields.content.get(item_id.as_str()) == Some(&item_class);
         let BackendItemRefresh {
             title,
             body,
             status,
             ticket_kind,
+            priority,
         } = refresh;
+        let priority_write = priority.filter(|_| !shields.priority.contains(item_id.as_str()));
         let (title_write, body_write) = if preserve_content {
             (None, None)
         } else {
@@ -1682,45 +1712,72 @@ pub fn merge_backend_refreshes(
         // Pull never imports Work State. A Backend close still clears it as a
         // local consequence, while an open refresh must not undo `tk start`
         // (ADR-0043, ADR-0021). Title/body shielding does not affect Lifecycle
-        // or Ticket Kind (ADR-0044).
+        // or Ticket Kind (ADR-0044). A triage Ticket holds no Priority
+        // (ADR-0027), so Pull leaves it unset; the table CHECK would abort the
+        // whole merge otherwise.
         tx.execute(
             "update items set title = coalesce(?2, title), body = coalesce(?3, body), updated_at = max(updated_at, ?5), \
               ticket_kind = case when item_class = 'ticket' then coalesce(?6, ticket_kind) else ticket_kind end, \
+              priority = case when item_class = 'ticket' and selection_state <> 'triage' \
+                              then coalesce(?8, priority) else priority end, \
               status = ?4, \
               work_state = coalesce(?7, work_state) \
               where id = ?1",
             params![item_id, title_write, body_write, status, now,
-                ticket_kind, work_state_write],
+                ticket_kind, work_state_write, priority_write],
         )?;
     }
     tx.commit()?;
     Ok(())
 }
 
-/// Collect exact Items whose unresolved content Mutations shield title/body.
+/// What unresolved local intent shields from a Backend Pull (ADR-0044).
+struct LocalShields {
+    /// Items whose unresolved content Mutation shields title and body.
+    content: HashMap<String, ItemClass>,
+    /// Tickets whose unresolved Priority Mutation shields Priority.
+    priority: HashSet<String>,
+}
+
+/// Collect the exact Items whose unresolved Mutations shield Pull fields.
 ///
 /// Decoding every unresolved Mutation row before the first write exposes
-/// unknown Mutation Type or Item Class spellings. The map only adds targets,
-/// so non-content Mutations cannot remove a shield added by an earlier row.
-fn local_content_targets(conn: &Connection) -> rusqlite::Result<HashMap<String, ItemClass>> {
+/// unknown Mutation Type or Item Class spellings. The sets only add targets,
+/// so a Mutation of another kind cannot remove a shield added by an earlier
+/// row.
+fn local_shields(conn: &Connection) -> rusqlite::Result<LocalShields> {
     let mut stmt = conn.prepare(
         "select item_id, item_class, mutation_type from mutations \
           where state in ('pending', 'failed')",
     )?;
     let mut rows = stmt.query([])?;
-    let mut targets = HashMap::new();
+    let mut shields = LocalShields {
+        content: HashMap::new(),
+        priority: HashSet::new(),
+    };
     while let Some(row) = rows.next()? {
         let item_id: String = row.get(0)?;
         let item_class: ItemClass = row.get(1)?;
         let mutation_type: MutationType = row.get(2)?;
-        if matches!(
-            mutation_type,
-            MutationType::UpdateTicket | MutationType::UpdateEpic
-        ) {
-            targets.insert(item_id, item_class);
+        match mutation_type {
+            MutationType::UpdateTicket | MutationType::UpdateEpic => {
+                shields.content.insert(item_id, item_class);
+            }
+            MutationType::SetTicketPriority => {
+                shields.priority.insert(item_id);
+            }
+            MutationType::SetItemStatus
+            | MutationType::AddTicketToEpic
+            | MutationType::RemoveTicketFromEpic
+            | MutationType::AddDependency
+            | MutationType::RemoveDependency
+            | MutationType::AddExternalBlocker
+            | MutationType::ResolveExternalBlocker
+            | MutationType::PromoteTicket
+            | MutationType::PromoteEpic => {}
         }
     }
-    Ok(targets)
+    Ok(shields)
 }
 
 /// The single Backend kind retained backend-bound state belongs to, or `None`
@@ -2374,6 +2431,7 @@ mod tests {
             body: "Body".into(),
             status,
             ticket_kind: Some(TicketKind::Task),
+            priority: None,
         }
     }
 
@@ -2546,6 +2604,7 @@ mod tests {
                         body: "Stale Backend body".into(),
                         status: Lifecycle::Done,
                         ticket_kind: Some(TicketKind::Task),
+                        priority: None,
                     },
                 )],
                 "2026-05-20T00:00:00Z",
@@ -2565,6 +2624,75 @@ mod tests {
             assert_eq!(
                 item_axes(&conn, "t1").unwrap(),
                 (Lifecycle::Done, WorkState::Idle)
+            );
+        }
+    }
+
+    #[test]
+    fn refresh_priority_shield_follows_unresolved_set_ticket_priority_only() {
+        // A pending or failed `set_ticket_priority` keeps the local Priority
+        // against a Backend value (ADR-0054, ADR-0044). Once it is applied or
+        // skipped the Backend value lands. Moving the type out of the shield
+        // in `local_shields` compiles and breaks the first two rows.
+        for (state, failure, imported) in [
+            (MutationState::Pending, None, false),
+            (
+                MutationState::Failed,
+                Some(r#"{"detail":"rejected"}"#),
+                false,
+            ),
+            (MutationState::Applied, None, true),
+            (MutationState::Skipped, None, true),
+        ] {
+            let mut conn = open_seeded();
+            seed_remote(&conn);
+            backend_ticket(&conn, "t1", "gh-1", "1", 1);
+            backend_ticket(&conn, "t2", "gh-2", "2", 2);
+            insert_fixture_mutation(
+                &conn,
+                FixtureMutation {
+                    sequence: 1,
+                    payload_json: r#"{"priority":"P3"}"#,
+                    state,
+                    failure_json: failure,
+                    ..FixtureMutation::new(MutationType::SetTicketPriority, "t1")
+                },
+            )
+            .unwrap();
+            let backend = BackendItemRefresh {
+                priority: Some(Priority::P0),
+                ..refresh("Backend title", Lifecycle::Open)
+            };
+
+            merge_backend_refreshes(
+                &mut conn,
+                BackendKind::Github,
+                &[("1".into(), backend.clone()), ("2".into(), backend)],
+                "2026-05-20T00:00:00Z",
+            )
+            .unwrap();
+
+            let read = |id: &str| -> (String, String) {
+                conn.query_row(
+                    "select priority, title from items where id = ?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap()
+            };
+            // The seeded Priority is P2: the shield keeps it, import writes P0.
+            let expected = if imported { "P0" } else { "P2" };
+            assert_eq!(
+                read("t1"),
+                (expected.into(), "Backend title".into()),
+                "{state:?}"
+            );
+            // The shield is per Ticket and per field: t2 imports, and t1's
+            // title imports even while its Priority is held.
+            assert_eq!(
+                read("t2"),
+                ("P0".into(), "Backend title".into()),
+                "{state:?}"
             );
         }
     }
@@ -2715,6 +2843,7 @@ mod tests {
                         body: "Stale body".into(),
                         status: Lifecycle::Done,
                         ticket_kind: Some(TicketKind::Task),
+                        priority: None,
                     },
                 ),
                 (
@@ -2724,6 +2853,7 @@ mod tests {
                         body: "Backend body".into(),
                         status: Lifecycle::Done,
                         ticket_kind: Some(TicketKind::Bug),
+                        priority: None,
                     },
                 ),
             ],
@@ -2930,6 +3060,7 @@ mod tests {
                     body: "Body".into(),
                     status: Lifecycle::Done,
                     ticket_kind: None,
+                    priority: None,
                 },
             )],
             "2026-05-20T00:00:00Z",
@@ -2996,6 +3127,7 @@ mod tests {
                     body: "Backend epic body".into(),
                     status: Lifecycle::Done,
                     ticket_kind: Some(TicketKind::Task),
+                    priority: None,
                 },
             )],
             "2026-05-20T00:00:00Z",
@@ -3311,11 +3443,12 @@ mod tests {
     fn refresh_preserves_local_selection_state_and_priority() {
         // Selection State is a Local Field (ADR-0027); Backend Pull never reads
         // it back, so a Pull merging title/status must leave a local `parked`
-        // state and its Priority untouched. Regression lock against a future
-        // edit adding Selection State or Priority to the refresh write. Its
-        // sibling below draws the other side of the same boundary: Work State
-        // is equally local, and Pull writes it only as the consequence of a
-        // Lifecycle transition Pull is authoritative for (ADR-0043).
+        // state untouched. Priority is Shared (ADR-0054) but a refresh without
+        // one, as an Epic issue gives, must not clear it. Regression lock
+        // against a future edit adding Selection State to the refresh write.
+        // Its sibling below draws the other side of the same boundary: Work
+        // State is equally local, and Pull writes it only as the consequence
+        // of a Lifecycle transition Pull is authoritative for (ADR-0043).
         let mut conn = open_seeded();
         seed_remote(&conn);
         insert_fixture_item(
@@ -3541,12 +3674,14 @@ mod tests {
         let BackendCreate::Ticket {
             snapshot,
             ticket_kind,
+            priority,
         } = create
         else {
             panic!("expected Ticket creation")
         };
         assert_eq!(snapshot.title, "T");
         assert_eq!(ticket_kind, TicketKind::Task);
+        assert_eq!(priority, Priority::P2);
     }
 
     #[test]
@@ -5909,6 +6044,7 @@ mod tests {
                     body: "Fresh body".into(),
                     status: Lifecycle::Open,
                     ticket_kind: Some(TicketKind::Bug),
+                    priority: None,
                 },
             )],
             NOW,

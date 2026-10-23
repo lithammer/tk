@@ -103,6 +103,22 @@ covers cannot arise. An issue with no Priority, or with an option
 tk does not name, maps to `P2`, the default a new Ticket gets. Epics have no
 Priority, so tk neither sets nor reads it on an Epic issue.
 
+A local Priority change queues a `set_ticket_priority` Mutation. Its payload is the target
+level, and Apply sends it as a GraphQL `setIssueFieldValue`, which a probe
+showed replaces an existing value (playground #26: unset, then Medium, then
+Low). Pull shields Priority per Ticket while that Mutation is `pending` or
+`failed`, in the shape ADR-0044 gives title and body. A triage Ticket has no
+Priority, so Pull leaves it unset. Promotion refuses triage and no command
+returns a Ticket to triage, so a backend-bound triage Ticket does not arise;
+if one ever does, `tk accept` assigns its Priority locally without a push.
+
+Pull treats an issue typed `Epic` as an Epic: it reads no Priority and needs
+no Priority field. For any other issue it requires the field and all four
+options, and fails with the named error otherwise. Adopt does not read
+Priority, because `gh` 2.100.0 cannot (`gh issue view --json issueFieldValues`
+is rejected); an Adopted Ticket starts at `P2` and the next Pull imports the
+Backend value.
+
 ### Effort replaces the planned Ticket Size
 
 tk-194 planned a local Size: how much work a Ticket is expected to take,
@@ -145,6 +161,8 @@ organization they do not administer.
 - Amends ADR-0021: the `bug` Label fallback, the repository-ownership read,
   and the gh-49 revisit condition are gone; Epic Promotion moves to the
   GraphQL `createIssue` path Bug already uses.
+- Amends ADR-0036: every GitHub Promotion creates through `createIssue`, and
+  the `gh issue create` receipt and 401 rules go.
 - Amends ADR-0049: Item Class joins relationships as push-only by structure,
   and Priority crosses from Local to Shared on GitHub.
 - Backend data is already migrated: `lithammer/tk` issues #52, #53, and #54,
@@ -152,7 +170,12 @@ organization they do not administer.
   instead, and the open Epics (gh-43, gh-61, gh-65) carry the `Epic` type.
 - Before Pull reads Priority, tk must push the current Priority of every
   Adopted Ticket that is not `done`. Otherwise the first Pull maps each
-  unset issue to `P2`. Effort needs no backfill: unset maps to unset.
+  unset issue to `P2`. Migration 019 does it: it queues one `pending`
+  `set_ticket_priority` Mutation per Backend Ticket Pull can reach (open, or
+  done with an unresolved close), and that row is the
+  Pull shield, so no Pull can run between the upgrade and the push. Skipping a
+  failed push in `tk sync skip` gives up the shield. Effort needs no backfill:
+  unset maps to unset.
 - GitHub did not enforce which types a field is pinned to through the API: an
   untyped probe issue (#26) accepted Effort. tk sets Effort only on Tickets.
   This rests on one probe; GitHub's server is not open source.

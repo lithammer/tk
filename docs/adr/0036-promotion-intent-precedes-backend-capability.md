@@ -12,6 +12,10 @@
 > before Promotion intent commits. Repository-invariant facets resolve without
 > I/O.
 >
+> **Amended by ADR-0054.** GitHub creation is one GraphQL `createIssue` call
+> for every Promotion, and Ticket preflight reads the Priority field. Only a
+> missing receipt, never error text, leaves a completed creation Indeterminate.
+>
 > **Amended by ADR-0047.** A Former Backend Identity is retained history, not
 > Backend Binding. Detach holds the Remote workflow lock, but an unrelated
 > `applying` Promotion does not block it because Detach opens no Adapter.
@@ -62,12 +66,13 @@ only for requested dynamic facets. The planner therefore remains independent
 of the Adapter and aggregates an unsupported capability with every other
 finding rather than short-circuiting.
 
-The GitHub Adapter resolves Ticket creation, Task Ticket Kind, Dependencies,
-and Epic membership without a Backend call; later relationship Mutations
-supply their structure. A requested Bug facet or Epic Item Class triggers the
-Issue Type inspection in ADR-0021 and ADR-0054. A failed inspection, or a
-missing type, aborts preflight with an Adapter error and leaves the outbox
-empty.
+The GitHub Adapter resolves Task Ticket Kind, Dependencies, and Epic
+membership without a Backend call; later relationship Mutations supply their
+structure. A requested Bug facet or Epic Item Class triggers the Issue Type
+inspection in ADR-0021 and ADR-0054, and a requested Ticket Item Class
+triggers the Priority field inspection in ADR-0054. A failed inspection, or a
+missing type or field, aborts preflight with an Adapter error and leaves the
+outbox empty.
 
 Staging is a safety property, not sequencing preference. Sync stops at the
 first rejected Mutation, a Promotion Mutation is not a Sync Skip candidate, and
@@ -89,22 +94,20 @@ receipt remains visible to later Mutations in the same run.
 Creation returns one of three value outcomes: `Created(identity)`, certified
 no-effect `Rejected(failure)`, or `Indeterminate(failure)`. It has no generic
 process-error arm because the Adapter owns effect-certainty classification.
-The runner's `ExecutableNotFound` and `SpawnFailed` errors happen before a
-child exists and certify no effect. `OutcomeUnobserved` means the child started
-but tk could not observe its exit or captured output, so it is indeterminate;
-observed `gh issue create` behavior also showed that a completed nonzero
+A request that never started, and a read that fails before the mutation,
+certify no effect. A started request whose outcome tk could not observe is
+indeterminate; observed `gh` behavior also showed that a completed nonzero
 invocation may still create the issue.
 
-The GitHub Adapter invokes exactly `gh issue create --title <title> --body
-<body>` for both Ticket and Epic Promotion. It sends no issue type or
-relationship flags. A canonical GitHub issue URL receipt certifies `Created`
-even alongside a nonzero exit. Only the initial 401/bad-credentials frame
-observed in the playground certifies authentication rejection before creation;
-other auth-flavoured text is classification, not proof. Every other completed
-result without a trustworthy receipt is `Indeterminate`. Arbitrary validation
-text, network errors, server errors, and a negative lookup do not justify
-automatic replay. The receipt URL is retained as the Backend key, pinning later
-operations to the repository that created the issue.
+The GitHub Adapter creates every Ticket and Epic with one GraphQL `createIssue`
+call that carries the issue type and issue fields (ADR-0054). It sends no
+relationship input. A canonical GitHub issue URL receipt certifies `Created`
+even alongside a delivery failure. Every completed result without a
+trustworthy receipt is `Indeterminate`, whatever its error text: arbitrary
+validation text, authentication-flavoured text, network errors, server errors,
+and a negative lookup do not justify automatic replay. The receipt URL is
+retained as the Backend key, pinning later operations to the repository that
+created the issue.
 
 The engine durably marks a Promotion `applying` before the creation call.
 `Created` applies identity, marks the Mutation applied, clears failure, and

@@ -6,7 +6,8 @@
 //! Repository Store identity or Item Class (ADR-0034).
 
 use super::lifecycle::Lifecycle;
-use super::mutation_payload::{LifecycleChange, TitleBody};
+use super::mutation_payload::{LifecycleChange, PriorityChange, TitleBody};
+use super::priority::Priority;
 use super::ticket_kind::TicketKind;
 use thiserror::Error;
 
@@ -64,6 +65,10 @@ pub enum BackendEdit {
         item: BackendItemAddress,
         change: LifecycleChange,
     },
+    SetTicketPriority {
+        ticket: BackendItemAddress,
+        change: PriorityChange,
+    },
     AddDependency {
         blocked: BackendItemAddress,
         blocking: BackendItemAddress,
@@ -91,6 +96,10 @@ pub enum BackendCreate {
         /// Current Ticket Kind from the Repository Store. This is transient
         /// delivery data, not persisted Promotion intent.
         ticket_kind: TicketKind,
+        /// Current Priority from the Repository Store. Promotion refuses a
+        /// triage Ticket, the only Ticket without one (ADR-0027). Transient
+        /// delivery data, like `ticket_kind`.
+        priority: Priority,
     },
     Epic {
         snapshot: TitleBody,
@@ -130,6 +139,9 @@ pub struct BackendItemRefresh {
     pub status: Lifecycle,
     /// Ticket Kind when the Backend can refresh it; `None` preserves it.
     pub ticket_kind: Option<TicketKind>,
+    /// Priority the Backend holds for a Ticket; `None` on an Epic issue
+    /// preserves the stored value (ADR-0054).
+    pub priority: Option<Priority>,
 }
 
 /// One keyed refresh returned as part of a Backend Pull.
@@ -214,6 +226,7 @@ mod tests {
                 body: String::new(),
                 status: Lifecycle::Open,
                 ticket_kind: Some(TicketKind::Task),
+                priority: Some(Priority::P2),
             },
         }
     }

@@ -1132,8 +1132,8 @@ fn render_cancellation<W: Write + ?Sized>(stdout: &mut W, report: &CancellationR
 mod tests {
     use super::*;
     use crate::commands::testing::{
-        self, Harness, cwd, expect_git, expect_github_issue_type, expect_github_pull,
-        expect_github_typed_create,
+        self, Harness, cwd, expect_git, expect_github_create, expect_github_issue_type,
+        expect_github_priority_field, expect_github_pull,
     };
     use crate::domain::backend_operation::{
         BackendEdit, BackendItemIdentity, BackendItemInspection, BackendItemRefresh,
@@ -1318,6 +1318,7 @@ mod tests {
             body: body.into(),
             status,
             ticket_kind: Some(TicketKind::Task),
+            priority: None,
         }
     }
 
@@ -1518,6 +1519,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::with_seed(&cwd_path, &fixture, 7);
         expect_git(&h, &fixture);
+        expect_github_priority_field(&h, "o", "r");
         expect_github_issue_type(&h, "o", "r", "Epic", "IT_EPIC");
 
         let code = run_rendered(&mut h, "tk-1", true);
@@ -1563,22 +1565,9 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::with_seed(&cwd_path, &fixture, 7);
         expect_git(&h, &fixture);
-        h.runner.expect_exact(
-            &[
-                "gh",
-                "issue",
-                "create",
-                "--title",
-                "Local work",
-                "--body",
-                "",
-            ],
-            RunOutput {
-                exit_code: 0,
-                stdout: b"https://github.com/o/r/issues/42\n".to_vec(),
-                stderr: Vec::new(),
-            },
-        );
+        expect_github_priority_field(&h, "o", "r");
+        expect_github_priority_field(&h, "o", "r");
+        expect_github_create(&h, "o", "r", ("Local work", ""), None, Some("O_P2"), 42);
 
         let code = run_rendered(&mut h, "tk-1", false);
 
@@ -1609,17 +1598,12 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::with_seed(&cwd_path, &fixture, 7);
         expect_git(&h, &fixture);
+        expect_github_priority_field(&h, "o", "r");
         expect_github_issue_type(&h, "o", "r", "Epic", "IT_EPIC");
         expect_github_issue_type(&h, "o", "r", "Epic", "IT_EPIC");
-        expect_github_typed_create(&h, "o", "r", "Local epic", "IT_EPIC", 1);
-        h.runner.expect_exact(
-            &["gh", "issue", "create", "--title", "Child", "--body", ""],
-            RunOutput {
-                exit_code: 0,
-                stdout: b"https://github.com/o/r/issues/2\n".to_vec(),
-                stderr: Vec::new(),
-            },
-        );
+        expect_github_create(&h, "o", "r", ("Local epic", ""), Some("IT_EPIC"), None, 1);
+        expect_github_priority_field(&h, "o", "r");
+        expect_github_create(&h, "o", "r", ("Child", ""), None, Some("O_P2"), 2);
         h.runner.expect_exact(
             &[
                 "gh",
@@ -1667,7 +1651,7 @@ mod tests {
                 "view",
                 "42",
                 "--json",
-                "number,title,body,state,issueType,url",
+                "id,number,title,body,state,issueType,url",
             ],
             RunOutput {
                 exit_code: 0,
@@ -1703,22 +1687,8 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::with_seed(&cwd_path, &fixture, 7);
         expect_git(&h, &fixture);
-        h.runner.expect_exact(
-            &[
-                "gh",
-                "issue",
-                "create",
-                "--title",
-                "Local work",
-                "--body",
-                "",
-            ],
-            RunOutput {
-                exit_code: 0,
-                stdout: b"https://github.com/o/r/issues/42\n".to_vec(),
-                stderr: Vec::new(),
-            },
-        );
+        expect_github_priority_field(&h, "o", "r");
+        expect_github_create(&h, "o", "r", ("Local work", ""), None, Some("O_P2"), 42);
 
         let code = run_subcommand_rendered(&mut h, Sub::Retry(RetryArgs { id: "tk-1".into() }));
 

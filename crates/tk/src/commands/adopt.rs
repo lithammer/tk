@@ -318,7 +318,9 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::commands::testing::{Harness, cwd, expect_git, seed_store};
+    use crate::commands::testing::{
+        Harness, cwd, expect_git, expect_github_create, expect_github_priority_field, seed_store,
+    };
     use crate::commands::{detach, list, next, promote, remote, search, show};
     use crate::domain::backend_operation::BackendItemIdentity;
     use crate::domain::item_class::ItemClass;
@@ -572,7 +574,7 @@ mod tests {
                 "view",
                 "5",
                 "--json",
-                "number,title,body,state,issueType,url",
+                "id,number,title,body,state,issueType,url",
             ],
             ok(&issue_json(
                 5,
@@ -1081,17 +1083,16 @@ mod tests {
         detach_item(&store, &cwd_path, "gh-42");
         let mut promote_h = Harness::new(&cwd_path, &store);
         expect_git(&promote_h, &store);
-        promote_h.runner.expect_exact(
-            &[
-                "gh",
-                "issue",
-                "create",
-                "--title",
-                "Local title",
-                "--body",
-                "Local body",
-            ],
-            ok("https://github.com/o/r/issues/99\n"),
+        expect_github_priority_field(&promote_h, "o", "r");
+        expect_github_priority_field(&promote_h, "o", "r");
+        expect_github_create(
+            &promote_h,
+            "o",
+            "r",
+            ("Local title", "Local body"),
+            None,
+            Some("O_P2"),
+            99,
         );
         promote::run(
             &mut promote_h.deps(),

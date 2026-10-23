@@ -246,6 +246,7 @@ mod tests {
             body: "Body".into(),
             status: Lifecycle::Open,
             ticket_kind: Some(TicketKind::Task),
+            priority: None,
         }
     }
 

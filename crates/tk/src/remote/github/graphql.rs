@@ -15,11 +15,19 @@ mod transport;
 
 /// Reads every enabled Issue Type page needed by ADR-0054 capability checks.
 pub(super) const ISSUE_TYPES_QUERY: &str = "query RepositoryIssueTypes($owner: String!, $name: String!, $after: String) { repository(owner: $owner, name: $name) { issueTypes(first: 50, after: $after) { nodes { id name isEnabled } pageInfo { hasNextPage endCursor } } } }";
-/// Creates an issue and its native Issue Type in one effect (ADR-0054).
-pub(super) const CREATE_TYPED_ISSUE_QUERY: &str = "mutation CreateTypedIssue($repositoryId: ID!, $title: String!, $body: String!, $issueTypeId: ID!) { createIssue(input: { repositoryId: $repositoryId, title: $title, body: $body, issueTypeId: $issueTypeId }) { issue { url number } } }";
+/// Reads the single-select issue fields an account defines (ADR-0054). The
+/// account, not the repository, owns them; `hasNextPage` lets the caller refuse
+/// to read a truncated list as "absent".
+const ISSUE_FIELDS_SELECTION: &str = "issueFields(first: 50) { nodes { ... on IssueFieldSingleSelect { id name options { id name } } } pageInfo { hasNextPage } }";
+/// Sets one single-select field value. Probed as an upsert (ADR-0054): an
+/// unset field takes the value and a set one is replaced.
+pub(super) const SET_ISSUE_FIELD_VALUE_QUERY: &str = "mutation SetIssueFieldValue($issueId: ID!, $issueFields: [IssueFieldCreateOrUpdateInput!]!) { setIssueFieldValue(input: { issueId: $issueId, issueFields: $issueFields }) { issue { number } } }";
+/// Creates an issue with its optional native Issue Type and issue fields in
+/// one effect (ADR-0054).
+pub(super) const CREATE_ISSUE_QUERY: &str = "mutation CreateIssue($repositoryId: ID!, $title: String!, $body: String!, $issueTypeId: ID, $issueFields: [IssueFieldCreateOrUpdateInput!]) { createIssue(input: { repositoryId: $repositoryId, title: $title, body: $body, issueTypeId: $issueTypeId, issueFields: $issueFields }) { issue { url number } } }";
 
-/// 50 Pull targets request at most 100 nodes, well below GitHub's 500,000-node
-/// query limit.
+/// 50 Pull targets request at most 50 repositories, 2,500 issue fields, and
+/// 2,500 issue field values, well below GitHub's 500,000-node query limit.
 pub(super) const MAX_PULL_KEYS_PER_QUERY: usize = 50;
 
 /// A typed GraphQL operation binds one request to its response decoder.
@@ -101,23 +109,104 @@ impl GraphqlOperation for IssueTypesOperation<'_> {
     }
 }
 
-/// Atomic GitHub issue creation with one resolved native Issue Type (ADR-0054).
-pub(super) struct CreateTypedIssueOperation<'a> {
+/// A resolved single-select issue field value, ready for the wire.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct FieldValue<'a> {
+    pub field_id: &'a str,
+    pub option_id: &'a str,
+}
+
+impl FieldValue<'_> {
+    fn input(self) -> serde_json::Value {
+        json!({"fieldId": self.field_id, "singleSelectOptionId": self.option_id})
+    }
+}
+
+/// Read of an account's issue fields through one repository.
+pub(super) struct IssueFieldsOperation<'a> {
+    host: &'a str,
+    owner: &'a str,
+    name: &'a str,
+}
+
+impl<'a> IssueFieldsOperation<'a> {
+    /// Bind one repository to the issue field query.
+    pub(super) fn new(host: &'a str, owner: &'a str, name: &'a str) -> Self {
+        Self { host, owner, name }
+    }
+}
+
+impl GraphqlOperation for IssueFieldsOperation<'_> {
+    type Response = IssueFieldsResponse;
+
+    fn request(&self) -> GraphqlRequest {
+        GraphqlRequest {
+            host: self.host.into(),
+            operation_name: "RepositoryIssueFields",
+            document: format!(
+                "query RepositoryIssueFields($owner: String!, $name: String!) {{ repository(owner: $owner, name: $name) {{ {ISSUE_FIELDS_SELECTION} }} }}"
+            ),
+            variables: json!({"owner": self.owner, "name": self.name}),
+        }
+    }
+}
+
+/// Replaces one issue field value on an existing issue (ADR-0054).
+pub(super) struct SetIssueFieldValueOperation<'a> {
+    host: &'a str,
+    issue_id: &'a str,
+    value: FieldValue<'a>,
+}
+
+impl<'a> SetIssueFieldValueOperation<'a> {
+    /// Bind one issue node and its resolved field value to the mutation.
+    pub(super) fn new(host: &'a str, issue_id: &'a str, value: FieldValue<'a>) -> Self {
+        Self {
+            host,
+            issue_id,
+            value,
+        }
+    }
+}
+
+impl GraphqlOperation for SetIssueFieldValueOperation<'_> {
+    type Response = SetIssueFieldValueData;
+
+    fn request(&self) -> GraphqlRequest {
+        GraphqlRequest {
+            host: self.host.into(),
+            operation_name: "SetIssueFieldValue",
+            document: SET_ISSUE_FIELD_VALUE_QUERY.into(),
+            variables: json!({
+                "issueId": self.issue_id,
+                "issueFields": [self.value.input()],
+            }),
+        }
+    }
+}
+
+/// Atomic GitHub issue creation with its resolved native Issue Type and issue
+/// field values (ADR-0054). Either may be absent: a Task is untyped, and an
+/// Epic has no Priority to set.
+pub(super) struct CreateIssueOperation<'a> {
     host: &'a str,
     repository_id: &'a str,
     title: &'a str,
     body: &'a str,
-    issue_type_id: &'a str,
+    issue_type_id: Option<&'a str>,
+    priority: Option<FieldValue<'a>>,
 }
 
-impl<'a> CreateTypedIssueOperation<'a> {
-    /// Bind the retained Promotion snapshot and its Issue Type to creation.
+impl<'a> CreateIssueOperation<'a> {
+    /// Bind the retained Promotion snapshot and its resolved taxonomy to
+    /// creation.
     pub(super) fn new(
         host: &'a str,
         repository_id: &'a str,
         title: &'a str,
         body: &'a str,
-        issue_type_id: &'a str,
+        issue_type_id: Option<&'a str>,
+        priority: Option<FieldValue<'a>>,
     ) -> Self {
         Self {
             host,
@@ -125,23 +214,25 @@ impl<'a> CreateTypedIssueOperation<'a> {
             title,
             body,
             issue_type_id,
+            priority,
         }
     }
 }
 
-impl GraphqlOperation for CreateTypedIssueOperation<'_> {
+impl GraphqlOperation for CreateIssueOperation<'_> {
     type Response = CreateIssueData;
 
     fn request(&self) -> GraphqlRequest {
         GraphqlRequest {
             host: self.host.into(),
-            operation_name: "CreateTypedIssue",
-            document: CREATE_TYPED_ISSUE_QUERY.into(),
+            operation_name: "CreateIssue",
+            document: CREATE_ISSUE_QUERY.into(),
             variables: json!({
                 "repositoryId": self.repository_id,
                 "title": self.title,
                 "body": self.body,
                 "issueTypeId": self.issue_type_id,
+                "issueFields": self.priority.map(|value| [value.input()]),
             }),
         }
     }
@@ -201,7 +292,7 @@ impl GraphqlOperation for PullOperation<'_> {
                 let index = target.input_index;
                 let alias = target.alias();
                 format!(
-                    "{alias}: repository(owner: $owner_{index}, name: $name_{index}) {{ item: issueOrPullRequest(number: $number_{index}) {{ __typename ... on Issue {{ number title body state url issueType {{ name }} }} ... on PullRequest {{ number url }} }} }}"
+                    "{alias}: repository(owner: $owner_{index}, name: $name_{index}) {{ {ISSUE_FIELDS_SELECTION} item: issueOrPullRequest(number: $number_{index}) {{ __typename ... on Issue {{ number title body state url issueType {{ name }} issueFieldValues(first: 50) {{ nodes {{ ... on IssueFieldSingleSelectValue {{ value field {{ ... on IssueFieldSingleSelect {{ name }} }} }} }} pageInfo {{ hasNextPage }} }} }} ... on PullRequest {{ number url }} }} }}"
                 )
             })
             .collect::<Vec<_>>()
@@ -268,6 +359,79 @@ pub(super) struct CreateIssueReceipt {
     pub url: String,
 }
 
+/// `setIssueFieldValue` mutation response data (ADR-0054).
+#[derive(Debug, Deserialize)]
+pub(super) struct SetIssueFieldValueData {
+    #[serde(rename = "setIssueFieldValue")]
+    pub set_issue_field_value: Option<SetIssueFieldValuePayload>,
+}
+
+/// `setIssueFieldValue` payload; the issue proves the write landed.
+#[derive(Debug, Deserialize)]
+pub(super) struct SetIssueFieldValuePayload {
+    pub issue: Option<serde_json::Value>,
+}
+
+/// Repository data returned by the issue field query.
+#[derive(Debug, Deserialize)]
+pub(super) struct IssueFieldsResponse {
+    pub repository: Option<IssueFieldsRepository>,
+}
+
+/// Repository wrapper for GitHub's nullable issue field connection.
+#[derive(Debug, Deserialize)]
+pub(super) struct IssueFieldsRepository {
+    #[serde(rename = "issueFields")]
+    pub issue_fields: Option<IssueFieldConnection>,
+}
+
+/// One page of an account's issue fields. A field that is not a single-select
+/// decodes with every member absent.
+#[derive(Debug, Deserialize)]
+pub(super) struct IssueFieldConnection {
+    pub nodes: Vec<IssueFieldNode>,
+    #[serde(rename = "pageInfo")]
+    pub page_info: PageInfo,
+}
+
+/// A single-select issue field and its options.
+#[derive(Debug, Deserialize)]
+pub(super) struct IssueFieldNode {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    #[serde(default)]
+    pub options: Vec<IssueFieldOption>,
+}
+
+/// One option of a single-select issue field.
+#[derive(Debug, Deserialize)]
+pub(super) struct IssueFieldOption {
+    pub id: String,
+    pub name: String,
+}
+
+/// Issue field values on one issue, as Pull reads them.
+#[derive(Debug, Deserialize)]
+pub(super) struct IssueFieldValues {
+    pub nodes: Vec<IssueFieldValueNode>,
+    #[serde(rename = "pageInfo")]
+    pub page_info: PageInfo,
+}
+
+/// One issue field value. Non-single-select values decode with both members
+/// absent.
+#[derive(Debug, Deserialize)]
+pub(super) struct IssueFieldValueNode {
+    pub value: Option<String>,
+    pub field: Option<IssueFieldName>,
+}
+
+/// The owning field's name, the only part of it Pull reads.
+#[derive(Debug, Deserialize)]
+pub(super) struct IssueFieldName {
+    pub name: Option<String>,
+}
+
 /// Repository data returned by one Issue Type page query.
 #[derive(Debug, Deserialize)]
 pub(super) struct IssueTypePageResponse {
@@ -322,9 +486,12 @@ pub(super) struct PullData {
     pub items: std::collections::HashMap<String, Option<PullRepository>>,
 }
 
-/// Requested object returned for one alias.
+/// Requested object returned for one alias, with the account's issue fields
+/// that give its Priority meaning.
 #[derive(Debug, Deserialize)]
 pub(super) struct PullRepository {
+    #[serde(rename = "issueFields")]
+    pub issue_fields: Option<IssueFieldConnection>,
     pub item: Option<PullObject>,
 }
 
@@ -424,12 +591,19 @@ mod tests {
             request.document,
             "query PullItems($owner_2: String!, $name_2: String!, $number_2: Int!, \
 $owner_5: String!, $name_5: String!, $number_5: Int!) { item_2: \
-repository(owner: $owner_2, name: $name_2) { item: \
-issueOrPullRequest(number: $number_2) { __typename ... on Issue { number title \
-body state url issueType { name } } ... \
-on PullRequest { number url } } } item_5: repository(owner: $owner_5, name: \
-$name_5) { item: issueOrPullRequest(number: $number_5) { \
-__typename ... on Issue { number title body state url issueType { name } } ... on PullRequest { number url } } } }"
+repository(owner: $owner_2, name: $name_2) { issueFields(first: 50) { nodes { \
+... on IssueFieldSingleSelect { id name options { id name } } } pageInfo { \
+hasNextPage } } item: issueOrPullRequest(number: $number_2) { __typename ... on \
+Issue { number title body state url issueType { name } issueFieldValues(first: \
+50) { nodes { ... on IssueFieldSingleSelectValue { value field { ... on \
+IssueFieldSingleSelect { name } } } } pageInfo { hasNextPage } } } ... on \
+PullRequest { number url } } } item_5: repository(owner: $owner_5, name: \
+$name_5) { issueFields(first: 50) { nodes { ... on IssueFieldSingleSelect { id \
+name options { id name } } } pageInfo { hasNextPage } } item: \
+issueOrPullRequest(number: $number_5) { __typename ... on Issue { number title \
+body state url issueType { name } issueFieldValues(first: 50) { nodes { ... on \
+IssueFieldSingleSelectValue { value field { ... on IssueFieldSingleSelect { \
+name } } } } pageInfo { hasNextPage } } } ... on PullRequest { number url } } } }"
         );
     }
 }

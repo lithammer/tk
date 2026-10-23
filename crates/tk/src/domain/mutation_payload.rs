@@ -8,7 +8,7 @@
 //! constraint on the column.
 //!
 //! `Serialize`/`Deserialize` therefore live on the per-variant payload
-//! structs ([`TitleBody`], [`EpicRef`], [`LifecycleChange`], [`DependencyRef`],
+//! structs ([`TitleBody`], [`EpicRef`], [`LifecycleChange`], [`PriorityChange`], [`DependencyRef`],
 //! [`Promotion`]) rather than on the outer enum: serializing the enum
 //! directly would produce externally-tagged JSON (`{"UpdateTitleBody":{…}}`)
 //! that breaks the flat row contract.
@@ -16,6 +16,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::domain::lifecycle::Lifecycle;
+use crate::domain::priority::Priority;
 
 /// Typed payload union for a `mutations` row. Variant choice is determined by
 /// the row's `mutation_type` discriminator.
@@ -29,6 +30,8 @@ pub enum MutationPayload {
     EpicRef(EpicRef),
     /// Payload for `set_item_status` — target Lifecycle after the change.
     Lifecycle(LifecycleChange),
+    /// Payload for `set_ticket_priority` — target Priority after the change.
+    Priority(PriorityChange),
     /// Payload for `add_dependency` and `remove_dependency` — the internal
     /// stable ID of the Blocking Item referenced by the Dependency.
     DependencyRef(DependencyRef),
@@ -48,6 +51,7 @@ impl MutationPayload {
             Self::UpdateTitleBody(v) => serde_json::to_string(v),
             Self::EpicRef(v) => serde_json::to_string(v),
             Self::Lifecycle(v) => serde_json::to_string(v),
+            Self::Priority(v) => serde_json::to_string(v),
             Self::DependencyRef(v) => serde_json::to_string(v),
             Self::Promotion(v) => serde_json::to_string(v),
         }
@@ -75,6 +79,13 @@ pub struct EpicRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LifecycleChange {
     pub status: Lifecycle,
+}
+
+/// Priority-change payload used by `set_ticket_priority`. The target value,
+/// not a delta, so replaying it converges.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PriorityChange {
+    pub priority: Priority,
 }
 
 /// Blocking Item reference used by `add_dependency` / `remove_dependency`.
@@ -144,6 +155,15 @@ mod tests {
         })
         .to_json_string();
         assert_eq!(json, r#"{"status":"done"}"#);
+    }
+
+    #[test]
+    fn priority_change_json_is_flat() {
+        let json = MutationPayload::Priority(PriorityChange {
+            priority: Priority::P0,
+        })
+        .to_json_string();
+        assert_eq!(json, r#"{"priority":"P0"}"#);
     }
 
     #[test]

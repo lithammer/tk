@@ -1,11 +1,12 @@
 //! GitHub Backend Adapter over the `gh` CLI (ADR-0021 fields, ADR-0034 opt-in,
-//! ADR-0054 native Issue Types).
+//! ADR-0054 native Issue Types and issue fields).
 //!
-//! Implements [`Adapter`] by shelling out to `gh issue` through an injected
+//! Implements [`Adapter`] by shelling out to `gh` through an injected
 //! [`ProcRunner`] (ADR-0031: the real subprocess only in production, a
 //! `FakeRunner` in tests). Creation and bare Adopt input let `gh` resolve the
 //! repository from the command cwd; canonical issue URLs then pin existing
-//! Item operations to their repository (ADR-0033).
+//! Item operations to their repository (ADR-0033). Creation and Priority
+//! edits go through GraphQL, because `gh` has no issue field support.
 //!
 //! Pull is exact-key batching: the engine hands the Adapter the Adopted working
 //! set, which the Adapter groups by host and reads through bounded GraphQL
@@ -25,6 +26,7 @@ use crate::domain::backend_outcome::{
     BackendCreateOutcome, BackendEditOutcome, Failure, FailureClass,
 };
 use crate::domain::lifecycle::Lifecycle;
+use crate::domain::priority::Priority;
 use crate::domain::promotion_capability::{PromotionCapabilities, PromotionRequirements};
 use crate::domain::ticket_kind::TicketKind;
 use crate::proc::{ProcRunner, RunOutput};
@@ -32,16 +34,19 @@ use crate::proc::{ProcRunner, RunOutput};
 use super::adapter::{Adapter, AdapterReadError, ApplyError};
 
 mod graphql;
+mod priority;
 
 use graphql::cli::CliGraphqlTransport;
 #[cfg(test)]
-use graphql::{CREATE_TYPED_ISSUE_QUERY, GraphqlExchange, GraphqlRequest, ISSUE_TYPES_QUERY};
+use graphql::{CREATE_ISSUE_QUERY, GraphqlExchange, GraphqlRequest, ISSUE_TYPES_QUERY};
 use graphql::{
-    CreateIssueData, CreateTypedIssueOperation, GraphqlCompleted, GraphqlEnvelope, GraphqlError,
-    GraphqlObservation, GraphqlOperation, GraphqlStartFailure, GraphqlTransport,
-    IssueTypePageResponse, IssueTypesField, IssueTypesOperation, MAX_PULL_KEYS_PER_QUERY, PullData,
-    PullObject, PullOperation, PullRepository, PullTarget,
+    CreateIssueData, CreateIssueOperation, GraphqlCompleted, GraphqlEnvelope, GraphqlError,
+    GraphqlObservation, GraphqlOperation, GraphqlStartFailure, GraphqlTransport, IssueFieldValues,
+    IssueFieldsOperation, IssueFieldsResponse, IssueTypePageResponse, IssueTypesField,
+    IssueTypesOperation, MAX_PULL_KEYS_PER_QUERY, PullData, PullObject, PullOperation,
+    PullRepository, PullTarget, SetIssueFieldValueOperation,
 };
+use priority::PriorityField;
 
 /// Encode a one-item request through the production Pull operation.
 #[cfg(test)]
@@ -63,24 +68,43 @@ pub(crate) fn issue_types_request_body(owner: &str, name: &str) -> Vec<u8> {
         .body()
 }
 
-/// Encode a typed `createIssue` request through the production operation.
+/// Encode the issue field request through the production operation.
 #[cfg(test)]
-pub(crate) fn create_typed_issue_request_body(
+pub(crate) fn issue_fields_request_body(owner: &str, name: &str) -> Vec<u8> {
+    IssueFieldsOperation::new("github.com", owner, name)
+        .request()
+        .body()
+}
+
+/// Encode a `createIssue` request for a Ticket with its Priority resolved.
+#[cfg(test)]
+pub(crate) fn create_issue_request_body(
     repository_id: &str,
     title: &str,
     body: &str,
-    issue_type_id: &str,
+    issue_type_id: Option<&str>,
+    priority: Option<(&str, &str)>,
 ) -> Vec<u8> {
-    CreateTypedIssueOperation::new("github.com", repository_id, title, body, issue_type_id)
-        .request()
-        .body()
+    CreateIssueOperation::new(
+        "github.com",
+        repository_id,
+        title,
+        body,
+        issue_type_id,
+        priority.map(|(field_id, option_id)| graphql::FieldValue {
+            field_id,
+            option_id,
+        }),
+    )
+    .request()
+    .body()
 }
 
 /// The `--json` field set tk requests from `gh issue view`. `url` supplies the
 /// canonical Adopt and Promotion-recovery identity and rejects pull requests
 /// (see [`is_pull_request_url`]); `state` arrives UPPERCASE; `issueType` is an
-/// object-or-null.
-const ISSUE_JSON_FIELDS: &str = "number,title,body,state,issueType,url";
+/// object-or-null; `id` is the node ID that issue field mutations address.
+const ISSUE_JSON_FIELDS: &str = "id,number,title,body,state,issueType,url";
 const REPOSITORY_JSON_FIELDS: &str = "id,nameWithOwner,url";
 
 /// Issue Type names Promotion requires, matched case-insensitively (ADR-0054).
@@ -161,6 +185,9 @@ impl Adapter for GithubAdapter<'_> {
                 "--body",
                 &snapshot.body,
             ]),
+            BackendEdit::SetTicketPriority { ticket, change } => {
+                self.set_ticket_priority(&ticket.backend_key, change.priority)
+            }
             BackendEdit::SetItemStatus { item, change, .. } => match change.status {
                 Lifecycle::Done => self.run_edit(&["gh", "issue", "close", &item.backend_key]),
                 // v1 has no remote reopen: `done` is terminal (ADR-0006), and
@@ -233,6 +260,7 @@ impl Adapter for GithubAdapter<'_> {
 
         let mut capabilities = PromotionCapabilities::none();
         if requirements.requires_item_class(ItemClass::Ticket) {
+            self.require_priority_field()?;
             capabilities = capabilities.with_item_class(ItemClass::Ticket);
         }
         if requirements.requires_item_class(ItemClass::Epic) {
@@ -283,7 +311,7 @@ impl GithubAdapter<'_> {
                         });
                         continue;
                     };
-                    match decode_pull_item(&items[target.input_index], repository) {
+                    match decode_pull_item(&items[target.input_index], &target.owner, repository) {
                         Ok(item) => pulled[target.input_index] = Some(item),
                         Err(error) => item_errors.push(PullItemError {
                             input_index: target.input_index,
@@ -358,112 +386,47 @@ impl GithubAdapter<'_> {
         Ok(rejected_edit(&output))
     }
 
-    /// Run one non-idempotent creation command and preserve ADR-0036's effect
-    /// certainty boundary: a child that never starts is Rejected, while an
-    /// unobserved child is Indeterminate.
-    fn run_creation(
-        &self,
-        command: &str,
-        argv: &[&str],
-    ) -> Result<RunOutput, BackendCreateOutcome> {
-        match self.runner.run(argv, self.cwd) {
-            Ok(output) => Ok(output),
-            Err(
-                error @ (crate::proc::ProcError::ExecutableNotFound
-                | crate::proc::ProcError::SpawnFailed),
-            ) => Err(BackendCreateOutcome::Rejected(Failure {
-                detail: format!("{command} did not start: {error}"),
-                class: FailureClass::Unknown,
-                retry_after_s: None,
-            })),
-            Err(error @ crate::proc::ProcError::OutcomeUnobserved) => {
-                Err(BackendCreateOutcome::Indeterminate(Failure {
-                    detail: format!("{command} started, but its outcome is unknown: {error}"),
-                    class: FailureClass::Unknown,
-                    retry_after_s: None,
-                }))
-            }
-        }
-    }
-
     /// Create the GitHub issue represented by either Promotion variant.
     ///
-    /// Task Tickets use the typeless `gh issue create` surface. Bugs and Epics
-    /// use the direct GraphQL path below so the Issue Type and creation are one
-    /// effect (ADR-0054). A canonical receipt remains authoritative even when
-    /// `gh` exits non-zero.
+    /// Every creation is one GraphQL `createIssue` call, because `gh` cannot
+    /// set an issue field and the type, fields, and creation must be one
+    /// effect (ADR-0054). A Task is untyped; a Bug and an Epic carry their
+    /// native type; a Ticket carries its Priority, an Epic none. A creation
+    /// outcome is Indeterminate unless a canonical receipt proves it
+    /// (ADR-0036), and Rejected only when a read before the mutation
+    /// certifies no effect.
     fn create_issue(&self, create: &BackendCreate) -> BackendCreateOutcome {
-        let snapshot = match create {
+        let (snapshot, type_name, priority) = match create {
             BackendCreate::Ticket {
                 snapshot,
                 ticket_kind: TicketKind::Task,
-            } => snapshot,
+                priority,
+            } => (snapshot, None, Some(*priority)),
             BackendCreate::Ticket {
                 snapshot,
                 ticket_kind: TicketKind::Bug,
-            } => return self.create_typed_issue(snapshot, BUG_ISSUE_TYPE),
-            BackendCreate::Epic { snapshot } => {
-                return self.create_typed_issue(snapshot, EPIC_ISSUE_TYPE);
-            }
+                priority,
+            } => (snapshot, Some(BUG_ISSUE_TYPE), Some(*priority)),
+            BackendCreate::Epic { snapshot } => (snapshot, Some(EPIC_ISSUE_TYPE), None),
         };
-        let output = match self.run_creation(
-            "gh issue create",
-            &[
-                "gh",
-                "issue",
-                "create",
-                "--title",
-                &snapshot.title,
-                "--body",
-                &snapshot.body,
-            ],
-        ) {
-            Ok(output) => output,
-            Err(outcome) => return outcome,
-        };
-
-        if let Some(identity) = parse_create_receipt(&output.stdout) {
-            return BackendCreateOutcome::Created(identity);
-        }
-
-        let stderr = stderr_string(&output);
-        let class = classify(&stderr);
-        let failure = Failure {
-            detail: create_failure_detail(&output, &stderr),
-            class,
-            retry_after_s: None,
-        };
-        if certifies_auth_rejection(&output, &stderr) {
-            BackendCreateOutcome::Rejected(failure)
-        } else {
-            BackendCreateOutcome::Indeterminate(failure)
-        }
-    }
-
-    /// Resolve the required Issue Type, then create the issue and its type in
-    /// one GraphQL mutation (ADR-0054).
-    fn create_typed_issue(
-        &self,
-        snapshot: &crate::domain::mutation_payload::TitleBody,
-        type_name: &str,
-    ) -> BackendCreateOutcome {
         let repository = match self.current_repository() {
             Ok(repository) => repository,
             Err(error) => return BackendCreateOutcome::rejected(error.to_string()),
         };
-        let target = repository
-            .host()
-            .and_then(|host| Ok((host, self.resolve_issue_type(&repository, type_name)?)));
-        let (host, issue_type_id) = match target {
-            Ok(target) => target,
-            Err(error) => return BackendCreateOutcome::rejected(error.to_string()),
-        };
-        let operation = CreateTypedIssueOperation::new(
+        let (host, issue_type_id, priority_field) =
+            match self.creation_taxonomy(&repository, type_name, priority) {
+                Ok(taxonomy) => taxonomy,
+                Err(error) => return BackendCreateOutcome::rejected(error.to_string()),
+            };
+        let operation = CreateIssueOperation::new(
             host,
             &repository.id,
             &snapshot.title,
             &snapshot.body,
-            &issue_type_id,
+            issue_type_id.as_deref(),
+            priority_field
+                .as_ref()
+                .map(|(field, priority)| field.value(*priority)),
         );
         match graphql::execute(self.graphql.as_ref(), &operation) {
             GraphqlObservation::NotStarted(failure) => BackendCreateOutcome::Rejected(Failure {
@@ -481,12 +444,84 @@ impl GithubAdapter<'_> {
                 })
             }
             GraphqlObservation::Completed { exchange, envelope } => {
-                Self::classify_typed_creation(&exchange, envelope)
+                Self::classify_creation(&exchange, envelope)
             }
         }
     }
 
-    fn classify_typed_creation(
+    /// Resolve the issue type and Priority field a creation sets, reading the
+    /// Backend before any mutation.
+    fn creation_taxonomy<'r>(
+        &self,
+        repository: &'r RepositoryContext,
+        type_name: Option<&str>,
+        priority: Option<Priority>,
+    ) -> Result<CreationTaxonomy<'r>, AdapterReadError> {
+        let host = repository.host()?;
+        let issue_type_id = type_name
+            .map(|name| self.resolve_issue_type(repository, name))
+            .transpose()?;
+        let priority_field = match priority {
+            Some(priority) => {
+                let (owner, name) = repository.owner_and_name()?;
+                Some((self.resolve_priority_field(host, owner, name)?, priority))
+            }
+            None => None,
+        };
+        Ok((host, issue_type_id, priority_field))
+    }
+
+    /// Replace the Priority on one issue. The field and option IDs and the
+    /// issue's node ID come from reads, so a missing field rejects the
+    /// Mutation with the named error before anything is written.
+    fn set_ticket_priority(
+        &self,
+        key: &str,
+        priority: Priority,
+    ) -> Result<BackendEditOutcome, ApplyError> {
+        let Some(address) = GithubIssueAddress::parse(key) else {
+            return Ok(BackendEditOutcome::rejected(format!(
+                "'{key}' is not a canonical GitHub issue URL"
+            )));
+        };
+        match self.write_priority(&address, key, priority) {
+            Ok(()) => Ok(BackendEditOutcome::Acknowledged),
+            Err(AdapterReadError::Env(error)) => Err(error),
+            Err(AdapterReadError::Failed(detail)) => Ok(BackendEditOutcome::Rejected(Failure {
+                class: classify(&detail),
+                detail,
+                retry_after_s: None,
+            })),
+        }
+    }
+
+    fn write_priority(
+        &self,
+        address: &GithubIssueAddress<'_>,
+        key: &str,
+        priority: Priority,
+    ) -> Result<(), AdapterReadError> {
+        let field = self.resolve_priority_field(address.host, address.owner, address.repository)?;
+        let issue_id = self.view_matching_issue(key)?.id.ok_or_else(|| {
+            AdapterReadError::Failed(format!("gh returned no node ID for '{key}'"))
+        })?;
+        let response = self.graphql_read(&SetIssueFieldValueOperation::new(
+            address.host,
+            &issue_id,
+            field.value(priority),
+        ))?;
+        response
+            .set_issue_field_value
+            .and_then(|payload| payload.issue)
+            .map(drop)
+            .ok_or_else(|| {
+                AdapterReadError::Failed(format!(
+                    "GitHub did not confirm the Priority change on '{key}'"
+                ))
+            })
+    }
+
+    fn classify_creation(
         exchange: &GraphqlCompleted,
         envelope: Result<GraphqlEnvelope<CreateIssueData>, String>,
     ) -> BackendCreateOutcome {
@@ -575,6 +610,30 @@ impl GithubAdapter<'_> {
         self.resolve_issue_type(&repository, name).map(drop)
     }
 
+    /// Fail with the Priority field's name and owner when the repository's
+    /// account lacks it or one of its four options (ADR-0054).
+    fn require_priority_field(&self) -> Result<(), AdapterReadError> {
+        let repository = self.current_repository()?;
+        let (owner, name) = repository.owner_and_name()?;
+        self.resolve_priority_field(repository.host()?, owner, name)
+            .map(drop)
+    }
+
+    /// Read the account's issue fields and resolve Priority and its options.
+    fn resolve_priority_field(
+        &self,
+        host: &str,
+        owner: &str,
+        name: &str,
+    ) -> Result<PriorityField, AdapterReadError> {
+        let response: IssueFieldsResponse =
+            self.graphql_read(&IssueFieldsOperation::new(host, owner, name))?;
+        let repository = response.repository.ok_or_else(|| {
+            AdapterReadError::Failed(format!("GitHub returned no repository for {owner}/{name}"))
+        })?;
+        PriorityField::resolve(repository.issue_fields, owner)
+    }
+
     /// Read every Issue Type page before concluding that no enabled, exact
     /// case-insensitive `name` exists.
     fn resolve_issue_type(
@@ -583,12 +642,7 @@ impl GithubAdapter<'_> {
         name: &str,
     ) -> Result<String, AdapterReadError> {
         let host = repository.host()?;
-        let (owner, repo) = repository.name_with_owner.split_once('/').ok_or_else(|| {
-            AdapterReadError::Failed(format!(
-                "GitHub returned an invalid repository name '{}'",
-                repository.name_with_owner
-            ))
-        })?;
+        let (owner, repo) = repository.owner_and_name()?;
         let missing = || {
             AdapterReadError::Failed(format!(
                 "required issue type '{name}' is missing on {owner}"
@@ -688,6 +742,12 @@ struct GhIssue {
     issue_type: Option<GhIssueType>,
     /// Canonical issue/PR URL used for identity and the PR guard.
     url: String,
+    /// Present only in `gh issue view`.
+    #[serde(default)]
+    id: Option<String>,
+    /// Present only in a GraphQL Pull; `gh issue view` cannot return it.
+    #[serde(default, rename = "issueFieldValues")]
+    issue_field_values: Option<IssueFieldValues>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -699,6 +759,15 @@ struct RepositoryContext {
 }
 
 impl RepositoryContext {
+    fn owner_and_name(&self) -> Result<(&str, &str), AdapterReadError> {
+        self.name_with_owner.split_once('/').ok_or_else(|| {
+            AdapterReadError::Failed(format!(
+                "GitHub returned an invalid repository name '{}'",
+                self.name_with_owner
+            ))
+        })
+    }
+
     fn host(&self) -> Result<&str, AdapterReadError> {
         let remainder = self.url.strip_prefix("https://").ok_or_else(|| {
             AdapterReadError::Failed(format!(
@@ -726,6 +795,9 @@ impl RepositoryContext {
         Ok(host)
     }
 }
+
+/// The host, issue type ID, and Priority field value a creation needs.
+type CreationTaxonomy<'a> = (&'a str, Option<String>, Option<(PriorityField, Priority)>);
 
 struct PullGroup {
     host: String,
@@ -850,6 +922,7 @@ fn pull_item_error_detail(
 
 fn decode_pull_item(
     address: &BackendItemAddress,
+    owner: &str,
     repository: Option<PullRepository>,
 ) -> Result<BackendPullItem, AdapterReadError> {
     let key = &address.backend_key;
@@ -858,7 +931,11 @@ fn decode_pull_item(
             "{key}: GitHub returned no repository for the requested issue"
         ))
     })?;
-    let object = repository.item.ok_or_else(|| {
+    let PullRepository {
+        issue_fields,
+        item: object,
+    } = repository;
+    let object = object.ok_or_else(|| {
         AdapterReadError::Failed(format!("{key}: GitHub returned no issue or pull request"))
     })?;
     let refresh = match object {
@@ -871,7 +948,17 @@ fn decode_pull_item(
             issue.validate_key(key)?;
             issue.validate_identity()?;
             let ticket_kind = classify_ticket_kind(&issue);
-            issue.into_refresh(ticket_kind)?
+            // An Epic issue carries no Priority, so it needs no Priority field.
+            let priority = if issue.has_type(EPIC_ISSUE_TYPE) {
+                None
+            } else {
+                PriorityField::resolve(issue_fields, owner)?;
+                Some(priority::from_values(
+                    issue.issue_field_values.as_ref(),
+                    owner,
+                )?)
+            };
+            issue.into_refresh(ticket_kind, priority)?
         }
     };
     Ok(BackendPullItem {
@@ -883,9 +970,10 @@ fn decode_pull_item(
 /// A `Bug` type is a Bug; every other case, untyped included, is a Task
 /// (ADR-0054).
 fn classify_ticket_kind(issue: &GhIssue) -> TicketKind {
-    match issue.issue_type.as_ref() {
-        Some(issue_type) if issue_type.name.eq_ignore_ascii_case(BUG_ISSUE_TYPE) => TicketKind::Bug,
-        _ => TicketKind::Task,
+    if issue.has_type(BUG_ISSUE_TYPE) {
+        TicketKind::Bug
+    } else {
+        TicketKind::Task
     }
 }
 
@@ -973,14 +1061,25 @@ impl GhIssue {
         })
     }
 
-    fn into_refresh(self, ticket_kind: TicketKind) -> Result<BackendItemRefresh, AdapterReadError> {
+    fn into_refresh(
+        self,
+        ticket_kind: TicketKind,
+        priority: Option<Priority>,
+    ) -> Result<BackendItemRefresh, AdapterReadError> {
         let status = self.lifecycle()?;
         Ok(BackendItemRefresh {
             title: self.title,
             body: self.body,
             status,
             ticket_kind: Some(ticket_kind),
+            priority,
         })
+    }
+
+    fn has_type(&self, name: &str) -> bool {
+        self.issue_type
+            .as_ref()
+            .is_some_and(|issue_type| issue_type.name.eq_ignore_ascii_case(name))
     }
 
     fn into_inspection(
@@ -1068,48 +1167,6 @@ impl<'a> GithubIssueAddress<'a> {
             number,
         })
     }
-}
-
-/// Parse the canonical one-line URL receipt emitted by `gh issue create`.
-///
-/// The URL itself becomes the Backend key, retaining host and repository
-/// identity without a separate Remote setting (ADR-0033).
-fn parse_create_receipt(stdout: &[u8]) -> Option<BackendItemIdentity> {
-    let receipt = std::str::from_utf8(stdout).ok()?.trim();
-    if receipt.lines().count() != 1 {
-        return None;
-    }
-    parse_issue_url(receipt)
-}
-
-fn create_failure_detail(output: &RunOutput, stderr: &str) -> String {
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    match (stderr.is_empty(), stdout.is_empty()) {
-        (false, false) => format!("{stderr}\nUnrecognized stdout receipt: {stdout}"),
-        (false, true) => stderr.to_owned(),
-        (true, false) => format!("gh issue create returned an unrecognized receipt: {stdout}"),
-        (true, true) => "gh issue create returned no GitHub issue URL receipt".to_owned(),
-    }
-}
-
-/// True only for the one `gh` stderr shape that certifies no issue was created.
-///
-/// ADR-0036 effect certainty: a completed non-zero `gh issue create` is
-/// Indeterminate by default, because `gh` may have created the issue and then
-/// failed a later step. Certifying Rejected therefore needs all three
-/// conditions at once — a non-zero exit with no stdout receipt at all, stderr
-/// *starting* with the `HTTP 401: Bad credentials (https://.../graphql)` line,
-/// and its `Try authenticating with:  gh auth login -h ` hint on a following
-/// line (all matched case-insensitively). [`classify`]'s broader Auth anchors
-/// classify a failure; they never certify absence of effect.
-fn certifies_auth_rejection(output: &RunOutput, stderr: &str) -> bool {
-    if output.succeeded() || !output.stdout.is_empty() {
-        return false;
-    }
-    let normalized = stderr.to_ascii_lowercase();
-    normalized.starts_with("http 401: bad credentials (https://")
-        && normalized.contains("/graphql)")
-        && normalized.contains("\ntry authenticating with:  gh auth login -h ")
 }
 
 /// Classify a non-zero `gh` failure into a [`FailureClass`] (ADR-0016).
@@ -1224,14 +1281,25 @@ mod tests {
         repository_id: &str,
         title: &str,
         body: &str,
-        issue_type_id: &str,
+        issue_type_id: Option<&str>,
+        priority: Option<(&str, &str)>,
         response: &str,
     ) {
+        let issue_type_id = issue_type_id.map_or_else(|| "null".into(), json_string);
+        let issue_fields = priority.map_or_else(
+            || "null".into(),
+            |(field_id, option_id)| {
+                format!(
+                    r#"[{{"fieldId":{},"singleSelectOptionId":{}}}]"#,
+                    json_string(field_id),
+                    json_string(option_id)
+                )
+            },
+        );
         let request_body = format!(
-            r#"{{"query":{},"operationName":"CreateTypedIssue","variables":{{"body":{},"issueTypeId":{},"repositoryId":{},"title":{}}}}}"#,
-            json_string(CREATE_TYPED_ISSUE_QUERY),
+            r#"{{"query":{},"operationName":"CreateIssue","variables":{{"body":{},"issueFields":{issue_fields},"issueTypeId":{issue_type_id},"repositoryId":{},"title":{}}}}}"#,
+            json_string(CREATE_ISSUE_QUERY),
             json_string(body),
-            json_string(issue_type_id),
             json_string(repository_id),
             json_string(title),
         );
@@ -1254,6 +1322,31 @@ mod tests {
             "--input",
             "-",
         ]
+    }
+
+    /// The account's Priority field as GitHub's starter pack defines it.
+    fn priority_fields() -> serde_json::Value {
+        serde_json::json!({
+            "nodes": [{"id": "F1", "name": "Priority", "options": [
+                {"id": "O0", "name": "Urgent"},
+                {"id": "O1", "name": "High"},
+                {"id": "O2", "name": "Medium"},
+                {"id": "O3", "name": "Low"},
+            ]}],
+            "pageInfo": {"hasNextPage": false},
+        })
+    }
+
+    fn priority_fields_json() -> String {
+        serde_json::json!({"data": {"repository": {"issueFields": priority_fields()}}}).to_string()
+    }
+
+    fn expect_graphql_fields(runner: &FakeRunner, owner: &str, name: &str, response: &str) {
+        runner.expect_exact_with_stdin(
+            &graphql_argv("github.com"),
+            &issue_fields_request_body(owner, name),
+            ok(response),
+        );
     }
 
     fn json_string(value: &str) -> String {
@@ -1284,7 +1377,7 @@ mod tests {
                 })
             );
             GraphqlExchange::Completed(GraphqlCompleted {
-                body: br#"{"data":{"item_0":{"item":{"__typename":"Issue","number":1,"title":"First","body":"B1","state":"OPEN","url":"https://github.com/o/r/issues/1","issueType":{"name":"Bug"} }},"item_1":{"item":{"__typename":"Issue","number":2,"title":"Second","body":"B2","state":"CLOSED","url":"https://github.com/p/q/issues/2","issueType":{"name":"Bug"}}}}}"#.to_vec(),
+                body: br#"{"data":{"item_0":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":1,"title":"First","body":"B1","state":"OPEN","url":"https://github.com/o/r/issues/1","issueType":{"name":"Bug"} }},"item_1":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":2,"title":"Second","body":"B2","state":"CLOSED","url":"https://github.com/p/q/issues/2","issueType":{"name":"Bug"}}}}}"#.to_vec(),
                 completion: graphql::GraphqlCompletion::Succeeded {
                     detail: String::new(),
                 },
@@ -1319,6 +1412,7 @@ mod tests {
                 data.insert(
                     format!("item_{index}"),
                     serde_json::json!({
+                        "issueFields": priority_fields(),
                         "item": {
                             "__typename": "Issue",
                             "number": number,
@@ -1390,7 +1484,7 @@ mod tests {
             let body = if call == 0 {
                 br#"{"data":{"item_0":null},"errors":[{"message":"first input failed","path":["item_0","item"]}]}"#.to_vec()
             } else {
-                br#"{"data":{"item_50":{"item":{"__typename":"Issue","number":51,"title":"Last","body":"","state":"OPEN","url":"https://github.com/o/r/issues/51","issueType":null}}}}"#.to_vec()
+                br#"{"data":{"item_50":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":51,"title":"Last","body":"","state":"OPEN","url":"https://github.com/o/r/issues/51","issueType":null}}}}"#.to_vec()
             };
             GraphqlExchange::Completed(GraphqlCompleted {
                 body,
@@ -1434,9 +1528,9 @@ mod tests {
     impl GraphqlTransport for CrossHostDecodeErrorTransport {
         fn exchange(&self, request: &GraphqlRequest) -> GraphqlExchange {
             let body = if request.host == "one.example" {
-                br#"{"data":{"item_0":{"item":{"__typename":"Issue","number":1,"title":"Valid","body":"","state":"OPEN","url":"https://one.example/o/r/issues/1","issueType":null}},"item_2":{"item":{"__typename":"Issue","number":3,"title":"Later","body":"","state":"FUTURE","url":"https://one.example/o/r/issues/3","issueType":null}}}}"#.to_vec()
+                br#"{"data":{"item_0":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":1,"title":"Valid","body":"","state":"OPEN","url":"https://one.example/o/r/issues/1","issueType":null}},"item_2":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":3,"title":"Later","body":"","state":"FUTURE","url":"https://one.example/o/r/issues/3","issueType":null}}}}"#.to_vec()
             } else {
-                br#"{"data":{"item_1":{"item":{"__typename":"Issue","number":2,"title":"Earlier","body":"","state":"FUTURE","url":"https://two.example/o/r/issues/2","issueType":null}}}}"#.to_vec()
+                br#"{"data":{"item_1":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":2,"title":"Earlier","body":"","state":"FUTURE","url":"https://two.example/o/r/issues/2","issueType":null}}}}"#.to_vec()
             };
             GraphqlExchange::Completed(GraphqlCompleted {
                 body,
@@ -1513,6 +1607,10 @@ mod tests {
                         r#"{"data":{"repository":{"issueTypes":{"nodes":[{"id":"IT_1","name":"Bug","isEnabled":true}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#,
                         None,
                     ),
+                    completed_graphql(
+                        r#"{"data":{"repository":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]}],"pageInfo":{"hasNextPage":false}}}}}"#,
+                        None,
+                    ),
                     exchange,
                 ]
                 .into(),
@@ -1528,11 +1626,16 @@ mod tests {
                 body: "Bug body".into(),
             },
             ticket_kind: TicketKind::Bug,
+            priority: Priority::P2,
         });
 
         assert_eq!(
             operations.borrow().as_slice(),
-            ["RepositoryIssueTypes", "CreateTypedIssue"]
+            [
+                "RepositoryIssueTypes",
+                "RepositoryIssueFields",
+                "CreateIssue"
+            ]
         );
         runner.assert_all_consumed();
         outcome
@@ -1644,7 +1747,7 @@ mod tests {
             &runner,
             cwd(),
             Box::new(StaticPullTransport {
-                body: br#"{"data":{"item_0":{"item":{"__typename":"Issue","number":1,"title":"Untyped","body":"","state":"OPEN","url":"https://github.com/o/r/issues/1","issueType":null}},"item_1":{"item":{"__typename":"Issue","number":2,"title":"Feature","body":"","state":"OPEN","url":"https://github.com/o/r/issues/2","issueType":{"name":"Feature"}}},"item_2":{"item":{"__typename":"Issue","number":3,"title":"Bug","body":"","state":"OPEN","url":"https://github.com/o/r/issues/3","issueType":{"name":"bug"}}},"item_3":{"item":{"__typename":"Issue","number":4,"title":"Epic","body":"","state":"OPEN","url":"https://github.com/o/r/issues/4","issueType":{"name":"Epic"}}}}}"#.to_vec(),
+                body: br#"{"data":{"item_0":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":1,"title":"Untyped","body":"","state":"OPEN","url":"https://github.com/o/r/issues/1","issueType":null}},"item_1":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":2,"title":"Feature","body":"","state":"OPEN","url":"https://github.com/o/r/issues/2","issueType":{"name":"Feature"}}},"item_2":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":3,"title":"Bug","body":"","state":"OPEN","url":"https://github.com/o/r/issues/3","issueType":{"name":"bug"}}},"item_3":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":4,"title":"Epic","body":"","state":"OPEN","url":"https://github.com/o/r/issues/4","issueType":{"name":"Epic"}}}}}"#.to_vec(),
             }),
         );
         let items = [
@@ -1953,11 +2056,11 @@ mod tests {
             ),
             (b"not json".as_slice(), "could not parse GitHub GraphQL response"),
             (
-                br#"{"data":{"item_0":{"item":{"__typename":"Issue","number":1,"title":"Wrong","body":"","state":"OPEN","url":"https://github.com/o/r/issues/2","issueType":null}}}}"#.as_slice(),
+                br#"{"data":{"item_0":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":1,"title":"Wrong","body":"","state":"OPEN","url":"https://github.com/o/r/issues/2","issueType":null}}}}"#.as_slice(),
                 "different issue",
             ),
             (
-                br#"{"data":{"item_0":{"item":{"__typename":"Issue","number":1,"title":"Future","body":"","state":"FUTURE","url":"https://github.com/o/r/issues/1","issueType":null}}}}"#.as_slice(),
+                br#"{"data":{"item_0":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":1,"title":"Future","body":"","state":"FUTURE","url":"https://github.com/o/r/issues/1","issueType":null}}}}"#.as_slice(),
                 "unexpected issue state",
             ),
         ];
@@ -1999,21 +2102,6 @@ mod tests {
                 blocking: address(blocking),
             },
             _ => panic!("not a dependency edit"),
-        }
-    }
-
-    fn create(mt: MutationType, title: &str, body: &str) -> BackendCreate {
-        let snapshot = TitleBody {
-            title: title.into(),
-            body: body.into(),
-        };
-        match mt {
-            MutationType::PromoteTicket => BackendCreate::Ticket {
-                snapshot,
-                ticket_kind: TicketKind::Task,
-            },
-            MutationType::PromoteEpic => BackendCreate::Epic { snapshot },
-            _ => panic!("not a Promotion Mutation Type"),
         }
     }
 
@@ -2504,198 +2592,17 @@ mod tests {
     // ---- Promotion -------------------------------------------------------
 
     #[test]
-    fn create_task_uses_the_exact_typeless_issue_argv() {
-        let runner = FakeRunner::new();
-        runner.expect_exact(
-            &["gh", "issue", "create", "--title", "T", "--body", "Body"],
-            ok("https://github.com/o/r/issues/42\n"),
-        );
-        let mut adapter = GithubAdapter::new(&runner, cwd());
-        let outcome = adapter.create_item(&create(MutationType::PromoteTicket, "T", "Body"));
-        let BackendCreateOutcome::Created(identity) = outcome else {
-            panic!("expected a confirmed receipt, got {outcome:?}");
-        };
-        assert_eq!(identity.backend_key, "https://github.com/o/r/issues/42");
-        assert_eq!(identity.display_id, "gh-42");
-        runner.assert_all_consumed();
-    }
-
-    #[test]
-    fn a_valid_receipt_wins_even_when_gh_exits_nonzero() {
-        let runner = FakeRunner::new();
-        runner.expect_exact(
-            &["gh", "issue", "create", "--title", "T", "--body", "B"],
-            RunOutput {
-                exit_code: 1,
-                stdout: b" https://github.example/o/r/issues/7\n".to_vec(),
-                stderr: b"a later CLI step failed".to_vec(),
-            },
-        );
-        let mut adapter = GithubAdapter::new(&runner, cwd());
-
-        assert_eq!(
-            adapter.create_item(&create(MutationType::PromoteTicket, "T", "B")),
-            BackendCreateOutcome::Created(identity("https://github.example/o/r/issues/7"))
-        );
-        runner.assert_all_consumed();
-    }
-
-    #[test]
-    fn empty_and_malformed_success_receipts_are_indeterminate() {
-        for stdout in [
-            "",
-            "created #42",
-            "https://github.com/o/r/pull/42",
-            "http://github.com/o/r/issues/1",
-            "https://github.com/o/r/issues/0",
-            "https://github.com/o/r/issues/01",
-            "https://github.com/o/r/issues/1?x=y",
-            "https://user@github.com/o/r/issues/1",
-            "https://github.com/o/r/issues/1\nextra",
-            "https://github.com/o/r/issues/not-a-number",
-        ] {
-            let runner = FakeRunner::new();
-            runner.expect_exact(
-                &["gh", "issue", "create", "--title", "T", "--body", "B"],
-                ok(stdout),
-            );
-            let mut adapter = GithubAdapter::new(&runner, cwd());
-
-            let BackendCreateOutcome::Indeterminate(failure) =
-                adapter.create_item(&create(MutationType::PromoteTicket, "T", "B"))
-            else {
-                panic!("{stdout:?}: missing receipt must be indeterminate");
-            };
-            assert_eq!(failure.class, FailureClass::Unknown);
-            assert!(failure.detail.contains("receipt"), "{}", failure.detail);
-            runner.assert_all_consumed();
-        }
-    }
-
-    #[test]
-    fn completed_nonzero_without_a_receipt_is_indeterminate() {
-        for stderr in [
-            "GraphQL: service unavailable",
-            "HTTP 422: Validation Failed",
-            "type \"Bug\" not found; available types:",
-        ] {
-            let runner = FakeRunner::new();
-            runner.expect_exact(
-                &["gh", "issue", "create", "--title", "T", "--body", "B"],
-                fail(1, stderr),
-            );
-            let mut adapter = GithubAdapter::new(&runner, cwd());
-
-            let BackendCreateOutcome::Indeterminate(failure) =
-                adapter.create_item(&create(MutationType::PromoteTicket, "T", "B"))
-            else {
-                panic!("{stderr}: completed nonzero is not certified no-effect");
-            };
-            assert_eq!(failure.detail, stderr);
-            runner.assert_all_consumed();
-        }
-    }
-
-    #[test]
-    fn authentication_rejection_is_certified_no_effect() {
-        let stderr = "HTTP 401: Bad credentials (https://api.github.com/graphql)\n\
-                      Try authenticating with:  gh auth login -h github.com";
-        let runner = FakeRunner::new();
-        runner.expect_exact(
-            &["gh", "issue", "create", "--title", "T", "--body", "B"],
-            fail(1, stderr),
-        );
-        let mut adapter = GithubAdapter::new(&runner, cwd());
-
-        let BackendCreateOutcome::Rejected(failure) =
-            adapter.create_item(&create(MutationType::PromoteTicket, "T", "B"))
-        else {
-            panic!("the observed initial authentication failure certifies no effect");
-        };
-        assert_eq!(failure.detail, stderr);
-        assert_eq!(failure.class, FailureClass::Auth);
-        runner.assert_all_consumed();
-    }
-
-    #[test]
-    fn auth_flavoured_text_alone_does_not_certify_creation_rejection() {
-        for stderr in [
-            "HTTP 401: Unauthorized",
-            "GraphQL authentication failed: Bad credentials",
-            "To get started, please run:  gh auth login",
-        ] {
-            let runner = FakeRunner::new();
-            runner.expect_exact(
-                &["gh", "issue", "create", "--title", "T", "--body", "B"],
-                fail(1, stderr),
-            );
-            let mut adapter = GithubAdapter::new(&runner, cwd());
-
-            let BackendCreateOutcome::Indeterminate(failure) =
-                adapter.create_item(&create(MutationType::PromoteTicket, "T", "B"))
-            else {
-                panic!("auth classification alone cannot certify no effect");
-            };
-            assert_eq!(failure.class, FailureClass::Auth);
-            runner.assert_all_consumed();
-        }
-    }
-
-    #[test]
-    fn pre_spawn_process_failures_are_certified_no_effect() {
-        for err in [ProcError::ExecutableNotFound, ProcError::SpawnFailed] {
-            let runner = FakeRunner::new();
-            runner.expect_exact_error(
-                &["gh", "issue", "create", "--title", "T", "--body", "B"],
-                err,
-            );
-            let mut adapter = GithubAdapter::new(&runner, cwd());
-
-            let BackendCreateOutcome::Rejected(failure) =
-                adapter.create_item(&create(MutationType::PromoteTicket, "T", "B"))
-            else {
-                panic!("a pre-spawn error cannot create an issue");
-            };
-            assert!(failure.detail.starts_with("gh issue create did not start:"));
-            assert_eq!(failure.class, FailureClass::Unknown);
-            runner.assert_all_consumed();
-        }
-    }
-
-    #[test]
-    fn post_spawn_process_failure_is_indeterminate() {
-        let runner = FakeRunner::new();
-        runner.expect_exact_error(
-            &["gh", "issue", "create", "--title", "T", "--body", "B"],
-            ProcError::OutcomeUnobserved,
-        );
-        let mut adapter = GithubAdapter::new(&runner, cwd());
-
-        let BackendCreateOutcome::Indeterminate(failure) =
-            adapter.create_item(&create(MutationType::PromoteTicket, "T", "B"))
-        else {
-            panic!("a started process may already have created an issue");
-        };
-        assert!(failure.detail.contains("started"));
-        assert!(failure.detail.contains("outcome is unknown"));
-        assert_eq!(failure.class, FailureClass::Unknown);
-        runner.assert_all_consumed();
-    }
-
-    #[test]
     fn resolves_requested_static_facets_without_io() {
         let runner = FakeRunner::new();
         let mut adapter = GithubAdapter::new(&runner, cwd());
         let caps = adapter
             .resolve_promotion_capabilities(
                 PromotionRequirements::none()
-                    .with_item_class(ItemClass::Ticket)
                     .with_ticket_kind(TicketKind::Task)
                     .with_dependencies()
                     .with_epic_membership(),
             )
             .unwrap();
-        assert!(caps.can_create_item_class(ItemClass::Ticket));
         assert!(!caps.can_create_item_class(ItemClass::Epic));
         assert!(caps.can_create_ticket_kind(TicketKind::Task));
         assert!(!caps.can_create_ticket_kind(TicketKind::Bug));
@@ -2865,12 +2772,14 @@ mod tests {
             None,
             r#"{"data":{"repository":{"issueTypes":{"nodes":[{"id":"IT_1","name":"Bug","isEnabled":true}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#,
         );
+        expect_graphql_fields(&runner, "o", "r", &priority_fields_json());
         expect_typed_create(
             &runner,
             "R_1",
             "Bug title",
             "Bug body",
-            "IT_1",
+            Some("IT_1"),
+            Some(("F1", "O2")),
             r#"{"data":{"createIssue":{"issue":{"url":"https://github.com/o/r/issues/42","number":42}}}}"#,
         );
         let mut adapter = GithubAdapter::new(&runner, cwd());
@@ -2880,6 +2789,7 @@ mod tests {
                 body: "Bug body".into(),
             },
             ticket_kind: TicketKind::Bug,
+            priority: Priority::P2,
         });
 
         assert_eq!(
@@ -3021,7 +2931,8 @@ mod tests {
             "R_1",
             "Epic title",
             "Epic body",
-            "IT_2",
+            Some("IT_2"),
+            None,
             r#"{"data":{"createIssue":{"issue":{"url":"https://github.com/o/r/issues/43","number":43}}}}"#,
         );
         let mut adapter = GithubAdapter::new(&runner, cwd());
@@ -3106,6 +3017,80 @@ mod tests {
                 if detail == "GitHub issue type pagination returned null after a continuation cursor"
         ));
         runner.assert_all_consumed();
+    }
+
+    /// Issue field lists that do not give tk a usable Priority, with the error
+    /// each must raise for owner `o`. A deleted field reads as no value on every
+    /// issue, which would overwrite every local Priority, so none may pass.
+    fn unusable_priority_fields() -> [(&'static str, &'static str); 3] {
+        [
+            ("null", "required issue field 'Priority' is missing on o"),
+            (
+                r#"{"nodes":[{"id":"F2","name":"Effort","options":[]}],"pageInfo":{"hasNextPage":false}}"#,
+                "required issue field 'Priority' is missing on o",
+            ),
+            (
+                r#"{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]}],"pageInfo":{"hasNextPage":false}}"#,
+                "required issue field 'Priority' lacks option 'Urgent' on o",
+            ),
+        ]
+    }
+
+    #[test]
+    fn pull_fails_naming_a_missing_priority_field_or_option() {
+        for (fields, expected) in unusable_priority_fields() {
+            let body = format!(
+                r#"{{"data":{{"item_0":{{"issueFields":{fields},"item":{{"__typename":"Issue","number":1,"title":"T","body":"","state":"OPEN","url":"https://github.com/o/r/issues/1","issueType":null}}}}}}}}"#
+            );
+            let runner = FakeRunner::new();
+            let mut adapter = GithubAdapter::with_graphql_transport(
+                &runner,
+                cwd(),
+                Box::new(StaticPullTransport {
+                    body: body.into_bytes(),
+                }),
+            );
+
+            let result = adapter.pull(&[address("https://github.com/o/r/issues/1")]);
+
+            assert!(
+                matches!(&result, Err(AdapterReadError::Failed(detail)) if detail.contains(expected)),
+                "{fields}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ticket_preflight_fails_naming_a_missing_priority_field_or_option() {
+        for (fields, expected) in unusable_priority_fields() {
+            let runner = FakeRunner::new();
+            runner.expect_exact(
+                &["gh", "repo", "view", "--json", REPOSITORY_JSON_FIELDS],
+                ok(r#"{"id":"R_1","nameWithOwner":"o/r","url":"https://github.com/o/r"}"#),
+            );
+            let transport = ScriptedGraphqlTransport {
+                exchanges: std::cell::RefCell::new(
+                    [completed_graphql(
+                        &format!(r#"{{"data":{{"repository":{{"issueFields":{fields}}}}}}}"#),
+                        None,
+                    )]
+                    .into(),
+                ),
+                operations: std::rc::Rc::default(),
+            };
+            let mut adapter =
+                GithubAdapter::with_graphql_transport(&runner, cwd(), Box::new(transport));
+
+            let result = adapter.resolve_promotion_capabilities(
+                PromotionRequirements::none().with_item_class(ItemClass::Ticket),
+            );
+
+            assert!(
+                matches!(&result, Err(AdapterReadError::Failed(detail)) if detail == expected),
+                "{fields}: {result:?}"
+            );
+            runner.assert_all_consumed();
+        }
     }
 
     #[test]

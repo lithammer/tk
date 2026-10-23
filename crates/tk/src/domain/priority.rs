@@ -1,18 +1,23 @@
-//! Priority is a local-only Ticket ranking.
+//! Priority is a Shared Field: a Ticket ranking that crosses to a Backend
+//! (ADR-0054).
 //!
 //! The four-variant set is mirrored verbatim in the `items.priority` CHECK
 //! constraint, so the SQL spelling returned by [`Priority::text`] is the
-//! contract — not just a rendering convenience.
+//! contract — not just a rendering convenience. The Mutation payload uses the
+//! same spelling.
 
 use std::fmt;
 use std::str::FromStr;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Local-only Ticket ranking. Lower discriminants sort before higher ones, so
+/// Ticket ranking. Lower discriminants sort before higher ones, so
 /// `Priority::P0` is the highest-priority ticket and `Priority::P3` the lowest.
 /// `Priority::P2` is the default for newly-created local Tickets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
 pub enum Priority {
     P0,
     P1,
