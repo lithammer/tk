@@ -1131,7 +1131,10 @@ fn render_cancellation<W: Write + ?Sized>(stdout: &mut W, report: &CancellationR
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::testing::{self, Harness, cwd, expect_git, expect_github_pull};
+    use crate::commands::testing::{
+        self, Harness, cwd, expect_git, expect_github_issue_type, expect_github_pull,
+        expect_github_typed_create,
+    };
     use crate::domain::backend_operation::{
         BackendEdit, BackendItemIdentity, BackendItemInspection, BackendItemRefresh,
     };
@@ -1515,6 +1518,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::with_seed(&cwd_path, &fixture, 7);
         expect_git(&h, &fixture);
+        expect_github_issue_type(&h, "o", "r", "Epic", "IT_EPIC");
 
         let code = run_rendered(&mut h, "tk-1", true);
 
@@ -1605,22 +1609,9 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::with_seed(&cwd_path, &fixture, 7);
         expect_git(&h, &fixture);
-        h.runner.expect_exact(
-            &[
-                "gh",
-                "issue",
-                "create",
-                "--title",
-                "Local epic",
-                "--body",
-                "",
-            ],
-            RunOutput {
-                exit_code: 0,
-                stdout: b"https://github.com/o/r/issues/1\n".to_vec(),
-                stderr: Vec::new(),
-            },
-        );
+        expect_github_issue_type(&h, "o", "r", "Epic", "IT_EPIC");
+        expect_github_issue_type(&h, "o", "r", "Epic", "IT_EPIC");
+        expect_github_typed_create(&h, "o", "r", "Local epic", "IT_EPIC", 1);
         h.runner.expect_exact(
             &["gh", "issue", "create", "--title", "Child", "--body", ""],
             RunOutput {
@@ -1676,7 +1667,7 @@ mod tests {
                 "view",
                 "42",
                 "--json",
-                "number,title,body,state,issueType,labels,url",
+                "number,title,body,state,issueType,url",
             ],
             RunOutput {
                 exit_code: 0,

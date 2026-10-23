@@ -138,7 +138,6 @@ pub(crate) fn expect_github_pull(
     let response = serde_json::to_vec(&json!({
         "data": {
             "item_0": {
-                "isInOrganization": true,
                 "item": {
                     "__typename": "Issue",
                     "number": number,
@@ -147,7 +146,6 @@ pub(crate) fn expect_github_pull(
                     "state": state,
                     "url": format!("https://github.com/{owner}/{name}/issues/{number}"),
                     "issueType": null,
-                    "labels": { "nodes": [] },
                 },
             },
         },
@@ -173,3 +171,80 @@ pub(crate) fn expect_github_pull(
         },
     );
 }
+
+/// Queue the repository read and Issue Type page that resolve `type_name` to
+/// `type_id` for an Epic or Bug requirement.
+pub(crate) fn expect_github_issue_type(
+    h: &Harness<'_>,
+    owner: &str,
+    name: &str,
+    type_name: &str,
+    type_id: &str,
+) {
+    h.runner.expect_exact(
+        &["gh", "repo", "view", "--json", "id,nameWithOwner,url"],
+        RunOutput {
+            exit_code: 0,
+            stdout: serde_json::to_vec(&json!({
+                "id": "R_1",
+                "nameWithOwner": format!("{owner}/{name}"),
+                "url": format!("https://github.com/{owner}/{name}"),
+            }))
+            .unwrap(),
+            stderr: Vec::new(),
+        },
+    );
+    h.runner.expect_exact_with_stdin(
+        &GRAPHQL_ARGV,
+        &crate::remote::github::issue_types_request_body(owner, name),
+        RunOutput {
+            exit_code: 0,
+            stdout: serde_json::to_vec(&json!({
+                "data": {"repository": {"issueTypes": {
+                    "nodes": [{"id": type_id, "name": type_name, "isEnabled": true}],
+                    "pageInfo": {"hasNextPage": false, "endCursor": null},
+                }}},
+            }))
+            .unwrap(),
+            stderr: Vec::new(),
+        },
+    );
+}
+
+/// Queue one typed `createIssue` mutation that returns issue `number`.
+pub(crate) fn expect_github_typed_create(
+    h: &Harness<'_>,
+    owner: &str,
+    name: &str,
+    title: &str,
+    type_id: &str,
+    number: i64,
+) {
+    h.runner.expect_exact_with_stdin(
+        &GRAPHQL_ARGV,
+        &crate::remote::github::create_typed_issue_request_body("R_1", title, "", type_id),
+        RunOutput {
+            exit_code: 0,
+            stdout: serde_json::to_vec(&json!({
+                "data": {"createIssue": {"issue": {
+                    "url": format!("https://github.com/{owner}/{name}/issues/{number}"),
+                    "number": number,
+                }}},
+            }))
+            .unwrap(),
+            stderr: Vec::new(),
+        },
+    );
+}
+
+const GRAPHQL_ARGV: [&str; 9] = [
+    "gh",
+    "api",
+    "graphql",
+    "--hostname",
+    "github.com",
+    "-H",
+    "Content-Type: application/json",
+    "--input",
+    "-",
+];
