@@ -35,9 +35,9 @@ creates taxonomy (ADR-0049 rule 1). There is no stored capability record and
 no per-field switch between Shared and Local: if tk uses it, the Backend must
 have it.
 
-Promotion reports a missing type or field as an unsupported-capability
-preflight finding, the shape ADR-0021 gives a missing Bug representation.
-Pull has no capability pass, so it checks the fields itself and reports a
+Promotion reports a missing type as an Adapter read error from capability
+resolution, which aborts preflight and leaves the outbox empty; the planner
+does not aggregate it with other findings. Pull has no capability pass, so it checks the fields itself and reports a
 missing one as an Adapter read error. A deleted Priority field reads back as
 no value on every issue, and mapping that through ADR-0049 rule 3 would
 overwrite every local Priority.

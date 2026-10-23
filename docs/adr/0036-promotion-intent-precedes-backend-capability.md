@@ -62,13 +62,12 @@ only for requested dynamic facets. The planner therefore remains independent
 of the Adapter and aggregates an unsupported capability with every other
 finding rather than short-circuiting.
 
-The GitHub Adapter resolves Ticket and Epic creation, Task Ticket Kind,
-Dependencies, and Epic membership without a Backend call. It creates both Item
-Classes as typeless GitHub issues; later relationship Mutations supply their
-structure. A requested Bug facet triggers the repository-aware inspection in
-ADR-0021. A failed inspection aborts preflight as an Adapter read error; a
-successful inspection without a usable representation returns Bug as
-unsupported and leaves the outbox empty.
+The GitHub Adapter resolves Ticket creation, Task Ticket Kind, Dependencies,
+and Epic membership without a Backend call; later relationship Mutations
+supply their structure. A requested Bug facet or Epic Item Class triggers the
+Issue Type inspection in ADR-0021 and ADR-0054. A failed inspection, or a
+missing type, aborts preflight with an Adapter error and leaves the outbox
+empty.
 
 Staging is a safety property, not sequencing preference. Sync stops at the
 first rejected Mutation, a Promotion Mutation is not a Sync Skip candidate, and

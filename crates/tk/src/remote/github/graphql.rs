@@ -13,15 +13,13 @@ pub(super) use self::transport::{
 pub(super) mod cli;
 mod transport;
 
-/// Reads every enabled Issue Type page needed by ADR-0021 capability checks.
+/// Reads every enabled Issue Type page needed by ADR-0054 capability checks.
 pub(super) const ISSUE_TYPES_QUERY: &str = "query RepositoryIssueTypes($owner: String!, $name: String!, $after: String) { repository(owner: $owner, name: $name) { issueTypes(first: 50, after: $after) { nodes { id name isEnabled } pageInfo { hasNextPage endCursor } } } }";
-/// Reads candidate Bug Labels and pagination evidence for ADR-0021 fallback.
-pub(super) const LABELS_QUERY: &str = "query RepositoryLabels($owner: String!, $name: String!, $after: String) { repository(owner: $owner, name: $name) { labels(first: 100, query: \"bug\", after: $after) { nodes { id name } pageInfo { hasNextPage endCursor } } } }";
-/// Creates a Bug and its one chosen representation in one effect (ADR-0021).
-pub(super) const CREATE_BUG_QUERY: &str = "mutation CreateBugIssue($repositoryId: ID!, $title: String!, $body: String!, $issueTypeId: ID, $labelIds: [ID!]) { createIssue(input: { repositoryId: $repositoryId, title: $title, body: $body, issueTypeId: $issueTypeId, labelIds: $labelIds }) { issue { url number } } }";
+/// Creates an issue and its native Issue Type in one effect (ADR-0054).
+pub(super) const CREATE_TYPED_ISSUE_QUERY: &str = "mutation CreateTypedIssue($repositoryId: ID!, $title: String!, $body: String!, $issueTypeId: ID!) { createIssue(input: { repositoryId: $repositoryId, title: $title, body: $body, issueTypeId: $issueTypeId }) { issue { url number } } }";
 
-/// 50 Pull targets request at most 5,100 nodes: one Repository, one Item, and
-/// up to 100 Labels per target, well below GitHub's 500,000-node query limit.
+/// 50 Pull targets request at most 100 nodes, well below GitHub's 500,000-node
+/// query limit.
 pub(super) const MAX_PULL_KEYS_PER_QUERY: usize = 50;
 
 /// A typed GraphQL operation binds one request to its response decoder.
@@ -61,7 +59,7 @@ pub(super) fn execute<O: GraphqlOperation>(
     }
 }
 
-/// Exhaustive Issue Type page read for one repository (ADR-0021).
+/// Exhaustive Issue Type page read for one repository (ADR-0054).
 pub(super) struct IssueTypesOperation<'a> {
     host: &'a str,
     owner: &'a str,
@@ -103,67 +101,23 @@ impl GraphqlOperation for IssueTypesOperation<'_> {
     }
 }
 
-/// Candidate Bug Label page read for one personal repository (ADR-0021).
-pub(super) struct LabelsOperation<'a> {
-    host: &'a str,
-    owner: &'a str,
-    name: &'a str,
-    after: Option<&'a str>,
-}
-
-impl<'a> LabelsOperation<'a> {
-    /// Bind one repository and optional continuation cursor to the page query.
-    pub(super) fn new(
-        host: &'a str,
-        owner: &'a str,
-        name: &'a str,
-        after: Option<&'a str>,
-    ) -> Self {
-        Self {
-            host,
-            owner,
-            name,
-            after,
-        }
-    }
-}
-
-impl GraphqlOperation for LabelsOperation<'_> {
-    type Response = LabelPageResponse;
-
-    fn request(&self) -> GraphqlRequest {
-        GraphqlRequest {
-            host: self.host.into(),
-            operation_name: "RepositoryLabels",
-            document: LABELS_QUERY.into(),
-            variables: json!({
-                "owner": self.owner,
-                "name": self.name,
-                "after": self.after,
-            }),
-        }
-    }
-}
-
-/// Atomic GitHub Bug creation with one resolved representation (ADR-0021).
-pub(super) struct CreateBugOperation<'a> {
+/// Atomic GitHub issue creation with one resolved native Issue Type (ADR-0054).
+pub(super) struct CreateTypedIssueOperation<'a> {
     host: &'a str,
     repository_id: &'a str,
     title: &'a str,
     body: &'a str,
-    issue_type_id: Option<&'a str>,
-    label_id: Option<&'a str>,
+    issue_type_id: &'a str,
 }
 
-impl<'a> CreateBugOperation<'a> {
-    /// Bind the retained Promotion snapshot and one representation to creation.
+impl<'a> CreateTypedIssueOperation<'a> {
+    /// Bind the retained Promotion snapshot and its Issue Type to creation.
     pub(super) fn new(
         host: &'a str,
         repository_id: &'a str,
         title: &'a str,
         body: &'a str,
-        issue_type_id: Option<&'a str>,
-        label_id: Option<&'a str>,
+        issue_type_id: &'a str,
     ) -> Self {
         Self {
             host,
@@ -171,26 +125,23 @@ impl<'a> CreateBugOperation<'a> {
             title,
             body,
             issue_type_id,
-            label_id,
         }
     }
 }
 
-impl GraphqlOperation for CreateBugOperation<'_> {
+impl GraphqlOperation for CreateTypedIssueOperation<'_> {
     type Response = CreateIssueData;
 
     fn request(&self) -> GraphqlRequest {
-        let label_ids = self.label_id.map(|id| vec![id]);
         GraphqlRequest {
             host: self.host.into(),
-            operation_name: "CreateBugIssue",
-            document: CREATE_BUG_QUERY.into(),
+            operation_name: "CreateTypedIssue",
+            document: CREATE_TYPED_ISSUE_QUERY.into(),
             variables: json!({
                 "repositoryId": self.repository_id,
                 "title": self.title,
                 "body": self.body,
                 "issueTypeId": self.issue_type_id,
-                "labelIds": label_ids,
             }),
         }
     }
@@ -250,7 +201,7 @@ impl GraphqlOperation for PullOperation<'_> {
                 let index = target.input_index;
                 let alias = target.alias();
                 format!(
-                    "{alias}: repository(owner: $owner_{index}, name: $name_{index}) {{ isInOrganization item: issueOrPullRequest(number: $number_{index}) {{ __typename ... on Issue {{ number title body state url issueType {{ name }} labels(first: 100) {{ nodes {{ name }} }} }} ... on PullRequest {{ number url }} }} }}"
+                    "{alias}: repository(owner: $owner_{index}, name: $name_{index}) {{ item: issueOrPullRequest(number: $number_{index}) {{ __typename ... on Issue {{ number title body state url issueType {{ name }} }} ... on PullRequest {{ number url }} }} }}"
                 )
             })
             .collect::<Vec<_>>()
@@ -298,7 +249,7 @@ impl GraphqlError {
     }
 }
 
-/// `createIssue` mutation response data (ADR-0021).
+/// `createIssue` mutation response data (ADR-0054).
 #[derive(Debug, Deserialize)]
 pub(super) struct CreateIssueData {
     #[serde(rename = "createIssue")]
@@ -330,7 +281,7 @@ pub(super) struct IssueTypeRepository {
     pub issue_types: IssueTypesField,
 }
 
-/// Keeps ADR-0021's initial-null policy distinct from a missing field.
+/// Keeps the initial-null policy distinct from a missing field.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub(super) enum IssueTypesField {
@@ -346,40 +297,13 @@ pub(super) struct IssueTypeConnection {
     pub page_info: PageInfo,
 }
 
-/// Native Issue Type fields needed to find an enabled Bug type.
+/// Native Issue Type fields needed to find an enabled type by name.
 #[derive(Debug, Deserialize)]
 pub(super) struct NativeIssueType {
     pub id: String,
     pub name: String,
     #[serde(rename = "isEnabled")]
     pub is_enabled: bool,
-}
-
-/// Repository data returned by one Label page query.
-#[derive(Debug, Deserialize)]
-pub(super) struct LabelPageResponse {
-    pub repository: Option<LabelRepository>,
-}
-
-/// Repository wrapper for the Label connection.
-#[derive(Debug, Deserialize)]
-pub(super) struct LabelRepository {
-    pub labels: LabelConnection,
-}
-
-/// One Label page and its continuation evidence.
-#[derive(Debug, Deserialize)]
-pub(super) struct LabelConnection {
-    pub nodes: Vec<GraphqlLabel>,
-    #[serde(rename = "pageInfo")]
-    pub page_info: PageInfo,
-}
-
-/// GitHub Label fields needed for exact Bug fallback matching.
-#[derive(Debug, Deserialize)]
-pub(super) struct GraphqlLabel {
-    pub id: String,
-    pub name: String,
 }
 
 /// GraphQL connection state used for exhaustive pagination.
@@ -398,11 +322,9 @@ pub(super) struct PullData {
     pub items: std::collections::HashMap<String, Option<PullRepository>>,
 }
 
-/// Repository ownership and requested object returned for one alias.
+/// Requested object returned for one alias.
 #[derive(Debug, Deserialize)]
 pub(super) struct PullRepository {
-    #[serde(rename = "isInOrganization")]
-    pub is_in_organization: bool,
     pub item: Option<PullObject>,
 }
 
@@ -502,13 +424,12 @@ mod tests {
             request.document,
             "query PullItems($owner_2: String!, $name_2: String!, $number_2: Int!, \
 $owner_5: String!, $name_5: String!, $number_5: Int!) { item_2: \
-repository(owner: $owner_2, name: $name_2) { isInOrganization item: \
+repository(owner: $owner_2, name: $name_2) { item: \
 issueOrPullRequest(number: $number_2) { __typename ... on Issue { number title \
-body state url issueType { name } labels(first: 100) { nodes { name } } } ... \
+body state url issueType { name } } ... \
 on PullRequest { number url } } } item_5: repository(owner: $owner_5, name: \
-$name_5) { isInOrganization item: issueOrPullRequest(number: $number_5) { \
-__typename ... on Issue { number title body state url issueType { name } \
-labels(first: 100) { nodes { name } } } ... on PullRequest { number url } } } }"
+$name_5) { item: issueOrPullRequest(number: $number_5) { \
+__typename ... on Issue { number title body state url issueType { name } } ... on PullRequest { number url } } } }"
         );
     }
 }

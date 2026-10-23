@@ -37,8 +37,7 @@ _Avoid_: Synced Field, Backend Field, Remote Field
 **Reserved Representation**:
 A pre-existing **Backend** label or type that a **Backend Adapter** uses as
 private encoding of a typed **tk** field when the **Backend** has no native
-slot for it, such as GitHub's `bug` label for **Ticket Kind**; **tk** never
-stores or shows it as a label.
+slot for it; **tk** never stores or shows it as a label.
 _Avoid_: Label, Reserved Label, Adapter Encoding
 
 **Priority**:
@@ -616,10 +615,10 @@ _Avoid_: ticket, tickets
   aborts the run without changing the Mutation.
 - A Promotion creation returns exactly one certainty outcome: **Created** with
   a Backend identity, certified-no-effect **Rejected**, or **Indeterminate**.
-- The GitHub **Backend Adapter** promotes Task **Tickets** and **Epics** as
-  typeless GitHub issues. It promotes Bug **Tickets** with a usable native
-  `Bug` Issue Type, or in personal repositories with an existing `bug` Label.
-  It represents **Dependencies** and Epic membership through later relationship
+- The GitHub **Backend Adapter** promotes Task **Tickets** as typeless GitHub
+  issues. It promotes Bug **Tickets** and **Epics** with the native `Bug` and
+  `Epic` Issue Types, and fails preflight naming a missing type. It represents
+  **Dependencies** and Epic membership through later relationship
   **Mutations**.
 - A trustworthy GitHub issue URL receipt certifies **Created**, including when
   `gh` also exits nonzero. Pre-spawn runner failures and authentication

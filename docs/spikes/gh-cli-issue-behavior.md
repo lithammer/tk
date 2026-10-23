@@ -1,5 +1,9 @@
 # Spike: `gh issue` CLI behaviour (tk-34 adapter)
 
+> **Superseded in part by ADR-0054.** The personal-repository `bug` Label
+> fallback and the typeless Epic path described below are gone: Bug and Epic
+> Promotion require native Issue Types. This spike keeps its history.
+
 Behaviour of the `gh issue` subcommands the GitHub Backend Adapter
 (`crates/tk/src/remote/github.rs`) drives, so the adapter's `FakeRunner`
 fixtures and the `FailureClass` classifier rest on evidence rather than on

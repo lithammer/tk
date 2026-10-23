@@ -26,63 +26,46 @@ GitHub repository, chiefly through the `gh issue` subcommands:
   Mutation pushes Kind, so Pull remains authoritative after creation,
 - the exact-key GraphQL Pull (`issueOrPullRequest` → `BackendItemRefresh`).
 
-GitHub Bug Promotion prefers a usable native `Bug` Issue Type for any
-repository. When that capability is unavailable, a personal repository falls
-back to an existing `bug` Label; an organization repository rejects preflight.
-A native Issue Type or Label counts as the reserved representation only when
-its name equals `Bug` case-insensitively. Renamed, localized, prefixed, or
-otherwise heuristic aliases are not inferred. A missing representation rejects
-preflight rather than causing tk to create repository taxonomy.
+GitHub Bug Promotion requires a native `Bug` Issue Type. A native Issue Type
+counts as the reserved representation only when its name equals `Bug`
+case-insensitively. Renamed, localized, prefixed, or otherwise heuristic
+aliases are not inferred. A missing type rejects preflight rather than causing
+tk to create repository taxonomy.
 
-The personal-repository `bug` Label is private Backend Adapter encoding for
-Ticket Kind, not general Label support in tk. It adds no Label field, command,
-or Mutation Type to the Repository Store; tk-21 retains ownership of those
-domain and interface decisions.
+Backend Pull remains authoritative for Ticket Kind after Promotion. `Bug` maps
+to Bug, while every other native type, and no type, maps to Task. Changing a
+native Issue Type away from `Bug` refreshes the local Ticket as `Task`; tk does
+not restore the previous Backend representation.
 
-Backend Pull remains authoritative for Ticket Kind after Promotion. A
-personal repository treats a present native Issue Type as authoritative: `Bug`
-maps to Bug, while every other native type maps to Task. The reserved `bug`
-Label maps to Bug only when the issue is typeless, so a later GitHub rollout
-does not invalidate older labeled Bugs. Removing the only representation, or
-changing a native Issue Type away from `Bug`, refreshes the local Ticket as
-`Task`; tk does not restore the previous Backend representation.
+The installed `gh` 2.98.0 source exposes `issueType` through `gh issue view
+--json`, and Pull reads it in the same exact-key GraphQL operation as the
+issue fields. Adopt and Promotion Reconciliation keep that issue-read and
+identity-validation path.
 
-The installed `gh` 2.98.0 source exposes `issueType` and `labels`, but not
-repository ownership, through `gh issue view --json`; `gh repo view --json`
-separately exposes `isInOrganization`. Adopt and Promotion Reconciliation keep
-that issue-read and identity-validation path. A typeless issue carrying the
-reserved Label needs the additional repository-ownership read, whose result
-the Adapter caches by repository for that invocation. Pull instead reads the
-issue fields and `isInOrganization` in the same exact-key GraphQL operation.
-Native types and ordinary typeless Tasks need no separate ownership call.
-
-Promotion Reconciliation also maps the candidate's Ticket Kind through that
-repository-specific representation. The mapped Kind must equal the retained
-Promotion's Kind, for both Task and Bug, and a mismatch is refused even with
-`--force`; the user must correct it on GitHub before reconciling.
+Promotion Reconciliation also maps the candidate's Ticket Kind from its
+Issue Type. The mapped Kind must equal the retained Promotion's Kind, for both
+Task and Bug, and a mismatch is refused even with `--force`; the user must
+correct it on GitHub before reconciling.
 
 A 2026-08-24 live probe against the user-owned
 `lithammer/tk-gh-playground` repository with `gh` 2.98.0 showed why capability
 must match the creation path. The REST repository Issue Types endpoint listed
 enabled Task, Bug, and Feature types, but `gh issue edit --type Bug` resolved
-no available types and wrote nothing. Repository ownership selects whether
-the Label fallback is allowed; the REST listing alone does not prove native
-Issue Type capability. A REST create with an unavailable `type` then created
-issue #24 successfully but silently left it typeless; the probe issue was
+no available types and wrote nothing. The REST listing alone does not prove
+native Issue Type capability. A REST create with an unavailable `type` then
+created issue #24 successfully but silently left it typeless; the probe issue was
 closed after inspection. In contrast, a direct `createIssue` GraphQL mutation
 with an invalid Issue Type ID returned no issue, and a title search confirmed
 that it created nothing. The REST result is observed behavior, not a claim
 from `gh` source; the GraphQL input contract is the API primitive that can
 couple representation and creation in one mutation.
 
-Bug Promotion therefore uses one direct GraphQL `createIssue` path with an
-exclusive representation proved during preflight: either the native Issue Type
-or the fallback Label, never both. Apply resolves that representation's current
-ID. Task and Epic Promotion retain their shipped `gh issue create` path. A
-future move to `gh issue create --type Bug` requires both usable
-personal-repository Issue Types and an upstream single-create contract that
-cannot strand a typeless issue before returning its receipt; personal
-availability alone is insufficient. The revisit is tracked by gh-49.
+Bug Promotion therefore uses one direct GraphQL `createIssue` path with the
+native Issue Type proved during preflight. Apply resolves that type's current
+ID. Task Promotion retains its shipped `gh issue create` path; ADR-0054 moves
+Epic Promotion onto the `createIssue` path as well. `gh issue create --type`
+is not the goal: `gh` 2.100.0 has no issue field flags, and `createIssue`
+takes the type and fields in one call.
 
 The GitHub Adapter chooses direct GraphQL by operation contract, not transport
 uniformity. It uses GraphQL when a Backend operation needs exact batching,
@@ -97,32 +80,29 @@ policy.
 
 Every Promotion calls the requirements-aware capability resolver established
 by ADR-0036. The GitHub Adapter satisfies static facets without I/O; when Bug
-is requested, it performs a fallible, repository-aware read to resolve
-repository ownership and currently usable Bug representations. It returns a
-plain `PromotionCapabilities` value to the pure Promotion planner. A
-successful inspection with no usable representation produces the ordinary
-unsupported-Bug preflight finding. Authentication, transport, and
-malformed-response failures remain Adapter read errors rather than being
-reported as unsupported capability. Repository-specific GitHub knowledge does
-not enter the command or planner.
+or Epic is requested, it performs a fallible read to resolve the required
+Issue Type. It returns a plain `PromotionCapabilities` value to the pure
+Promotion planner. A successful inspection that finds no such type fails
+preflight with an error that names the type and the owner. Authentication,
+transport, and malformed-response failures remain Adapter read errors.
+Repository-specific GitHub knowledge does not enter the command or planner.
 
 Native Issue Type absence requires an exhaustive direct GraphQL read. GitHub's
 schema makes `Repository.issueTypes` nullable. An initial null is Adapter
-policy for no native Issue Type representation available to this caller, and
-is terminal native absence. A non-null connection still requires reading each
-`issueTypes` page, including `isEnabled` and `pageInfo`, until `hasNextPage` is
-false; only then may it report that no enabled case-insensitive `Bug` exists.
-Null after a promised next page, omitted or malformed fields, GraphQL errors,
-and failed pages are Adapter read errors. It must not use `gh` 2.98.0's
-`RepoIssueTypes` helper as this proof because that helper requests only the
-first 50 nodes and no page information. Apply uses the same exhaustive
-resolver before creation.
+policy for no native Issue Type available to this caller, and is terminal
+absence. A non-null connection still requires reading each `issueTypes` page,
+including `isEnabled` and `pageInfo`, until `hasNextPage` is false; only then
+may it report that no enabled case-insensitive match exists. Null after a
+promised next page, omitted or malformed fields, GraphQL errors, and failed
+pages are Adapter read errors. It must not use `gh` 2.98.0's `RepoIssueTypes`
+helper as this proof because that helper requests only the first 50 nodes and
+no page information. Apply uses the same exhaustive resolver before creation.
 
-The Issue Type or Label ID is not durable Promotion intent and is not
-persisted. Preflight proves that the repository can currently represent Bug;
-Apply resolves the current ID again immediately before the atomic mutation. If
-that read finds the representation missing, Apply rejects without creating an
-issue and ordinary sync can retry after the repository taxonomy is repaired.
+The Issue Type ID is not durable Promotion intent and is not persisted.
+Preflight proves that the repository has the type; Apply resolves the current
+ID again immediately before the atomic mutation. If that read finds the type
+missing, Apply rejects without creating an issue and ordinary sync can retry
+after the repository taxonomy is repaired.
 Once `createIssue` starts, the ADR-0036 receipt contract still applies: a
 canonical URL proves creation, while a result without one is indeterminate
 unless the Adapter can prove that creation did not run.

@@ -572,7 +572,7 @@ mod tests {
                 "view",
                 "5",
                 "--json",
-                "number,title,body,state,issueType,labels,url",
+                "number,title,body,state,issueType,url",
             ],
             ok(&issue_json(
                 5,
