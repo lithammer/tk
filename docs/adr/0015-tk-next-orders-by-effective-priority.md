@@ -113,7 +113,8 @@ cannot use `-q` as one shared name for a low-chrome mode across read commands.
 `tk next` now sorts by Effective Priority, then own Priority, then
 **Effort**, then `created_seq`. Low Effort comes first. Effort is the
 candidate's own value. It does not propagate through Dependencies, so
-a high-Effort Ticket that blocks a P0 still inherits P0 and wins.
+a high-Effort Ticket that blocks a P0 still inherits P0 as its
+Effective Priority.
 
 An unset Effort sorts as `medium`. Every Ticket that predates Effort
 has none. If unset sorted last, marking one Ticket `high` would lift it
