@@ -101,6 +101,7 @@ fn render<W: Write + ?Sized>(
             item_class: detail.item_class,
             title: &detail.title,
             priority: detail.priority,
+            effort: detail.effort,
             ticket_kind: detail.ticket_kind,
             created_at: &detail.created_at,
             updated_at: &detail.updated_at,
@@ -253,15 +254,7 @@ fn render_sub_row<W: Write + ?Sized>(
     }
     item_row::render_pending_promotion(stdout, item.has_pending_promotion)?;
     sanitize::write_sanitized_line(stdout, item.title.as_bytes())?;
-    if let Some(p) = item.priority {
-        let p_st = palette::priority_style(p);
-        write!(
-            stdout,
-            " {} {}",
-            styler.wrap(p_st, "\u{25cf}"),
-            styler.wrap(p_st, p.text())
-        )?;
-    }
+    item_row::render_ticket_markers(stdout, item.priority, item.effort, None, styler)?;
     stdout.write_all(b"\n")
 }
 
@@ -332,6 +325,7 @@ mod tests {
             item_class: ItemClass::Ticket,
             ticket_kind: Some(crate::domain::ticket_kind::TicketKind::Task),
             priority: Some(crate::domain::priority::Priority::P2),
+            effort: None,
             selection_state: Some(crate::domain::selection_state::SelectionState::Accepted),
             title: "Ticket".into(),
             body: String::new(),
@@ -713,6 +707,7 @@ mod tests {
             item_class: class,
             status,
             priority,
+            effort: None,
         };
         let detail = ItemDetail {
             has_pending_promotion: false,
@@ -720,6 +715,7 @@ mod tests {
             item_class: ItemClass::Ticket,
             ticket_kind: Some(crate::domain::ticket_kind::TicketKind::Task),
             priority: Some(crate::domain::priority::Priority::P1),
+            effort: None,
             selection_state: Some(crate::domain::selection_state::SelectionState::Accepted),
             title: "Wire the thing".into(),
             body: "First line.\nSecond line.".into(),

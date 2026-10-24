@@ -42,6 +42,18 @@ filters by item class \(em it shows Epics instead of Tickets.
 .I epic-id
 is a Scope \(em it narrows the listing to one Epic and its child Tickets.
 .PP
+A Ticket row shows its Priority as
+.BR "● P2" .
+When the Ticket has an Effort, the Priority gains
+.BR /L ,
+.BR /M ,
+or
+.B /H
+for low, medium, or high, as in
+.BR "● P2/L" .
+Triage rows show neither. Rows in search, plan, and prime, and the related
+Item rows in show, use the same form.
+.PP
 When a Scope is active,
 .B tk list
 prints a hint above the tree so a narrowed view never reads as the whole

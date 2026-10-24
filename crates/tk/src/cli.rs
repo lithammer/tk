@@ -235,7 +235,7 @@ enum Command {
     Search(commands::search::Args),
     /// Search title and body text for a regular expression; show context by default.
     Grep(commands::grep::Args),
-    /// Update the title, body, priority, or parent of a Ticket or Epic.
+    /// Update the title, body, priority, effort, or parent of a Ticket or Epic.
     Update(commands::update::Args),
     /// Mark a Ticket or Epic active.
     Start(commands::start::Args),

@@ -2,7 +2,7 @@
 source: crates/tk/tests/scenarios.rs
 expression: "p.run(&format!(\"{command} --help\"))"
 ---
-Update the title, body, priority, or parent of a Ticket or Epic
+Update the title, body, priority, effort, or parent of a Ticket or Epic
 
 Usage: tk update [OPTIONS] <ID>
 
@@ -14,6 +14,8 @@ Options:
   -b, --body <BODY>          Replace the body with literal text; an empty value clears it
       --body-file <PATH>     Replace the body from a UTF-8 file, or '-' for stdin; empty input clears it
   -p, --priority <PRIORITY>  Set Priority (P0..P3). Tickets only
+      --effort <EFFORT>      Set Effort (low, medium, high). Tickets only
+      --no-effort            Clear the Ticket's Effort. Tickets only
   -P, --parent <EPIC>        Set the containing Epic by Display ID or Alias. Tickets only
       --no-parent            Remove the Ticket from its current Epic. Tickets only
   -h, --help                 Print help

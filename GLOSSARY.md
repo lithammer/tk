@@ -30,7 +30,7 @@ _Avoid_: Unsynced Field, Sync Excluded Field
 
 **Shared Field**:
 A field whose authority **tk** shares with a **Backend**: title, body,
-**Lifecycle**, **Ticket Kind**, and **Priority**. **Backend Pull** imports it
+**Lifecycle**, **Ticket Kind**, **Priority**, and **Effort**. **Backend Pull** imports it
 and a **Mutation** may push it.
 _Avoid_: Synced Field, Backend Field, Remote Field
 
@@ -41,8 +41,12 @@ slot for it; **tk** never stores or shows it as a label.
 _Avoid_: Label, Reserved Label, Adapter Encoding
 
 **Priority**:
-A ranking for a **Ticket**: `P0`, `P1`, `P2`, or `P3`. A **Shared Field**: on GitHub it is the native Priority issue field, with `P0`..`P3` mapped to Urgent, High, Medium, and Low (ADR-0054).
+How important or urgent a **Ticket**'s work is: `P0`, `P1`, `P2`, or `P3`. A **Shared Field**: on GitHub it is the native Priority issue field, with `P0`..`P3` mapped to Urgent, High, Medium, and Low (ADR-0054).
 _Avoid_: Severity
+
+**Effort**:
+How much work a **Ticket** is expected to take, apart from how much it matters: `low`, `medium`, or `high`, or unset. A **Shared Field**: on GitHub it is the native Effort issue field (ADR-0054). **Epics** carry none.
+_Avoid_: Size, Estimate, Complexity, Story Points, Scope
 
 **Effective Priority**:
 The priority used to order a candidate **Ticket** in **`tk next`**, derived from its own **Priority** and the **Priorities** of items it transitively blocks within the selected work. **Scope** and explicit **Plan** selection bound propagation; Effective Priority is not stored, displayed by **`tk show`** or **`tk list`**, or synced to **Backends**.
@@ -224,10 +228,11 @@ A component that maps between **tk** domain concepts and a specific **Backend**.
 _Avoid_: Facade, Provider, Connector
 
 **Backend Pull**:
-An all-or-nothing **Backend Adapter** operation that refreshes the exact set of **Adopted** **Backend** items not yet `done`, returning title, body, **Lifecycle**, optional **Ticket Kind**, and **Priority** values for the Repository Store to merge. It never mirrors, discovers, or changes item identity, **Origin**, **Display ID**, or **Item Class**. It never writes a Backend value to **Work State**; importing a `done` **Lifecycle** clears **Work State** to `idle` as a local consequence.
+An all-or-nothing **Backend Adapter** operation that refreshes the exact set of **Adopted** **Backend** items not yet `done`, returning title, body, **Lifecycle**, optional **Ticket Kind**, **Priority**, and **Effort** values for the Repository Store to merge. It never mirrors, discovers, or changes item identity, **Origin**, **Display ID**, or **Item Class**. It never writes a Backend value to **Work State**; importing a `done` **Lifecycle** clears **Work State** to `idle` as a local consequence.
 When an Item has a `pending` or `failed` `UpdateTicket` or `UpdateEpic`
 **Mutation**, the Repository Store preserves its title and body; a `pending`
-or `failed` `set_ticket_priority` **Mutation** preserves **Priority**. Pull still
+or `failed` `set_ticket_priority` or `set_ticket_effort` **Mutation**
+preserves **Priority** or **Effort**. Pull still
 imports **Lifecycle** and a present **Ticket Kind**; `None` keeps the stored
 Kind. The merge keeps `updated_at` at the later of the stored value and refresh
 time. The Repository Store, not the **Backend Adapter**, owns these field rules.
@@ -382,7 +387,7 @@ A named domain operation that describes the intent of a **Mutation**.
 _Avoid_: Field Patch, JSON Patch
 
 **V1 Mutation Type**:
-A **Mutation Type** supported by the first implementation: `update_ticket`, `update_epic`, `set_item_status`, `set_ticket_priority`, `add_ticket_to_epic`, `remove_ticket_from_epic`, `add_dependency`, `remove_dependency`, `promote_ticket`, or `promote_epic`.
+A **Mutation Type** supported by the first implementation: `update_ticket`, `update_epic`, `set_item_status`, `set_ticket_priority`, `set_ticket_effort`, `add_ticket_to_epic`, `remove_ticket_from_epic`, `add_dependency`, `remove_dependency`, `promote_ticket`, or `promote_epic`.
 _Avoid_: Comment Mutation, Label Mutation, Assignee Mutation, External Blocker Mutation
 
 **Mutation Log**:
@@ -500,6 +505,9 @@ _Avoid_: ticket, tickets
 - A **Ticket** has exactly one **Priority**.
 - **Priority** is a **Shared Field**. **Promotion** sets it, a local change records a `set_ticket_priority` **Mutation**, and **Backend Pull** imports it unless an unresolved `set_ticket_priority` **Mutation** shields it. An issue with no Priority, or an option **tk** does not name, reads as `P2`. An **Epic** and a `triage` **Ticket** have none to share (ADR-0054).
 - The default **Priority** is `P2`.
+- A **Ticket** has at most one **Effort**; an **Epic** has none.
+- **Effort** is a **Shared Field**. **Promotion** sets it when present, a local change records a `set_ticket_effort` **Mutation**, and **Backend Pull** imports it unless an unresolved `set_ticket_effort` **Mutation** shields it. An issue with no Effort, or an option **tk** does not name, reads as no **Effort** (ADR-0054).
+- **`tk next`** breaks ties in **Effective Priority** and own **Priority** by **Effort**, low first; a **Ticket** with no **Effort** ranks as `medium` (ADR-0015).
 - Lower **Priority** numbers sort before higher **Priority** numbers.
 - A candidate **Ticket**'s **Effective Priority** is the lowest of its own **Priority** and the **Effective Priorities** of every unfinished **Blocked Item** (**Item Status** `open` or `active`) it reaches through transitive `blocked_by` **Dependencies** within the active **Scope**.
 - A `done` **Blocking Item** resolves the **Dependency** for readiness and
@@ -619,8 +627,8 @@ _Avoid_: ticket, tickets
 - The GitHub **Backend Adapter** promotes Task **Tickets** as typeless GitHub
   issues. It promotes Bug **Tickets** and **Epics** with the native `Bug` and
   `Epic` Issue Types, and fails preflight naming a missing type. It sets a
-  **Ticket**'s **Priority** in the same call and fails preflight naming a
-  missing Priority field. It represents
+  **Ticket**'s **Priority** and any **Effort** in the same call and fails
+  preflight naming a missing Priority or Effort field. It represents
   **Dependencies** and Epic membership through later relationship
   **Mutations**.
 - A trustworthy GitHub issue URL receipt certifies **Created**, including when

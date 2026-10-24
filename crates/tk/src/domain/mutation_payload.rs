@@ -8,13 +8,14 @@
 //! constraint on the column.
 //!
 //! `Serialize`/`Deserialize` therefore live on the per-variant payload
-//! structs ([`TitleBody`], [`EpicRef`], [`LifecycleChange`], [`PriorityChange`], [`DependencyRef`],
-//! [`Promotion`]) rather than on the outer enum: serializing the enum
-//! directly would produce externally-tagged JSON (`{"UpdateTitleBody":{…}}`)
-//! that breaks the flat row contract.
+//! structs ([`TitleBody`], [`EpicRef`], [`LifecycleChange`], [`PriorityChange`],
+//! [`EffortChange`], [`DependencyRef`], [`Promotion`]) rather than on the outer
+//! enum: serializing the enum directly would produce externally-tagged JSON
+//! (`{"UpdateTitleBody":{…}}`) that breaks the flat row contract.
 
 use serde::{Deserialize, Serialize};
 
+use crate::domain::effort::Effort;
 use crate::domain::lifecycle::Lifecycle;
 use crate::domain::priority::Priority;
 
@@ -32,6 +33,8 @@ pub enum MutationPayload {
     Lifecycle(LifecycleChange),
     /// Payload for `set_ticket_priority` — target Priority after the change.
     Priority(PriorityChange),
+    /// Payload for `set_ticket_effort` — target Effort after the change.
+    Effort(EffortChange),
     /// Payload for `add_dependency` and `remove_dependency` — the internal
     /// stable ID of the Blocking Item referenced by the Dependency.
     DependencyRef(DependencyRef),
@@ -52,6 +55,7 @@ impl MutationPayload {
             Self::EpicRef(v) => serde_json::to_string(v),
             Self::Lifecycle(v) => serde_json::to_string(v),
             Self::Priority(v) => serde_json::to_string(v),
+            Self::Effort(v) => serde_json::to_string(v),
             Self::DependencyRef(v) => serde_json::to_string(v),
             Self::Promotion(v) => serde_json::to_string(v),
         }
@@ -86,6 +90,13 @@ pub struct LifecycleChange {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PriorityChange {
     pub priority: Priority,
+}
+
+/// Effort-change payload used by `set_ticket_effort`. The target value, so
+/// replaying it converges; `None` clears the Effort.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffortChange {
+    pub effort: Option<Effort>,
 }
 
 /// Blocking Item reference used by `add_dependency` / `remove_dependency`.

@@ -65,6 +65,7 @@ const MIGRATION_16_SQL: &str = include_str!("migrations/016_sync_skip_relinquish
 const MIGRATION_17_SQL: &str = include_str!("migrations/017_local_plan.sql");
 const MIGRATION_18_SQL: &str = include_str!("migrations/018_priority_four_levels.sql");
 const MIGRATION_19_SQL: &str = include_str!("migrations/019_set_ticket_priority.sql");
+const MIGRATION_20_SQL: &str = include_str!("migrations/020_ticket_effort.sql");
 
 /// V1 Repository Store schema skeleton.
 pub const MIGRATION_1: Migration = Migration {
@@ -253,6 +254,16 @@ pub const MIGRATION_19: Migration = Migration {
     foreign_keys: ForeignKeys::Off,
 };
 
+/// Adds the optional Ticket-only `items.effort` column and rebuilds `mutations`
+/// to admit `set_ticket_effort` (ADR-0054). Needs no backfill, since an issue
+/// with no Effort reads as none. Runs `ForeignKeys::Off` because it is a table
+/// rebuild (ADR-0028).
+pub const MIGRATION_20: Migration = Migration {
+    version: 20,
+    sql: MIGRATION_20_SQL,
+    foreign_keys: ForeignKeys::Off,
+};
+
 /// Ordered migration list applied by [`apply_all`].
 pub const ALL_MIGRATIONS: &[Migration] = &[
     MIGRATION_1,
@@ -274,13 +285,14 @@ pub const ALL_MIGRATIONS: &[Migration] = &[
     MIGRATION_17,
     MIGRATION_18,
     MIGRATION_19,
+    MIGRATION_20,
 ];
 
 /// Highest schema version this binary can apply. Named so future migrations
 /// surface the threshold to `grep` instead of hiding it behind `.last()`.
 /// Adding a migration is a two-line patch: append to `ALL_MIGRATIONS`, bump
 /// this constant, with a debug_assert below catching the drift.
-pub const MAX_KNOWN_VERSION: u32 = MIGRATION_19.version;
+pub const MAX_KNOWN_VERSION: u32 = MIGRATION_20.version;
 
 /// Errors returned while applying migrations.
 ///
@@ -811,6 +823,7 @@ mod tests {
                 ),
                 MutationType::UpdateTicket
                 | MutationType::SetTicketPriority
+                | MutationType::SetTicketEffort
                 | MutationType::UpdateEpic
                 | MutationType::AddTicketToEpic
                 | MutationType::RemoveTicketFromEpic

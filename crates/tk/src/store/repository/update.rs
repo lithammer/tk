@@ -1,11 +1,13 @@
-//! `tk update` field-level write (title / body / priority / parent move).
+//! `tk update` field-level write (title / body / priority / effort / parent
+//! move).
 //!
 //! Diffs each requested field against the stored value inside the same
 //! `begin immediate` transaction the read used, writes only the changed
 //! columns, and — for a backend-bound Item — emits one Mutation per changed
 //! field-group (title/body becomes a single full snapshot; parent change is
 //! `remove_ticket_from_epic` plus `add_ticket_to_epic` in that order; a
-//! priority change is `set_ticket_priority`, ADR-0054).
+//! priority change is `set_ticket_priority` and an effort change
+//! `set_ticket_effort`, ADR-0054).
 //!
 //! Title/body names one Item, so the Ticket's own Backend Binding gates it. A
 //! membership Mutation names two, so it is emitted only when Ticket and Epic
@@ -20,8 +22,11 @@ use rusqlite::{OptionalExtension, params};
 
 use crate::clock::Clock;
 use crate::domain::backend_binding::BackendBinding;
+use crate::domain::effort::Effort;
 use crate::domain::item_class::ItemClass;
-use crate::domain::mutation_payload::{EpicRef, MutationPayload, PriorityChange, TitleBody};
+use crate::domain::mutation_payload::{
+    EffortChange, EpicRef, MutationPayload, PriorityChange, TitleBody,
+};
 use crate::domain::mutation_type::MutationType;
 use crate::domain::priority::Priority;
 use crate::domain::selection_state::SelectionState;
@@ -29,16 +34,37 @@ use crate::store::mutations;
 
 use super::Store;
 
-/// Parent-Epic operation requested by the caller.
-#[derive(Debug, Clone, Copy, Default)]
-pub enum ParentOp<'a> {
-    /// Leave `container_id` as-is; no parent Mutation is emitted.
+/// An edit of one optional field: keep it, clear it, or set it. The caller
+/// passes what it asked for; [`update_item`] narrows it to what changes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FieldEdit<T> {
+    /// Leave the field as-is; no Mutation is emitted.
     #[default]
     Unchanged,
-    /// Set `container_id` to NULL (remove from current Epic).
+    /// Set the field to NULL.
     Clear,
-    /// Set `container_id` to the given internal stable `items.id`.
-    Set(&'a str),
+    Set(T),
+}
+
+impl<T: Copy + PartialEq> FieldEdit<T> {
+    /// This edit against the stored value: `Unchanged` when it would write
+    /// what is already there.
+    fn against(self, current: Option<T>) -> Self {
+        match self {
+            Self::Clear if current.is_none() => Self::Unchanged,
+            Self::Set(value) if current == Some(value) => Self::Unchanged,
+            edit => edit,
+        }
+    }
+
+    /// Whether the edit writes the column, and the value it writes.
+    fn column(self) -> (bool, Option<T>) {
+        match self {
+            Self::Unchanged => (false, None),
+            Self::Clear => (true, None),
+            Self::Set(value) => (true, Some(value)),
+        }
+    }
 }
 
 /// Input for [`update_item`].
@@ -61,7 +87,11 @@ pub struct UpdateRequest<'a> {
     /// is responsible for ensuring this is `None` when `item_class` is
     /// [`ItemClass::Epic`] — Epics have no Priority column.
     pub priority: Option<Priority>,
-    pub parent: ParentOp<'a>,
+    /// Like `priority`, the caller keeps this [`FieldEdit::Unchanged`] on an
+    /// Epic; the `items.effort` CHECK backs that up.
+    pub effort: FieldEdit<Effort>,
+    /// The containing Epic's internal stable `items.id`.
+    pub parent: FieldEdit<&'a str>,
 }
 
 /// Snapshot returned on a successful update.
@@ -97,6 +127,7 @@ struct Current {
     title: String,
     body: String,
     priority: Option<Priority>,
+    effort: Option<Effort>,
     selection_state: Option<SelectionState>,
     container_id: Option<String>,
     display_id: String,
@@ -112,17 +143,8 @@ struct ColumnWrites<'a> {
     /// `Some` only when the priority actually changed; `None` leaves the
     /// column untouched.
     priority: Option<Priority>,
-    parent: ParentWrite<'a>,
-}
-
-/// Whether an update rewrites the container columns, and to what.
-#[derive(Clone, Copy)]
-enum ParentWrite<'a> {
-    /// Leave `container_id` / `container_class` as they are.
-    Unchanged,
-    /// Rewrite the container: `Some(epic_id)` reparents under that Epic,
-    /// `None` clears the parent.
-    Changed(Option<&'a str>),
+    effort: FieldEdit<Effort>,
+    parent: FieldEdit<&'a str>,
 }
 
 /// Apply per-field updates to a Ticket or Epic.
@@ -136,7 +158,7 @@ pub fn update_item<C: Clock + ?Sized>(
 
     let current = tx
         .query_row(
-            "select title, body, priority, selection_state, container_id, display_value \
+            "select title, body, priority, selection_state, container_id, display_value, effort \
                from items where id = ?1",
             params![req.id],
             |r| {
@@ -147,6 +169,7 @@ pub fn update_item<C: Clock + ?Sized>(
                     selection_state: r.get(3)?,
                     container_id: r.get(4)?,
                     display_id: r.get(5)?,
+                    effort: r.get(6)?,
                 })
             },
         )
@@ -172,26 +195,22 @@ pub fn update_item<C: Clock + ?Sized>(
     let new_priority: Option<Priority> = req
         .priority
         .filter(|requested| current.priority != Some(*requested));
+    let new_effort = req.effort.against(current.effort);
 
-    // Parent delta: `old_epic_id` addresses remove_ticket_from_epic; the
-    // `ParentWrite` carries the new container for both the column write and
+    // Parent delta: `old_epic_id` addresses remove_ticket_from_epic; `parent`
+    // carries the new container for both the column write and
     // add_ticket_to_epic.
-    let (old_epic_id, parent) = match req.parent {
-        ParentOp::Unchanged => (None, ParentWrite::Unchanged),
-        ParentOp::Clear => match current.container_id.as_deref() {
-            Some(existing) => (Some(existing), ParentWrite::Changed(None)),
-            None => (None, ParentWrite::Unchanged),
-        },
-        ParentOp::Set(target) => match current.container_id.as_deref() {
-            Some(existing) if existing == target => (None, ParentWrite::Unchanged),
-            existing => (existing, ParentWrite::Changed(Some(target))),
-        },
-    };
+    let parent = req.parent.against(current.container_id.as_deref());
+    let old_epic_id = current
+        .container_id
+        .as_deref()
+        .filter(|_| parent != FieldEdit::Unchanged);
 
     let title_or_body_changed = new_title.is_some() || new_body.is_some();
     let any_change = title_or_body_changed
         || new_priority.is_some()
-        || matches!(parent, ParentWrite::Changed(_));
+        || new_effort != FieldEdit::Unchanged
+        || parent != FieldEdit::Unchanged;
 
     if !any_change {
         tx.commit()?;
@@ -212,6 +231,7 @@ pub fn update_item<C: Clock + ?Sized>(
             title: effective_title,
             body: effective_body,
             priority: new_priority,
+            effort: new_effort,
             parent,
         },
         &now_iso,
@@ -240,7 +260,7 @@ pub fn update_item<C: Clock + ?Sized>(
                 },
             )?;
         }
-        if let ParentWrite::Changed(Some(new_id)) = parent
+        if let FieldEdit::Set(new_id) = parent
             && membership_is_backend_intent(&tx, &intent, new_id)?
         {
             mutations::append(
@@ -286,6 +306,19 @@ pub fn update_item<C: Clock + ?Sized>(
                 },
             )?;
         }
+        if let (true, effort) = new_effort.column() {
+            mutations::append(
+                &tx,
+                mutations::AppendRequest {
+                    mutation_type: MutationType::SetTicketEffort,
+                    item_id: req.id,
+                    item_class: req.item_class,
+                    payload: &MutationPayload::Effort(EffortChange { effort }),
+                    promotion_operation_id: None,
+                    now_iso: &now_iso,
+                },
+            )?;
+        }
     }
 
     tx.commit()?;
@@ -319,49 +352,29 @@ fn write_columns(
     writes: &ColumnWrites<'_>,
     now_iso: &str,
 ) -> Result<(), rusqlite::Error> {
-    let (title, body) = (writes.title, writes.body);
-    match writes.parent {
-        ParentWrite::Changed(new_epic_id) => {
-            let new_container_class: Option<&str> = new_epic_id.map(|_| "epic");
-            if let Some(p) = writes.priority {
-                conn.execute(
-                    "update items set title = ?2, body = ?3, priority = ?4, \
-                                      container_id = ?5, container_class = ?6, updated_at = ?7 \
-                      where id = ?1",
-                    params![
-                        id,
-                        title,
-                        body,
-                        p,
-                        new_epic_id,
-                        new_container_class,
-                        now_iso
-                    ],
-                )?;
-            } else {
-                conn.execute(
-                    "update items set title = ?2, body = ?3, \
-                                      container_id = ?4, container_class = ?5, updated_at = ?6 \
-                      where id = ?1",
-                    params![id, title, body, new_epic_id, new_container_class, now_iso],
-                )?;
-            }
-        }
-        ParentWrite::Unchanged => {
-            if let Some(p) = writes.priority {
-                conn.execute(
-                    "update items set title = ?2, body = ?3, priority = ?4, updated_at = ?5 \
-                      where id = ?1",
-                    params![id, title, body, p, now_iso],
-                )?;
-            } else {
-                conn.execute(
-                    "update items set title = ?2, body = ?3, updated_at = ?4 where id = ?1",
-                    params![id, title, body, now_iso],
-                )?;
-            }
-        }
-    }
+    let (parent_changed, new_epic_id) = writes.parent.column();
+    let new_container_class: Option<&str> = new_epic_id.map(|_| "epic");
+    let (effort_changed, new_effort) = writes.effort.column();
+    conn.execute(
+        "update items set title = ?2, body = ?3, priority = coalesce(?4, priority), \
+                          effort = case when ?5 then ?6 else effort end, \
+                          container_id = case when ?7 then ?8 else container_id end, \
+                          container_class = case when ?7 then ?9 else container_class end, \
+                          updated_at = ?10 \
+          where id = ?1",
+        params![
+            id,
+            writes.title,
+            writes.body,
+            writes.priority,
+            effort_changed,
+            new_effort,
+            parent_changed,
+            new_epic_id,
+            new_container_class,
+            now_iso
+        ],
+    )?;
     Ok(())
 }
 
@@ -653,6 +666,52 @@ mod tests {
     }
 
     #[test]
+    fn effort_changes_on_a_backend_ticket_emit_set_ticket_effort_mutations() {
+        // A clear is a Mutation too, spelled `null`, so Apply can delete the
+        // Backend value; a repeated clear changes nothing and emits nothing.
+        let mut store = open_seeded();
+        seed_backend_ticket(&store, "t1", "tk-1", 1);
+        for effort in [
+            FieldEdit::Set(Effort::Low),
+            FieldEdit::Clear,
+            FieldEdit::Clear,
+        ] {
+            update_item(
+                &mut store,
+                &clock(),
+                UpdateRequest {
+                    id: "t1",
+                    item_class: ItemClass::Ticket,
+                    effort,
+                    ..UpdateRequest::default()
+                },
+            )
+            .unwrap();
+        }
+
+        let effort: Option<String> = store
+            .conn
+            .query_row("select effort from items where id = 't1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(effort, None);
+        let mutations: Vec<(String, String)> = store
+            .conn
+            .prepare("select mutation_type, payload_json from mutations order by sequence")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            mutations,
+            [
+                ("set_ticket_effort".into(), r#"{"effort":"low"}"#.into()),
+                ("set_ticket_effort".into(), r#"{"effort":null}"#.into()),
+            ]
+        );
+    }
+
+    #[test]
     fn priority_update_is_allowed_for_a_parked_ticket() {
         // tk-75 AC: `tk update --priority` stays valid for parked Tickets. The
         // PriorityOnTriage guard keys on `triage` only, so parked passes
@@ -723,7 +782,7 @@ mod tests {
             UpdateRequest {
                 id: "t1",
                 item_class: ItemClass::Ticket,
-                parent: ParentOp::Set("e-new"),
+                parent: FieldEdit::Set("e-new"),
                 ..UpdateRequest::default()
             },
         )
@@ -789,7 +848,7 @@ mod tests {
             UpdateRequest {
                 id: "t1",
                 item_class: ItemClass::Ticket,
-                parent: ParentOp::Clear,
+                parent: FieldEdit::Clear,
                 ..UpdateRequest::default()
             },
         )
@@ -835,7 +894,7 @@ mod tests {
             UpdateRequest {
                 id: "t1",
                 item_class: ItemClass::Ticket,
-                parent: ParentOp::Clear,
+                parent: FieldEdit::Clear,
                 ..UpdateRequest::default()
             },
         )
@@ -880,7 +939,7 @@ mod tests {
                 id: "t1",
                 item_class: ItemClass::Ticket,
                 title: Some("Renamed"),
-                parent: ParentOp::Set("e-new"),
+                parent: FieldEdit::Set("e-new"),
                 ..UpdateRequest::default()
             },
         )
@@ -921,7 +980,7 @@ mod tests {
             UpdateRequest {
                 id: "t1",
                 item_class: ItemClass::Ticket,
-                parent: ParentOp::Set("e1"),
+                parent: FieldEdit::Set("e1"),
                 ..UpdateRequest::default()
             },
         )
@@ -954,7 +1013,7 @@ mod tests {
             UpdateRequest {
                 id: "t1",
                 item_class: ItemClass::Ticket,
-                parent: ParentOp::Set("e1"),
+                parent: FieldEdit::Set("e1"),
                 ..UpdateRequest::default()
             },
         )

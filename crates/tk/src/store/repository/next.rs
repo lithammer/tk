@@ -6,8 +6,9 @@
 //! Blockers. Each ready candidate's *Effective Priority* is the lowest
 //! Priority reachable through unresolved Dependency edges or Epic-membership
 //! edges, bounded by Epic Scope and Plan membership (ADR-0050). Selection sorts by
-//! `(effective_priority, own_priority, created_seq)` so a ticket inherits
-//! urgency from work that transitively waits on it.
+//! `(effective_priority, own_priority, effort, created_seq)` so a ticket inherits
+//! urgency from work that transitively waits on it, and smaller work wins among
+//! equally important candidates (ADR-0015).
 //!
 //! The Repository Store owns readiness, scope interpretation, Effective
 //! Priority computation, and creation-order tie breaks. The command
@@ -87,6 +88,9 @@ pub enum NextError {
 /// contributor sub-SELECT picks the lowest-`created_seq` Ticket carrying
 /// that Priority to ensure a deterministic rationale row.
 ///
+/// The Effort rank sorts an unset Effort with `medium`, so setting one moves a
+/// Ticket only in the direction it names (ADR-0015).
+///
 /// `selected` keeps Epics that carry Dependency paths to Plan members, even
 /// though Epics cannot be members. Readiness still checks blockers outside
 /// this boundary (ADR-0050).
@@ -108,7 +112,7 @@ with recursive \
   annotated as ( \
       select i.id, i.display_value, i.item_class, i.priority, i.status, \
              i.work_state, i.selection_state, i.container_id, i.created_seq, \
-             i.title, i.origin, \
+             i.title, i.origin, i.effort, \
              exists ( \
                  select 1 \
                    from dependencies d \
@@ -184,7 +188,9 @@ select ann.display_value, ann.priority, eff.ep, \
    and ann.selection_state = 'accepted' \
    and not ann.has_unresolved_dependency \
    and not ann.has_unresolved_external_blocker \
- order by eff.ep asc, ann.priority asc, ann.created_seq asc \
+ order by eff.ep asc, ann.priority asc, \
+          case ann.effort when 'low' then 0 when 'high' then 2 else 1 end asc, \
+          ann.created_seq asc \
  limit 1"
 );
 
@@ -359,6 +365,97 @@ mod tests {
         let rationale = ticket.rationale.expect("rationale required");
         assert_eq!(rationale.effective_priority, Priority::P0);
         assert_eq!(rationale.blocked_display_id, "tk-2");
+    }
+
+    fn set_effort(store: &Store, id: &str, effort: &str) {
+        store
+            .conn
+            .execute(
+                "update items set effort = ?1 where id = ?2",
+                params![effort, id],
+            )
+            .unwrap();
+    }
+
+    /// Every pick `tk next` makes, in order, starting each one so the next
+    /// call moves on.
+    fn selection_order(store: &Store) -> Vec<String> {
+        let mut order = Vec::new();
+        while let Some(ticket) = next_ready_ticket(store, NextOptions::default()).unwrap() {
+            store
+                .conn
+                .execute(
+                    "update items set work_state = 'active' where display_value = ?1",
+                    params![ticket.display_id],
+                )
+                .unwrap();
+            order.push(ticket.display_id);
+        }
+        order
+    }
+
+    #[test]
+    fn unset_effort_ties_with_medium_between_low_and_high() {
+        // If unset sorted first, tk-3 would lead; if last, it would trail
+        // tk-1; if between low and medium, it would pass tk-2 (ADR-0015).
+        let store = open_seeded();
+        for (id, display, seq, effort) in [
+            ("big", "tk-1", 1, Some("high")),
+            ("mid", "tk-2", 2, Some("medium")),
+            ("unset", "tk-3", 3, None),
+            ("small", "tk-4", 4, Some("low")),
+            ("unset2", "tk-5", 5, None),
+        ] {
+            seed(&store, id, display, "P2", seq);
+            if let Some(effort) = effort {
+                set_effort(&store, id, effort);
+            }
+        }
+        assert_eq!(
+            selection_order(&store),
+            ["tk-4", "tk-2", "tk-3", "tk-5", "tk-1"]
+        );
+    }
+
+    #[test]
+    fn effort_reorders_only_within_a_priority() {
+        // Newer small work overtakes older large work of the same Priority,
+        // and the large Ticket waits for as long as that continues; raising
+        // its Priority is the remedy, which Effort never overrides.
+        let store = open_seeded();
+        seed(&store, "big", "tk-1", "P2", 1);
+        set_effort(&store, "big", "high");
+        seed(&store, "small", "tk-2", "P2", 2);
+        set_effort(&store, "small", "low");
+        seed(&store, "urgent-big", "tk-3", "P1", 3);
+        set_effort(&store, "urgent-big", "high");
+        assert_eq!(selection_order(&store), ["tk-3", "tk-2", "tk-1"]);
+    }
+
+    #[test]
+    fn effort_ranks_by_the_candidates_own_value_not_what_it_blocks() {
+        // Both blockers inherit P0 from tk-3. Were Effort carried along the
+        // chain like Priority, both would read as low and tk-1 would win on
+        // creation order; a low-Effort P2 still loses to inherited P0.
+        let store = open_seeded();
+        seed(&store, "blocker-big", "tk-1", "P3", 1);
+        set_effort(&store, "blocker-big", "high");
+        seed(&store, "blocker", "tk-2", "P3", 2);
+        seed(&store, "blocked", "tk-3", "P0", 3);
+        set_effort(&store, "blocked", "low");
+        insert_dependency(&store.conn, "blocker-big", "blocked").unwrap();
+        insert_dependency(&store.conn, "blocker", "blocked").unwrap();
+        seed(&store, "small", "tk-4", "P2", 4);
+        set_effort(&store, "small", "low");
+
+        let ticket = next_ready_ticket(&store, NextOptions::default())
+            .unwrap()
+            .expect("a ready ticket");
+        assert_eq!(ticket.display_id, "tk-2");
+        assert_eq!(
+            ticket.rationale.expect("inherited P0").effective_priority,
+            Priority::P0
+        );
     }
 
     fn seed_epic(store: &Store, id: &str, display: &str, created_seq: i64) {

@@ -9,6 +9,7 @@
 use rusqlite::{OptionalExtension, params};
 
 use crate::domain::backend_kind::BackendKind;
+use crate::domain::effort::Effort;
 use crate::domain::item_class::ItemClass;
 use crate::domain::mutation_state::MutationState;
 use crate::domain::mutation_type::MutationType;
@@ -29,6 +30,7 @@ pub struct ItemSummary {
     pub item_class: ItemClass,
     pub status: ItemStatus,
     pub priority: Option<Priority>,
+    pub effort: Option<Effort>,
 }
 
 /// One unresolved External Blocker rendered in `tk show`.
@@ -64,6 +66,7 @@ pub struct ItemDetail {
     pub item_class: ItemClass,
     pub ticket_kind: Option<TicketKind>,
     pub priority: Option<Priority>,
+    pub effort: Option<Effort>,
     /// Selection State (ADR-0027). `Some` for Tickets, `None` for Epics — the
     /// column CHECK keeps Selection State Ticket-only.
     pub selection_state: Option<SelectionState>,
@@ -111,7 +114,7 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
                     body, closing_reason, status, created_at, updated_at, container_id, \
                     work_state, ",
                 pending_promotion_sql!("items"),
-                " \
+                ", effort \
                from items where id = ?1"
             ),
             params![&reference.id],
@@ -131,6 +134,7 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
                     r.get::<_, String>(10)?,
                     r.get::<_, Option<String>>(11)?,
                     r.get::<_, bool>(13)?,
+                    r.get::<_, Option<Effort>>(14)?,
                 ))
             },
         )
@@ -149,6 +153,7 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
         updated_at,
         container_id,
         has_pending_promotion,
+        effort,
     )) = row
     else {
         return Ok(None);
@@ -177,6 +182,7 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
         item_class,
         ticket_kind,
         priority,
+        effort,
         selection_state,
         title,
         body,
@@ -227,7 +233,7 @@ fn read_item_summary_by_id(
         concat!(
             "select display_value, title, item_class, status, priority, work_state, ",
             pending_promotion_sql!("items"),
-            " \
+            ", effort \
            from items where id = ?1"
         ),
         params![id],
@@ -243,7 +249,7 @@ fn read_children(
     let mut stmt = conn.prepare(concat!(
         "select display_value, title, item_class, status, priority, work_state, ",
         pending_promotion_sql!("items"),
-        " \
+        ", effort \
            from items \
           where container_id = ?1 \
           order by created_seq asc"
@@ -259,7 +265,7 @@ fn read_blocked_by(
     let mut stmt = conn.prepare(concat!(
         "select i.display_value, i.title, i.item_class, i.status, i.priority, i.work_state, ",
         pending_promotion_sql!("i"),
-        " \
+        ", i.effort \
            from dependencies d \
            join items i on i.id = d.blocking_id \
           where d.blocked_id = ?1 \
@@ -277,7 +283,7 @@ fn read_blocking(
     let mut stmt = conn.prepare(concat!(
         "select i.display_value, i.title, i.item_class, i.status, i.priority, i.work_state, ",
         pending_promotion_sql!("i"),
-        " \
+        ", i.effort \
            from dependencies d \
            join items i on i.id = d.blocked_id \
           where d.blocking_id = ?1 \
@@ -329,7 +335,8 @@ fn read_mutations(
 
 /// Shared by the parent, children, `BLOCKED BY`, and `BLOCKING` sub-reads, so
 /// all four select the same column list — Item Status is derived from the
-/// Lifecycle at column 3 and the Work State at column 5 (ADR-0043).
+/// Lifecycle at column 3 and the Work State at column 5 (ADR-0043), and
+/// Effort follows the Pending Promotion flag at column 7.
 fn item_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemSummary> {
     Ok(ItemSummary {
         has_pending_promotion: row.get(6)?,
@@ -338,6 +345,7 @@ fn item_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemSummar
         item_class: row.get(2)?,
         status: ItemStatus::of(row.get(3)?, row.get(5)?),
         priority: row.get(4)?,
+        effort: row.get(7)?,
     })
 }
 

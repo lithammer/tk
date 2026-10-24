@@ -2,7 +2,8 @@
 //!
 //! Both commands open an Item with the same two lines — the label line
 //! (`<status-glyph> <display-id> · <title>`) and the facet bar
-//! (`<P_> · <Kind> · Created: …` for Tickets, `Epic · Created: …` for Epics) —
+//! (`<P_> · Effort: <e> · <Kind> · Created: …` for Tickets, `Epic · Created: …`
+//! for Epics) —
 //! followed by an optional Pending Promotion Binding row (ADR-0041), before
 //! diverging: `tk show` follows with body + relationship sections,
 //! default `tk grep` with the matching hunks. Keeping the header here is the
@@ -13,6 +14,7 @@ use std::io::Write;
 
 use regex::Regex;
 
+use crate::domain::effort::Effort;
 use crate::domain::item_class::ItemClass;
 use crate::domain::priority::Priority;
 use crate::domain::status::ItemStatus;
@@ -32,6 +34,7 @@ pub(crate) struct Header<'a> {
     pub item_class: ItemClass,
     pub title: &'a str,
     pub priority: Option<Priority>,
+    pub effort: Option<Effort>,
     pub ticket_kind: Option<TicketKind>,
     pub created_at: &'a str,
     pub updated_at: &'a str,
@@ -93,6 +96,9 @@ pub(crate) fn render_header<W: Write + ?Sized>(
                     styler.wrap(palette::priority_style(priority), priority.text())
                 )?;
                 stdout.write_all(" \u{b7} ".as_bytes())?;
+            }
+            if let Some(effort) = header.effort {
+                write!(stdout, "Effort: {effort} \u{b7} ")?;
             }
             let kind = header
                 .ticket_kind

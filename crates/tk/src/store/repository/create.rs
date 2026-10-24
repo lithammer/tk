@@ -10,6 +10,7 @@ use rand::Rng;
 use rusqlite::params;
 
 use crate::clock::Clock;
+use crate::domain::effort::Effort;
 use crate::domain::item_class::ItemClass;
 use crate::domain::lifecycle::Lifecycle;
 use crate::domain::origin::Origin;
@@ -38,6 +39,7 @@ pub enum NewTicketSelection {
 pub struct CreateLocalTicketInput<'a> {
     pub kind: TicketKind,
     pub selection: NewTicketSelection,
+    pub effort: Option<Effort>,
     /// Internal stable `items.id` of the parent Epic, if any.
     pub parent_id: Option<&'a str>,
     pub title: &'a str,
@@ -59,6 +61,7 @@ pub struct CreatedTicket {
     pub kind: TicketKind,
     /// `None` for a triage Ticket, which carries no Priority (ADR-0027).
     pub priority: Option<Priority>,
+    pub effort: Option<Effort>,
     pub selection_state: SelectionState,
     pub status: ItemStatus,
     pub origin: Origin,
@@ -131,8 +134,8 @@ where
         "insert into items(\
             id, display_value, item_class, ticket_kind, priority, title, body, \
             container_id, container_class, origin, status, work_state, \
-            selection_state, created_seq, created_at, updated_at\
-         ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15)",
+            selection_state, created_seq, created_at, updated_at, effort\
+         ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, ?16)",
         params![
             id,
             display_id,
@@ -149,6 +152,7 @@ where
             selection_state,
             created_seq,
             now_iso,
+            input.effort,
         ],
     )?;
     insert_display_resolver(&tx, &display_id, &id, &now_iso)?;
@@ -159,6 +163,7 @@ where
         display_id,
         kind: input.kind,
         priority,
+        effort: input.effort,
         selection_state,
         status: ItemStatus::of(lifecycle, work_state),
         origin: Origin::Local,
@@ -273,6 +278,7 @@ mod tests {
             CreateLocalTicketInput {
                 kind: TicketKind::Task,
                 selection: NewTicketSelection::Accepted(Priority::P1),
+                effort: None,
                 parent_id: None,
                 title: "Ship it",
                 body: "Body text",
@@ -364,6 +370,7 @@ mod tests {
             CreateLocalTicketInput {
                 kind: TicketKind::Bug,
                 selection: NewTicketSelection::Triage,
+                effort: None,
                 parent_id: None,
                 title: "Maybe a bug",
                 body: "",
@@ -411,6 +418,7 @@ mod tests {
             CreateLocalTicketInput {
                 kind: TicketKind::Task,
                 selection: NewTicketSelection::Accepted(Priority::P2),
+                effort: None,
                 parent_id: Some(&epic.id),
                 title: "Child",
                 body: "",
@@ -444,6 +452,7 @@ mod tests {
             CreateLocalTicketInput {
                 kind: TicketKind::Task,
                 selection: NewTicketSelection::Accepted(Priority::P2),
+                effort: None,
                 parent_id: None,
                 title: "A",
                 body: "",
@@ -457,6 +466,7 @@ mod tests {
             CreateLocalTicketInput {
                 kind: TicketKind::Task,
                 selection: NewTicketSelection::Accepted(Priority::P2),
+                effort: None,
                 parent_id: None,
                 title: "B",
                 body: "",

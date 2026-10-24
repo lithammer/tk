@@ -240,6 +240,7 @@ fn render_match<W: Write + ?Sized>(
             item_class: item.item_class,
             title: &item.title,
             priority: item.priority,
+            effort: item.effort,
             ticket_kind: item.ticket_kind,
             created_at: &item.created_at,
             updated_at: &item.updated_at,

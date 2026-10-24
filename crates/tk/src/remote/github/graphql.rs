@@ -22,6 +22,10 @@ const ISSUE_FIELDS_SELECTION: &str = "issueFields(first: 50) { nodes { ... on Is
 /// Sets one single-select field value. Probed as an upsert (ADR-0054): an
 /// unset field takes the value and a set one is replaced.
 pub(super) const SET_ISSUE_FIELD_VALUE_QUERY: &str = "mutation SetIssueFieldValue($issueId: ID!, $issueFields: [IssueFieldCreateOrUpdateInput!]!) { setIssueFieldValue(input: { issueId: $issueId, issueFields: $issueFields }) { issue { number } } }";
+/// Clears one issue field value. ADR-0054 records a probe in which it reported
+/// `success` both when it removed a value and when the field was already unset,
+/// so a replay converges.
+pub(super) const DELETE_ISSUE_FIELD_VALUE_QUERY: &str = "mutation DeleteIssueFieldValue($issueId: ID!, $fieldId: ID!) { deleteIssueFieldValue(input: { issueId: $issueId, fieldId: $fieldId }) { success } }";
 /// Creates an issue with its optional native Issue Type and issue fields in
 /// one effect (ADR-0054).
 pub(super) const CREATE_ISSUE_QUERY: &str = "mutation CreateIssue($repositoryId: ID!, $title: String!, $body: String!, $issueTypeId: ID, $issueFields: [IssueFieldCreateOrUpdateInput!]) { createIssue(input: { repositoryId: $repositoryId, title: $title, body: $body, issueTypeId: $issueTypeId, issueFields: $issueFields }) { issue { url number } } }";
@@ -185,16 +189,47 @@ impl GraphqlOperation for SetIssueFieldValueOperation<'_> {
     }
 }
 
+/// Clears one issue field value on an existing issue (ADR-0054).
+pub(super) struct DeleteIssueFieldValueOperation<'a> {
+    host: &'a str,
+    issue_id: &'a str,
+    field_id: &'a str,
+}
+
+impl<'a> DeleteIssueFieldValueOperation<'a> {
+    /// Bind one issue node and the field to clear on it.
+    pub(super) fn new(host: &'a str, issue_id: &'a str, field_id: &'a str) -> Self {
+        Self {
+            host,
+            issue_id,
+            field_id,
+        }
+    }
+}
+
+impl GraphqlOperation for DeleteIssueFieldValueOperation<'_> {
+    type Response = DeleteIssueFieldValueData;
+
+    fn request(&self) -> GraphqlRequest {
+        GraphqlRequest {
+            host: self.host.into(),
+            operation_name: "DeleteIssueFieldValue",
+            document: DELETE_ISSUE_FIELD_VALUE_QUERY.into(),
+            variables: json!({"issueId": self.issue_id, "fieldId": self.field_id}),
+        }
+    }
+}
+
 /// Atomic GitHub issue creation with its resolved native Issue Type and issue
 /// field values (ADR-0054). Either may be absent: a Task is untyped, and an
-/// Epic has no Priority to set.
+/// Epic has no field to set.
 pub(super) struct CreateIssueOperation<'a> {
     host: &'a str,
     repository_id: &'a str,
     title: &'a str,
     body: &'a str,
     issue_type_id: Option<&'a str>,
-    priority: Option<FieldValue<'a>>,
+    fields: Vec<FieldValue<'a>>,
 }
 
 impl<'a> CreateIssueOperation<'a> {
@@ -206,7 +241,7 @@ impl<'a> CreateIssueOperation<'a> {
         title: &'a str,
         body: &'a str,
         issue_type_id: Option<&'a str>,
-        priority: Option<FieldValue<'a>>,
+        fields: Vec<FieldValue<'a>>,
     ) -> Self {
         Self {
             host,
@@ -214,7 +249,7 @@ impl<'a> CreateIssueOperation<'a> {
             title,
             body,
             issue_type_id,
-            priority,
+            fields,
         }
     }
 }
@@ -232,7 +267,9 @@ impl GraphqlOperation for CreateIssueOperation<'_> {
                 "title": self.title,
                 "body": self.body,
                 "issueTypeId": self.issue_type_id,
-                "issueFields": self.priority.map(|value| [value.input()]),
+                "issueFields": (!self.fields.is_empty()).then(|| {
+                    self.fields.iter().map(|value| value.input()).collect::<Vec<_>>()
+                }),
             }),
         }
     }
@@ -372,6 +409,19 @@ pub(super) struct SetIssueFieldValuePayload {
     pub issue: Option<serde_json::Value>,
 }
 
+/// `deleteIssueFieldValue` mutation response data (ADR-0054).
+#[derive(Debug, Deserialize)]
+pub(super) struct DeleteIssueFieldValueData {
+    #[serde(rename = "deleteIssueFieldValue")]
+    pub delete_issue_field_value: Option<DeleteIssueFieldValuePayload>,
+}
+
+/// `deleteIssueFieldValue` payload; `success` proves the field is unset.
+#[derive(Debug, Deserialize)]
+pub(super) struct DeleteIssueFieldValuePayload {
+    pub success: Option<bool>,
+}
+
 /// Repository data returned by the issue field query.
 #[derive(Debug, Deserialize)]
 pub(super) struct IssueFieldsResponse {
@@ -487,7 +537,7 @@ pub(super) struct PullData {
 }
 
 /// Requested object returned for one alias, with the account's issue fields
-/// that give its Priority meaning.
+/// that give its Priority and Effort meaning.
 #[derive(Debug, Deserialize)]
 pub(super) struct PullRepository {
     #[serde(rename = "issueFields")]

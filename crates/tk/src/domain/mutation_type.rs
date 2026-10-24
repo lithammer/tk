@@ -18,6 +18,7 @@ pub enum MutationType {
     UpdateEpic,
     SetItemStatus,
     SetTicketPriority,
+    SetTicketEffort,
     AddTicketToEpic,
     RemoveTicketFromEpic,
     AddDependency,
@@ -35,11 +36,12 @@ impl MutationType {
     /// it a second time — reads this list instead of maintaining its own.
     ///
     /// [`text`]: MutationType::text
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::UpdateTicket,
         Self::UpdateEpic,
         Self::SetItemStatus,
         Self::SetTicketPriority,
+        Self::SetTicketEffort,
         Self::AddTicketToEpic,
         Self::RemoveTicketFromEpic,
         Self::AddDependency,
@@ -59,6 +61,7 @@ impl MutationType {
             Self::UpdateEpic => "update_epic",
             Self::SetItemStatus => "set_item_status",
             Self::SetTicketPriority => "set_ticket_priority",
+            Self::SetTicketEffort => "set_ticket_effort",
             Self::AddTicketToEpic => "add_ticket_to_epic",
             Self::RemoveTicketFromEpic => "remove_ticket_from_epic",
             Self::AddDependency => "add_dependency",
@@ -86,6 +89,7 @@ impl MutationType {
             | Self::UpdateEpic
             | Self::SetItemStatus
             | Self::SetTicketPriority
+            | Self::SetTicketEffort
             | Self::AddTicketToEpic
             | Self::RemoveTicketFromEpic
             | Self::AddDependency
@@ -115,6 +119,7 @@ impl MutationType {
             | Self::UpdateEpic
             | Self::SetItemStatus
             | Self::SetTicketPriority
+            | Self::SetTicketEffort
             | Self::AddExternalBlocker
             | Self::ResolveExternalBlocker
             | Self::PromoteTicket
@@ -157,6 +162,7 @@ impl FromStr for MutationType {
             "update_epic" => Ok(Self::UpdateEpic),
             "set_item_status" => Ok(Self::SetItemStatus),
             "set_ticket_priority" => Ok(Self::SetTicketPriority),
+            "set_ticket_effort" => Ok(Self::SetTicketEffort),
             "add_ticket_to_epic" => Ok(Self::AddTicketToEpic),
             "remove_ticket_from_epic" => Ok(Self::RemoveTicketFromEpic),
             "add_dependency" => Ok(Self::AddDependency),

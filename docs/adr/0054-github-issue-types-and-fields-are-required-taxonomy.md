@@ -128,6 +128,13 @@ that Epics carry none. Effort is optional, takes `low`, `medium`, or `high`,
 and crosses as a Shared Field. An issue with no Effort, or an option tk does
 not name, maps to unset.
 
+A local change queues a `set_ticket_effort` Mutation whose payload is the
+target value or none. Apply sends a value as `setIssueFieldValue` and none as
+`deleteIssueFieldValue`. A probe (playground #26, 2026-10-24) showed the delete
+reports `success` both when it removes a value and when the field is already
+unset, so a replayed clear converges. Pull shields Effort per Ticket while that
+Mutation is `pending` or `failed`, as it does Priority.
+
 ## Considered Options
 
 **Record capabilities at `tk remote set`.** `tk remote set github` would probe

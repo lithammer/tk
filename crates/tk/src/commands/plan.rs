@@ -131,6 +131,7 @@ pub(crate) fn render(
             item_row::render_ticket_markers(
                 out,
                 ticket.priority,
+                ticket.effort,
                 Some(ticket.ticket_kind),
                 styler,
             )?;
@@ -256,6 +257,7 @@ mod tests {
                     title: "Fix crash".into(),
                     ticket_kind: TicketKind::Bug,
                     priority,
+                    effort: None,
                     status,
                     selection: if priority.is_some() {
                         SelectionState::Parked

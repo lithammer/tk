@@ -14,6 +14,7 @@ use clap::Args as ClapArgs;
 use crate::cli::{CommandError, Deps, Exit};
 use crate::commands::message::{self, Input as MessageInput};
 use crate::commands::resolver;
+use crate::domain::effort::Effort;
 use crate::domain::priority::Priority;
 use crate::domain::ticket_kind::TicketKind;
 use crate::store::repository::create::{
@@ -37,8 +38,8 @@ pub struct Args {
     /// Create a bug Ticket (conflicts with --epic).
     #[arg(long, conflicts_with = "epic")]
     pub bug: bool,
-    /// Create an Epic (conflicts with --bug, --priority, --parent).
-    #[arg(long, conflicts_with_all = ["bug", "priority", "parent"])]
+    /// Create an Epic (conflicts with --bug, --priority, --effort, --parent).
+    #[arg(long, conflicts_with_all = ["bug", "priority", "effort", "parent"])]
     pub epic: bool,
     /// Place the new Ticket under an Epic by Display ID or Alias.
     #[arg(short = 'P', long, value_name = "EPIC")]
@@ -46,6 +47,9 @@ pub struct Args {
     /// Set Priority (P0..P3). Tickets only.
     #[arg(short = 'p', long, value_name = "PRIORITY")]
     pub priority: Option<Priority>,
+    /// Set Effort (low, medium, high). Tickets only.
+    #[arg(long, value_name = "EFFORT")]
+    pub effort: Option<Effort>,
     /// Capture the Ticket in triage with no Priority, pending a decision
     /// (conflicts with --priority and --epic).
     #[arg(long, conflicts_with_all = ["priority", "epic"])]
@@ -124,6 +128,7 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         CreateLocalTicketInput {
             kind,
             selection,
+            effort: args.effort,
             parent_id,
             title: &parsed.title,
             body: &parsed.body,
@@ -146,6 +151,9 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         None => {
             let _ = writeln!(deps.stdout, "Selection: {}", ticket.selection_state);
         }
+    }
+    if let Some(effort) = ticket.effort {
+        let _ = writeln!(deps.stdout, "Effort: {effort}");
     }
     let _ = writeln!(deps.stdout, "Status: {}", ticket.status);
     if let Some(parent) = parent_ref.as_ref() {
@@ -204,6 +212,7 @@ mod tests {
             epic: false,
             parent: None,
             priority: None,
+            effort: None,
             triage: false,
         }
     }
