@@ -1,5 +1,8 @@
 # tk search is title-only item lookup; ID is tk show, content search is a deferred tk grep
 
+> **Amended by ADR-0055.** Any Container, not only an Epic, groups the
+> matching Tickets it holds in `tk list`.
+
 `tk search <query>` (tk-79) finds **Tickets** and **Epics** whose title
 contains the query as a case-insensitive literal substring, across the whole
 **Repository Store** and every **Item Status**, rendering matches as flat

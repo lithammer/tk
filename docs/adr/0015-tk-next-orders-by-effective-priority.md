@@ -1,5 +1,9 @@
 # tk next orders by Effective Priority within Scope
 
+> **Amended by ADR-0055.** A Ticket Container counts as a Blocked Item of each
+> Ticket it holds, so its Effective Priority flows down to them. The Epic rule
+> below is unchanged.
+
 `tk next` ranks ready **Tickets** by **Effective Priority** (lowest
 first), then own **Priority**, then `created_seq`, where **Effective
 Priority** is the minimum of a **Ticket**'s own **Priority** and the

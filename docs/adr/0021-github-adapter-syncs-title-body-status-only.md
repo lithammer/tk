@@ -15,6 +15,11 @@
 > applies. Every Promotion now uses the `createIssue` mutation, and Priority
 > is a Shared Field the Adapter pushes and reads.
 
+> **Amended by ADR-0055.** Epic Membership is now Containment, whose Container
+> is an Epic or a Ticket. `add_ticket_to_epic` and `remove_ticket_from_epic`
+> become `set_ticket_container` and `clear_ticket_container`, and a move is one
+> `set_ticket_container`. Containment stays push-only.
+
 The v1 GitHub Backend Adapter (tk-34) maps item *fields* between tk and a
 GitHub repository, chiefly through the `gh issue` subcommands:
 

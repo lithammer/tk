@@ -53,9 +53,9 @@ The priority used to order a candidate **Ticket** in **`tk next`**, derived from
 _Avoid_: Inherited Priority, Critical Path Priority, Derived Priority
 
 **List Tree**:
-The **`tk list`** view that renders **Epics** and their child **Tickets** as a
-tree. An **Epic** may appear as grouping context for matching child
-**Tickets** without matching the view itself.
+The **`tk list`** view that renders each **Container** with the **Tickets** it
+holds nested beneath it. A **Container** may appear as grouping context for
+matching **Tickets** it holds without matching the view itself.
 _Avoid_: Flat List
 
 **Epic**:
@@ -64,12 +64,16 @@ worked as one unit. Its **Lifecycle** is independent of each child **Ticket**'s
 **Lifecycle**.
 _Avoid_: Batch, Ticket Group, Umbrella
 
-**Epic Membership**:
-The containment relationship between a **Ticket** and the **Epic** that holds
-it. A **Ticket** has at most one, so membership is a property of the **Ticket**
+**Containment**:
+The relationship between a **Ticket** and the **Container** that holds it. A
+**Ticket** has at most one, so Containment is a property of the **Ticket**
 rather than an edge named by both of its ends — the distinction from a
 **Dependency**.
-_Avoid_: Sub-issue, Parent Link, Containment
+_Avoid_: Epic Membership, Sub-issue, Parent Link
+
+**Container**:
+The **Epic** or **Ticket** that holds a **Ticket** through **Containment**.
+_Avoid_: Parent, Holder
 
 **Parent Argument**:
 CLI shorthand for placing a **Ticket** under a containing item.
@@ -132,7 +136,7 @@ A local checkout of the repository, usually a git worktree, that shares the **Re
 _Avoid_: Worktree
 
 **Scope**:
-The **Epic** that narrows **`tk next`** and **`tk list`**, supplied as an explicit `<epic-id>` argument or the `TK_SCOPE` environment variable. A **Scope** is **Epic**-only and is never persisted; **Plan** selection further narrows **`tk next`** when explicitly requested.
+The **Container** that narrows **`tk next`** and **`tk list`**, supplied as an explicit positional argument or the `TK_SCOPE` environment variable: an **Epic**, or a **Ticket** that holds **Tickets**. A **Scope** is never persisted; **Plan** selection further narrows **`tk next`** when explicitly requested.
 _Avoid_: Workspace Scope, Workspace Binding, Inferred Workspace Scope, Filter
 
 **Ticket Branch**:
@@ -377,9 +381,9 @@ A **Mutation** that modifies exactly one **Ticket**.
 _Avoid_: Ticket Change, Change, Audit Entry
 
 **Epic Mutation**:
-A **Mutation** that modifies exactly one **Epic**. A change of **Epic
-Membership** is a **Ticket Mutation**, since it names the **Ticket** whose
-containment changed.
+A **Mutation** that modifies exactly one **Epic**. A change of
+**Containment** is a **Ticket Mutation**, since it names the **Ticket** whose
+**Container** changed.
 _Avoid_: Epic Change, Change, Audit Entry
 
 **Mutation Type**:
@@ -387,7 +391,7 @@ A named domain operation that describes the intent of a **Mutation**.
 _Avoid_: Field Patch, JSON Patch
 
 **V1 Mutation Type**:
-A **Mutation Type** supported by the first implementation: `update_ticket`, `update_epic`, `set_item_status`, `set_ticket_priority`, `set_ticket_effort`, `add_ticket_to_epic`, `remove_ticket_from_epic`, `add_dependency`, `remove_dependency`, `promote_ticket`, or `promote_epic`.
+A **Mutation Type** supported by the first implementation: `update_ticket`, `update_epic`, `set_item_status`, `set_ticket_priority`, `set_ticket_effort`, `set_ticket_container`, `clear_ticket_container`, `add_dependency`, `remove_dependency`, `promote_ticket`, or `promote_epic`.
 _Avoid_: Comment Mutation, Label Mutation, Assignee Mutation, External Blocker Mutation
 
 **Mutation Log**:
@@ -477,14 +481,17 @@ _Avoid_: ticket, tickets
 
 - **`tk`** is the command-line executable for **tk**.
 - A **Ticket** may be backed by a GitHub issue, Jira issue, or another backend-specific work item.
-- An **Epic** contains zero or more **Tickets**.
-- An **Epic** does not contain other **Epics** in v1.
-- A **Ticket** may belong to zero or one **Epic** in v1.
+- A **Ticket** has zero or one **Container**: an **Epic** or another
+  **Ticket**.
+- An **Epic** has no **Container**.
+- A **Container** holds zero or more **Tickets**.
+- **Ticket Kind** does not restrict **Containment**: a `bug` may hold
+  **Tickets**, and a `task` may hold `bug` **Tickets**.
 - The **Repository Store** holds one current **Plan**, with no named-plan
   registry, archive or separate Plan status (ADR-0050).
 - Only **Tickets** belong to the **Plan**, in any **Item Status** or
   **Selection State**. Membership is local and preserves Ticket state,
-  **Priority**, **Origin** and **Epic Membership**.
+  **Priority**, **Origin** and **Containment**.
 - `tk plan add` and `tk plan remove` validate every explicit ID before
   changing membership atomically. Unknown IDs and **Epics** reject the
   operation; adding a member or removing a nonmember is a no-op.
@@ -495,12 +502,16 @@ _Avoid_: ticket, tickets
   In progress, Waiting and Done sections, omitting empty sections and a
   redundant header. Each member appears once; Waiting explains blocked,
   triage or parked work, and the footer counts remaining and done/total.
-- `tk next --plan` selects only **Plan** members, intersecting any Epic
-  **Scope**. Outside **Dependencies** still block readiness; their Items
-  are never included or selected automatically. `tk plan` names outside
-  blockers so the operator can include them or work them separately.
-- The v1 **Parent Argument** must resolve to an **Epic**.
-- Future versions may allow the **Parent Argument** to resolve to a **Ticket** if subtickets are introduced.
+- `tk next --plan` selects only **Plan** members, intersecting any
+  **Scope**. Outside **Dependencies** and outside contained **Tickets** still
+  block readiness; their Items are never included or selected automatically.
+  `tk plan` names them so the operator can include them or work them
+  separately.
+- The **Parent Argument** resolves to the **Ticket**'s new **Container**: an
+  **Epic** or a **Ticket**.
+- A **Ticket** held by a **Ticket** holds no **Tickets**, and a **Ticket** that
+  holds **Tickets** has no **Container** but an **Epic**. The longest chain is
+  **Epic**, **Ticket**, **Ticket**.
 - A **Ticket** has exactly one **Ticket Kind**.
 - A **Ticket** has exactly one **Priority**.
 - **Priority** is a **Shared Field**. **Promotion** sets it, a local change records a `set_ticket_priority` **Mutation**, and **Backend Pull** imports it unless an unresolved `set_ticket_priority` **Mutation** shields it. An issue with no Priority, or an option **tk** does not name, reads as `P2`. An **Epic** and a `triage` **Ticket** have none to share (ADR-0054).
@@ -509,10 +520,10 @@ _Avoid_: ticket, tickets
 - **Effort** is a **Shared Field**. **Promotion** sets it when present, a local change records a `set_ticket_effort` **Mutation**, and **Backend Pull** imports it unless an unresolved `set_ticket_effort` **Mutation** shields it. An issue with no Effort, or an option **tk** does not name, reads as no **Effort** (ADR-0054).
 - **`tk next`** breaks ties in **Effective Priority** and own **Priority** by **Effort**, low first; a **Ticket** with no **Effort** ranks as `medium` (ADR-0015).
 - Lower **Priority** numbers sort before higher **Priority** numbers.
-- A candidate **Ticket**'s **Effective Priority** is the lowest of its own **Priority** and the **Effective Priorities** of every unfinished **Blocked Item** (**Item Status** `open` or `active`) it reaches through transitive `blocked_by` **Dependencies** within the active **Scope**.
+- A candidate **Ticket**'s **Effective Priority** is the lowest of its own **Priority** and the **Effective Priorities** of every unfinished **Blocked Item** (**Item Status** `open` or `active`) it reaches through transitive `blocked_by` **Dependencies** within the active **Scope**. A **Ticket** **Container** counts as a **Blocked Item** of each **Ticket** it holds.
 - A `done` **Blocking Item** resolves the **Dependency** for readiness and
   **Effective Priority**, but does not remove the relationship.
-- An **Epic** in the **Effective Priority** chain contributes the lowest **Effective Priority** over its unfinished child **Tickets**.
+- An **Epic** in the **Effective Priority** chain contributes the lowest **Effective Priority** over the unfinished **Tickets** it holds. A **Ticket** held by an **Epic** inherits nothing from it.
 - **Effective Priority** propagation stops at the **Scope** boundary; items outside the active **Scope** do not contribute.
 - With `tk next --plan`, **Effective Priority** also stops at the **Plan**
   boundary. When combined with **Scope**, only work in their intersection
@@ -555,17 +566,22 @@ _Avoid_: ticket, tickets
 - A **Ticket** or **Epic** may have zero or more **Dependencies**.
 - **Dependencies** may connect **Tickets** and **Epics** in any blocking or blocked combination.
 - **Dependencies** must not form cycles.
-- **Dependency** is distinct from **Epic** membership.
+- **Dependency** is distinct from **Containment**.
 - A **Ticket** or **Epic** may have zero or more **External Blockers**.
-- A **Ticket** is ready only when its **Item Status** is `open`, it has no unresolved **Dependencies**, and it has no **External Blockers**.
-- Parent **Epic** **Item Status** does not change child **Ticket** readiness;
-  an open child **Ticket** under a done **Epic** remains ready when otherwise
-  unblocked.
-- Parent **Epic** **Dependencies** and **External Blockers** do not change
-  child **Ticket** readiness.
-- A **Scope** references exactly one **Epic**; a **Ticket** supplied as a **Scope** is a typed error.
-- **Scope** narrows **`tk next`** and **`tk list`** to an **Epic** and its child **Tickets**; it is not an implicit target for item commands.
-- **Scope** is supplied as an explicit `<epic-id>` argument or the `TK_SCOPE` environment variable; the argument wins when both are present.
+- A **Ticket** is ready only when its **Item Status** is `open`, it has no unresolved **Dependencies**, it has no **External Blockers**, and every **Ticket** it contains is `done`.
+- A **Ticket** that contains **Tickets** waits on each one until it is `done`,
+  whatever that **Ticket**'s **Selection State**. Readiness never flows the
+  other way: a contained **Ticket** does not wait on its **Container**.
+- A **Container**'s **Item Status** does not change the readiness of the
+  **Tickets** it holds; an open **Ticket** under a done **Container** remains
+  ready when otherwise unblocked.
+- A **Container**'s **Selection State**, **Dependencies**, and **External
+  Blockers** do not change the readiness of the **Tickets** it holds.
+- A **Container** may be `done` while **Tickets** it holds are not; closing it
+  neither refuses nor warns, and closes nothing else.
+- A **Scope** references exactly one **Container**; a **Ticket** that holds no **Tickets** supplied as a **Scope** is a typed error.
+- **Scope** narrows **`tk next`** and **`tk list`** to a **Container** and every **Ticket** it holds, directly or through a **Ticket** it holds; it is not an implicit target for item commands.
+- **Scope** is supplied as an explicit positional argument or the `TK_SCOPE` environment variable; the argument wins when both are present.
 - An absent **Scope** means **`tk list`** considers the whole **Repository
   Store**; **`tk next`** does too unless `--plan` selects the **Plan**.
 - **Scope** is never persisted; it is read per invocation from the argument or environment.
@@ -582,7 +598,7 @@ _Avoid_: ticket, tickets
   Backend's current Lifecycle, and **Sync Skip** of that Item's failed closing
   **Mutation** relinquishes the close intent. v1 has no dedicated `tk reopen`
   command.
-- The **`done`** terminal rule constrains **Item Status** transitions only; title, body, **Priority**, and **Epic** membership remain editable on a `done` item.
+- The **`done`** terminal rule constrains **Item Status** transitions only; title, body, **Priority**, and **Containment** remain editable on a `done` item.
 - **`tk`** does not manage git worktrees; checkout creation is the harness's or the user's responsibility via `git worktree`.
 - **`tk show`**, **`tk update`**, **`tk start`**, **`tk stop`**, **`tk done`**, and **`tk promote`** require an explicit **Display ID** in v1.
 - **`tk show`** renders an Item's **Former Backend Identities**, most recently
@@ -629,7 +645,7 @@ _Avoid_: ticket, tickets
   `Epic` Issue Types, and fails preflight naming a missing type. It sets a
   **Ticket**'s **Priority** and any **Effort** in the same call and fails
   preflight naming a missing Priority or Effort field. It represents
-  **Dependencies** and Epic membership through later relationship
+  **Dependencies** and **Containment** through later relationship
   **Mutations**.
 - A trustworthy GitHub issue URL receipt certifies **Created**, including when
   delivery also reports failure. A request that never started, or a read that
@@ -701,16 +717,16 @@ _Avoid_: ticket, tickets
 - **Promotion Cancellation** withdraws every **Mutation** that cannot be applied
   without a cancelled item's backend identity: the **Promotions** themselves,
   **Mutations** targeting a cancelled item, a **Dependency** naming one as
-  **Blocking Item**, and an **Epic Membership** addition naming a cancelled
-  **Epic**. Clearing **Epic Membership** survives, because it names no **Epic**
-  the **Backend** must address.
+  **Blocking Item**, and a **Containment** addition naming a cancelled
+  **Container**. Clearing **Containment** survives, because it names no
+  **Container** the **Backend** must address.
 - Cancellation reaches one hop, never transitively: only the cancelled items lose
   their prospective identity, so another item's **Promotion** survives with just
   its references to a cancelled item withdrawn.
 - **Promotion Cancellation** refuses while a cancelled **Blocking Item** would
   leave a backend-bound **Blocked Item** waiting on it, the same graph
-  **Promotion** rejects; the **Dependency** must be removed first. **Epic
-  Membership** degrades to local instead, as it does under **Promotion**.
+  **Promotion** rejects; the **Dependency** must be removed first.
+  **Containment** degrades to local instead, as it does under **Promotion**.
 - **Promotion Cancellation** leaves current **Ticket** and **Epic** state
   untouched, including **Display IDs** and **Aliases**, and returns each
   cancelled item's **Backend Binding** to unbound. Promoting it again is
@@ -764,7 +780,7 @@ _Avoid_: ticket, tickets
 - **Promotion** does not include contained **Tickets** unless `--children` is used.
 - v1 **Promotion Children** are directly contained **Local Tickets** only.
 - **Promotion Children** do not follow **Dependencies**.
-- `tk promote <epic-id> --children` evaluates the **Local Epic** and all
+- `tk promote <id> --children` evaluates the local **Container** and all
   **Promotion Children** together, so **Dependencies** among them become
   backend intent regardless of creation order.
 - Newly created **Tickets** and **Epics** are local by default, even when a **Primary Backend** exists.
@@ -776,12 +792,12 @@ _Avoid_: ticket, tickets
 - A **Mutation** targets a **Backend Ticket**, a **Backend Epic**, or a
   **Pending Promotion**.
 - A **Ticket Mutation** modifies exactly one **Ticket**.
-- An **Epic Mutation** modifies exactly one **Epic**; a change of **Epic
-  Membership** is a **Ticket Mutation** naming the contained **Ticket**.
-- A **Ticket Mutation** that clears **Epic Membership** names only the
-  **Ticket**. The **Epic** it left needs no **Backend** identity for the change
-  to be applied, so an **Epic** still awaiting its **Promotion** receipt cannot
-  stop it.
+- An **Epic Mutation** modifies exactly one **Epic**; a change of
+  **Containment** is a **Ticket Mutation** naming the contained **Ticket**.
+- A **Ticket Mutation** that clears **Containment** names only the
+  **Ticket**. The **Container** it left needs no **Backend** identity for the
+  change to be applied, so a **Container** still awaiting its **Promotion**
+  receipt cannot stop it.
 - Pre-Promotion edits to **Local Tickets** and **Local Epics** are Repository
   Store current-state changes, not **Mutations**.
 - **Promotion** is the boundary where current local state becomes backend
@@ -792,34 +808,36 @@ _Avoid_: ticket, tickets
 - **Promotion** rejects an operation that would leave a backend-backed
   **Blocked Item** waiting on a local **Blocking Item**.
 - **Promotion** rejects before creating backend objects when the configured
-  **Backend Adapter** cannot represent a **Dependency** or an **Epic
-  Membership** that the operation would make backend intent.
-- **Promotion** makes an existing **Epic Membership** backend intent when both
-  the **Ticket** and its **Epic** are backed by the same **Backend** after the
-  **Promotion**. Promoting a **Local Epic** therefore snapshots membership for
-  the same-**Backend Tickets** it already contains.
-- Mixed-**Origin** **Epic Membership** stays local and does **not** reject the
+  **Backend Adapter** cannot represent a **Dependency** or a **Containment**
+  that the operation would make backend intent.
+- **Promotion** makes an existing **Containment** backend intent when both
+  the **Ticket** and its **Container** are backed by the same **Backend** after
+  the **Promotion**. Promoting a local **Container** therefore snapshots
+  **Containment** for the same-**Backend Tickets** it already holds.
+- Mixed-**Origin** **Containment** stays local and does **not** reject the
   **Promotion**, where an unrepresentable **Dependency** rejects the whole
   operation. A half-represented **Dependency** would leave a backend-backed
-  item exposing an incomplete blocking constraint; half-represented membership
-  costs only grouping.
-- **Detach** preserves **Dependencies**, **Epic Membership**, and **External
+  item exposing an incomplete blocking constraint; half-represented
+  **Containment** costs only grouping.
+- **Detach** preserves **Dependencies**, **Containment**, and **External
   Blockers**. It refuses to turn a **Blocking Item** local while its **Blocked
   Item** remains backend-bound; that **Dependency** must be removed first.
-  Mixed-**Origin** membership stays local, and a detached **Blocked Item** may
+  Mixed-**Origin** **Containment** stays local, and a detached **Blocked Item** may
   keep its Dependencies.
 - Re-Adopt preflights preserved relationships under the same resulting-graph
   rules as **Promotion**. It appends new Mutations for every relationship that
   becomes representable Backend intent, rejects an invalid **Dependency**, and
-  leaves mixed-**Origin** Epic Membership local.
+  leaves mixed-**Origin** **Containment** local.
 - Re-Adopt records its restored Binding and relationship Mutations in one
   transaction but does not run sync. Its report names each queued Mutation.
-- **Dependency** and **Epic Membership** sync are push-only. **Backend Pull**
+- **Dependency** and **Containment** sync are push-only. **Backend Pull**
   refreshes fields alone and reconciles neither relationship, so the
-  **Repository Store** stays authoritative for both.
+  **Repository Store** stays authoritative for both. **Adopting** the issues of
+  a **Backend** tree therefore yields flat **Tickets** until gh-66 reads edges
+  back.
 - A **Repository Store** syncs with the one **Backend** repository its own
   version-control repository resolves through the **Backend Adapter**.
-  **Dependencies** and **Epic Membership** spanning two **Backend**
+  **Dependencies** and **Containment** spanning two **Backend**
   repositories are unsupported; tk does not check for them, and the
   **Backend Adapter**'s external CLI reports the failure.
 - **Promotion** preserves a **Ticket**'s `accepted` or `parked` **Selection
@@ -845,23 +863,26 @@ _Avoid_: ticket, tickets
 - **`tk next`** selects the ready **Ticket** with the lowest **Effective Priority**, then lowest own **Priority**, then lowest `created_seq`, within the active **Scope**.
 - **`tk next`** is deterministic and does not randomize among candidates.
 - **Ticket Kind** does not affect **`tk next`** ordering.
-- **`tk next`** does not explain skipped candidates, but may render a rationale for the selected **Ticket** when its **Effective Priority** comes from a **Blocked Item** rather than its own **Priority**. The rationale names the **Ticket** whose **Priority** drives the **Effective Priority** signal, which is not always the item the candidate directly unblocks — in an **Epic**-mediated chain, the named **Ticket** is a child of an **Epic** the candidate blocks, not a direct **Blocked Item**.
+- **`tk next`** does not explain skipped candidates, but may render a rationale for the selected **Ticket** when its **Effective Priority** comes from a **Blocked Item** rather than its own **Priority**. The rationale names the **Ticket** whose **Priority** drives the **Effective Priority** signal, which is not always the item the candidate directly unblocks — in a **Container**-mediated chain, the named **Ticket** is held by, or holds, an item the candidate blocks, not a direct **Blocked Item**.
 - **`tk next`** has no JSON or structured-output mode in v1.
 - When there is no active **Scope** or explicit **Plan** selection,
   **`tk next`** searches ready **Tickets** across the **Repository Store**.
-- When a **Scope** is active, **`tk next`** searches only **Tickets** directly
-  contained by that **Epic**.
+- When a **Scope** is active, **`tk next`** searches only that **Container**
+  and the **Tickets** it holds, directly or through a **Ticket** it holds. A
+  **Ticket** **Container** is itself a candidate once every **Ticket** it holds
+  is `done`.
 - **`tk next`** does not filter by **Origin**.
 - **`tk next`** does not use **Mutation Log**, **Mutation Failure**, or **Sync
   Cursor** state as readiness inputs.
 - **`tk next`** does not emit sync-health warnings.
 - **`tk next`** does not change **Item Status**; selecting ready work is
   separate from starting work.
-- **`tk next`** takes an optional positional `<epic-id>` argument; absent it,
+- **`tk next`** takes an optional positional **Scope** argument; absent it,
   **`tk next`** reads `TK_SCOPE`, then falls back to the whole **Repository
   Store**.
-- **`tk next`** and **`tk list`** reject a **Ticket** **Scope** argument with a
-  typed error rather than narrowing to a single **Ticket**.
+- **`tk next`** and **`tk list`** reject a **Scope** argument naming a
+  **Ticket** that holds no **Tickets** with a typed error rather than narrowing
+  to a single **Ticket**.
 - Store-facing **`tk next`** selection accepts a resolved **Scope**; command
   code owns **Scope** resolution from argument or environment.
 - **`tk next`** takes the optional **Scope** argument, `-q`/`--quiet`, and
@@ -872,13 +893,13 @@ _Avoid_: ticket, tickets
   changes the **Effective Priority** rationale, which stays on stderr.
 - Done-item browsing through **`tk next`** is deferred; **`tk next`** selects
   ready **Tickets** only and never surfaces a `done` item. Every **`tk list`**
-  view can surface a `done` **Epic** as a container when it has a matching
-  child **Ticket**.
+  view can surface a `done` **Container** as grouping context when it holds a
+  matching **Ticket**.
   **`tk search`** is the sanctioned path for finding a specific `done`
   **Ticket** or **Epic** by title, since it matches every **Item Status**.
-- **`tk list`** takes an optional positional `<epic-id>` argument; absent it, **`tk list`** reads `TK_SCOPE`, then renders the whole **Repository Store**.
-- When a **Scope** is active, **`tk list`** renders only that **Epic** and its child **Tickets**, and prints a hint that the view is filtered.
-- **List Tree** renders **Epics** as top-level rows, child **Tickets** nested under their **Epic**, and unparented **Tickets** as top-level rows.
+- **`tk list`** takes an optional positional **Scope** argument; absent it, **`tk list`** reads `TK_SCOPE`, then renders the whole **Repository Store**.
+- When a **Scope** is active, **`tk list`** renders only that **Container** and the **Tickets** it holds, and prints a hint that the view is filtered.
+- **List Tree** renders **Epics** and **Tickets** with no **Container** as top-level rows, and nests each held **Ticket** under its **Container**, to every depth **Containment** allows.
 - **List Tree** uses decorative tree glyphs and compact status, priority, kind, and Mutation markers without column alignment.
 - **List Tree** status markers render **Item Status** as `○` for `open`, `◐`
   for `active`, and `✓` for `done`.
@@ -916,7 +937,8 @@ _Avoid_: ticket, tickets
   **Mutation** appears in neither. Each section is omitted when it has none
   and points the reader at **`tk sync log`** for detail.
 - **`tk next`** does not select **Epics**.
-- **`tk list --ready`** keeps the **List Tree** shape and includes non-empty **Epics** as containers for ready child **Tickets**.
+- **`tk list --ready`** keeps the **List Tree** shape and includes each **Container**, ready or not, as grouping context for the ready **Tickets** it holds.
+- **`tk show`** renders an item's **Container** and the **Tickets** it holds.
 - **`tk search`** finds **Tickets** and **Epics** whose title contains the query as a case-insensitive literal substring.
 - **`tk search`** covers the whole **Repository Store** and every **Item Status**, including `done`; it ignores **Scope** and is never narrowed by `TK_SCOPE`.
 - **`tk search`** matches title text only. Exact **Display ID** / **Alias** lookup is **`tk show`**; title-or-body content search is **`tk grep`**.
@@ -957,7 +979,7 @@ _Avoid_: ticket, tickets
 > **Domain expert:** "No — it should store a **Mutation Type** like `set_status` so the backend adapter can preserve intent."
 >
 > **Dev:** "Should comments, labels, or assignees be **V1 Mutation Types**?"
-> **Domain expert:** "No — v1 only supports creation, title/body updates, status, priority, epic membership, dependencies, and promotion."
+> **Domain expert:** "No — v1 only supports creation, title/body updates, status, priority, containment, dependencies, and promotion."
 >
 > **Dev:** "When **`tk`** runs inside a git worktree for a Jira backend feature, should it show unrelated work by default?"
 > **Domain expert:** "Pass the relevant **Epic** as a **Scope** — `tk list <epic-id>` or `tk next <epic-id>` — when you want to stay inside that feature; otherwise it considers all work."
@@ -1020,13 +1042,13 @@ _Avoid_: ticket, tickets
 > **Domain expert:** "No — default ticket views include both **Local Tickets** and **Backend Tickets**. **Origin** is not a separate rendered field; it is normally inferred from the **Display ID** shape."
 >
 > **Dev:** "If **src-12** belongs to **src-3**, does that mean **src-12** is blocked by **src-3**?"
-> **Domain expert:** "No — **Epic Membership** groups work, while a **Dependency** says one item cannot progress until another is done."
+> **Domain expert:** "No — a **Container** never blocks what it holds. A **Dependency** says one item cannot progress until another is done; **Containment** groups work, and only makes a **Ticket** **Container** wait on what it holds."
 >
 > **Dev:** "When a **Backend Ticket** moves out of a **Local Epic**, what reaches the **Backend**?"
-> **Domain expert:** "Nothing. Mixed-**Origin** **Epic Membership** is local-only; it becomes backend intent once both ends share a **Backend**, which is what promoting that **Epic** does."
+> **Domain expert:** "Nothing. Mixed-**Origin** **Containment** is local-only; it becomes backend intent once both ends share a **Backend**, which is what promoting that **Epic** does."
 >
 > **Dev:** "Does `--parent src-3` introduce a parent-child domain model?"
-> **Domain expert:** "No — in v1, the **Parent Argument** is CLI shorthand for **Epic** membership."
+> **Domain expert:** "No — the **Parent Argument** is CLI shorthand for setting a **Ticket**'s **Container**, which may be an **Epic** or another **Ticket**."
 >
 > **Dev:** "Is an **Epic** a type of **Ticket**?"
 > **Domain expert:** "No — **Epic** is separate from **Ticket**; only **Tickets** have **Ticket Kind**."
@@ -1035,7 +1057,7 @@ _Avoid_: ticket, tickets
 > **Domain expert:** "It uses **Effective Priority** first, then own **Priority**, then creation order, within the active **Scope**. **Effective Priority** lets a ready **Blocking Item** outrank lower-priority direct work when finishing it would unblock a higher-priority **Ticket**."
 >
 > **Dev:** "Should **`tk list`** be a flat table?"
-> **Domain expert:** "No — **`tk list`** uses a **List Tree** so **Epics** and child **Tickets** are visible together."
+> **Domain expert:** "No — **`tk list`** uses a **List Tree** so each **Container** and the **Tickets** it holds are visible together."
 >
 > **Dev:** "If every **Ticket** in an **Epic** is done, should the **Epic** close automatically?"
 > **Domain expert:** "No — **Epic** closure is explicit because completion criteria may exist outside the current child tickets."
@@ -1075,7 +1097,7 @@ _Avoid_: ticket, tickets
 - Configurable worktree root and layout were considered for v1 (ADR-0007) — superseded: **`tk`** no longer creates worktrees (ADR-0022).
 - Naming the **Epic**-narrowing concept **Filter** was considered — resolved: **Scope** is the term, because it bounds **Effective Priority** propagation and changes which **Ticket** **`tk next`** picks, not merely which rows **`tk list`** shows; "filter" is the verb **`tk list`** performs (ADR-0022).
 - Defaulting item commands from **Scope** was considered — resolved: **Scope** is not an implicit item target; commands that inspect, update, or promote a specific item require an explicit **Display ID** in v1.
-- A separate `tk list --parent <id>` filter flag was considered — resolved: the positional `<epic-id>` **Scope** subsumes it in v1, since the **Parent Argument** resolves only to an **Epic** and both return the same rows; `--parent` stays the **Parent Argument** flag on `tk add` (ADR-0022).
+- A separate `tk list --parent <id>` filter flag was considered — resolved: the positional **Scope** argument subsumes it, since the **Parent Argument** and a **Scope** both resolve to a **Container** and return the same rows; `--parent` stays the **Parent Argument** flag on `tk add` (ADR-0022).
 - "workspace store" and "global store" were considered for local state — resolved: a **Repository Store** is shared across all **Workspaces** for one repository.
 - Checked-in ticket state was considered for portability — resolved: the **Repository Store** is untracked local state by default.
 - "facade", "provider", and "connector" were considered for integrations — resolved: **Backend Adapter** maps domain concepts to a **Backend**.
@@ -1085,7 +1107,9 @@ _Avoid_: ticket, tickets
 - "memory" and "note" were considered for agent follow-ups — resolved: follow-ups are **Local Tickets**.
 - "publish" and "export" were considered for moving local work to a backend — resolved: **Promotion** converts a **Local Ticket** or **Local Epic** into a backend-backed object.
 - Keeping local IDs as visible IDs after **Promotion** was considered — resolved: **Promotion** replaces the **Display ID** and preserves the old local ID as an **Alias**.
-- Recursive promotion was considered — resolved: `--children` includes direct **Promotion Children** only in v1.
+- Recursive promotion was considered, and again when **Tickets** became **Containers** — resolved: `--children` includes direct **Promotion Children** only. `tk promote <epic> --children` leaves the **Tickets** its **Tickets** hold local, and their **Containment** degrades to local until each **Ticket** **Container** is promoted with `--children` (ADR-0055).
+- Nesting **Tickets** as deep as GitHub allows (eight levels) was considered — resolved: **Epic**, **Ticket**, **Ticket** at most. That is Jira's ceiling, and loosening a cap later breaks no stored data where adding one would (ADR-0055).
+- Letting a parked or blocked **Container** hold back the **Tickets** it holds was considered — resolved: no. That is a hidden propagation rule; park the held **Tickets** directly (ADR-0055).
 - Backend-intended creation by default was considered when a **Primary Backend** exists — resolved: new **Tickets** and **Epics** are local by default to avoid upstream tracker noise.
 - "local edit log", "change log", and "audit log" were considered for
   replayable backend intent — resolved: **Mutation Log** stores **Mutations**,
@@ -1102,13 +1126,23 @@ _Avoid_: ticket, tickets
 - Mirroring the whole **Backend** into the **Repository Store** on every sync — the original tk-34 model — was considered (tk-34) — resolved: tk is a local-first tracker with **opt-in** **Backend** support. **Backend** issues enter only by **Adopt** (or **Promotion**), and **Backend Pull** refreshes just the **Adopted** non-`done` items; tk neither mirrors nor auto-discovers a **Backend**. Mirroring would import an entire tracker (e.g. a 15k-item Jira project) as `accepted` **Backend Tickets**, swamping **`tk next`**, and a fixed pull cap silently drops items past the cap.
 - Naming the derived bound-to-a-**Backend** state **Backend Intent** was considered — resolved: **Backend Binding**, because GLOSSARY.md already uses "backend intent" for what a **Mutation** records. One phrase cannot name both a record and an item's relationship to a **Backend**; "intent" is something written down to be carried out, "binding" is the relationship itself (ADR-0036).
 - "Epic membership" was used as undefined prose, and GitHub's "sub-issue" as its
-  backend spelling (tk-132) — resolved: **Epic Membership** is a defined term.
-  Because a **Ticket** has at most one **Epic**, it is a property of the
+  backend spelling — resolved: **Epic Membership** became a defined
+  term. Because a **Ticket** has at most one **Epic**, it is a property of the
   **Ticket** rather than an edge named by both ends, so changing it is a
   **Ticket Mutation** and clearing it names no **Epic** (ADR-0021).
-- Rejecting a **Promotion** over mixed-**Origin** **Epic Membership**, the way
+- A **Sub-ticket** relation beside **Epic Membership**, so a **Ticket** could
+  name both an **Epic** and a parent **Ticket**, was considered —
+  resolved: one relation, **Containment**, whose **Container** is an **Epic**
+  or a **Ticket**. GitHub gives an issue one parent, and a **Ticket**'s **Epic**
+  would otherwise stop following from its parent. **Epic Membership** is
+  retired (ADR-0055).
+- Letting a **Ticket** with unfinished contained **Tickets** stay selectable
+  was considered — resolved: it waits on them. An agent that picks the
+  **Container** builds the whole of it in one run instead of taking the
+  slices, the problem Matt Pocock's `to-spec` skill reports most (ADR-0055).
+- Rejecting a **Promotion** over mixed-**Origin** **Containment**, the way
   it rejects an unrepresentable **Dependency**, was considered — resolved:
-  membership stays local, because losing grouping is not the same failure as a
+  **Containment** stays local, because losing grouping is not the same failure as a
   backend-backed item exposing an incomplete blocking constraint (ADR-0035).
 - Withdrawing a single **Promotion** rather than its whole **Promotion
   Operation** was considered (tk-134) — resolved: **Promotion Cancellation** is
@@ -1157,11 +1191,11 @@ _Avoid_: ticket, tickets
   and a fresh **Promotion** instead (ADR-0037).
 - Requiring a force flag for a cancellation that withdraws queued **Mutations**
   was considered (tk-134) — resolved: no gate. Promoting the item again
-  re-snapshots title, body, **Item Status**, and same-**Backend** **Epic
-  Membership**, so cancellation is reversible, and friction on the exit of last
+  re-snapshots title, body, **Item Status**, and same-**Backend**
+  **Containment**, so cancellation is reversible, and friction on the exit of last
   resort only makes a stopped queue harder to clear (ADR-0038).
 - Letting cancellation leave a withdrawn **Dependency**'s edge local, the way
-  **Epic Membership** degrades, was considered (tk-134) — resolved: it refuses
+  **Containment** degrades, was considered — resolved: it refuses
   instead. A backend-bound **Blocked Item** waiting on a **Local** **Blocking
   Item** is the one graph **Promotion** rejects outright, and reaching it by
   withdrawal rather than by **Promotion** does not make it acceptable
@@ -1175,6 +1209,6 @@ _Avoid_: ticket, tickets
   their request was dropped.
 - Whether a `done` **Epic** can still supply grouping context in **List
   Tree** was left open (tk-163, now gh-58) — resolved: **Lifecycle** and
-  **Epic Membership** are independent. A done Epic remains the containing
+  **Containment** are independent. A done Epic remains the containing
   Epic of its child **Tickets**; showing it as context does not make it
   matching work. ADR-0025 records the list-view policy.
