@@ -41,7 +41,7 @@ pub struct CreateLocalTicketInput<'a> {
     pub kind: TicketKind,
     pub selection: NewTicketSelection,
     pub effort: Option<Effort>,
-    /// Internal stable `items.id` of the Container (an Epic or a Ticket), if any.
+    /// Internal stable `items.id` of the Container, an Epic or a Ticket.
     pub parent_id: Option<&'a str>,
     pub title: &'a str,
     pub body: &'a str,

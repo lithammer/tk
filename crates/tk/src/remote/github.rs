@@ -206,9 +206,9 @@ impl Adapter for GithubAdapter<'_> {
                     "cannot push a target Lifecycle of 'open': v1 has no remote reopen",
                 )),
             },
-            // Relationship sync (ADR-0021, ADR-0055): every arm edits the Mutation's own item, and any
-            // counterpart address is resolved store-side onto the operation's
-            // identity. All four flags below are native to `gh issue edit` as of
+            // Relationship sync (ADR-0021, ADR-0055): every arm edits the
+            // Mutation's own item, and any counterpart address is resolved
+            // store-side onto the operation's identity. All four flags below are native to `gh issue edit` as of
             // `gh` 2.94.0, which the adapter therefore requires; an older `gh`
             // rejects the unknown flag and the Mutation fails.
             BackendEdit::AddDependency {
@@ -244,8 +244,9 @@ impl Adapter for GithubAdapter<'_> {
             // `--remove-parent` clears whichever parent the issue actually has,
             // which is what makes the push converge on tk's cleared
             // `container_id`. The `--remove-sub-issue <ticket>` form names the
-            // Container tk expected and was observed to exit 0 without changing a
-            // divergent parent, reporting a removal that never happened.
+            // Container tk expected and was observed to exit 0 without
+            // changing a divergent parent, reporting a removal that never
+            // happened.
             BackendEdit::ClearTicketContainer { ticket } => self.run_edit(&[
                 "gh",
                 "issue",

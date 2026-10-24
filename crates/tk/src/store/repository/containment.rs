@@ -34,7 +34,7 @@ pub enum ContainmentError {
 ///
 /// Reads the graph inside the caller's transaction, before the write. The
 /// stored graph cannot show a Ticket naming itself, so `check` tests that
-/// first. A pair that would hold each other fails the held and holds rules.
+/// first. A pair that would hold each other fails with `ContainerHeldByTicket`.
 pub(crate) fn check(
     conn: &Connection,
     ticket_id: Option<&str>,
@@ -80,8 +80,8 @@ mod tests {
     use crate::store::testing::{FixtureItem, insert_fixture_item};
 
     /// An Epic `e`, a top-level Ticket `a`, a Ticket `b` held by `e`, a Ticket
-    /// `c` held by `a` (so `a` holds Tickets and `c` is held by a Ticket), and a
-    /// free Ticket `d`.
+    /// `c` held by `a` (so `a` holds Tickets and `c` is held by a Ticket), and
+    /// a free Ticket `d`.
     fn seeded() -> Connection {
         let mut conn = Connection::open_in_memory().expect("open :memory:");
         conn.execute_batch("pragma foreign_keys = on").unwrap();

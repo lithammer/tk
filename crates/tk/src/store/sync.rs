@@ -3849,8 +3849,8 @@ mod tests {
     }
 
     /// A clear empties a 0..1 slot, so it must stay deliverable even when the
-    /// Container it left has no Backend identity to address — the case a Promotion
-    /// that has not yet received its receipt would otherwise stop.
+    /// Container it left has no Backend identity to address — the case a
+    /// Promotion that has not yet received its receipt would otherwise stop.
     #[test]
     fn resolve_operation_clears_containment_without_addressing_the_container() {
         let conn = open_seeded();

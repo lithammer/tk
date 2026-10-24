@@ -387,7 +387,7 @@ pub(crate) fn next_display_id(
 /// Resolve a Display ID or Alias to an Epic reference, classifying the
 /// outcome so callers can render `not_found` vs `not_an_epic` differently.
 ///
-/// Scope validation uses this: a Scope is an Epic today (ADR-0022).
+/// Scope validation uses this: ADR-0022 limits a Scope to an Epic.
 pub fn resolve_as_epic(
     conn: &Connection,
     display_arg: &str,

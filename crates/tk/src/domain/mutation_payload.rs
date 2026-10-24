@@ -8,9 +8,9 @@
 //! constraint on the column.
 //!
 //! `Serialize`/`Deserialize` therefore live on the per-variant payload
-//! structs ([`TitleBody`], [`ContainerRef`], [`LifecycleChange`], [`PriorityChange`],
-//! [`EffortChange`], [`DependencyRef`], [`Promotion`]) rather than on the outer
-//! enum: serializing the enum directly would produce externally-tagged JSON
+//! structs ([`TitleBody`], [`ContainerRef`], [`LifecycleChange`],
+//! [`PriorityChange`], [`EffortChange`], [`DependencyRef`], [`Promotion`])
+//! rather than on the outer enum: serializing the enum directly would produce externally-tagged JSON
 //! (`{"UpdateTitleBody":{…}}`) that breaks the flat row contract.
 
 use serde::{Deserialize, Serialize};

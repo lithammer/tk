@@ -308,8 +308,8 @@ fn render_children<W: Write + ?Sized>(
     Ok(markers)
 }
 
-/// Whether an Epic row in the view nests `row`. Only an Epic row nests its
-/// Tickets, so a Ticket held by a Ticket stays a top-level row (ADR-0055).
+/// Whether an Epic row in the view nests `row`. Only Epic rows nest Tickets,
+/// so a Ticket held by a Ticket stays a top-level row.
 fn nests_under_epic_row(rows: &[ListRow], row: &ListRow) -> bool {
     let Some(container_id) = row.container_id.as_deref() else {
         return false;

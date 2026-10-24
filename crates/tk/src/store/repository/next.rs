@@ -5,8 +5,8 @@
 //! again — with no unresolved Dependencies and no unresolved External
 //! Blockers. Each ready candidate's *Effective Priority* is the lowest
 //! Priority reachable through unresolved Dependency edges or an Epic's
-//! Containment edges, bounded by Epic Scope and Plan membership (ADR-0050). Selection sorts by
-//! `(effective_priority, own_priority, effort, created_seq)` so a ticket inherits
+//! Containment edges, bounded by Epic Scope and Plan membership (ADR-0050).
+//! Selection sorts by `(effective_priority, own_priority, effort, created_seq)` so a ticket inherits
 //! urgency from work that transitively waits on it, and smaller work wins among
 //! equally important candidates (ADR-0015).
 //!

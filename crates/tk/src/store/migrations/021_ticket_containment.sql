@@ -2,14 +2,12 @@
 -- `ticket` beside `epic`, and the two Containment Mutation Types become
 -- `set_ticket_container` / `clear_ticket_container`.
 --
--- Neither CHECK can be altered in place, so this is a foreign-keys-off rebuild
--- of `items` in migration 018's shape followed by one of `mutations` in
--- migration 020's, in a single transaction (ADR-0028). `items` carries the
--- `effort` column migration 020 added. SQLite re-parses every trigger during
--- `alter table ... rename`, which fails while the table a trigger names is
--- absent, so both triggers that name `items` or `mutations` across the two
--- rebuilds are dropped first and recreated, byte for byte as migration 018 left
--- them, at the end.
+-- Neither CHECK can be altered in place, so this rebuilds `items` (migration
+-- 018's shape, plus the `effort` column from 020) and then `mutations`
+-- (migration 020's shape), with foreign keys off (ADR-0028). SQLite re-parses
+-- every trigger during `alter table ... rename` and fails when a trigger names
+-- an absent table, so the two triggers that name `items` and `mutations` are
+-- dropped first and recreated unchanged at the end.
 --
 -- Existing rows keep their meaning: a stored `container_class` is `epic`, so
 -- the wider CHECK admits every row as it is. Each queued Containment Mutation

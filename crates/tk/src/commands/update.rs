@@ -38,7 +38,7 @@ pub struct Args {
     /// Clear the Ticket's Effort. Tickets only.
     #[arg(long = "no-effort")]
     pub no_effort: bool,
-    /// Set the Container, an Epic or a Ticket, by Display ID or Alias. Tickets only.
+    /// Set the Container (an Epic or a Ticket) by Display ID or Alias. Tickets only.
     #[arg(
         short = 'P',
         long,

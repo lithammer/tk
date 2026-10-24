@@ -165,7 +165,8 @@ pub(crate) fn plan(
 }
 
 /// Dependencies order by (Blocked, Blocking); Containment orders by (Ticket,
-/// Container). This keeps findings and Mutations deterministic across both kinds.
+/// Container). This keeps findings and Mutations deterministic across both
+/// kinds.
 type EndpointOrder = (i64, i64);
 
 /// Both endpoints of every Dependency must occur in `items`.
