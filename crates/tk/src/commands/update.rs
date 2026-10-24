@@ -38,10 +38,15 @@ pub struct Args {
     /// Clear the Ticket's Effort. Tickets only.
     #[arg(long = "no-effort")]
     pub no_effort: bool,
-    /// Set the containing Epic by Display ID or Alias. Tickets only.
-    #[arg(short = 'P', long, value_name = "EPIC", conflicts_with = "no_parent")]
+    /// Set the Container, an Epic or a Ticket, by Display ID or Alias. Tickets only.
+    #[arg(
+        short = 'P',
+        long,
+        value_name = "CONTAINER",
+        conflicts_with = "no_parent"
+    )]
     pub parent: Option<String>,
-    /// Remove the Ticket from its current Epic. Tickets only.
+    /// Remove the Ticket from its current Container. Tickets only.
     #[arg(long = "no-parent")]
     pub no_parent: bool,
 }
@@ -114,29 +119,23 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         }
     }
 
-    let resolved_parent = if let Some(arg) = args.parent.as_deref() {
-        match resolver::resolve_epic(&store, arg) {
-            Ok(epic) => Some(epic),
-            Err(resolver::ResolveEpicError::NotFound) => {
+    let resolved_parent = match args.parent.as_deref() {
+        Some(arg) => match resolver::resolve(&store, arg) {
+            Ok(container) => Some(container),
+            Err(resolver::ResolveError::NotFound) => {
                 return Err(CommandError::failure(format!(
                     "parent '{arg}' is not a known Display ID or Alias"
                 )));
             }
-            Err(resolver::ResolveEpicError::NotAnEpic) => {
-                return Err(CommandError::failure(format!(
-                    "parent '{arg}' is not an Epic"
-                )));
-            }
-            Err(resolver::ResolveEpicError::Storage(err)) => {
+            Err(resolver::ResolveError::Storage(err)) => {
                 return Err(resolver::storage_error(&err));
             }
-        }
-    } else {
-        None
+        },
+        None => None,
     };
 
     let parent_op = match resolved_parent.as_ref() {
-        Some(epic) => FieldEdit::Set(epic.id.as_str()),
+        Some(container) => FieldEdit::Set(container.id.as_str()),
         None if args.no_parent => FieldEdit::Clear,
         None => FieldEdit::Unchanged,
     };
@@ -178,6 +177,7 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
              'tk accept {id} --priority Pn'",
             id = args.id
         ))),
+        Err(update::UpdateError::Containment(err)) => Err(resolver::containment_error(&err)),
         Err(update::UpdateError::Sqlite(err)) => Err(resolver::storage_error(&err)),
         Err(update::UpdateError::BackendBinding(err)) => Err(resolver::backend_binding_error(&err)),
         Err(update::UpdateError::Mutation(err)) => Err(CommandError::failure(format!(

@@ -89,8 +89,8 @@ Create a bug Ticket (conflicts with \-\-epic)
 \fB\-\-epic\fR
 Create an Epic (conflicts with \-\-bug, \-\-priority, \-\-effort, \-\-parent)
 .TP
-\fB\-P\fR, \fB\-\-parent\fR \fI<EPIC>\fR
-Place the new Ticket under an Epic by Display ID or Alias
+\fB\-P\fR, \fB\-\-parent\fR \fI<CONTAINER>\fR
+Place the new Ticket under an Epic or Ticket by Display ID or Alias
 .TP
 \fB\-p\fR, \fB\-\-priority\fR \fI<PRIORITY>\fR
 Set Priority (P0..P3). Tickets only
@@ -132,7 +132,7 @@ Kind: task|bug
 Priority: P0|P1|P2|P3
 Effort: low|medium|high
 Status: open
-Parent: <epic-display-id>
+Parent: <container-display-id>
 .fi
 .RE
 .PP
@@ -148,7 +148,7 @@ is supplied. The
 .B Parent:
 line is printed only when
 .B \-\-parent
-is supplied, and it uses the parent Epic's current Display ID even when the
+is supplied, and it uses the Container's current Display ID even when the
 argument was an Alias.
 .PP
 On successful Epic creation,
@@ -616,7 +616,7 @@ then creation order in the Repository Store, and never selects Epics. Low
 Effort comes first, and a Ticket with no Effort ranks as medium. Unlike
 Priority, Effort does not pass along Dependencies. Effective Priority is
 the lowest of a candidate's own Priority and the Priorities of every unfinished
-item it transitively blocks through Dependencies and Epic Membership, so a ready
+item it transitively blocks through Dependencies and an Epic's Containment, so a ready
 Ticket that gates a higher-Priority Blocked Item outranks lower-priority
 direct work. Effective Priority does not cross the Scope boundary, so the same
 Ticket can rank differently scoped and unscoped.
@@ -1104,11 +1104,11 @@ Set Effort (low, medium, high). Tickets only
 \fB\-\-no\-effort\fR
 Clear the Ticket\*(Aqs Effort. Tickets only
 .TP
-\fB\-P\fR, \fB\-\-parent\fR \fI<EPIC>\fR
-Set the containing Epic by Display ID or Alias. Tickets only
+\fB\-P\fR, \fB\-\-parent\fR \fI<CONTAINER>\fR
+Set the Container, an Epic or a Ticket, by Display ID or Alias. Tickets only
 .TP
 \fB\-\-no\-parent\fR
-Remove the Ticket from its current Epic. Tickets only
+Remove the Ticket from its current Container. Tickets only
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help
@@ -1603,7 +1603,7 @@ Promote a Local Ticket or Epic through the configured Remote
 \fBArguments and options\fR
 .TP
 \fB\-\-children\fR
-Also promote the Epic\*(Aqs directly contained Local Tickets — its Promotion Children. Epics only
+Also promote the Local Tickets the Epic or Ticket directly holds — its Promotion Children
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help
@@ -1616,9 +1616,9 @@ Remote. The outgoing local Display ID remains an Alias after the Backend
 Display ID replaces it.
 .PP
 .B \-\-children
-includes an Epic's directly contained Local Tickets in the same Promotion
+includes the Local Tickets an Epic or Ticket holds directly in the same Promotion
 Operation. Promotion preflight rejects the whole operation before any Backend
-write when its Item classes, Ticket Kinds, Dependencies, or Epic membership
+write when its Item classes, Ticket Kinds, Dependencies, or Containment
 cannot be represented.
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
@@ -1744,7 +1744,7 @@ tk never deletes a Backend object.
 Cancellation is refused while a withdrawal would leave a backend-backed Blocked
 Item waiting on an item returning to Local; drop the Dependency with
 .B tk unblock
-first. Epic membership degrades to local instead. Cancellation reaches no
+first. Containment degrades to local instead. Cancellation reaches no
 Backend, so it works with a broken or unconfigured Remote and is not held back
 by an earlier unresolved Mutation. Withdrawn Mutations are recorded as
 cancelled and listed by

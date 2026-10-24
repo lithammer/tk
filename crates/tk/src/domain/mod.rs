@@ -34,7 +34,7 @@
 //! [`dependency_rule`] is the one behaviour rather than a value type: what a
 //! Dependency edge means for the Mutation Log (ADR-0035). It sits here because
 //! `tk block`, Promotion, and Re-Adopt decide it over different graphs.
-//! [`epic_membership_rule`] likewise keeps Promotion and Re-Adopt's
+//! [`containment_rule`] likewise keeps Promotion and Re-Adopt's
 //! mixed-Origin rule in agreement.
 //! [`relationship_plan`] owns their shared resulting-graph classification,
 //! capability checks, ordering, and Mutation drafts.
@@ -48,9 +48,9 @@ pub mod backend_kind;
 pub mod backend_operation;
 pub mod backend_outcome;
 pub mod binding_display_provenance;
+pub mod containment_rule;
 pub mod dependency_rule;
 pub mod effort;
-pub mod epic_membership_rule;
 pub mod item_class;
 pub mod lifecycle;
 pub mod mutation_payload;

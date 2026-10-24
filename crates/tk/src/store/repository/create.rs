@@ -21,6 +21,7 @@ use crate::domain::ticket_kind::TicketKind;
 use crate::domain::work_state::WorkState;
 use crate::store::sequences;
 
+use super::containment::{self, ContainmentError};
 use super::{Store, insert_display_resolver, next_display_id};
 
 /// The Selection State a `tk add` can create, with its Priority where one
@@ -40,7 +41,7 @@ pub struct CreateLocalTicketInput<'a> {
     pub kind: TicketKind,
     pub selection: NewTicketSelection,
     pub effort: Option<Effort>,
-    /// Internal stable `items.id` of the parent Epic, if any.
+    /// Internal stable `items.id` of the Container (an Epic or a Ticket), if any.
     pub parent_id: Option<&'a str>,
     pub title: &'a str,
     pub body: &'a str,
@@ -87,6 +88,9 @@ pub enum CreateError {
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
     Sequence(#[from] sequences::SequenceError),
+    /// The Container is a Ticket that cannot hold another (ADR-0055).
+    #[error(transparent)]
+    Containment(#[from] ContainmentError),
     /// `store_config.display_prefix` was not seeded; the store has not been
     /// initialised. Reachable only on a corrupted or partially-restored
     /// database — `tk init` always seeds the row.
@@ -126,7 +130,9 @@ where
         NewTicketSelection::Triage => (SelectionState::Triage, None),
         NewTicketSelection::Accepted(priority) => (SelectionState::Accepted, Some(priority)),
     };
-    let container_class = input.parent_id.map(|_| ItemClass::Epic);
+    if let Some(container_id) = input.parent_id {
+        containment::check(&tx, None, container_id)?;
+    }
     // Both axes are bound side by side, rather than letting the `work_state`
     // DDL default supply one, so "a newly created Item is open and idle"
     // (ADR-0043) is visible where it is decided.
@@ -135,7 +141,9 @@ where
             id, display_value, item_class, ticket_kind, priority, title, body, \
             container_id, container_class, origin, status, work_state, \
             selection_state, created_seq, created_at, updated_at, effort\
-         ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, ?16)",
+         ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, \
+                   (select item_class from items where id = ?8), \
+                   ?9, ?10, ?11, ?12, ?13, ?14, ?14, ?15)",
         params![
             id,
             display_id,
@@ -145,7 +153,6 @@ where
             input.title,
             input.body,
             input.parent_id,
-            container_class,
             Origin::Local,
             lifecycle,
             work_state,

@@ -35,7 +35,7 @@ pub struct ListRow {
     pub effort: Option<Effort>,
     pub title: String,
     pub status: ItemStatus,
-    /// Internal stable ID of the parent Epic, if any.
+    /// Internal stable ID of the Container, if any.
     pub container_id: Option<String>,
     /// Ticket-only Selection State; `None` for Epics (ADR-0027).
     pub selection_state: Option<SelectionState>,
@@ -1095,7 +1095,7 @@ mod tests {
     }
 
     #[test]
-    fn epic_parent_does_not_inherit_a_childs_pending_mutation() {
+    fn epic_parent_does_not_inherit_the_pending_mutation_of_a_child() {
         // The flag is per-Item, not a subtree rollup: a child's unsent edit
         // must not make the parent Epic's own row look unsent.
         let store = open_seeded();

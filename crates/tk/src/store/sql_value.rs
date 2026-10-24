@@ -270,10 +270,10 @@ mod tests {
         assert_decodes(b"update_ticket", MutationType::UpdateTicket);
         assert_decodes(b"update_epic", MutationType::UpdateEpic);
         assert_decodes(b"set_item_status", MutationType::SetItemStatus);
-        assert_decodes(b"add_ticket_to_epic", MutationType::AddTicketToEpic);
+        assert_decodes(b"set_ticket_container", MutationType::SetTicketContainer);
         assert_decodes(
-            b"remove_ticket_from_epic",
-            MutationType::RemoveTicketFromEpic,
+            b"clear_ticket_container",
+            MutationType::ClearTicketContainer,
         );
         assert_decodes(b"add_dependency", MutationType::AddDependency);
         assert_decodes(b"remove_dependency", MutationType::RemoveDependency);

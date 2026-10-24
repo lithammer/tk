@@ -25,7 +25,7 @@ pub struct MutationDraft {
     /// Operation stored in the Mutation Log.
     pub mutation_type: MutationType,
     /// Internal stable `items.id` the Mutation targets: the Blocked Item for
-    /// a Dependency, the Ticket for Epic membership.
+    /// a Dependency, the Ticket for Containment.
     pub item_id: String,
     /// Item Class stored beside the target to check the operation shape.
     pub item_class: ItemClass,

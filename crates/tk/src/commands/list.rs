@@ -17,6 +17,7 @@ use clap::Args as ClapArgs;
 use crate::cli::{self, CommandError, Deps, Exit};
 use crate::commands::item_row::{MutationMarkers, render_chrome, render_row};
 use crate::commands::{resolver, scope};
+use crate::domain::item_class::ItemClass;
 use crate::domain::mutation_state::MutationState;
 use crate::render::palette;
 use crate::render::styler::SubStyler;
@@ -227,11 +228,13 @@ fn render<W: Write + ?Sized>(
     } else {
         let mut markers = MutationMarkers::default();
         for row in rows {
-            if parent_is_in_rows(rows, row) {
+            if nests_under_epic_row(rows, row) {
                 continue;
             }
             markers = markers.merge(render_row(stdout, row, "", styler)?);
-            markers = markers.merge(render_children(stdout, rows, row, styler)?);
+            if row.item_class == ItemClass::Epic {
+                markers = markers.merge(render_children(stdout, rows, row, styler)?);
+            }
         }
         render_chrome(stdout, rows, markers, styler)?;
     }
@@ -305,11 +308,14 @@ fn render_children<W: Write + ?Sized>(
     Ok(markers)
 }
 
-fn parent_is_in_rows(rows: &[ListRow], row: &ListRow) -> bool {
+/// Whether an Epic row in the view nests `row`. Only an Epic row nests its
+/// Tickets, so a Ticket held by a Ticket stays a top-level row (ADR-0055).
+fn nests_under_epic_row(rows: &[ListRow], row: &ListRow) -> bool {
     let Some(container_id) = row.container_id.as_deref() else {
         return false;
     };
-    rows.iter().any(|r| r.id == container_id)
+    rows.iter()
+        .any(|r| r.id == container_id && r.item_class == ItemClass::Epic)
 }
 
 fn empty_message(options: ListOptions<'_>) -> &'static str {

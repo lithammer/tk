@@ -202,6 +202,12 @@ Important stable contracts:
   is the backstop for a writer that holds the lock past the timeout.
 - `items` stores current Ticket/Epic state. Current state is the read model;
   the Mutation Log is an outbox, not an event-sourced source of truth.
+- `items.container_id` and `container_class` hold Containment: only a Ticket has
+  a Container, which is an Epic or a Ticket, and the composite foreign key pins
+  the class to the Container's real class. No constraint spans rows, so
+  `store/repository/containment.rs` enforces the depth cap (a Ticket held by a
+  Ticket holds nothing) inside the transaction that sets the Container
+  ([ADR 0055](./docs/adr/0055-a-ticket-can-be-a-container.md)).
 - `plan_members` holds the single local Plan's Ticket identities. Its composite
   foreign key restricts membership to Tickets. `store/repository/plan.rs`
   owns atomic batch validation and a consistent read of members and blockers;

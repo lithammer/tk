@@ -132,7 +132,6 @@ impl RunSyncError {
                 LoadApplicableError::PayloadJson { .. }
                 | LoadApplicableError::OperationShapeMismatch { .. }
                 | LoadApplicableError::MissingBackendIdentity { .. }
-                | LoadApplicableError::CounterpartClassMismatch { .. }
                 | LoadApplicableError::MissingTicketKind { .. }
                 | LoadApplicableError::MissingPriority { .. },
             )

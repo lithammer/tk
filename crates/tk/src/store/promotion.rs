@@ -69,14 +69,13 @@ pub enum ReadGraphError {
 /// Membership, in order of how it is built:
 ///
 /// - the target;
-/// - every Item the target directly contains, whether or not children were
-///   requested. `--children` decides which contained Tickets are Promotion
-///   Children, but promoting an Epic also snapshots membership for the
-///   Tickets it already contains on the same Backend, so the planner needs
-///   them either way. Only an Epic can contain Items, so a Ticket target
-///   contributes none, and Origin is not filtered here because both
-///   questions are the planner's;
-/// - the target's containing Epic, when it has one — Epic membership is a
+/// - every Item the target directly holds, whether or not children were
+///   requested. `--children` decides which held Tickets are Promotion
+///   Children, but promoting a Container also snapshots Containment for the
+///   Tickets it already holds on the same Backend, so the planner needs
+///   them either way. Origin is not filtered here because both questions
+///   are the planner's;
+/// - the target's Container, when it has one — Containment is a
 ///   facet the operation has to decide about;
 /// - both endpoints of every Dependency edge that touches any of the above.
 ///
@@ -1126,7 +1125,7 @@ fn withdrawn_mutations(
 /// Cancellation is the third caller of ADR-0035's Dependency classification,
 /// judging each affected edge against the Backend Binding the withdrawal will
 /// produce exactly as Promotion preflight judges against the Binding a
-/// Promotion will produce. Epic Membership degrades to local instead, as
+/// Promotion will produce. Containment degrades to local instead, as
 /// ADR-0035 already decided.
 fn ensure_dependencies_representable(
     conn: &Connection,
@@ -1270,7 +1269,7 @@ mod tests {
     use crate::domain::item_class::ItemClass;
     use crate::domain::lifecycle::Lifecycle;
     use crate::domain::mutation_payload::{
-        DependencyRef, EpicRef, MutationPayload, Promotion, TitleBody,
+        ContainerRef, DependencyRef, MutationPayload, Promotion, TitleBody,
     };
     use crate::domain::mutation_type::{AddressedCounterpart, MutationType};
     use crate::domain::promotion_plan::MutationDraft;
@@ -1557,14 +1556,20 @@ mod tests {
         .unwrap();
     }
 
-    fn seed_child(conn: &Connection, id: &str, display: &str, epic_id: &str, created_seq: i64) {
+    fn seed_child(
+        conn: &Connection,
+        id: &str,
+        display: &str,
+        container_id: &str,
+        created_seq: i64,
+    ) {
         insert_fixture_item(
             conn,
             FixtureItem {
                 id,
                 display,
                 title: "Child",
-                container_id: Some(epic_id),
+                container_id: Some(container_id),
                 created_seq,
                 ..FixtureItem::default()
             },
@@ -1642,7 +1647,7 @@ mod tests {
 
     #[test]
     fn contained_tickets_are_snapshotted_even_without_children() {
-        // Promoting an Epic snapshots membership for the Tickets it already
+        // Promoting an Epic snapshots Containment for the Tickets it already
         // contains on the same Backend, so the snapshot carries them whether
         // or not `--children` was passed; `children_requested` only decides
         // which of them the planner treats as Promotion Children.
@@ -1665,8 +1670,8 @@ mod tests {
 
         let graph = read_graph(&conn, "child", false).unwrap();
 
-        // The Epic joins because Promotion has to decide about membership; the
-        // sibling does not — `--children` descends from an Epic target only.
+        // The Epic joins because Promotion has to decide about Containment; the
+        // sibling does not — `--children` reaches only what the target holds.
         assert_eq!(item_ids(&graph), vec!["epic", "child"]);
     }
 
@@ -3016,15 +3021,15 @@ mod tests {
         counterpart_id: &str,
         op: Option<&str>,
     ) {
-        // `remove_ticket_from_epic` addresses no counterpart yet still carries
-        // an `EpicRef`, which is exactly the distinction under test.
+        // `clear_ticket_container` addresses no counterpart yet still carries
+        // a `ContainerRef`, which is exactly the distinction under test.
         let payload = match mutation_type.addressed_counterpart() {
             AddressedCounterpart::BlockingItem => MutationPayload::DependencyRef(DependencyRef {
                 blocking_id: counterpart_id.into(),
             }),
-            AddressedCounterpart::Epic | AddressedCounterpart::None => {
-                MutationPayload::EpicRef(EpicRef {
-                    epic_id: counterpart_id.into(),
+            AddressedCounterpart::Container | AddressedCounterpart::None => {
+                MutationPayload::ContainerRef(ContainerRef {
+                    container_id: counterpart_id.into(),
                 })
             }
         }
@@ -3134,7 +3139,7 @@ mod tests {
     }
 
     #[test]
-    fn adding_membership_to_a_cancelled_epic_is_withdrawn_and_removing_it_is_not() {
+    fn adding_containment_to_a_cancelled_epic_is_withdrawn_and_removing_it_is_not() {
         // The withdrawn set's defining asymmetry: a Backend Ticket's addition
         // needs the Epic's address, its removal clears a 0..1 slot.
         let mut conn = open_seeded();
@@ -3157,7 +3162,7 @@ mod tests {
         seed_counterpart_mutation(
             &conn,
             2,
-            MutationType::AddTicketToEpic,
+            MutationType::SetTicketContainer,
             "backend",
             "e1",
             None,
@@ -3165,7 +3170,7 @@ mod tests {
         seed_counterpart_mutation(
             &conn,
             3,
-            MutationType::RemoveTicketFromEpic,
+            MutationType::ClearTicketContainer,
             "backend",
             "e1",
             None,
@@ -3177,7 +3182,7 @@ mod tests {
         assert_eq!(
             state_of(&conn, 3).unwrap(),
             MutationState::Pending,
-            "clearing Epic Membership resolves without the Epic's address"
+            "clearing Containment resolves without the Epic's address"
         );
         assert_eq!(
             report

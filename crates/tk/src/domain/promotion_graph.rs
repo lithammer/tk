@@ -37,7 +37,7 @@ pub struct GraphItem {
     /// `items.created_seq`. Findings render in creation order, so the order is
     /// carried as data rather than left to the order Items were collected in.
     pub created_seq: i64,
-    /// Containing Epic's internal id, when the Item is a Ticket in one.
+    /// The Container's internal id, when the Item is a Ticket held by one.
     pub container_id: Option<String>,
     pub backend_binding: BackendBinding,
 }
@@ -62,7 +62,7 @@ pub struct PromotionGraph {
     /// Whether `--children` was passed. The planner, not the read, decides
     /// which contained Tickets are Promotion Children.
     pub children_requested: bool,
-    /// The target, any contained Tickets, any containing Epic, and every
+    /// The target, any held Tickets, its Container, and every
     /// Dependency endpoint reachable in one hop from those — in creation
     /// order.
     pub items: Vec<GraphItem>,

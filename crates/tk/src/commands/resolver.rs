@@ -16,6 +16,7 @@ use crate::cli::CommandError;
 use crate::clock::Clock;
 use crate::proc::ProcRunner;
 use crate::store::mutations;
+use crate::store::repository::containment::ContainmentError;
 use crate::store::repository::{self, ResolvedItemRef, Store};
 
 /// Errors re-exported from the store layer, where the operations that produce
@@ -86,6 +87,18 @@ pub fn open_error(err: &OpenError) -> CommandError {
         | OpenError::NotRepositoryStore
         | OpenError::FromFutureVersion
         | OpenError::MigrationForeignKeyCheck(_) => CommandError::failure(format!("{err}")),
+    }
+}
+
+/// Build the [`CommandError`] for a Parent Argument the Containment depth cap
+/// refuses (ADR-0055). The refusal's own text is the body.
+#[must_use]
+pub fn containment_error(err: &ContainmentError) -> CommandError {
+    match err {
+        ContainmentError::Sqlite(e) => storage_error(e),
+        ContainmentError::HoldsItself
+        | ContainmentError::ContainerHeldByTicket { .. }
+        | ContainmentError::TicketHoldsTickets { .. } => CommandError::failure(err.to_string()),
     }
 }
 

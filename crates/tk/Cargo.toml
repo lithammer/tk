@@ -72,7 +72,7 @@ rand = { version = "0.10", default-features = false, features = ["std", "std_rng
 # which carries `check(json_valid(payload_json))`. Free-text titles, bodies,
 # and external blocker reasons demand a real JSON encoder rather than a
 # `format!`-style hand-roll. Derives sit on the per-variant payload structs
-# (TitleBody, EpicRef, …) so the on-disk shape stays flat — one object per
+# (TitleBody, ContainerRef, …) so the on-disk shape stays flat — one object per
 # row — which keeps the Backend Adapter (tk-97) reading the same shape the
 # store writes.
 serde = { version = "1", features = ["derive"] }

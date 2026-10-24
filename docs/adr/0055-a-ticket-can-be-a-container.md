@@ -36,8 +36,10 @@ later breaks no stored data; adding one later would mean migrating every tree
 that already breaks it.
 
 A CHECK constraint cannot span rows, and the deferred foreign key fails only
-at commit, so the command layer enforces the cap where it resolves the Parent
-Argument.
+at commit, so the write that sets the Container enforces the cap, inside its own
+transaction. Checking where the Parent Argument resolves would leave a window
+between the check and the write for a concurrent `tk update` to open a third
+level.
 
 ### A Ticket Container waits on what it holds
 
