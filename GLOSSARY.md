@@ -73,7 +73,7 @@ _Avoid_: Epic Membership, Sub-issue, Parent Link
 
 **Container**:
 The **Epic** or **Ticket** that holds a **Ticket** through **Containment**.
-_Avoid_: Parent, Holder
+_Avoid_: Parent
 
 **Parent Argument**:
 CLI shorthand for placing a **Ticket** under a containing item.
@@ -503,7 +503,7 @@ _Avoid_: ticket, tickets
   redundant header. Each member appears once; Waiting explains blocked,
   triage or parked work, and the footer counts remaining and done/total.
 - `tk next --plan` selects only **Plan** members, intersecting any
-  **Scope**. Outside **Dependencies** and outside contained **Tickets** still
+  **Scope**. Outside **Dependencies** and outside held **Tickets** still
   block readiness; their Items are never included or selected automatically.
   `tk plan` names them so the operator can include them or work them
   separately.
@@ -571,10 +571,10 @@ _Avoid_: ticket, tickets
   itself. An **Epic** adds no edge, since it never waits.
 - **Dependency** is distinct from **Containment**.
 - A **Ticket** or **Epic** may have zero or more **External Blockers**.
-- A **Ticket** is ready only when its **Item Status** is `open`, it has no unresolved **Dependencies**, it has no **External Blockers**, and every **Ticket** it contains is `done`.
-- A **Ticket** that contains **Tickets** waits on each one until it is `done`,
+- A **Ticket** is ready only when its **Item Status** is `open`, it has no unresolved **Dependencies**, it has no **External Blockers**, and every **Ticket** it holds is `done`.
+- A **Ticket** that holds **Tickets** waits on each one until it is `done`,
   whatever that **Ticket**'s **Selection State**. Readiness never flows the
-  other way: a contained **Ticket** does not wait on its **Container**.
+  other way: a held **Ticket** does not wait on its **Container**.
 - A **Container**'s **Item Status** does not change the readiness of the
   **Tickets** it holds; an open **Ticket** under a done **Container** remains
   ready when otherwise unblocked.
@@ -582,7 +582,7 @@ _Avoid_: ticket, tickets
   Blockers** do not change the readiness of the **Tickets** it holds.
 - A **Container** may be `done` while **Tickets** it holds are not; closing it
   neither refuses nor warns, and closes nothing else.
-- A **Scope** references exactly one **Container**; a **Ticket** that holds no **Tickets** supplied as a **Scope** is a typed error.
+- A **Scope** references exactly one **Container**; as a **Scope**, a **Ticket** that holds no **Tickets** is a typed error.
 - **Scope** narrows **`tk next`** and **`tk list`** to a **Container** and every **Ticket** it holds, directly or through a **Ticket** it holds; it is not an implicit target for item commands.
 - **Scope** is supplied as an explicit positional argument or the `TK_SCOPE` environment variable; the argument wins when both are present.
 - An absent **Scope** means **`tk list`** considers the whole **Repository
@@ -796,7 +796,7 @@ _Avoid_: ticket, tickets
   **Pending Promotion**.
 - A **Ticket Mutation** modifies exactly one **Ticket**.
 - An **Epic Mutation** modifies exactly one **Epic**; a change of
-  **Containment** is a **Ticket Mutation** naming the contained **Ticket**.
+  **Containment** is a **Ticket Mutation** naming the held **Ticket**.
 - A **Ticket Mutation** that clears **Containment** names only the
   **Ticket**. The **Container** it left needs no **Backend** identity for the
   change to be applied, so a **Container** still awaiting its **Promotion**
@@ -836,8 +836,7 @@ _Avoid_: ticket, tickets
 - **Dependency** and **Containment** sync are push-only. **Backend Pull**
   refreshes fields alone and reconciles neither relationship, so the
   **Repository Store** stays authoritative for both. **Adopting** the issues of
-  a **Backend** tree therefore yields flat **Tickets** until gh-66 reads edges
-  back.
+  a **Backend** tree therefore yields **Tickets** with no **Container**.
 - A **Repository Store** syncs with the one **Backend** repository its own
   version-control repository resolves through the **Backend Adapter**.
   **Dependencies** and **Containment** spanning two **Backend**
@@ -1045,7 +1044,7 @@ _Avoid_: ticket, tickets
 > **Domain expert:** "No — default ticket views include both **Local Tickets** and **Backend Tickets**. **Origin** is not a separate rendered field; it is normally inferred from the **Display ID** shape."
 >
 > **Dev:** "If **src-12** belongs to **src-3**, does that mean **src-12** is blocked by **src-3**?"
-> **Domain expert:** "No — a **Container** never blocks what it holds. A **Dependency** says one item cannot progress until another is done; **Containment** groups work, and only makes a **Ticket** **Container** wait on what it holds."
+> **Domain expert:** "No — a **Container** never blocks what it holds. **Containment** groups work, while a **Dependency** says one item cannot progress until another is done. The wait runs the other way: a **Ticket** **Container** waits on what it holds."
 >
 > **Dev:** "When a **Backend Ticket** moves out of a **Local Epic**, what reaches the **Backend**?"
 > **Domain expert:** "Nothing. Mixed-**Origin** **Containment** is local-only; it becomes backend intent once both ends share a **Backend**, which is what promoting that **Epic** does."
@@ -1139,10 +1138,11 @@ _Avoid_: ticket, tickets
   or a **Ticket**. GitHub gives an issue one parent, and a **Ticket**'s **Epic**
   would otherwise stop following from its parent. **Epic Membership** is
   retired (ADR-0055).
-- Letting a **Ticket** with unfinished contained **Tickets** stay selectable
+- Letting a **Ticket** that holds unfinished **Tickets** stay selectable
   was considered — resolved: it waits on them. An agent that picks the
   **Container** builds the whole of it in one run instead of taking the
-  slices, the problem Matt Pocock's `to-spec` skill reports most (ADR-0055).
+  **Tickets** it holds, the problem the docs for Matt Pocock's `to-spec` skill
+  report most (ADR-0055).
 - Rejecting a **Promotion** over mixed-**Origin** **Containment**, the way
   it rejects an unrepresentable **Dependency**, was considered — resolved:
   **Containment** stays local, because losing grouping is not the same failure as a

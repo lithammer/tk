@@ -6,8 +6,8 @@ relationship, **Containment**, and the item that holds a Ticket is its
 that holds Tickets waits on them in `tk next`, and nesting stops at Epic,
 Ticket, Ticket.
 
-GitHub allows sub-issues on any issue type, and the trees tk is asked to track
-are built from Tasks. Matt Pocock's `to-tickets` skill files each slice as a
+GitHub allows sub-issues on any issue type, and the trees agents build there
+hang from Tasks. Matt Pocock's `to-tickets` skill files each slice as a
 sub-issue of the spec issue it came from, and `wayfinder` keeps its map as a
 labelled issue whose tickets are sub-issues. Until now only an Epic could hold
 anything, so such a tree had no local shape. ADR-0054 made the `Epic` issue
@@ -22,8 +22,8 @@ A Ticket has zero or one Container. An Epic has none. Containment stays a
 property of the Ticket, as ADR-0021 made Epic Membership: changing it is a
 Ticket Mutation, and clearing it names no Container. A Ticket cannot hold both
 an Epic and a parent Ticket, since GitHub gives an issue one parent
-(`Issue.parent` is a single `Issue` in the GraphQL schema). A sub-task's Epic is
-therefore its Container's Container. Ticket Kind plays no part: a `bug` may
+(`Issue.parent` is a single `Issue` in the GraphQL schema). A held Ticket's Epic
+is therefore its Container's Container. Ticket Kind plays no part: a `bug` may
 hold Tickets, and a `task` may hold `bug` Tickets.
 
 ### Nesting stops at Epic, Ticket, Ticket
@@ -35,9 +35,9 @@ items", and a work item that has subtasks cannot become one. Lifting the cap
 later breaks no stored data; adding one later would mean migrating every tree
 that already breaks it.
 
-A CHECK constraint cannot span rows, so the command layer enforces the cap
-where it resolves the Parent Argument. That is where tk already checks that a
-parent is an Epic, since the deferred foreign key would fail only at commit.
+A CHECK constraint cannot span rows, and the deferred foreign key fails only
+at commit, so the command layer enforces the cap where it resolves the Parent
+Argument.
 
 ### A Ticket Container waits on what it holds
 
@@ -45,8 +45,8 @@ A Ticket is ready only when every Ticket it holds is `done`, whatever that
 Ticket's Selection State. Each held Ticket acts as a Blocking Item of its
 Container. Pocock's `to-spec` docs name the reason: an agent that picks the
 parent spec tries to build all of it in one run instead of taking the slices,
-"the most-reported problem with the skill". Once the slices are done, the
-Container is ready, and its work is to check the whole and close it.
+"the most-reported problem with the skill". Once the Tickets it holds are
+done, the Container is ready, and its work is to check the whole and close it.
 
 The same edge counts against cycles. `tk block` refuses a Dependency, and the
 Parent Argument refuses a Container, when the result would make a Ticket wait
@@ -56,8 +56,8 @@ guard of its own, so every Ticket in the loop would wait forever. An Epic adds
 no edge, since it never waits.
 
 Effective Priority follows the same edge. A Ticket Container counts as a
-Blocked Item of each Ticket it holds, so a P0 Container lifts its P3 slices
-to Effective P0. An Epic has no Priority and keeps its ADR-0015 rule: a Ticket
+Blocked Item of each Ticket it holds, so a P0 Container lifts the P3 Tickets
+it holds to Effective P0. An Epic has no Priority and keeps its ADR-0015 rule: a Ticket
 that blocks an Epic takes the lowest Effective Priority of the Epic's
 unfinished Tickets, and a Ticket held by an Epic takes nothing from it.
 
@@ -73,8 +73,8 @@ else; GitHub does not cascade a close to sub-issues either.
 Tickets. A Ticket that holds none is still a typed error, since ADR-0022's
 reason stands: scoping to it selects one item or nothing. A Scope covers its
 Container and every Ticket it holds, directly or through a Ticket it holds, so
-an Epic Scope reaches the slices that are now its real work. Scoping to a
-Ticket Container is `wayfinder`'s frontier query.
+an Epic Scope reaches the Tickets that now carry its work. Scoping to a Ticket
+Container answers `wayfinder`'s frontier query.
 
 Under `tk next --plan`, a held Ticket outside the Plan blocks its Container the
 way an outside Dependency blocks its Blocked Item, and `tk plan` names it.
@@ -90,19 +90,20 @@ holds; a Ticket may now have both.
 
 `tk promote <id> --children` promotes the local Tickets that a Container holds
 directly, for an Epic or a Ticket. `tk promote <epic> --children` therefore
-leaves the slices under each Ticket local, and their Containment stays local,
+leaves the Tickets each of its Tickets holds local, and their Containment stays local,
 as mixed-Origin Containment does under ADR-0035, until each Ticket Container
 is promoted with `--children`.
 
 ### Mutations set and clear a Container
 
 `add_ticket_to_epic` and `remove_ticket_from_epic` become
-`set_ticket_container` and `clear_ticket_container`, after
+`set_ticket_container` and `clear_ticket_container`, matching
 `set_ticket_priority` and `set_ticket_effort`. A move is one
-`set_ticket_container`, not today's remove-then-add pair: `gh issue edit
+`set_ticket_container`, not a remove-then-add pair: `gh issue edit
 --parent` in gh 2.100.0 sends `addSubIssue` with `replaceParent: true`, so one
 call moves the issue. `--remove-parent` sends `removeSubIssue` against the
-current parent, and sends nothing when there is none.
+current parent, and sends nothing when there is none, so a replayed clear is
+harmless.
 
 ### Containment stays push-only
 
@@ -119,8 +120,8 @@ Epic would no longer follow from its parent.
 **Keep a Ticket Container selectable.** Rejected; it is the failure `to-spec`
 reports most.
 
-**Nest as deep as GitHub allows.** Rejected. Jira cannot hold it, and no tree
-tk tracks needs it yet. A `wayfinder` map that is a Task, holding a task that
+**Nest as deep as GitHub allows.** Rejected: Jira cannot hold it. A
+`wayfinder` map that is a Task, holding a task that
 `to-tickets` then splits, is Ticket, Ticket, Ticket; model that map as a local
 Epic and promote it.
 
@@ -143,8 +144,8 @@ Adopted, and which pending Mutations shield the edge.
   the table rebuild ADR-0028 sets out, and ADR-0048 backs the Store up first.
   A queued remove-then-add pair stays two rows, which still converges.
 - Adopting the issues of a GitHub tree yields flat Tickets until gh-66. Link
-  them with `tk update --parent`; the pushes that queues re-send the parent
-  GitHub already has.
+  them with `tk update --parent`; each link queues a push that re-sends the
+  parent GitHub already has.
 - The Jira Adapter must settle three things before it can represent
   a Ticket Container:
   - A Ticket held by a Ticket must carry a subtask-level type, so moving a
@@ -154,7 +155,7 @@ Adopted, and which pending Mutations shield the edge.
     parent; probe it.
 
   Until then, Promotion rejects a Containment the Adapter cannot represent,
-  as it already does any relationship it cannot represent.
+  as it does any relationship.
 - Amends ADR-0015, ADR-0021, ADR-0022, ADR-0025, ADR-0050 and ADR-0054. ADRs
   that only use the term Epic Membership stay as written; GLOSSARY.md lists it
   under Containment's _Avoid_.
