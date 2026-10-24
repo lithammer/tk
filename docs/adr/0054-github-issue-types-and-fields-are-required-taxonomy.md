@@ -1,5 +1,8 @@
 # GitHub issue types and issue fields are required taxonomy
 
+> **Amended by ADR-0055.** A Ticket can now hold Tickets; the `Epic` type
+> below was the precondition.
+
 GitHub's private preview of issue types and issue fields now reaches personal
 accounts enrolled in it. On 2026-10-21, with `gh` 2.100.0, both
 `lithammer/tk` and `lithammer/tk-gh-playground` (`isInOrganization: false`)

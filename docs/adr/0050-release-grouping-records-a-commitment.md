@@ -4,6 +4,10 @@ status: accepted
 
 # Next-release inclusion is local to the Repository Store
 
+> **Amended by ADR-0055.** A held Ticket outside the Plan blocks its Ticket
+> Container under `tk next --plan` as an outside Dependency does, and any
+> Container, not only an Epic, can be the Scope the Plan intersects.
+
 tk-214 asks how to choose the Tickets for the next release and see what
 remains. Priority must continue to rank urgency; using P1 to record release
 membership distorts `tk next` selection. The work can span Epics.

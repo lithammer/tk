@@ -7,6 +7,10 @@
 > it for selection remains explicit per invocation. `tk plan` shows the whole
 > Plan regardless of `TK_SCOPE`; `tk list` retains its existing behavior.
 
+> **Amended by ADR-0055.** A Scope is any Container: an Epic, or a Ticket that
+> holds Tickets. It covers every Ticket the Container holds, directly or
+> through a Ticket it holds. A Ticket that holds none is still a typed error.
+
 `tk next` and `tk list` are narrowed by a **Scope**: an Epic supplied
 explicitly as a positional `<epic-id>` argument or through the `TK_SCOPE`
 environment variable, with the argument winning when both are present and an
