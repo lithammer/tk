@@ -1,0 +1,40 @@
+#!/bin/sh
+# Enable once per clone with `make hooks`.
+set -eu
+
+# A local Ticket id (tk-NN) resolves only in the Repository Store that made
+# it. Cite the promoted gh-NN, or the ADR that records the decision. Checks
+# only added lines, and only comments in Rust, where test fixtures use ids.
+git diff --cached -U0 --no-color -- '*.rs' 'docs/*.md' GLOSSARY.md ARCHITECTURE.md |
+	awk '
+	/^\+\+\+ / { file = substr($0, 7); next }
+	/^@@/ {
+		match($0, /\+[0-9]+/)
+		line = substr($0, RSTART + 1, RLENGTH - 1)
+		next
+	}
+	/^\+/ {
+		text = substr($0, 2)
+		if (file ~ /\.rs$/) {
+			at = index(text, "//")
+			checked = at ? substr(text, at) : ""
+		} else {
+			checked = text
+		}
+		if (checked ~ /(^|[^A-Za-z0-9_-])tk-[0-9][0-9]+([^0-9]|$)/) {
+			printf "%s:%d: local Ticket id: %s\n", file, line, text
+			found = 1
+		}
+		line++
+	}
+	END {
+		if (found) {
+			print "pre-commit: cite a promoted gh-NN or an ADR instead"
+			exit 1
+		}
+	}
+	'
+
+if git diff --cached --name-only -- '*.rs' | grep -q .; then
+	cargo fmt --check
+fi

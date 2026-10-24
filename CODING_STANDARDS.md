@@ -23,6 +23,8 @@ construction and helper effects within the helper's stated purpose.
 ## Contracts
 
 Review behavior against GLOSSARY.md, ARCHITECTURE.md, and the relevant ADRs.
+A change's Ticket (`tk show <id>`) records its agreed design; read it before
+flagging a behavior the Ticket chose.
 
 CLI output, exit codes, SQL schema, and ADR-0017 messages are contracts.
 Change them deliberately. When a change revises a recorded decision,
