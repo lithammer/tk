@@ -35,7 +35,8 @@ pub(crate) fn selection_badge(selection_state: Option<SelectionState>) -> Option
 }
 
 /// The compact row token for a Priority, with any Effort fused on as `/L`,
-/// `/M`, or `/H`: `P2/L`. Effort qualifies the Priority a row is chosen by.
+/// `/M`, or `/H`: `P2/L`. One token, because Effort only orders Tickets that
+/// share a Priority.
 fn priority_token(priority: Priority, effort: Option<Effort>) -> String {
     let letter = match effort {
         None => "",

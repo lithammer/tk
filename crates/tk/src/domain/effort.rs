@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Expected amount of work on a Ticket. Optional: a Ticket with none stores
-/// `NULL`, and every Ticket that predates Effort has none.
+/// `NULL`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Effort {

@@ -613,8 +613,8 @@ Restrict selection to this Epic\*(Aqs child Tickets. Falls back to the `TK_SCOPE
 selects open Tickets with no unresolved Dependencies or External Blockers. It
 orders ready Tickets by Effective Priority, then own Priority, then Effort,
 then creation order in the Repository Store, and never selects Epics. Low
-Effort comes first, and a Ticket with no Effort ranks as medium. Effort is the
-candidate's own and does not propagate. Effective Priority is
+Effort comes first, and a Ticket with no Effort ranks as medium. Unlike
+Priority, Effort does not pass along Dependencies. Effective Priority is
 the lowest of a candidate's own Priority and the Priorities of every unfinished
 item it transitively blocks through Dependencies and Epic Membership, so a ready
 Ticket that gates a higher-Priority Blocked Item outranks lower-priority

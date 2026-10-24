@@ -5,8 +5,9 @@
 //! [`ProcRunner`] (ADR-0031: the real subprocess only in production, a
 //! `FakeRunner` in tests). Creation and bare Adopt input let `gh` resolve the
 //! repository from the command cwd; canonical issue URLs then pin existing
-//! Item operations to their repository (ADR-0033). Creation and Priority and
-//! Effort edits go through GraphQL, because `gh` has no issue field support.
+//! Item operations to their repository (ADR-0033). Creation and edits to
+//! Priority and Effort go through GraphQL, because `gh` has no issue field
+//! support.
 //!
 //! Pull is exact-key batching: the engine hands the Adapter the Adopted working
 //! set, which the Adapter groups by host and reads through bounded GraphQL
@@ -398,9 +399,8 @@ impl GithubAdapter<'_> {
     /// set an issue field and the type, fields, and creation must be one
     /// effect (ADR-0054). A Task is untyped; a Bug and an Epic carry their
     /// native type; a Ticket carries its Priority and any Effort, an Epic
-    /// neither. A creation
-    /// outcome is Indeterminate unless a canonical receipt proves it
-    /// (ADR-0036), and Rejected only when a read before the mutation
+    /// neither. A creation outcome is Indeterminate unless a canonical receipt
+    /// proves it (ADR-0036), and Rejected only when a read before the mutation
     /// certifies no effect.
     fn create_issue(&self, create: &BackendCreate) -> BackendCreateOutcome {
         let (snapshot, type_name, ticket_fields) = match create {

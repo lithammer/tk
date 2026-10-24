@@ -1737,8 +1737,8 @@ pub fn merge_backend_refreshes(
         // (ADR-0043, ADR-0021). Title/body shielding does not affect Lifecycle
         // or Ticket Kind (ADR-0044). A triage Ticket holds no Priority
         // (ADR-0027), so Pull leaves it unset; the table CHECK would abort the
-        // whole merge otherwise. An Epic holds no Effort, so the same CHECK
-        // keeps Pull from writing one.
+        // whole merge otherwise. Effort is written only on a Ticket for the
+        // same reason: the CHECK rejects one on an Epic.
         tx.execute(
             "update items set title = coalesce(?2, title), body = coalesce(?3, body), updated_at = max(updated_at, ?5), \
               ticket_kind = case when item_class = 'ticket' then coalesce(?6, ticket_kind) else ticket_kind end, \

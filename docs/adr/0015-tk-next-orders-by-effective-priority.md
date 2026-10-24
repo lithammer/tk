@@ -108,7 +108,7 @@ line. tk-171 chose this spelling after considering the collision;
 `--id-only` and `--plain` remained viable alternatives. As a result, tk-173
 cannot use `-q` as one shared name for a low-chrome mode across read commands.
 
-## Amendment (tk-194): Effort breaks ties after own Priority
+## Amendment: Effort breaks ties after own Priority
 
 `tk next` now sorts by Effective Priority, then own Priority, then
 **Effort**, then `created_seq`. Low Effort comes first. Effort is the
