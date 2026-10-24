@@ -17,6 +17,13 @@ in the same change; remove superseded code. The exception is live data:
 changes that make an existing Repository Store incompatible must provide
 a migration path.
 
+## The Live Repository Store
+
+Run `tk` against the user's Repository Store only with a binary built from
+`main`. A branch build that adds a migration upgrades the Store on first open,
+and every older binary then refuses it (ADR-0024). Exercise branch builds
+against a scratch `XDG_DATA_HOME`.
+
 ## Evidence About External Tools
 
 tk shells out to external CLIs, and they are open source — `gh` is `cli/cli`
