@@ -1,7 +1,7 @@
 //! `tk show` full-item read with parent / children / blocker sub-sections.
 //!
 //! Composed from one item row plus narrow sub-queries for parent, children
-//! (when the item is an Epic), `BLOCKED BY`, `BLOCKING`, unresolved External
+//! (the Tickets it holds), `BLOCKED BY`, `BLOCKING`, unresolved External
 //! Blockers, Former Backend Identities, and every Mutation Log entry targeting
 //! the item. The Repository Store owns the SQL; the command-side renderer owns
 //! the tree-block layout and styled output.
@@ -165,11 +165,7 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
         .transpose()?
         .flatten();
 
-    let children = if item_class == ItemClass::Epic {
-        read_children(&store.conn, &reference.id)?
-    } else {
-        Vec::new()
-    };
+    let children = read_children(&store.conn, &reference.id)?;
     let blocked_by = read_blocked_by(&store.conn, &reference.id)?;
     let blocking = read_blocking(&store.conn, &reference.id)?;
     let external_blockers = read_external_blockers(&store.conn, &reference.id)?;

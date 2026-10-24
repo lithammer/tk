@@ -49,6 +49,7 @@ macro_rules! pending_promotion_sql {
     };
 }
 
+pub mod containment;
 pub mod create;
 pub mod dependency;
 pub mod detach;
@@ -386,9 +387,7 @@ pub(crate) fn next_display_id(
 /// Resolve a Display ID or Alias to an Epic reference, classifying the
 /// outcome so callers can render `not_found` vs `not_an_epic` differently.
 ///
-/// Use this for `--parent <epic-id>` validation so the deferred composite
-/// foreign key on `items(container_id, container_class)` does not surface
-/// as a raw constraint error when the user supplies a Ticket's Display ID.
+/// Scope validation uses this: ADR-0022 limits a Scope to an Epic.
 pub fn resolve_as_epic(
     conn: &Connection,
     display_arg: &str,

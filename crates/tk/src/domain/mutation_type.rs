@@ -19,8 +19,8 @@ pub enum MutationType {
     SetItemStatus,
     SetTicketPriority,
     SetTicketEffort,
-    AddTicketToEpic,
-    RemoveTicketFromEpic,
+    SetTicketContainer,
+    ClearTicketContainer,
     AddDependency,
     RemoveDependency,
     AddExternalBlocker,
@@ -42,8 +42,8 @@ impl MutationType {
         Self::SetItemStatus,
         Self::SetTicketPriority,
         Self::SetTicketEffort,
-        Self::AddTicketToEpic,
-        Self::RemoveTicketFromEpic,
+        Self::SetTicketContainer,
+        Self::ClearTicketContainer,
         Self::AddDependency,
         Self::RemoveDependency,
         Self::AddExternalBlocker,
@@ -62,8 +62,8 @@ impl MutationType {
             Self::SetItemStatus => "set_item_status",
             Self::SetTicketPriority => "set_ticket_priority",
             Self::SetTicketEffort => "set_ticket_effort",
-            Self::AddTicketToEpic => "add_ticket_to_epic",
-            Self::RemoveTicketFromEpic => "remove_ticket_from_epic",
+            Self::SetTicketContainer => "set_ticket_container",
+            Self::ClearTicketContainer => "clear_ticket_container",
             Self::AddDependency => "add_dependency",
             Self::RemoveDependency => "remove_dependency",
             Self::AddExternalBlocker => "add_external_blocker",
@@ -90,8 +90,8 @@ impl MutationType {
             | Self::SetItemStatus
             | Self::SetTicketPriority
             | Self::SetTicketEffort
-            | Self::AddTicketToEpic
-            | Self::RemoveTicketFromEpic
+            | Self::SetTicketContainer
+            | Self::ClearTicketContainer
             | Self::AddDependency
             | Self::RemoveDependency
             | Self::AddExternalBlocker
@@ -110,11 +110,12 @@ impl MutationType {
     #[must_use]
     pub fn addressed_counterpart(self) -> AddressedCounterpart {
         match self {
-            Self::AddTicketToEpic => AddressedCounterpart::Epic,
+            Self::SetTicketContainer => AddressedCounterpart::Container,
             Self::AddDependency | Self::RemoveDependency => AddressedCounterpart::BlockingItem,
-            // Clearing Epic Membership is a 0..1 slot the Backend resolves
-            // without naming the Epic, so it survives the Epic's withdrawal.
-            Self::RemoveTicketFromEpic
+            // Clearing Containment is a 0..1 slot the Backend resolves
+            // without naming the Container, so it survives the Container's
+            // withdrawal.
+            Self::ClearTicketContainer
             | Self::UpdateTicket
             | Self::UpdateEpic
             | Self::SetItemStatus
@@ -134,8 +135,8 @@ impl MutationType {
 pub enum AddressedCounterpart {
     /// The Mutation addresses nothing beyond its own target.
     None,
-    /// The Epic named by the payload's `epic_id`.
-    Epic,
+    /// The Container named by the payload's `container_id`.
+    Container,
     /// The Blocking Item named by the payload's `blocking_id`.
     BlockingItem,
 }
@@ -163,8 +164,8 @@ impl FromStr for MutationType {
             "set_item_status" => Ok(Self::SetItemStatus),
             "set_ticket_priority" => Ok(Self::SetTicketPriority),
             "set_ticket_effort" => Ok(Self::SetTicketEffort),
-            "add_ticket_to_epic" => Ok(Self::AddTicketToEpic),
-            "remove_ticket_from_epic" => Ok(Self::RemoveTicketFromEpic),
+            "set_ticket_container" => Ok(Self::SetTicketContainer),
+            "clear_ticket_container" => Ok(Self::ClearTicketContainer),
             "add_dependency" => Ok(Self::AddDependency),
             "remove_dependency" => Ok(Self::RemoveDependency),
             "add_external_blocker" => Ok(Self::AddExternalBlocker),
@@ -198,16 +199,16 @@ mod tests {
     }
 
     #[test]
-    fn adding_epic_membership_addresses_the_epic_and_clearing_it_does_not() {
-        // The asymmetry ADR-0038 turns on: withdrawing an Epic's Promotion
-        // withdraws the additions naming it, while a removal still applies
-        // because the Backend clears a 0..1 slot without addressing the Epic.
+    fn setting_a_container_addresses_it_and_clearing_does_not() {
+        // The asymmetry ADR-0038 turns on: withdrawing a Container's Promotion
+        // withdraws the sets naming it, while a clear still applies because
+        // the Backend clears a 0..1 slot without addressing the Container.
         assert_eq!(
-            MutationType::AddTicketToEpic.addressed_counterpart(),
-            AddressedCounterpart::Epic
+            MutationType::SetTicketContainer.addressed_counterpart(),
+            AddressedCounterpart::Container
         );
         assert_eq!(
-            MutationType::RemoveTicketFromEpic.addressed_counterpart(),
+            MutationType::ClearTicketContainer.addressed_counterpart(),
             AddressedCounterpart::None
         );
     }

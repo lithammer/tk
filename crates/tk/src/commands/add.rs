@@ -41,8 +41,8 @@ pub struct Args {
     /// Create an Epic (conflicts with --bug, --priority, --effort, --parent).
     #[arg(long, conflicts_with_all = ["bug", "priority", "effort", "parent"])]
     pub epic: bool,
-    /// Place the new Ticket under an Epic by Display ID or Alias.
-    #[arg(short = 'P', long, value_name = "EPIC")]
+    /// Place the new Ticket under an Epic or Ticket by Display ID or Alias.
+    #[arg(short = 'P', long, value_name = "CONTAINER")]
     pub parent: Option<String>,
     /// Set Priority (P0..P3). Tickets only.
     #[arg(short = 'p', long, value_name = "PRIORITY")]
@@ -65,25 +65,19 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     let mut store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock, deps.data_root)
         .map_err(|err| resolver::open_error(&err))?;
 
-    let parent_ref = if let Some(arg) = args.parent.as_deref() {
-        match resolver::resolve_epic(&store, arg) {
+    let parent_ref = match args.parent.as_deref() {
+        Some(arg) => match resolver::resolve(&store, arg) {
             Ok(r) => Some(r),
-            Err(resolver::ResolveEpicError::NotFound) => {
+            Err(resolver::ResolveError::NotFound) => {
                 return Err(CommandError::failure(format!(
                     "parent '{arg}' is not a known Display ID or Alias"
                 )));
             }
-            Err(resolver::ResolveEpicError::NotAnEpic) => {
-                return Err(CommandError::failure(format!(
-                    "parent '{arg}' is not an Epic"
-                )));
-            }
-            Err(resolver::ResolveEpicError::Storage(err)) => {
+            Err(resolver::ResolveError::Storage(err)) => {
                 return Err(resolver::storage_error(&err));
             }
-        }
-    } else {
-        None
+        },
+        None => None,
     };
 
     if args.epic {
@@ -178,6 +172,7 @@ fn create_error(err: &CreateError) -> CommandError {
         CreateError::Sequence(err) => {
             CommandError::failure(format!("Repository Store corruption: {err}"))
         }
+        CreateError::Containment(err) => resolver::containment_error(err),
         CreateError::DisplayPrefixMissing => CommandError::failure(
             "Repository Store is missing the display_prefix seed (run 'tk init')",
         ),
@@ -329,30 +324,29 @@ mod tests {
     }
 
     #[test]
-    fn parent_must_be_an_epic_not_a_ticket() {
+    fn a_ticket_holds_a_ticket_but_not_a_third_level() {
         let store = TmpStore::new("repo");
         seed_store(&store);
         let cwd_path = cwd();
 
-        // Create a ticket first.
-        {
-            let mut h = Harness::with_seed(&cwd_path, &store, 7);
+        for (seed, title, parent) in [(7, "Container", None), (11, "Held", Some("tk-1"))] {
+            let mut h = Harness::with_seed(&cwd_path, &store, seed);
             expect_git(&h, &store);
-            assert_eq!(
-                run_rendered(&mut h, args_with(vec!["Standalone".into()])),
-                Exit::Ok
-            );
+            let mut a = args_with(vec![title.into()]);
+            a.parent = parent.map(Into::into);
+            assert_eq!(run_rendered(&mut h, a), Exit::Ok);
         }
 
-        // Trying to parent a new ticket under that ticket should fail.
-        let mut h = Harness::with_seed(&cwd_path, &store, 11);
+        // tk-2 is held by tk-1, so a Ticket held by a Ticket holds nothing.
+        let mut h = Harness::with_seed(&cwd_path, &store, 13);
         expect_git(&h, &store);
-        let mut a = args_with(vec!["Child".into()]);
-        a.parent = Some("tk-1".into());
-        let code = run_rendered(&mut h, a);
-        assert_eq!(code, Exit::Failure);
+        let mut a = args_with(vec!["Third level".into()]);
+        a.parent = Some("tk-2".into());
+        assert_eq!(run_rendered(&mut h, a), Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
-        assert!(stderr.contains("tk add: parent 'tk-1' is not an Epic"));
+        assert!(stderr.contains(
+            "tk add: tk-2 is held by Ticket tk-1, and a Ticket held by a Ticket holds nothing"
+        ));
     }
 
     #[test]

@@ -16,5 +16,5 @@ Arguments:
   <ID>  Display ID or Alias of the Ticket or Epic to promote
 
 Options:
-      --children  Also promote the Epic's directly contained Local Tickets — its Promotion Children. Epics only
+      --children  Also promote the Local Tickets the Epic or Ticket directly holds — its Promotion Children
   -h, --help      Print help

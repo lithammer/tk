@@ -4,15 +4,18 @@
 //! Diffs each requested field against the stored value inside the same
 //! `begin immediate` transaction the read used, writes only the changed
 //! columns, and — for a backend-bound Item — emits one Mutation per changed
-//! field-group (title/body becomes a single full snapshot; parent change is
-//! `remove_ticket_from_epic` plus `add_ticket_to_epic` in that order; a
-//! priority change is `set_ticket_priority` and an effort change
+//! field-group (title/body becomes a single full snapshot; a parent change is
+//! one `set_ticket_container` or `clear_ticket_container`, never a pair
+//! (ADR-0055); a priority change is `set_ticket_priority` and an effort change
 //! `set_ticket_effort`, ADR-0054).
 //!
 //! Title/body names one Item, so the Ticket's own Backend Binding gates it. A
-//! membership Mutation names two, so it is emitted only when Ticket and Epic
-//! are backend-bound to the same Backend — the rule Promotion preflight and
-//! `tk block` apply to their own two-endpoint relationships.
+//! Containment Mutation names two, so `set_ticket_container` is emitted only
+//! when Ticket and Container are backend-bound to the same Backend — the rule
+//! Promotion preflight and `tk block` apply to their own two-endpoint
+//! relationships. A move whose new Container the Backend cannot hold emits
+//! `clear_ticket_container`, so the Backend drops the parent tk no longer
+//! records.
 //!
 //! `updated_at` is bumped only when at least one column actually changes;
 //! a request whose values all match the stored state commits a no-op
@@ -25,7 +28,7 @@ use crate::domain::backend_binding::BackendBinding;
 use crate::domain::effort::Effort;
 use crate::domain::item_class::ItemClass;
 use crate::domain::mutation_payload::{
-    EffortChange, EpicRef, MutationPayload, PriorityChange, TitleBody,
+    ContainerRef, EffortChange, MutationPayload, PriorityChange, TitleBody,
 };
 use crate::domain::mutation_type::MutationType;
 use crate::domain::priority::Priority;
@@ -33,6 +36,7 @@ use crate::domain::selection_state::SelectionState;
 use crate::store::mutations;
 
 use super::Store;
+use super::containment::{self, ContainmentError};
 
 /// An edit of one optional field: keep it, clear it, or set it. The caller
 /// passes what it asked for; [`update_item`] narrows it to what changes.
@@ -90,7 +94,7 @@ pub struct UpdateRequest<'a> {
     /// Like `priority`, the caller keeps this [`FieldEdit::Unchanged`] on an
     /// Epic; the `items.effort` CHECK backs that up.
     pub effort: FieldEdit<Effort>,
-    /// The containing Epic's internal stable `items.id`.
+    /// The Container's internal stable `items.id`.
     pub parent: FieldEdit<&'a str>,
 }
 
@@ -115,6 +119,9 @@ pub enum UpdateError {
     /// at `tk accept`.
     #[error("triage Ticket cannot be reprioritized via update")]
     PriorityOnTriage,
+    /// `parent` names a Container the depth cap refuses (ADR-0055).
+    #[error(transparent)]
+    Containment(#[from] ContainmentError),
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
@@ -197,14 +204,13 @@ pub fn update_item<C: Clock + ?Sized>(
         .filter(|requested| current.priority != Some(*requested));
     let new_effort = req.effort.against(current.effort);
 
-    // Parent delta: `old_epic_id` addresses remove_ticket_from_epic; `parent`
-    // carries the new container for both the column write and
-    // add_ticket_to_epic.
+    // Parent delta: `parent` carries the new Container for both the column
+    // write and set_ticket_container.
     let parent = req.parent.against(current.container_id.as_deref());
-    let old_epic_id = current
-        .container_id
-        .as_deref()
-        .filter(|_| parent != FieldEdit::Unchanged);
+    // The depth cap reads the graph inside this transaction (ADR-0055).
+    if let FieldEdit::Set(container_id) = parent {
+        containment::check(&tx, Some(req.id), container_id)?;
+    }
 
     let title_or_body_changed = new_title.is_some() || new_body.is_some();
     let any_change = title_or_body_changed
@@ -243,34 +249,29 @@ pub fn update_item<C: Clock + ?Sized>(
     // will give the Item its backend identity.
     let intent = mutations::resolve_backend_binding(&tx, req.id)?;
     if intent.is_backend_bound() {
-        if let Some(old_id) = old_epic_id
-            && membership_is_backend_intent(&tx, &intent, old_id)?
-        {
+        let container_mutation = match parent {
+            FieldEdit::Set(new_id) if containment_is_backend_intent(&tx, &intent, new_id)? => {
+                Some((MutationType::SetTicketContainer, new_id))
+            }
+            // Cleared, or moved to a Container the Backend cannot hold: the
+            // Backend still has the parent tk just dropped.
+            FieldEdit::Set(_) | FieldEdit::Clear => match current.container_id.as_deref() {
+                Some(old_id) if containment_is_backend_intent(&tx, &intent, old_id)? => {
+                    Some((MutationType::ClearTicketContainer, old_id))
+                }
+                _ => None,
+            },
+            FieldEdit::Unchanged => None,
+        };
+        if let Some((mutation_type, container_id)) = container_mutation {
             mutations::append(
                 &tx,
                 mutations::AppendRequest {
-                    mutation_type: MutationType::RemoveTicketFromEpic,
+                    mutation_type,
                     item_id: req.id,
                     item_class: req.item_class,
-                    payload: &MutationPayload::EpicRef(EpicRef {
-                        epic_id: old_id.to_owned(),
-                    }),
-                    promotion_operation_id: None,
-                    now_iso: &now_iso,
-                },
-            )?;
-        }
-        if let FieldEdit::Set(new_id) = parent
-            && membership_is_backend_intent(&tx, &intent, new_id)?
-        {
-            mutations::append(
-                &tx,
-                mutations::AppendRequest {
-                    mutation_type: MutationType::AddTicketToEpic,
-                    item_id: req.id,
-                    item_class: req.item_class,
-                    payload: &MutationPayload::EpicRef(EpicRef {
-                        epic_id: new_id.to_owned(),
+                    payload: &MutationPayload::ContainerRef(ContainerRef {
+                        container_id: container_id.to_owned(),
                     }),
                     promotion_operation_id: None,
                     now_iso: &now_iso,
@@ -329,21 +330,21 @@ pub fn update_item<C: Clock + ?Sized>(
     })
 }
 
-/// Whether an Epic-membership change is backend intent: the Ticket and the
-/// Epic must both be backend-bound, to the *same* Backend.
+/// Whether a Containment change is backend intent: the Ticket and the
+/// Container must both be backend-bound, to the *same* Backend.
 ///
-/// The typed membership operation carries both Backend identities, resolved
+/// The typed Containment operation carries both Backend identities, resolved
 /// immediately before delivery. Appending intent only when both endpoints
 /// already bind the same Backend ensures that resolution can succeed. This is
-/// the same rule Promotion preflight applies to a membership draft (ADR-0035)
+/// the same rule Promotion preflight applies to a Containment draft (ADR-0035)
 /// and `dependency_rule` applies to an edge.
-fn membership_is_backend_intent(
+fn containment_is_backend_intent(
     conn: &rusqlite::Connection,
     ticket: &BackendBinding,
-    epic_id: &str,
+    container_id: &str,
 ) -> Result<bool, mutations::BackendBindingError> {
-    let epic = mutations::resolve_backend_binding(conn, epic_id)?;
-    Ok(ticket.backend_kind().is_some() && ticket.backend_kind() == epic.backend_kind())
+    let container = mutations::resolve_backend_binding(conn, container_id)?;
+    Ok(ticket.backend_kind().is_some() && ticket.backend_kind() == container.backend_kind())
 }
 
 fn write_columns(
@@ -352,15 +353,16 @@ fn write_columns(
     writes: &ColumnWrites<'_>,
     now_iso: &str,
 ) -> Result<(), rusqlite::Error> {
-    let (parent_changed, new_epic_id) = writes.parent.column();
-    let new_container_class: Option<&str> = new_epic_id.map(|_| "epic");
+    let (parent_changed, new_container_id) = writes.parent.column();
     let (effort_changed, new_effort) = writes.effort.column();
     conn.execute(
         "update items set title = ?2, body = ?3, priority = coalesce(?4, priority), \
                           effort = case when ?5 then ?6 else effort end, \
                           container_id = case when ?7 then ?8 else container_id end, \
-                          container_class = case when ?7 then ?9 else container_class end, \
-                          updated_at = ?10 \
+                          container_class = case when ?7 \
+                              then (select item_class from items where id = ?8) \
+                              else container_class end, \
+                          updated_at = ?9 \
           where id = ?1",
         params![
             id,
@@ -370,8 +372,7 @@ fn write_columns(
             effort_changed,
             new_effort,
             parent_changed,
-            new_epic_id,
-            new_container_class,
+            new_container_id,
             now_iso
         ],
     )?;
@@ -421,6 +422,30 @@ mod tests {
                 origin: "backend",
                 backend_kind: Some("github"),
                 backend_key: Some(display),
+                created_seq,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+    }
+
+    fn seed_backend_ticket_in(
+        store: &Store,
+        id: &str,
+        display: &str,
+        container_id: &str,
+        created_seq: i64,
+    ) {
+        insert_fixture_item(
+            &store.conn,
+            FixtureItem {
+                id,
+                display,
+                title: "Ticket",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some(display),
+                container_id: Some(container_id),
                 created_seq,
                 ..FixtureItem::default()
             },
@@ -756,25 +781,11 @@ mod tests {
     }
 
     #[test]
-    fn parent_move_emits_remove_then_add_for_backend_ticket() {
+    fn parent_move_emits_one_set_for_backend_ticket() {
         let mut store = open_seeded();
         seed_backend_epic(&store, "e-old", "tk-1", 1);
         seed_backend_epic(&store, "e-new", "tk-2", 2);
-        insert_fixture_item(
-            &store.conn,
-            FixtureItem {
-                id: "t1",
-                display: "tk-3",
-                title: "Ticket",
-                origin: "backend",
-                backend_kind: Some("github"),
-                backend_key: Some("99"),
-                container_id: Some("e-old"),
-                created_seq: 3,
-                ..FixtureItem::default()
-            },
-        )
-        .unwrap();
+        seed_backend_ticket_in(&store, "t1", "tk-3", "e-old", 3);
 
         update_item(
             &mut store,
@@ -788,42 +799,21 @@ mod tests {
         )
         .unwrap();
 
-        let (container_id, container_class): (Option<String>, Option<String>) = store
-            .conn
-            .query_row(
-                "select container_id, container_class from items where id = 't1'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(container_id.as_deref(), Some("e-new"));
-        assert_eq!(container_class.as_deref(), Some("epic"));
-
-        let mutation_rows: Vec<(String, String)> = store
-            .conn
-            .prepare("select mutation_type, payload_json from mutations order by sequence")
-            .unwrap()
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-            .unwrap()
-            .map(Result::unwrap)
-            .collect();
         assert_eq!(
-            mutation_rows,
-            vec![
-                (
-                    "remove_ticket_from_epic".to_string(),
-                    r#"{"epic_id":"e-old"}"#.to_string(),
-                ),
-                (
-                    "add_ticket_to_epic".to_string(),
-                    r#"{"epic_id":"e-new"}"#.to_string(),
-                ),
-            ]
+            container_of(&store, "t1"),
+            (Some("e-new".into()), Some("epic".into()))
+        );
+        assert_eq!(
+            mutation_rows(&store),
+            vec![(
+                "set_ticket_container".to_string(),
+                r#"{"container_id":"e-new"}"#.to_string(),
+            )]
         );
     }
 
     #[test]
-    fn parent_clear_emits_remove_only() {
+    fn parent_clear_emits_clear_only() {
         let mut store = open_seeded();
         seed_backend_epic(&store, "e1", "tk-1", 1);
         insert_fixture_item(
@@ -863,7 +853,7 @@ mod tests {
         assert!(container_id.is_none());
         assert_eq!(
             mutation_types(&store.conn).unwrap(),
-            vec!["remove_ticket_from_epic"]
+            vec!["clear_ticket_container"]
         );
     }
 
@@ -912,7 +902,7 @@ mod tests {
     }
 
     #[test]
-    fn combined_parent_move_and_title_change_emits_three_mutations_in_order() {
+    fn combined_parent_move_and_title_change_emits_two_mutations_in_order() {
         let mut store = open_seeded();
         seed_backend_epic(&store, "e-old", "tk-1", 1);
         seed_backend_epic(&store, "e-new", "tk-2", 2);
@@ -956,16 +946,15 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                "remove_ticket_from_epic".to_string(),
-                "add_ticket_to_epic".to_string(),
+                "set_ticket_container".to_string(),
                 "update_ticket".to_string(),
             ]
         );
     }
 
     #[test]
-    fn parent_move_into_a_local_epic_emits_no_membership_mutation() {
-        // A membership Mutation names the Epic, and nothing resolves a backend
+    fn parent_move_into_a_local_epic_emits_no_containment_mutation() {
+        // A Containment Mutation names the Epic, and nothing resolves a backend
         // identity for it, so a Pending Promotion Ticket moved under a Local
         // Epic would hand the Adapter an unaddressable parent. Promotion
         // preflight applies the same both-endpoints rule (ADR-0035).
@@ -1001,7 +990,7 @@ mod tests {
     }
 
     #[test]
-    fn parent_move_emits_membership_when_both_endpoints_share_a_backend() {
+    fn parent_move_emits_containment_when_both_endpoints_share_a_backend() {
         let mut store = open_seeded();
         seed_backend_epic(&store, "e1", "gh-1", 1);
         seed_local_ticket(&store, "t1", "tk-2", 2);
@@ -1021,9 +1010,144 @@ mod tests {
 
         assert_eq!(
             mutation_types(&store.conn).unwrap(),
-            vec!["promote_ticket", "add_ticket_to_epic"],
-            "the membership is ordered behind the Promotion that addresses the Ticket"
+            vec!["promote_ticket", "set_ticket_container"],
+            "the Containment is ordered behind the Promotion that addresses the Ticket"
         );
+    }
+
+    fn mutation_rows(store: &Store) -> Vec<(String, String)> {
+        store
+            .conn
+            .prepare("select mutation_type, payload_json from mutations order by sequence")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    fn container_of(store: &Store, id: &str) -> (Option<String>, Option<String>) {
+        store
+            .conn
+            .query_row(
+                "select container_id, container_class from items where id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn moving_under_a_ticket_stores_its_class_and_emits_one_set() {
+        let mut store = open_seeded();
+        seed_backend_epic(&store, "e1", "gh-1", 1);
+        seed_backend_ticket_in(&store, "t1", "gh-2", "e1", 2);
+        seed_backend_ticket(&store, "holder", "gh-3", 3);
+
+        update_item(
+            &mut store,
+            &clock(),
+            UpdateRequest {
+                id: "t1",
+                item_class: ItemClass::Ticket,
+                parent: FieldEdit::Set("holder"),
+                ..UpdateRequest::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            container_of(&store, "t1"),
+            (Some("holder".into()), Some("ticket".into()))
+        );
+        assert_eq!(
+            mutation_rows(&store),
+            vec![(
+                "set_ticket_container".to_string(),
+                r#"{"container_id":"holder"}"#.to_string(),
+            )],
+            "one set moves the Ticket; no clear of the old Epic precedes it"
+        );
+    }
+
+    #[test]
+    fn moving_to_a_container_the_backend_cannot_hold_clears_the_old_parent() {
+        let mut store = open_seeded();
+        seed_backend_epic(&store, "e1", "gh-1", 1);
+        seed_backend_ticket_in(&store, "t1", "gh-2", "e1", 2);
+        seed_local_ticket(&store, "local", "tk-3", 3);
+
+        update_item(
+            &mut store,
+            &clock(),
+            UpdateRequest {
+                id: "t1",
+                item_class: ItemClass::Ticket,
+                parent: FieldEdit::Set("local"),
+                ..UpdateRequest::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            container_of(&store, "t1"),
+            (Some("local".into()), Some("ticket".into())),
+            "the move is current state either way"
+        );
+        assert_eq!(
+            mutation_rows(&store),
+            vec![(
+                "clear_ticket_container".to_string(),
+                r#"{"container_id":"e1"}"#.to_string(),
+            )],
+            "GitHub still holds the old parent, so the clear is what converges it"
+        );
+    }
+
+    #[test]
+    fn a_refused_container_leaves_the_whole_update_unwritten() {
+        let mut store = open_seeded();
+        seed_backend_ticket(&store, "a", "gh-1", 1);
+        seed_backend_ticket(&store, "b", "gh-2", 2);
+        seed_backend_ticket(&store, "c", "gh-3", 3);
+        let mv = |id, title, parent| UpdateRequest {
+            id,
+            item_class: ItemClass::Ticket,
+            title,
+            parent,
+            ..UpdateRequest::default()
+        };
+        update_item(&mut store, &clock(), mv("a", None, FieldEdit::Set("b"))).unwrap();
+        let queued = mutation_types(&store.conn).unwrap();
+        assert_eq!(queued, vec!["set_ticket_container"], "a is held by b");
+
+        // b holds a, so b cannot go under a Ticket; c cannot go under a, which
+        // b holds; a Ticket cannot hold itself.
+        for (id, parent) in [("b", "c"), ("c", "a"), ("c", "c")] {
+            let err = update_item(
+                &mut store,
+                &clock(),
+                mv(id, Some("Renamed"), FieldEdit::Set(parent)),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(err, UpdateError::Containment(_)),
+                "{id} under {parent}: {err:?}"
+            );
+        }
+
+        assert_eq!(container_of(&store, "b"), (None, None));
+        assert_eq!(container_of(&store, "c"), (None, None));
+        let titles: Vec<String> = store
+            .conn
+            .prepare("select title from items where id in ('b', 'c')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(titles.iter().all(|t| t == "Original"), "{titles:?}");
+        assert_eq!(mutation_types(&store.conn).unwrap(), queued);
     }
 
     #[test]

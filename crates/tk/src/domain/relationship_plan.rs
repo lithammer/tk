@@ -5,10 +5,10 @@ use std::collections::{HashMap, HashSet};
 
 use super::backend_binding::BackendBinding;
 use super::backend_kind::BackendKind;
+use super::containment_rule::{self, Classification as ContainmentClassification};
 use super::dependency_rule::{self, DependencyClassification, DependencyRejection};
-use super::epic_membership_rule::{self, Classification as MembershipClassification};
 use super::item_class::ItemClass;
-use super::mutation_payload::{DependencyRef, EpicRef, MutationPayload};
+use super::mutation_payload::{ContainerRef, DependencyRef, MutationPayload};
 use super::mutation_type::MutationType;
 use super::promotion_capability::{PromotionCapabilities, PromotionRequirements};
 use super::promotion_graph::{GraphDependency, GraphItem};
@@ -54,12 +54,12 @@ pub enum RelationshipFinding {
         /// Blocking endpoint.
         blocking: RelationshipItem,
     },
-    /// Epic Membership the Backend cannot represent.
-    EpicMembershipNotRepresentable {
-        /// Member Ticket.
+    /// Containment the Backend cannot represent.
+    ContainmentNotRepresentable {
+        /// Held Ticket.
         ticket: RelationshipItem,
-        /// Containing Epic.
-        epic: RelationshipItem,
+        /// Containing Epic or Ticket.
+        container: RelationshipItem,
     },
 }
 
@@ -83,8 +83,8 @@ pub(crate) fn requirements(
     {
         requirements = requirements.with_dependencies();
     }
-    if !bound_memberships(items, &by_id, bound_ids, backend).is_empty() {
-        requirements = requirements.with_epic_membership();
+    if !bound_containments(items, &by_id, bound_ids, backend).is_empty() {
+        requirements = requirements.with_containment();
     }
     requirements
 }
@@ -136,18 +136,18 @@ pub(crate) fn plan(
         }
     }
 
-    for membership in bound_memberships(items, &by_id, bound_ids, backend) {
-        if capabilities.can_represent_epic_membership() {
+    for containment in bound_containments(items, &by_id, bound_ids, backend) {
+        if capabilities.can_represent_containment() {
             mutations.push((
-                membership.order,
-                membership_draft(membership.ticket, membership.epic),
+                containment.order,
+                containment_draft(containment.ticket, containment.container),
             ));
         } else {
             findings.push((
-                membership.order,
-                RelationshipFinding::EpicMembershipNotRepresentable {
-                    ticket: RelationshipItem::of(membership.ticket),
-                    epic: RelationshipItem::of(membership.epic),
+                containment.order,
+                RelationshipFinding::ContainmentNotRepresentable {
+                    ticket: RelationshipItem::of(containment.ticket),
+                    container: RelationshipItem::of(containment.container),
                 },
             ));
         }
@@ -164,8 +164,9 @@ pub(crate) fn plan(
         .collect())
 }
 
-/// Dependencies order by (Blocked, Blocking); membership orders by (Ticket,
-/// Epic). This keeps findings and Mutations deterministic across both kinds.
+/// Dependencies order by (Blocked, Blocking); Containment orders by (Ticket,
+/// Container). This keeps findings and Mutations deterministic across both
+/// kinds.
 type EndpointOrder = (i64, i64);
 
 /// Both endpoints of every Dependency must occur in `items`.
@@ -204,10 +205,10 @@ struct JudgedEdge<'a> {
     verdict: EdgeVerdict,
 }
 
-struct BoundMembership<'a> {
+struct BoundContainment<'a> {
     order: EndpointOrder,
     ticket: &'a GraphItem,
-    epic: &'a GraphItem,
+    container: &'a GraphItem,
 }
 
 fn classify_dependencies<'a>(
@@ -248,12 +249,12 @@ fn classify_dependencies<'a>(
         .collect()
 }
 
-fn bound_memberships<'a>(
+fn bound_containments<'a>(
     items: &'a [GraphItem],
     by_id: &HashMap<&'a str, &'a GraphItem>,
     bound_ids: &HashSet<&str>,
     backend: BackendKind,
-) -> Vec<BoundMembership<'a>> {
+) -> Vec<BoundContainment<'a>> {
     let mut bound = Vec::new();
     for ticket in items {
         let Some(container_id) = ticket.container_id.as_deref() else {
@@ -262,23 +263,23 @@ fn bound_memberships<'a>(
         if !bound_ids.contains(ticket.id.as_str()) && !bound_ids.contains(container_id) {
             continue;
         }
-        // `read_graph` gathers Items before it re-reads membership. A
-        // concurrent parent update may therefore name an Epic absent from the
-        // snapshot; skip the torn pair instead of guessing at its Binding.
-        let Some(epic) = by_id.get(container_id).copied() else {
+        // `read_graph` gathers Items before it re-reads containment. A
+        // concurrent parent update may therefore name a Container absent from
+        // the snapshot; skip the torn pair instead of guessing at its Binding.
+        let Some(container) = by_id.get(container_id).copied() else {
             continue;
         };
-        if epic_membership_rule::classify(
+        if containment_rule::classify(
             &binding_after(ticket, bound_ids, backend),
-            &binding_after(epic, bound_ids, backend),
-        ) == MembershipClassification::StaysLocal
+            &binding_after(container, bound_ids, backend),
+        ) == ContainmentClassification::StaysLocal
         {
             continue;
         }
-        bound.push(BoundMembership {
-            order: (ticket.created_seq, epic.created_seq),
+        bound.push(BoundContainment {
+            order: (ticket.created_seq, container.created_seq),
             ticket,
-            epic,
+            container,
         });
     }
     bound
@@ -295,13 +296,13 @@ fn dependency_draft(blocked: &GraphItem, blocking: &GraphItem) -> MutationDraft 
     }
 }
 
-fn membership_draft(ticket: &GraphItem, epic: &GraphItem) -> MutationDraft {
+fn containment_draft(ticket: &GraphItem, container: &GraphItem) -> MutationDraft {
     MutationDraft {
-        mutation_type: MutationType::AddTicketToEpic,
+        mutation_type: MutationType::SetTicketContainer,
         item_id: ticket.id.clone(),
         item_class: ticket.item_class,
-        payload: MutationPayload::EpicRef(EpicRef {
-            epic_id: epic.id.clone(),
+        payload: MutationPayload::ContainerRef(ContainerRef {
+            container_id: container.id.clone(),
         }),
     }
 }

@@ -81,7 +81,7 @@ struct PromotionFacets {
     item_classes: ItemClasses,
     ticket_kinds: TicketKinds,
     dependencies: bool,
-    epic_membership: bool,
+    containment: bool,
 }
 
 impl PromotionFacets {
@@ -89,13 +89,13 @@ impl PromotionFacets {
         item_classes: ItemClasses::NONE,
         ticket_kinds: TicketKinds::NONE,
         dependencies: false,
-        epic_membership: false,
+        containment: false,
     };
     const ALL: Self = Self {
         item_classes: ItemClasses::ALL,
         ticket_kinds: TicketKinds::ALL,
         dependencies: true,
-        epic_membership: true,
+        containment: true,
     };
 
     fn with_item_class(mut self, class: ItemClass) -> Self {
@@ -113,8 +113,8 @@ impl PromotionFacets {
         self
     }
 
-    fn with_epic_membership(mut self) -> Self {
-        self.epic_membership = true;
+    fn with_containment(mut self) -> Self {
+        self.containment = true;
         self
     }
 }
@@ -159,10 +159,10 @@ impl PromotionRequirements {
         self
     }
 
-    /// Add the Epic-membership facet.
+    /// Add the Containment facet.
     #[must_use]
-    pub fn with_epic_membership(mut self) -> Self {
-        self.facets = self.facets.with_epic_membership();
+    pub fn with_containment(mut self) -> Self {
+        self.facets = self.facets.with_containment();
         self
     }
 
@@ -184,16 +184,16 @@ impl PromotionRequirements {
         self.facets.dependencies
     }
 
-    /// Whether the Promotion requires the Epic-membership facet.
+    /// Whether the Promotion requires the Containment facet.
     #[must_use]
-    pub fn requires_epic_membership(self) -> bool {
-        self.facets.epic_membership
+    pub fn requires_containment(self) -> bool {
+        self.facets.containment
     }
 }
 
 /// The Promotion facets a Backend Adapter has resolved: which Item Classes and
 /// Ticket Kinds it can create, whether it can represent a Dependency, and
-/// whether it can represent Epic membership.
+/// whether it can represent Containment.
 ///
 /// Facets are queried by typed value (`can_create_item_class`,
 /// `can_create_ticket_kind`) rather than as a collection callers index
@@ -246,10 +246,10 @@ impl PromotionCapabilities {
         self
     }
 
-    /// Mark Epic membership as representable on this Backend.
+    /// Mark Containment as representable on this Backend.
     #[must_use]
-    pub fn with_epic_membership(mut self) -> Self {
-        self.facets = self.facets.with_epic_membership();
+    pub fn with_containment(mut self) -> Self {
+        self.facets = self.facets.with_containment();
         self
     }
 
@@ -271,10 +271,10 @@ impl PromotionCapabilities {
         self.facets.dependencies
     }
 
-    /// Whether Promotion can represent Epic membership on this Backend.
+    /// Whether Promotion can represent Containment on this Backend.
     #[must_use]
-    pub fn can_represent_epic_membership(&self) -> bool {
-        self.facets.epic_membership
+    pub fn can_represent_containment(&self) -> bool {
+        self.facets.containment
     }
 }
 
@@ -290,7 +290,7 @@ mod tests {
         assert!(!caps.can_create_ticket_kind(TicketKind::Task));
         assert!(!caps.can_create_ticket_kind(TicketKind::Bug));
         assert!(!caps.can_represent_dependencies());
-        assert!(!caps.can_represent_epic_membership());
+        assert!(!caps.can_represent_containment());
     }
 
     #[test]
@@ -301,7 +301,7 @@ mod tests {
         assert!(caps.can_create_ticket_kind(TicketKind::Task));
         assert!(caps.can_create_ticket_kind(TicketKind::Bug));
         assert!(caps.can_represent_dependencies());
-        assert!(caps.can_represent_epic_membership());
+        assert!(caps.can_represent_containment());
     }
 
     #[test]
@@ -319,10 +319,10 @@ mod tests {
     }
 
     #[test]
-    fn dependencies_and_epic_membership_are_independent() {
+    fn dependencies_and_containment_are_independent() {
         let caps = PromotionCapabilities::none().with_dependencies();
         assert!(caps.can_represent_dependencies());
-        assert!(!caps.can_represent_epic_membership());
+        assert!(!caps.can_represent_containment());
     }
 
     #[test]
@@ -331,10 +331,10 @@ mod tests {
             .with_item_class(ItemClass::Ticket)
             .with_ticket_kind(TicketKind::Task)
             .with_dependencies()
-            .with_epic_membership();
+            .with_containment();
         assert!(caps.can_create_item_class(ItemClass::Ticket));
         assert!(caps.can_create_ticket_kind(TicketKind::Task));
         assert!(caps.can_represent_dependencies());
-        assert!(caps.can_represent_epic_membership());
+        assert!(caps.can_represent_containment());
     }
 }

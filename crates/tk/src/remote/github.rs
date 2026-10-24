@@ -206,10 +206,9 @@ impl Adapter for GithubAdapter<'_> {
                     "cannot push a target Lifecycle of 'open': v1 has no remote reopen",
                 )),
             },
-            // Relationship sync (ADR-0021, tk-107 Dependencies, tk-132 Epic
-            // membership): every arm edits the Mutation's own item, and any
-            // counterpart address is resolved store-side onto the operation's
-            // identity. All four flags below are native to `gh issue edit` as of
+            // Relationship sync (ADR-0021, ADR-0055): every arm edits the
+            // Mutation's own item, and any counterpart address is resolved
+            // store-side onto the operation's identity. All four flags below are native to `gh issue edit` as of
             // `gh` 2.94.0, which the adapter therefore requires; an older `gh`
             // rejects the unknown flag and the Mutation fails.
             BackendEdit::AddDependency {
@@ -232,20 +231,23 @@ impl Adapter for GithubAdapter<'_> {
                 "--remove-blocked-by",
                 &blocking.backend_key,
             ]),
-            BackendEdit::AddTicketToEpic { ticket, epic, .. } => self.run_edit(&[
+            BackendEdit::SetTicketContainer {
+                ticket, container, ..
+            } => self.run_edit(&[
                 "gh",
                 "issue",
                 "edit",
                 &ticket.backend_key,
                 "--parent",
-                &epic.backend_key,
+                &container.backend_key,
             ]),
             // `--remove-parent` clears whichever parent the issue actually has,
             // which is what makes the push converge on tk's cleared
             // `container_id`. The `--remove-sub-issue <ticket>` form names the
-            // Epic tk expected and was observed to exit 0 without changing a
-            // divergent parent, reporting a removal that never happened.
-            BackendEdit::RemoveTicketFromEpic { ticket } => self.run_edit(&[
+            // Container tk expected and was observed to exit 0 without
+            // changing a divergent parent, reporting a removal that never
+            // happened.
+            BackendEdit::ClearTicketContainer { ticket } => self.run_edit(&[
                 "gh",
                 "issue",
                 "edit",
@@ -284,8 +286,8 @@ impl Adapter for GithubAdapter<'_> {
         if requirements.requires_dependencies() {
             capabilities = capabilities.with_dependencies();
         }
-        if requirements.requires_epic_membership() {
-            capabilities = capabilities.with_epic_membership();
+        if requirements.requires_containment() {
+            capabilities = capabilities.with_containment();
         }
         Ok(capabilities)
     }
@@ -1248,7 +1250,7 @@ mod tests {
     use crate::domain::backend_operation::BackendItemAddress;
     use crate::domain::item_class::ItemClass;
     use crate::domain::mutation_payload::{
-        EffortChange, EpicRef, LifecycleChange, MutationPayload, TitleBody,
+        ContainerRef, EffortChange, LifecycleChange, MutationPayload, TitleBody,
     };
     use crate::domain::mutation_type::MutationType;
     use crate::domain::priority::Priority;
@@ -1716,14 +1718,14 @@ mod tests {
                     change,
                 }
             }
-            (MutationType::AddTicketToEpic, MutationPayload::EpicRef(_)) => {
-                BackendEdit::AddTicketToEpic {
+            (MutationType::SetTicketContainer, MutationPayload::ContainerRef(_)) => {
+                BackendEdit::SetTicketContainer {
                     ticket: target,
-                    epic: address("9"),
+                    container: address("9"),
                 }
             }
-            (MutationType::RemoveTicketFromEpic, MutationPayload::EpicRef(_)) => {
-                BackendEdit::RemoveTicketFromEpic { ticket: target }
+            (MutationType::ClearTicketContainer, MutationPayload::ContainerRef(_)) => {
+                BackendEdit::ClearTicketContainer { ticket: target }
             }
             other => panic!("unsupported test edit: {other:?}"),
         }
@@ -2541,14 +2543,14 @@ mod tests {
     }
 
     #[test]
-    fn apply_add_ticket_to_epic_sets_parent() {
+    fn apply_set_ticket_container_sets_parent() {
         let runner = FakeRunner::new();
         runner.expect_exact(&["gh", "issue", "edit", "42", "--parent", "9"], ok(""));
         let mut adapter = GithubAdapter::new(&runner, cwd());
         let edit = edit(
-            MutationType::AddTicketToEpic,
-            MutationPayload::EpicRef(EpicRef {
-                epic_id: "e".into(),
+            MutationType::SetTicketContainer,
+            MutationPayload::ContainerRef(ContainerRef {
+                container_id: "e".into(),
             }),
             "42",
         );
@@ -2560,14 +2562,14 @@ mod tests {
     }
 
     #[test]
-    fn apply_remove_ticket_from_epic_removes_parent() {
+    fn apply_clear_ticket_container_removes_parent() {
         let runner = FakeRunner::new();
         runner.expect_exact(&["gh", "issue", "edit", "42", "--remove-parent"], ok(""));
         let mut adapter = GithubAdapter::new(&runner, cwd());
         let edit = edit(
-            MutationType::RemoveTicketFromEpic,
-            MutationPayload::EpicRef(EpicRef {
-                epic_id: "e".into(),
+            MutationType::ClearTicketContainer,
+            MutationPayload::ContainerRef(ContainerRef {
+                container_id: "e".into(),
             }),
             "42",
         );
@@ -2641,14 +2643,14 @@ mod tests {
                 PromotionRequirements::none()
                     .with_ticket_kind(TicketKind::Task)
                     .with_dependencies()
-                    .with_epic_membership(),
+                    .with_containment(),
             )
             .unwrap();
         assert!(!caps.can_create_item_class(ItemClass::Epic));
         assert!(caps.can_create_ticket_kind(TicketKind::Task));
         assert!(!caps.can_create_ticket_kind(TicketKind::Bug));
         assert!(caps.can_represent_dependencies());
-        assert!(caps.can_represent_epic_membership());
+        assert!(caps.can_represent_containment());
     }
 
     #[test]

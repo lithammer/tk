@@ -2051,20 +2051,6 @@ fn promote_an_unknown_id_names_what_was_typed() {
 }
 
 #[test]
-fn promote_children_on_a_ticket_is_a_usage_error() {
-    let p = Repo::new("project");
-    p.run("init");
-    p.run("add -m 'Local work'"); // project-1
-
-    tk!(p, "promote project-1 --children", @"
-    exit 2
-    -- stdout --
-    -- stderr --
-    tk promote: 'project-1' is not an Epic; --children promotes the Promotion Children of an Epic
-    ");
-}
-
-#[test]
 fn promote_recovery_subcommands_resolve_their_explicit_target() {
     let p = Repo::new("project");
     p.run("init");

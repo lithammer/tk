@@ -74,8 +74,8 @@ pub fn promotion_requirements(
     if relationship_facets.requires_dependencies() {
         requirements = requirements.with_dependencies();
     }
-    if relationship_facets.requires_epic_membership() {
-        requirements = requirements.with_epic_membership();
+    if relationship_facets.requires_containment() {
+        requirements = requirements.with_containment();
     }
 
     requirements
@@ -112,9 +112,9 @@ pub enum PromotionFinding {
     /// leave the backend-backed Blocked Item exposing an incomplete blocking
     /// relationship (ADR-0035).
     DependencyNotRepresentable { blocked: ItemRef, blocking: ItemRef },
-    /// Epic membership the operation would make backend intent, on a Backend
-    /// that cannot represent membership.
-    EpicMembershipNotRepresentable { ticket: ItemRef, epic: ItemRef },
+    /// Containment the operation would make backend intent, on a Backend
+    /// that cannot represent Containment.
+    ContainmentNotRepresentable { ticket: ItemRef, container: ItemRef },
 }
 
 impl From<RelationshipFinding> for PromotionFinding {
@@ -147,15 +147,15 @@ impl From<RelationshipFinding> for PromotionFinding {
                     },
                 }
             }
-            RelationshipFinding::EpicMembershipNotRepresentable { ticket, epic } => {
-                Self::EpicMembershipNotRepresentable {
+            RelationshipFinding::ContainmentNotRepresentable { ticket, container } => {
+                Self::ContainmentNotRepresentable {
                     ticket: ItemRef {
                         id: ticket.id,
                         display_id: ticket.display_id,
                     },
-                    epic: ItemRef {
-                        id: epic.id,
-                        display_id: epic.display_id,
+                    container: ItemRef {
+                        id: container.id,
+                        display_id: container.display_id,
                     },
                 }
             }
@@ -234,11 +234,11 @@ pub fn plan_promotion(
 }
 
 /// Whether the operation promotes this Item: the target, or — with
-/// `--children` — a Ticket the target Epic directly contains. Work that is
+/// `--children` — a Ticket the target directly holds. Work that is
 /// already Backend or already Pending Promotion contributes nothing, which is
 /// what makes the command idempotent.
 ///
-/// A Backend Epic target with `--children` therefore promotes its local
+/// A Backend Container target with `--children` therefore promotes its local
 /// children while contributing no Promotion of its own. That is a supported
 /// operation, not an error.
 fn is_promoted(graph: &PromotionGraph, item: &GraphItem) -> bool {
@@ -340,9 +340,9 @@ mod tests {
         }
     }
 
-    fn contained_in(epic_id: &str, item: GraphItem) -> GraphItem {
+    fn contained_in(container_id: &str, item: GraphItem) -> GraphItem {
         GraphItem {
-            container_id: Some(epic_id.to_owned()),
+            container_id: Some(container_id.to_owned()),
             ..item
         }
     }
@@ -425,7 +425,7 @@ mod tests {
         assert!(requirements.requires_ticket_kind(TicketKind::Bug));
         assert!(!requirements.requires_ticket_kind(TicketKind::Task));
         assert!(!requirements.requires_dependencies());
-        assert!(!requirements.requires_epic_membership());
+        assert!(!requirements.requires_containment());
     }
 
     #[test]
@@ -444,7 +444,7 @@ mod tests {
         assert!(requirements.requires_item_class(ItemClass::Epic));
         assert!(requirements.requires_ticket_kind(TicketKind::Task));
         assert!(requirements.requires_dependencies());
-        assert!(requirements.requires_epic_membership());
+        assert!(requirements.requires_containment());
     }
 
     /// `(mutation_type, item_id)` pairs, the shape order assertions read best
@@ -486,11 +486,11 @@ mod tests {
     }
 
     #[test]
-    fn promoting_an_epic_snapshots_membership_for_its_existing_backend_tickets() {
+    fn promoting_an_epic_snapshots_containment_for_its_existing_backend_tickets() {
         // tk-136: "Promoting an Epic snapshots membership for existing Backend
         // Tickets". Without `--children` the Local sibling stays local — it is
         // not a Promotion Child — but the Backend Ticket and the Epic end up on
-        // the same Backend, so that membership becomes intent.
+        // the same Backend, so that Containment becomes intent.
         let g = graph(
             "e1",
             vec![
@@ -502,7 +502,7 @@ mod tests {
 
         assert_eq!(
             shape(&plan(&g)),
-            vec![("promote_epic", "e1"), ("add_ticket_to_epic", "backed")]
+            vec![("promote_epic", "e1"), ("set_ticket_container", "backed")]
         );
     }
 
@@ -519,7 +519,7 @@ mod tests {
         ));
 
         // t2 is already a Backend Ticket in the Epic: promoting the Epic
-        // brings both onto the same Backend, so its membership becomes intent
+        // brings both onto the same Backend, so its Containment becomes intent
         // too (tk-136, "Promoting an Epic snapshots membership for existing
         // Backend Tickets").
         assert_eq!(
@@ -527,8 +527,8 @@ mod tests {
             vec![
                 ("promote_epic", "e1"),
                 ("promote_ticket", "t1"),
-                ("add_ticket_to_epic", "t1"),
-                ("add_ticket_to_epic", "t2"),
+                ("set_ticket_container", "t1"),
+                ("set_ticket_container", "t2"),
             ]
         );
     }
@@ -545,7 +545,7 @@ mod tests {
 
         assert_eq!(
             shape(&plan(&g)),
-            vec![("promote_ticket", "t1"), ("add_ticket_to_epic", "t1")]
+            vec![("promote_ticket", "t1"), ("set_ticket_container", "t1")]
         );
     }
 
@@ -797,7 +797,7 @@ mod tests {
 
         assert_eq!(
             shape(&plan(&g)),
-            vec![("promote_ticket", "t1"), ("add_ticket_to_epic", "t1")]
+            vec![("promote_ticket", "t1"), ("set_ticket_container", "t1")]
         );
     }
 
@@ -812,7 +812,7 @@ mod tests {
     }
 
     #[test]
-    fn membership_the_backend_cannot_represent_is_refused() {
+    fn containment_the_backend_cannot_represent_is_refused() {
         let g = graph(
             "t1",
             vec![
@@ -826,12 +826,12 @@ mod tests {
 
         assert!(matches!(
             findings(&g, capabilities).as_slice(),
-            [PromotionFinding::EpicMembershipNotRepresentable { .. }]
+            [PromotionFinding::ContainmentNotRepresentable { .. }]
         ));
     }
 
     #[test]
-    fn membership_of_a_local_epic_stays_local_without_a_finding() {
+    fn containment_of_a_local_epic_stays_local_without_a_finding() {
         let g = graph(
             "t1",
             vec![epic("e1", 1), contained_in("e1", ticket("t1", 2))],
@@ -841,7 +841,7 @@ mod tests {
     }
 
     #[test]
-    fn membership_of_an_epic_on_another_backend_stays_local_without_a_finding() {
+    fn containment_of_an_epic_on_another_backend_stays_local_without_a_finding() {
         let g = graph(
             "t1",
             vec![
@@ -891,7 +891,7 @@ mod tests {
         );
     }
 
-    /// An Epic, two children, one Dependency, two memberships and one closed
+    /// An Epic, two children, one Dependency, two Containments and one closed
     /// child: enough in every tier that a wrong order is visible.
     fn ordering_graph() -> PromotionGraph {
         with_edges(
@@ -921,8 +921,8 @@ mod tests {
                 ("promote_epic", "e1"),
                 ("promote_ticket", "c1"),
                 ("promote_ticket", "c2"),
-                ("add_ticket_to_epic", "c1"),
-                ("add_ticket_to_epic", "c2"),
+                ("set_ticket_container", "c1"),
+                ("set_ticket_container", "c2"),
                 ("add_dependency", "c2"),
                 ("set_item_status", "c2"),
             ]
@@ -940,8 +940,8 @@ mod tests {
                 PromotionFinding::TicketKindNotRepresentable { item, .. } => {
                     format!("kind {}", item.id)
                 }
-                PromotionFinding::EpicMembershipNotRepresentable { ticket, epic } => {
-                    format!("membership {}->{}", ticket.id, epic.id)
+                PromotionFinding::ContainmentNotRepresentable { ticket, container } => {
+                    format!("containment {}->{}", ticket.id, container.id)
                 }
                 PromotionFinding::DependencyNotRepresentable { blocked, blocking } => {
                     format!("dependency {}->{}", blocked.id, blocking.id)
@@ -956,8 +956,8 @@ mod tests {
                 "class e1",
                 "class c1",
                 "class c2",
-                "membership c1->e1",
-                "membership c2->e1",
+                "containment c1->e1",
+                "containment c2->e1",
                 "dependency c2->c1",
             ]
         );

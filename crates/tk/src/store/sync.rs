@@ -31,7 +31,7 @@ use crate::domain::effort::Effort;
 use crate::domain::item_class::ItemClass;
 use crate::domain::lifecycle::Lifecycle;
 use crate::domain::mutation_payload::{
-    DependencyRef, EffortChange, EpicRef, LifecycleChange, MutationPayload, PriorityChange,
+    ContainerRef, DependencyRef, EffortChange, LifecycleChange, MutationPayload, PriorityChange,
     Promotion, TitleBody,
 };
 use crate::domain::mutation_state::MutationState;
@@ -339,9 +339,9 @@ pub fn readopt_requirements(
 /// Ticket Kind for a Ticket, while Item Class, the stable internal Item ID,
 /// Local Fields, and relationships stay as the Item held them locally.
 ///
-/// Detach's withdrawals remain terminal. Dependencies and Epic Membership
+/// Detach's withdrawals remain terminal. Dependencies and Containment
 /// that become Backend intent append fresh ordered Mutations; an invalid
-/// Dependency refuses before any Store write, and mixed-Origin membership
+/// Dependency refuses before any Store write, and mixed-Origin Containment
 /// stays local. The caller commits the rebind and outbox together.
 fn readopt_backend_item(
     conn: &Connection,
@@ -627,15 +627,6 @@ pub enum LoadApplicableError {
         mutation_type: MutationType,
         item_id: String,
     },
-    #[error(
-        "mutation {mutation_type} requires Item {item_id} to be {expected}, but it is {actual}"
-    )]
-    CounterpartClassMismatch {
-        mutation_type: MutationType,
-        item_id: String,
-        expected: ItemClass,
-        actual: ItemClass,
-    },
     #[error("mutation {mutation_type} requires Ticket Kind for Item {item_id}")]
     MissingTicketKind {
         mutation_type: MutationType,
@@ -721,7 +712,7 @@ pub fn load_applicable_mutations(
 /// that the Mutations ordered behind it need (ADR-0036 "Resolve backend
 /// identity when the applicable Mutations are loaded" — rejected).
 ///
-/// Dependency and Epic-membership payloads carry a counterpart's internal
+/// Dependency and Containment payloads carry a counterpart's internal
 /// `items.id` (promote-safe). Its Backend identity is resolved immediately
 /// before delivery; a missing identity rejects resolution before the Adapter
 /// is invoked.
@@ -797,28 +788,23 @@ pub fn resolve_backend_operation(
                 blocking: backend_address(conn, &dependency.blocking_id, mutation_type)?,
             })
         }
-        (MutationType::AddTicketToEpic, MutationPayload::EpicRef(reference)) => {
+        (MutationType::SetTicketContainer, MutationPayload::ContainerRef(reference)) => {
             if item_class != ItemClass::Ticket {
                 return Err(shape_error());
             }
-            BackendOperation::Edit(BackendEdit::AddTicketToEpic {
+            BackendOperation::Edit(BackendEdit::SetTicketContainer {
                 ticket: target()?,
-                epic: backend_address_of_class(
-                    conn,
-                    &reference.epic_id,
-                    mutation_type,
-                    ItemClass::Epic,
-                )?,
+                container: backend_address(conn, &reference.container_id, mutation_type)?,
             })
         }
-        (MutationType::RemoveTicketFromEpic, MutationPayload::EpicRef(_)) => {
+        (MutationType::ClearTicketContainer, MutationPayload::ContainerRef(_)) => {
             if item_class != ItemClass::Ticket {
                 return Err(shape_error());
             }
-            // The payload keeps the Epic it left for the Sync Log and the
+            // The payload keeps the Container it left for the Sync Log and the
             // emission-time same-Backend gate, but delivery does not resolve
             // it: clearing a 0..1 slot needs no counterpart address.
-            BackendOperation::Edit(BackendEdit::RemoveTicketFromEpic { ticket: target()? })
+            BackendOperation::Edit(BackendEdit::ClearTicketContainer { ticket: target()? })
         }
         (MutationType::PromoteTicket, MutationPayload::Promotion(promotion)) => {
             if item_class != ItemClass::Ticket {
@@ -893,39 +879,6 @@ fn backend_address(
         })
 }
 
-fn backend_address_of_class(
-    conn: &Connection,
-    item_id: &str,
-    mutation_type: MutationType,
-    expected: ItemClass,
-) -> Result<BackendItemAddress, LoadApplicableError> {
-    let row: Option<(ItemClass, Option<String>)> = conn
-        .query_row(
-            "select item_class, backend_key from items where id = ?1",
-            params![item_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?;
-    let (actual, backend_key) = row.ok_or_else(|| LoadApplicableError::MissingBackendIdentity {
-        mutation_type,
-        item_id: item_id.to_owned(),
-    })?;
-    if actual != expected {
-        return Err(LoadApplicableError::CounterpartClassMismatch {
-            mutation_type,
-            item_id: item_id.to_owned(),
-            expected,
-            actual,
-        });
-    }
-    backend_key
-        .map(|backend_key| BackendItemAddress { backend_key })
-        .ok_or_else(|| LoadApplicableError::MissingBackendIdentity {
-            mutation_type,
-            item_id: item_id.to_owned(),
-        })
-}
-
 /// Decode a `payload_json` text column into the [`MutationPayload`] variant the
 /// [`MutationType`] selects.
 fn decode_mutation_payload(
@@ -946,8 +899,8 @@ fn decode_mutation_payload(
         Mt::UpdateTicket | Mt::UpdateEpic => MutationPayload::UpdateTitleBody(
             serde_json::from_str::<TitleBody>(payload_text).map_err(malformed)?,
         ),
-        Mt::AddTicketToEpic | Mt::RemoveTicketFromEpic => MutationPayload::EpicRef(
-            serde_json::from_str::<EpicRef>(payload_text).map_err(malformed)?,
+        Mt::SetTicketContainer | Mt::ClearTicketContainer => MutationPayload::ContainerRef(
+            serde_json::from_str::<ContainerRef>(payload_text).map_err(malformed)?,
         ),
         Mt::SetItemStatus => MutationPayload::Lifecycle(
             serde_json::from_str::<LifecycleChange>(payload_text).map_err(malformed)?,
@@ -1443,8 +1396,8 @@ pub fn mark_mutation_skipped(
         | MutationType::SetTicketEffort
         | MutationType::UpdateTicket
         | MutationType::UpdateEpic
-        | MutationType::AddTicketToEpic
-        | MutationType::RemoveTicketFromEpic
+        | MutationType::SetTicketContainer
+        | MutationType::ClearTicketContainer
         | MutationType::AddDependency
         | MutationType::RemoveDependency
         | MutationType::AddExternalBlocker
@@ -1799,8 +1752,8 @@ fn local_shields(conn: &Connection) -> rusqlite::Result<LocalShields> {
                 shields.effort.insert(item_id);
             }
             MutationType::SetItemStatus
-            | MutationType::AddTicketToEpic
-            | MutationType::RemoveTicketFromEpic
+            | MutationType::SetTicketContainer
+            | MutationType::ClearTicketContainer
             | MutationType::AddDependency
             | MutationType::RemoveDependency
             | MutationType::AddExternalBlocker
@@ -3002,14 +2955,14 @@ mod tests {
                 r#"{"status":"done"}"#,
             ),
             (
-                MutationType::AddTicketToEpic,
+                MutationType::SetTicketContainer,
                 ItemClass::Ticket,
-                r#"{"epic_id":"other"}"#,
+                r#"{"container_id":"other"}"#,
             ),
             (
-                MutationType::RemoveTicketFromEpic,
+                MutationType::ClearTicketContainer,
                 ItemClass::Ticket,
-                r#"{"epic_id":"other"}"#,
+                r#"{"container_id":"other"}"#,
             ),
             (
                 MutationType::AddDependency,
@@ -3852,7 +3805,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_operation_resolves_epic_membership_identities() {
+    fn resolve_operation_resolves_containment_identities() {
         let conn = open_seeded();
         backend_ticket(&conn, "ticket", "gh-5", "5", 1);
         insert_fixture_item(
@@ -3876,29 +3829,30 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                payload_json: r#"{"epic_id":"epic"}"#,
-                ..FixtureMutation::new(MutationType::AddTicketToEpic, "ticket")
+                payload_json: r#"{"container_id":"epic"}"#,
+                ..FixtureMutation::new(MutationType::SetTicketContainer, "ticket")
             },
         )
         .unwrap();
 
         let rows = load_applicable_mutations(&conn).unwrap();
-        let BackendOperation::Edit(BackendEdit::AddTicketToEpic { ticket, epic, .. }) =
-            resolve_backend_operation(&conn, rows.into_iter().next().unwrap())
-                .unwrap()
-                .operation
+        let BackendOperation::Edit(BackendEdit::SetTicketContainer {
+            ticket, container, ..
+        }) = resolve_backend_operation(&conn, rows.into_iter().next().unwrap())
+            .unwrap()
+            .operation
         else {
-            panic!("expected Epic membership edit")
+            panic!("expected Containment set")
         };
         assert_eq!(ticket.backend_key, "5");
-        assert_eq!(epic.backend_key, "9");
+        assert_eq!(container.backend_key, "9");
     }
 
-    /// A removal clears a 0..1 slot, so it must stay deliverable even when the
-    /// Epic it left has no Backend identity to address — the case a Promotion
-    /// that has not yet received its receipt would otherwise stop.
+    /// A clear empties a 0..1 slot, so it must stay deliverable even when the
+    /// Container it left has no Backend identity to address — the case a
+    /// Promotion that has not yet received its receipt would otherwise stop.
     #[test]
-    fn resolve_operation_removes_membership_without_addressing_the_epic() {
+    fn resolve_operation_clears_containment_without_addressing_the_container() {
         let conn = open_seeded();
         backend_ticket(&conn, "ticket", "gh-5", "5", 1);
         insert_fixture_item(
@@ -3919,48 +3873,47 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 1,
-                payload_json: r#"{"epic_id":"epic"}"#,
-                ..FixtureMutation::new(MutationType::RemoveTicketFromEpic, "ticket")
+                payload_json: r#"{"container_id":"epic"}"#,
+                ..FixtureMutation::new(MutationType::ClearTicketContainer, "ticket")
             },
         )
         .unwrap();
 
         let rows = load_applicable_mutations(&conn).unwrap();
-        let BackendOperation::Edit(BackendEdit::RemoveTicketFromEpic { ticket }) =
+        let BackendOperation::Edit(BackendEdit::ClearTicketContainer { ticket }) =
             resolve_backend_operation(&conn, rows.into_iter().next().unwrap())
                 .unwrap()
                 .operation
         else {
-            panic!("expected Epic membership removal")
+            panic!("expected Containment clear")
         };
         assert_eq!(ticket.backend_key, "5");
     }
 
     #[test]
-    fn resolve_operation_rejects_a_ticket_as_the_membership_epic() {
+    fn resolve_operation_addresses_a_ticket_as_the_container() {
         let conn = open_seeded();
         backend_ticket(&conn, "ticket", "gh-5", "5", 1);
-        backend_ticket(&conn, "not-epic", "gh-9", "9", 2);
+        backend_ticket(&conn, "holder", "gh-9", "9", 2);
         insert_fixture_mutation(
             &conn,
             FixtureMutation {
                 sequence: 1,
-                payload_json: r#"{"epic_id":"not-epic"}"#,
-                ..FixtureMutation::new(MutationType::AddTicketToEpic, "ticket")
+                payload_json: r#"{"container_id":"holder"}"#,
+                ..FixtureMutation::new(MutationType::SetTicketContainer, "ticket")
             },
         )
         .unwrap();
 
         let rows = load_applicable_mutations(&conn).unwrap();
-        assert!(matches!(
-            resolve_backend_operation(&conn, rows.into_iter().next().unwrap()),
-            Err(LoadApplicableError::CounterpartClassMismatch {
-                mutation_type: MutationType::AddTicketToEpic,
-                ref item_id,
-                expected: ItemClass::Epic,
-                actual: ItemClass::Ticket,
-            }) if item_id == "not-epic"
-        ));
+        let BackendOperation::Edit(BackendEdit::SetTicketContainer { container, .. }) =
+            resolve_backend_operation(&conn, rows.into_iter().next().unwrap())
+                .unwrap()
+                .operation
+        else {
+            panic!("expected Containment set")
+        };
+        assert_eq!(container.backend_key, "9");
     }
 
     #[test]
@@ -5053,7 +5006,7 @@ mod tests {
 
     #[test]
     fn unresolved_counts_split_by_state_and_ignore_terminal_rows() {
-        // Pins the membership of Unresolved Mutation (GLOSSARY.md): pending,
+        // Pins the Containment of Unresolved Mutation (GLOSSARY.md): pending,
         // failed and applying count; every terminal state does not. A failure
         // here means `tk list`'s footer count has silently changed which
         // Mutations it reports to the reader.
@@ -5629,7 +5582,7 @@ mod tests {
     }
 
     #[test]
-    fn readopt_refuses_membership_the_backend_cannot_represent() {
+    fn readopt_refuses_containment_the_backend_cannot_represent() {
         let mut conn = open_seeded();
         seed_remote(&conn);
         insert_fixture_item(
@@ -5689,8 +5642,8 @@ mod tests {
             AdoptStoreError::ReadoptRelationships { ref findings, .. }
                 if matches!(
                     findings.as_slice(),
-                    [RelationshipFinding::EpicMembershipNotRepresentable { ticket, epic }]
-                        if ticket.display_id == "tk-1" && epic.display_id == "gh-9"
+                    [RelationshipFinding::ContainmentNotRepresentable { ticket, container }]
+                        if ticket.display_id == "tk-1" && container.display_id == "gh-9"
                 )
         ));
         let origin: String = conn
@@ -5703,7 +5656,7 @@ mod tests {
     }
 
     #[test]
-    fn former_epic_requirements_include_membership_from_its_backend_ticket() {
+    fn former_epic_requirements_include_containment_from_its_backend_ticket() {
         let conn = open_seeded();
         insert_fixture_item(
             &conn,
@@ -5754,7 +5707,7 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        assert!(requirements.requires_epic_membership());
+        assert!(requirements.requires_containment());
     }
 
     #[test]

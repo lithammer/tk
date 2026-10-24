@@ -869,7 +869,7 @@ mod tests {
     }
 
     #[test]
-    fn detach_withdraws_membership_intent_once_its_promotion_operation_resolved() {
+    fn detach_withdraws_containment_intent_once_its_promotion_operation_resolved() {
         let store = TmpStore::new("repo");
         let mut conn = seed_store(&store);
         insert_fixture_item(&conn, local_epic("target", "tk-4", "Promoted Epic", 1)).unwrap();
@@ -926,11 +926,11 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 3,
-                payload_json: r#"{"epic_id":"target"}"#,
+                payload_json: r#"{"container_id":"target"}"#,
                 state: MutationState::Failed,
                 failure_json: Some(r#"{"detail":"sub-issues unavailable"}"#),
                 promotion_operation_id: Some("op-1"),
-                ..FixtureMutation::new(MutationType::AddTicketToEpic, "member")
+                ..FixtureMutation::new(MutationType::SetTicketContainer, "member")
             },
         )
         .unwrap();
@@ -943,7 +943,7 @@ mod tests {
             h.out(),
             "Detached: Backend Epic gh-9 → Local Epic tk-4\n\
              Backend object left unchanged: https://github.com/o/r/issues/9\n\
-             Withdrew add_ticket_to_epic for gh-10 (Mutation 3)\n"
+             Withdrew set_ticket_container for gh-10 (Mutation 3)\n"
         );
         let rows = mutation_rows(&conn);
         assert_eq!(states(&rows), ["applied", "cancelled", "cancelled"]);
@@ -951,7 +951,7 @@ mod tests {
             rows[2].failure_json.as_deref(),
             Some(r#"{"detail":"sub-issues unavailable"}"#)
         );
-        // Epic Membership stays local current state (ADR-0035).
+        // Containment stays local current state (ADR-0035).
         let container: Option<String> = conn
             .query_row(
                 "select container_id from items where id = 'member'",
@@ -1018,10 +1018,10 @@ mod tests {
                 &conn,
                 FixtureMutation {
                     sequence: 2,
-                    payload_json: r#"{"epic_id":"target"}"#,
+                    payload_json: r#"{"container_id":"target"}"#,
                     state: MutationState::Pending,
                     promotion_operation_id: Some("op-1"),
-                    ..FixtureMutation::new(MutationType::AddTicketToEpic, "child")
+                    ..FixtureMutation::new(MutationType::SetTicketContainer, "child")
                 },
             )
             .unwrap();
@@ -1033,7 +1033,7 @@ mod tests {
             assert_eq!(
                 h.err(),
                 format!(
-                    "tk detach: cannot detach 'gh-9': Mutation 2 (add_ticket_to_epic) belongs to the Promotion Operation of repo-1, \
+                    "tk detach: cannot detach 'gh-9': Mutation 2 (set_ticket_container) belongs to the Promotion Operation of repo-1, \
                      whose Promotion is unresolved.\n{remedy}\n"
                 ),
                 "Promotion state {state} must name a remedy its state allows"

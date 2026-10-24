@@ -8,9 +8,9 @@
 //! constraint on the column.
 //!
 //! `Serialize`/`Deserialize` therefore live on the per-variant payload
-//! structs ([`TitleBody`], [`EpicRef`], [`LifecycleChange`], [`PriorityChange`],
-//! [`EffortChange`], [`DependencyRef`], [`Promotion`]) rather than on the outer
-//! enum: serializing the enum directly would produce externally-tagged JSON
+//! structs ([`TitleBody`], [`ContainerRef`], [`LifecycleChange`],
+//! [`PriorityChange`], [`EffortChange`], [`DependencyRef`], [`Promotion`])
+//! rather than on the outer enum: serializing the enum directly would produce externally-tagged JSON
 //! (`{"UpdateTitleBody":{…}}`) that breaks the flat row contract.
 
 use serde::{Deserialize, Serialize};
@@ -26,9 +26,9 @@ pub enum MutationPayload {
     /// Payload for `update_ticket` and `update_epic` — full title/body snapshot
     /// of the current state after the edit.
     UpdateTitleBody(TitleBody),
-    /// Payload for `add_ticket_to_epic` and `remove_ticket_from_epic` — the
-    /// internal stable ID of the Epic being referenced.
-    EpicRef(EpicRef),
+    /// Payload for `set_ticket_container` and `clear_ticket_container` — the
+    /// internal stable ID of the Container being referenced.
+    ContainerRef(ContainerRef),
     /// Payload for `set_item_status` — target Lifecycle after the change.
     Lifecycle(LifecycleChange),
     /// Payload for `set_ticket_priority` — target Priority after the change.
@@ -52,7 +52,7 @@ impl MutationPayload {
     pub fn to_json_string(&self) -> String {
         match self {
             Self::UpdateTitleBody(v) => serde_json::to_string(v),
-            Self::EpicRef(v) => serde_json::to_string(v),
+            Self::ContainerRef(v) => serde_json::to_string(v),
             Self::Lifecycle(v) => serde_json::to_string(v),
             Self::Priority(v) => serde_json::to_string(v),
             Self::Effort(v) => serde_json::to_string(v),
@@ -70,13 +70,14 @@ pub struct TitleBody {
     pub body: String,
 }
 
-/// Epic reference used by `add_ticket_to_epic` / `remove_ticket_from_epic`.
+/// Container reference used by `set_ticket_container` /
+/// `clear_ticket_container`. The Container is an Epic or a Ticket (ADR-0055).
 ///
-/// `epic_id` is the internal stable `items.id`, not the Display ID, so
+/// `container_id` is the internal stable `items.id`, not the Display ID, so
 /// Promotion cannot break the reference.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EpicRef {
-    pub epic_id: String,
+pub struct ContainerRef {
+    pub container_id: String,
 }
 
 /// Lifecycle-change payload used by `set_item_status`.
@@ -151,12 +152,12 @@ mod tests {
     }
 
     #[test]
-    fn epic_ref_json_is_flat() {
-        let json = MutationPayload::EpicRef(EpicRef {
-            epic_id: "epic-id".into(),
+    fn container_ref_json_is_flat() {
+        let json = MutationPayload::ContainerRef(ContainerRef {
+            container_id: "container-id".into(),
         })
         .to_json_string();
-        assert_eq!(json, r#"{"epic_id":"epic-id"}"#);
+        assert_eq!(json, r#"{"container_id":"container-id"}"#);
     }
 
     #[test]

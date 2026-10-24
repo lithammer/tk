@@ -56,8 +56,8 @@ pub struct Args {
     /// Display ID or Alias of the Ticket or Epic to promote.
     #[arg(value_name = "ID", required = true)]
     pub id: Option<String>,
-    /// Also promote the Epic's directly contained Local Tickets — its
-    /// Promotion Children. Epics only.
+    /// Also promote the Local Tickets the Epic or Ticket directly holds — its
+    /// Promotion Children.
     #[arg(long)]
     pub children: bool,
 }
@@ -121,14 +121,6 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         .map_err(CommandError::failure)?;
 
     let target = resolve_target(&store, &id)?;
-
-    // Only an Epic contains Promotion Children, so `--children` elsewhere is a
-    // malformed invocation rather than an operation to refuse.
-    if args.children && target.item_class != ItemClass::Epic {
-        return Err(CommandError::usage(format!(
-            "'{id}' is not an Epic; --children promotes the Promotion Children of an Epic"
-        )));
-    }
 
     let mut adapter = open_adapter(deps.runner, deps.cwd, &store)?;
     promote(
@@ -935,9 +927,9 @@ fn render_finding(finding: &PromotionFinding, backend: BackendKind) -> String {
             "{} depends on {}, and the {backend} Backend cannot represent a Dependency under Promotion.",
             blocked.display_id, blocking.display_id
         ),
-        PromotionFinding::EpicMembershipNotRepresentable { ticket, epic } => format!(
-            "{} belongs to Epic {}, and the {backend} Backend cannot represent Epic membership under Promotion.",
-            ticket.display_id, epic.display_id
+        PromotionFinding::ContainmentNotRepresentable { ticket, container } => format!(
+            "{} is held by {}, and the {backend} Backend cannot represent Containment under Promotion.",
+            ticket.display_id, container.display_id
         ),
     }
 }
@@ -1410,32 +1402,6 @@ mod tests {
     }
 
     #[test]
-    fn children_on_a_ticket_is_a_usage_error() {
-        let fixture = TmpStore::new("repo");
-        let conn = seed_store(&fixture);
-        local_ticket(&conn, "t1", "tk-1", 1);
-        let cwd_path = cwd();
-        let mut h = Harness::with_seed(&cwd_path, &fixture, 7);
-        expect_git(&h, &fixture);
-
-        let code = run_rendered(&mut h, "tk-1", true);
-
-        assert_eq!(
-            code,
-            Exit::Usage,
-            "only an Epic contains Promotion Children"
-        );
-        assert!(
-            h.err().contains(
-                "tk promote: 'tk-1' is not an Epic; --children promotes the Promotion Children of an Epic"
-            ),
-            "{}",
-            h.err()
-        );
-        assert_eq!(mutation_count(&conn).unwrap(), 0);
-    }
-
-    #[test]
     fn no_remote_configured_is_a_failure_with_the_sync_guidance() {
         let fixture = TmpStore::new("repo");
         let conn = seed_store(&fixture);
@@ -1579,7 +1545,7 @@ mod tests {
     }
 
     #[test]
-    fn a_github_remote_promotes_an_epic_and_child_with_membership() {
+    fn a_github_remote_promotes_an_epic_and_child_with_containment() {
         let fixture = TmpStore::new("repo");
         let conn = seed_store(&fixture);
         local_epic(&conn, "e1", "tk-1", 1);
@@ -1629,6 +1595,63 @@ mod tests {
         );
         assert_eq!(item_state(&conn, "e1"), ("gh-1".into(), "backend".into()));
         assert_eq!(item_state(&conn, "c1"), ("gh-2".into(), "backend".into()));
+        h.runner.assert_all_consumed();
+    }
+
+    #[test]
+    fn children_promotes_the_tickets_a_ticket_container_holds() {
+        let fixture = TmpStore::new("repo");
+        let conn = seed_store(&fixture);
+        local_ticket(&conn, "t1", "tk-1", 1);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "held",
+                display: "tk-2",
+                title: "Child",
+                container_id: Some("t1"),
+                container_class: "ticket",
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        // Outside the Container, so `--children` must leave it local.
+        local_ticket(&conn, "other", "tk-3", 3);
+        let cwd_path = cwd();
+        let mut h = Harness::with_seed(&cwd_path, &fixture, 7);
+        expect_git(&h, &fixture);
+        expect_github_ticket_fields(&h, "o", "r");
+        expect_github_ticket_fields(&h, "o", "r");
+        expect_github_create(&h, "o", "r", ("Local work", ""), None, Some("O_P2"), 1);
+        expect_github_ticket_fields(&h, "o", "r");
+        expect_github_create(&h, "o", "r", ("Child", ""), None, Some("O_P2"), 2);
+        h.runner.expect_exact(
+            &[
+                "gh",
+                "issue",
+                "edit",
+                "https://github.com/o/r/issues/2",
+                "--parent",
+                "https://github.com/o/r/issues/1",
+            ],
+            RunOutput {
+                exit_code: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            },
+        );
+
+        let code = run_rendered(&mut h, "tk-1", true);
+
+        assert_eq!(code, Exit::Ok, "{}", h.err());
+        assert_eq!(
+            h.out(),
+            "Promoted Ticket: tk-1 -> gh-1\nPromoted Ticket: tk-2 -> gh-2\n"
+        );
+        assert_eq!(item_state(&conn, "t1"), ("gh-1".into(), "backend".into()));
+        assert_eq!(item_state(&conn, "held"), ("gh-2".into(), "backend".into()));
+        assert_eq!(item_state(&conn, "other"), ("tk-3".into(), "local".into()));
         h.runner.assert_all_consumed();
     }
 
@@ -2069,8 +2092,8 @@ mod tests {
             &conn,
             FixtureMutation {
                 sequence: 9,
-                payload_json: r#"{"epic_id":"e1"}"#,
-                ..FixtureMutation::new(MutationType::AddTicketToEpic, "backend")
+                payload_json: r#"{"container_id":"e1"}"#,
+                ..FixtureMutation::new(MutationType::SetTicketContainer, "backend")
             },
         )
         .unwrap();
@@ -2085,7 +2108,7 @@ mod tests {
         assert_eq!(
             h.out(),
             "Cancelled Promotion: Epic tk-1\n\
-             Withdrew add_ticket_to_epic for gh-9 (Mutation 9)\n"
+             Withdrew set_ticket_container for gh-9 (Mutation 9)\n"
         );
     }
 
@@ -2489,9 +2512,9 @@ mod tests {
             PromotionFinding::TriageTicket {
                 item: item_ref("tk-2"),
             },
-            PromotionFinding::EpicMembershipNotRepresentable {
+            PromotionFinding::ContainmentNotRepresentable {
                 ticket: item_ref("tk-2"),
-                epic: item_ref("tk-1"),
+                container: item_ref("tk-1"),
             },
         ];
 
@@ -2507,7 +2530,7 @@ mod tests {
             "tk promote: cannot promote tk-1:\n  \
              tk-1: the github Backend cannot create Epics under Promotion.\n  \
              tk-2 is in triage; run 'tk accept tk-2 --priority P0..P3' before promoting it.\n  \
-             tk-2 belongs to Epic tk-1, and the github Backend cannot represent Epic membership under Promotion.\n"
+             tk-2 is held by tk-1, and the github Backend cannot represent Containment under Promotion.\n"
         );
     }
 
@@ -2578,7 +2601,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::with_seed(&cwd_path, &fixture, 7);
         let mut store = open_store(&h, &fixture, &cwd_path);
-        // Three Promotions, then the two memberships and the Dependency.
+        // Three Promotions, then the two Containments and the Dependency.
         let mut fake = adapter(
             vec![
                 EditResponse::Success,

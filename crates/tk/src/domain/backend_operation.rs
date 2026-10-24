@@ -82,15 +82,17 @@ pub enum BackendEdit {
         blocked: BackendItemAddress,
         blocking: BackendItemAddress,
     },
-    AddTicketToEpic {
+    /// Holds the Ticket in a Container, an Epic or a Ticket. The Backend
+    /// replaces any parent the Ticket already has, so a move is this one edit.
+    SetTicketContainer {
         ticket: BackendItemAddress,
-        epic: BackendItemAddress,
+        container: BackendItemAddress,
     },
-    /// Clearing a Ticket's containing Epic names only the Ticket: Epic
-    /// membership is 0..1, so the Repository Store's cleared `container_id` is
-    /// the whole intent and no counterpart identity has to be addressable for
-    /// the removal to be delivered.
-    RemoveTicketFromEpic { ticket: BackendItemAddress },
+    /// Clearing a Ticket's Container names only the Ticket: Containment is
+    /// 0..1, so the Repository Store's cleared `container_id` is the whole
+    /// intent and no counterpart identity has to be addressable for the clear
+    /// to be delivered.
+    ClearTicketContainer { ticket: BackendItemAddress },
 }
 
 /// A Promotion Mutation that creates a new Backend object.

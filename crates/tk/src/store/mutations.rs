@@ -23,7 +23,7 @@ use thiserror::Error;
 use crate::domain::backend_binding::BackendBinding;
 use crate::domain::backend_outcome::Failure;
 use crate::domain::item_class::ItemClass;
-use crate::domain::mutation_payload::{DependencyRef, EpicRef, MutationPayload, Promotion};
+use crate::domain::mutation_payload::{ContainerRef, DependencyRef, MutationPayload, Promotion};
 use crate::domain::mutation_state::MutationState;
 use crate::domain::mutation_type::{AddressedCounterpart, MutationType};
 use crate::domain::origin::Origin;
@@ -99,7 +99,9 @@ fn addressed_counterpart_id(
 ) -> Result<Option<String>, serde_json::Error> {
     Ok(match mutation_type.addressed_counterpart() {
         AddressedCounterpart::None => None,
-        AddressedCounterpart::Epic => Some(serde_json::from_str::<EpicRef>(payload_json)?.epic_id),
+        AddressedCounterpart::Container => {
+            Some(serde_json::from_str::<ContainerRef>(payload_json)?.container_id)
+        }
         AddressedCounterpart::BlockingItem => {
             Some(serde_json::from_str::<DependencyRef>(payload_json)?.blocking_id)
         }

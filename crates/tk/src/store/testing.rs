@@ -161,6 +161,9 @@ pub struct FixtureItem<'a> {
     pub backend_kind: Option<&'a str>,
     pub backend_key: Option<&'a str>,
     pub container_id: Option<&'a str>,
+    /// Class of the Container `container_id` names; `"ticket"` fixtures a
+    /// Ticket that holds Tickets (ADR-0055). Ignored without a `container_id`.
+    pub container_class: &'a str,
     /// Selection State override for Ticket fixtures (ADR-0027). `None` derives
     /// the default `accepted`; set `Some("triage")` (with `priority: None`) or
     /// `Some("parked")` to fixture those states. Ignored for Epics, which
@@ -191,6 +194,7 @@ impl Default for FixtureItem<'_> {
             backend_kind: None,
             backend_key: None,
             container_id: None,
+            container_class: "epic",
             selection_state: None,
             created_seq: 0,
             created_at: "2026-05-09T00:00:00.000Z",
@@ -265,7 +269,7 @@ fn insert_item_row(
     work_state: Option<&str>,
     selection_state: Option<&str>,
 ) -> rusqlite::Result<()> {
-    let container_class = item.container_id.map(|_| "epic");
+    let container_class = item.container_id.map(|_| item.container_class);
     let tx = conn.unchecked_transaction()?;
     tx.execute(
         "insert into items(\

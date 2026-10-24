@@ -286,12 +286,12 @@ fn readopt_refusal(
                     readopt_display_id(blocking, item_id, backend_display_id)
                 );
             }
-            RelationshipFinding::EpicMembershipNotRepresentable { ticket, epic } => {
+            RelationshipFinding::ContainmentNotRepresentable { ticket, container } => {
                 let _ = write!(
                     body,
-                    "{} belongs to Epic {}, and the {backend_kind} Backend cannot represent Epic membership",
+                    "{} is held by {}, and the {backend_kind} Backend cannot represent Containment",
                     readopt_display_id(ticket, item_id, backend_display_id),
-                    readopt_display_id(epic, item_id, backend_display_id)
+                    readopt_display_id(container, item_id, backend_display_id)
                 );
             }
         }
@@ -752,9 +752,9 @@ mod tests {
                     blocked: item("stable", "gh-42", ItemClass::Ticket),
                     blocking: item("blocker", "gh-8", ItemClass::Ticket),
                 },
-                RelationshipFinding::EpicMembershipNotRepresentable {
+                RelationshipFinding::ContainmentNotRepresentable {
                     ticket: item("stable", "gh-42", ItemClass::Ticket),
-                    epic: item("parent", "gh-9", ItemClass::Epic),
+                    container: item("parent", "gh-9", ItemClass::Epic),
                 },
             ],
         });
@@ -764,7 +764,7 @@ mod tests {
             String::from_utf8(out).unwrap(),
             "tk adopt: cannot re-adopt gh-42:\n  \
              gh-42 depends on gh-8, and the github Backend cannot represent a Dependency\n  \
-             gh-42 belongs to Epic gh-9, and the github Backend cannot represent Epic membership\n"
+             gh-42 is held by gh-9, and the github Backend cannot represent Containment\n"
         );
     }
 
@@ -1608,7 +1608,7 @@ mod tests {
     }
 
     #[test]
-    fn readopt_reports_ordered_membership_and_dependency_mutations() {
+    fn readopt_reports_ordered_containment_and_dependency_mutations() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
@@ -1673,7 +1673,7 @@ mod tests {
              Imported title, body, Ticket Kind, and Lifecycle from the Backend\n\
              Kind: task\n\
              Status: open\n\
-             Queued add_ticket_to_epic for gh-42 (Mutation 1)\n\
+             Queued set_ticket_container for gh-42 (Mutation 1)\n\
              Queued add_dependency for gh-8 (Mutation 2)\n\
              Run 'tk sync' to apply the queued relationships.\n"
         );
@@ -1701,9 +1701,9 @@ mod tests {
             vec![
                 (
                     1,
-                    "add_ticket_to_epic".to_owned(),
+                    "set_ticket_container".to_owned(),
                     "stable".to_owned(),
-                    r#"{"epic_id":"parent"}"#.to_owned(),
+                    r#"{"container_id":"parent"}"#.to_owned(),
                     "pending".to_owned(),
                 ),
                 (

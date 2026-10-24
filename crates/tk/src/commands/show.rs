@@ -695,9 +695,9 @@ mod tests {
     /// `→`, BLOCKING `←` (the two blocker relationships read as opposite
     /// directions, mirroring the `↑`/`↓` parent/child pair). EXTERNAL BLOCKERS is
     /// Backend-Adapter-sourced and unreachable from the CLI, so this direct
-    /// `render()` call is the only path that covers it. Realism is not the point
-    /// — a real Ticket would not carry both a parent and children — coverage of
-    /// every layout branch is.
+    /// `render()` call is the only path that covers it. Coverage of every
+    /// layout branch is the point, though PARENT with TICKETS now occurs for
+    /// real (ADR-0055).
     #[test]
     fn render_pins_every_section_header_glyph_and_order() {
         let summary = |display_id: &str, title: &str, class, status, priority| ItemSummary {
