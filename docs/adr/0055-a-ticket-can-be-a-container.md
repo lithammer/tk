@@ -48,6 +48,13 @@ parent spec tries to build all of it in one run instead of taking the slices,
 "the most-reported problem with the skill". Once the slices are done, the
 Container is ready, and its work is to check the whole and close it.
 
+The same edge counts against cycles. `tk block` refuses a Dependency, and the
+Parent Argument refuses a Container, when the result would make a Ticket wait
+on itself: `tk block A1 A` where A holds A1, or A1 waiting on B while B waits
+on A. A check that walks Dependencies alone misses both, and readiness has no
+guard of its own, so every Ticket in the loop would wait forever. An Epic adds
+no edge, since it never waits.
+
 Effective Priority follows the same edge. A Ticket Container counts as a
 Blocked Item of each Ticket it holds, so a P0 Container lifts its P3 slices
 to Effective P0. An Epic has no Priority and keeps its ADR-0015 rule: a Ticket

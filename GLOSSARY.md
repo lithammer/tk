@@ -510,7 +510,7 @@ _Avoid_: ticket, tickets
 - The **Parent Argument** resolves to the **Ticket**'s new **Container**: an
   **Epic** or a **Ticket**.
 - A **Ticket** held by a **Ticket** holds no **Tickets**, and a **Ticket** that
-  holds **Tickets** has no **Container** but an **Epic**. The longest chain is
+  holds **Tickets** has no **Container** except an **Epic**. The longest chain is
   **Epic**, **Ticket**, **Ticket**.
 - A **Ticket** has exactly one **Ticket Kind**.
 - A **Ticket** has exactly one **Priority**.
@@ -565,7 +565,10 @@ _Avoid_: ticket, tickets
 - A **Dependency** has exactly one **Blocking Item** and one **Blocked Item**.
 - A **Ticket** or **Epic** may have zero or more **Dependencies**.
 - **Dependencies** may connect **Tickets** and **Epics** in any blocking or blocked combination.
-- **Dependencies** must not form cycles.
+- **Dependencies** must not form cycles, counting each **Ticket** a **Ticket**
+  **Container** holds as one of its **Blocking Items**. `tk block` and the
+  **Parent Argument** refuse a change that would make a **Ticket** wait on
+  itself. An **Epic** adds no edge, since it never waits.
 - **Dependency** is distinct from **Containment**.
 - A **Ticket** or **Epic** may have zero or more **External Blockers**.
 - A **Ticket** is ready only when its **Item Status** is `open`, it has no unresolved **Dependencies**, it has no **External Blockers**, and every **Ticket** it contains is `done`.
