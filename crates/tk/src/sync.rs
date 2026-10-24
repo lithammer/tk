@@ -359,7 +359,7 @@ mod tests {
     fn refresh(title: &str) -> BackendItemRefresh {
         BackendItemRefresh {
             ticket_kind: Some(TicketKind::Task),
-            priority: None,
+            ticket_fields: None,
             title: title.into(),
             body: String::new(),
             status: Lifecycle::Open,
@@ -774,7 +774,7 @@ mod tests {
             &graphql,
             &crate::remote::github::issue_fields_request_body("o", "r"),
             ok(
-                r#"{"data":{"repository":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]}],"pageInfo":{"hasNextPage":false}}}}}"#,
+                r#"{"data":{"repository":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}}}}}"#,
             ),
         );
         runner.expect_exact_with_stdin_error(
@@ -784,7 +784,7 @@ mod tests {
                 "Local work",
                 "",
                 None,
-                Some(("F1", "O2")),
+                &[("F1", "O2")],
             ),
             ProcError::OutcomeUnobserved,
         );
@@ -910,7 +910,7 @@ mod tests {
                 body: "Stale Backend body".into(),
                 status: Lifecycle::Done,
                 ticket_kind: Some(TicketKind::Task),
-                priority: None,
+                ticket_fields: None,
             }],
             vec![EditResponse::Success],
         );

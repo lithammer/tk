@@ -10,6 +10,7 @@
 
 use std::ops::ControlFlow;
 
+use crate::domain::effort::Effort;
 use crate::domain::item_class::ItemClass;
 use crate::domain::priority::Priority;
 use crate::domain::status::ItemStatus;
@@ -27,6 +28,7 @@ pub struct GrepItem {
     pub item_class: ItemClass,
     pub ticket_kind: Option<TicketKind>,
     pub priority: Option<Priority>,
+    pub effort: Option<Effort>,
     pub title: String,
     pub body: String,
     pub status: ItemStatus,
@@ -60,7 +62,7 @@ where
 select display_value, item_class, ticket_kind, priority, title, body, status, \
        created_at, updated_at, work_state, ",
         pending_promotion_sql!("items"),
-        " \
+        ", effort \
   from items \
  order by created_seq asc"
     );
@@ -83,6 +85,7 @@ fn item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GrepItem> {
         item_class: row.get(1)?,
         ticket_kind: row.get(2)?,
         priority: row.get(3)?,
+        effort: row.get(11)?,
         title: row.get(4)?,
         body: row.get(5)?,
         // Item Status is derived, not stored (ADR-0043): Lifecycle and Work

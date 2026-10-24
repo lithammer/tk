@@ -53,7 +53,7 @@ select i.id, i.display_value, i.item_class, i.ticket_kind, i.priority, i.title, 
        ) as has_failed_mutation, \
        i.work_state, ",
     pending_promotion_sql!("i"),
-    " as has_pending_promotion \
+    " as has_pending_promotion, i.effort \
   from items i \
  where instr(lower(i.title), lower(?1)) > 0 \
  order by i.created_seq asc"

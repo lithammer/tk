@@ -5,8 +5,9 @@
 //! fields for an existing Backend Item, so a Backend Pull cannot redefine its
 //! Repository Store identity or Item Class (ADR-0034).
 
+use super::effort::Effort;
 use super::lifecycle::Lifecycle;
-use super::mutation_payload::{LifecycleChange, PriorityChange, TitleBody};
+use super::mutation_payload::{EffortChange, LifecycleChange, PriorityChange, TitleBody};
 use super::priority::Priority;
 use super::ticket_kind::TicketKind;
 use thiserror::Error;
@@ -69,6 +70,10 @@ pub enum BackendEdit {
         ticket: BackendItemAddress,
         change: PriorityChange,
     },
+    SetTicketEffort {
+        ticket: BackendItemAddress,
+        change: EffortChange,
+    },
     AddDependency {
         blocked: BackendItemAddress,
         blocking: BackendItemAddress,
@@ -96,10 +101,10 @@ pub enum BackendCreate {
         /// Current Ticket Kind from the Repository Store. This is transient
         /// delivery data, not persisted Promotion intent.
         ticket_kind: TicketKind,
-        /// Current Priority from the Repository Store. Promotion refuses a
-        /// triage Ticket, the only Ticket without one (ADR-0027). Transient
-        /// delivery data, like `ticket_kind`.
-        priority: Priority,
+        /// Current Priority and Effort from the Repository Store. Promotion
+        /// refuses a triage Ticket, the only Ticket without a Priority
+        /// (ADR-0027). Transient delivery data, like `ticket_kind`.
+        fields: SharedTicketFields,
     },
     Epic {
         snapshot: TitleBody,
@@ -139,9 +144,17 @@ pub struct BackendItemRefresh {
     pub status: Lifecycle,
     /// Ticket Kind when the Backend can refresh it; `None` preserves it.
     pub ticket_kind: Option<TicketKind>,
-    /// Priority the Backend holds for a Ticket; `None` on an Epic issue
-    /// preserves the stored value (ADR-0054).
-    pub priority: Option<Priority>,
+    /// The Ticket fields the Backend holds; `None` on an Epic issue
+    /// preserves the stored values (ADR-0054).
+    pub ticket_fields: Option<SharedTicketFields>,
+}
+
+/// The Shared Fields only a Ticket carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SharedTicketFields {
+    pub priority: Priority,
+    /// `None` when the Backend holds no Effort, which clears the local one.
+    pub effort: Option<Effort>,
 }
 
 /// One keyed refresh returned as part of a Backend Pull.
@@ -226,7 +239,10 @@ mod tests {
                 body: String::new(),
                 status: Lifecycle::Open,
                 ticket_kind: Some(TicketKind::Task),
-                priority: Some(Priority::P2),
+                ticket_fields: Some(SharedTicketFields {
+                    priority: Priority::P2,
+                    effort: None,
+                }),
             },
         }
     }

@@ -2,7 +2,7 @@
 //! markers also used by the dedicated Plan view.
 //!
 //! Both commands render the same compact, unaligned row — status glyph,
-//! Display ID, optional blocked indicator, priority/kind markers, title —
+//! Display ID, optional blocked indicator, priority/effort/kind markers, title —
 //! and the same summary chrome (separator, totals, status/blocked legend).
 //! `tk list` walks a List Tree and passes a tree prefix per row; `tk search`
 //! lays its matches out flat with an empty prefix (ADR-0025). Keeping the
@@ -11,6 +11,7 @@
 
 use std::io::Write;
 
+use crate::domain::effort::Effort;
 use crate::domain::item_class::ItemClass;
 use crate::domain::priority::Priority;
 use crate::domain::selection_state::SelectionState;
@@ -33,11 +34,25 @@ pub(crate) fn selection_badge(selection_state: Option<SelectionState>) -> Option
     }
 }
 
+/// The compact row token for a Priority, with any Effort fused on as `/L`,
+/// `/M`, or `/H`: `P2/L`. Effort qualifies the Priority a row is chosen by.
+fn priority_token(priority: Priority, effort: Option<Effort>) -> String {
+    let letter = match effort {
+        None => "",
+        Some(Effort::Low) => "/L",
+        Some(Effort::Medium) => "/M",
+        Some(Effort::High) => "/H",
+    };
+    format!("{}{letter}", priority.text())
+}
+
 /// Shared Priority and Bug markers for List, Search and Plan rows.
-/// Triage omits Priority but keeps the Bug marker (ADR-0027).
+/// Triage omits Priority, and with it Effort, but keeps the Bug marker
+/// (ADR-0027).
 pub(crate) fn render_ticket_markers<W: Write + ?Sized>(
     out: &mut W,
     priority: Option<Priority>,
+    effort: Option<Effort>,
     kind: Option<TicketKind>,
     styler: SubStyler,
 ) -> std::io::Result<()> {
@@ -47,7 +62,7 @@ pub(crate) fn render_ticket_markers<W: Write + ?Sized>(
             out,
             " {} {}",
             styler.wrap(style, "●"),
-            styler.wrap(style, priority.text())
+            styler.wrap(style, &priority_token(priority, effort))
         )?;
     }
     if kind == Some(TicketKind::Bug) {
@@ -132,7 +147,7 @@ pub(crate) fn render_row<W: Write + ?Sized>(
 
     match row.item_class {
         ItemClass::Ticket => {
-            render_ticket_markers(stdout, row.priority, row.ticket_kind, styler)?;
+            render_ticket_markers(stdout, row.priority, row.effort, row.ticket_kind, styler)?;
             if let Some(badge) = selection_badge(row.selection_state) {
                 write!(stdout, " {}", styler.wrap(palette::SELECTION_BADGE, badge))?;
             }

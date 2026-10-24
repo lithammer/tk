@@ -21,16 +21,18 @@ use crate::domain::backend_binding::BackendBinding;
 use crate::domain::backend_kind::BackendKind;
 use crate::domain::backend_operation::{
     AdoptedItem, BackendCreate, BackendEdit, BackendItemAddress, BackendItemRefresh,
-    BackendOperation,
+    BackendOperation, SharedTicketFields,
 };
 use crate::domain::backend_outcome::{
     BackendCreateOutcome, BackendEditOutcome, Failure, FailureClass,
 };
 use crate::domain::binding_display_provenance::BindingDisplayProvenance;
+use crate::domain::effort::Effort;
 use crate::domain::item_class::ItemClass;
 use crate::domain::lifecycle::Lifecycle;
 use crate::domain::mutation_payload::{
-    DependencyRef, EpicRef, LifecycleChange, MutationPayload, PriorityChange, Promotion, TitleBody,
+    DependencyRef, EffortChange, EpicRef, LifecycleChange, MutationPayload, PriorityChange,
+    Promotion, TitleBody,
 };
 use crate::domain::mutation_state::MutationState;
 use crate::domain::mutation_type::MutationType;
@@ -774,6 +776,15 @@ pub fn resolve_backend_operation(
                 change,
             })
         }
+        (MutationType::SetTicketEffort, MutationPayload::Effort(change)) => {
+            if item_class != ItemClass::Ticket {
+                return Err(shape_error());
+            }
+            BackendOperation::Edit(BackendEdit::SetTicketEffort {
+                ticket: target()?,
+                change,
+            })
+        }
         (MutationType::AddDependency, MutationPayload::DependencyRef(dependency)) => {
             BackendOperation::Edit(BackendEdit::AddDependency {
                 blocked: target()?,
@@ -814,13 +825,14 @@ pub fn resolve_backend_operation(
                 return Err(shape_error());
             }
             let Promotion { title, body, .. } = promotion;
-            let (ticket_kind, priority) = conn.query_row(
-                "select ticket_kind, priority from items where id = ?1",
+            let (ticket_kind, priority, effort) = conn.query_row(
+                "select ticket_kind, priority, effort from items where id = ?1",
                 params![item_id],
                 |row| {
                     Ok((
                         row.get::<_, Option<TicketKind>>(0)?,
                         row.get::<_, Option<Priority>>(1)?,
+                        row.get::<_, Option<Effort>>(2)?,
                     ))
                 },
             )?;
@@ -836,7 +848,7 @@ pub fn resolve_backend_operation(
             BackendOperation::Create(BackendCreate::Ticket {
                 snapshot: TitleBody { title, body },
                 ticket_kind,
-                priority,
+                fields: SharedTicketFields { priority, effort },
             })
         }
         (MutationType::PromoteEpic, MutationPayload::Promotion(promotion)) => {
@@ -942,6 +954,9 @@ fn decode_mutation_payload(
         ),
         Mt::SetTicketPriority => MutationPayload::Priority(
             serde_json::from_str::<PriorityChange>(payload_text).map_err(malformed)?,
+        ),
+        Mt::SetTicketEffort => MutationPayload::Effort(
+            serde_json::from_str::<EffortChange>(payload_text).map_err(malformed)?,
         ),
         Mt::AddDependency | Mt::RemoveDependency => MutationPayload::DependencyRef(
             serde_json::from_str::<DependencyRef>(payload_text).map_err(malformed)?,
@@ -1425,6 +1440,7 @@ pub fn mark_mutation_skipped(
         }
         MutationType::SetItemStatus
         | MutationType::SetTicketPriority
+        | MutationType::SetTicketEffort
         | MutationType::UpdateTicket
         | MutationType::UpdateEpic
         | MutationType::AddTicketToEpic
@@ -1697,9 +1713,16 @@ pub fn merge_backend_refreshes(
             body,
             status,
             ticket_kind,
-            priority,
+            ticket_fields,
         } = refresh;
-        let priority_write = priority.filter(|_| !shields.priority.contains(item_id.as_str()));
+        let priority_write = ticket_fields
+            .map(|fields| fields.priority)
+            .filter(|_| !shields.priority.contains(item_id.as_str()));
+        // Effort needs a separate "write" flag: a Backend with no Effort
+        // clears the local one, so `None` is a value here, not "keep".
+        let effort_write = ticket_fields
+            .map(|fields| fields.effort)
+            .filter(|_| !shields.effort.contains(item_id.as_str()));
         let (title_write, body_write) = if preserve_content {
             (None, None)
         } else {
@@ -1714,17 +1737,20 @@ pub fn merge_backend_refreshes(
         // (ADR-0043, ADR-0021). Title/body shielding does not affect Lifecycle
         // or Ticket Kind (ADR-0044). A triage Ticket holds no Priority
         // (ADR-0027), so Pull leaves it unset; the table CHECK would abort the
-        // whole merge otherwise.
+        // whole merge otherwise. An Epic holds no Effort, so the same CHECK
+        // keeps Pull from writing one.
         tx.execute(
             "update items set title = coalesce(?2, title), body = coalesce(?3, body), updated_at = max(updated_at, ?5), \
               ticket_kind = case when item_class = 'ticket' then coalesce(?6, ticket_kind) else ticket_kind end, \
               priority = case when item_class = 'ticket' and selection_state <> 'triage' \
                               then coalesce(?8, priority) else priority end, \
+              effort = case when item_class = 'ticket' and ?9 then ?10 else effort end, \
               status = ?4, \
               work_state = coalesce(?7, work_state) \
               where id = ?1",
             params![item_id, title_write, body_write, status, now,
-                ticket_kind, work_state_write, priority_write],
+                ticket_kind, work_state_write, priority_write,
+                effort_write.is_some(), effort_write.flatten()],
         )?;
     }
     tx.commit()?;
@@ -1737,6 +1763,8 @@ struct LocalShields {
     content: HashMap<String, ItemClass>,
     /// Tickets whose unresolved Priority Mutation shields Priority.
     priority: HashSet<String>,
+    /// Tickets whose unresolved Effort Mutation shields Effort.
+    effort: HashSet<String>,
 }
 
 /// Collect the exact Items whose unresolved Mutations shield Pull fields.
@@ -1754,6 +1782,7 @@ fn local_shields(conn: &Connection) -> rusqlite::Result<LocalShields> {
     let mut shields = LocalShields {
         content: HashMap::new(),
         priority: HashSet::new(),
+        effort: HashSet::new(),
     };
     while let Some(row) = rows.next()? {
         let item_id: String = row.get(0)?;
@@ -1765,6 +1794,9 @@ fn local_shields(conn: &Connection) -> rusqlite::Result<LocalShields> {
             }
             MutationType::SetTicketPriority => {
                 shields.priority.insert(item_id);
+            }
+            MutationType::SetTicketEffort => {
+                shields.effort.insert(item_id);
             }
             MutationType::SetItemStatus
             | MutationType::AddTicketToEpic
@@ -2431,7 +2463,7 @@ mod tests {
             body: "Body".into(),
             status,
             ticket_kind: Some(TicketKind::Task),
-            priority: None,
+            ticket_fields: None,
         }
     }
 
@@ -2604,7 +2636,7 @@ mod tests {
                         body: "Stale Backend body".into(),
                         status: Lifecycle::Done,
                         ticket_kind: Some(TicketKind::Task),
-                        priority: None,
+                        ticket_fields: None,
                     },
                 )],
                 "2026-05-20T00:00:00Z",
@@ -2660,7 +2692,10 @@ mod tests {
             )
             .unwrap();
             let backend = BackendItemRefresh {
-                priority: Some(Priority::P0),
+                ticket_fields: Some(SharedTicketFields {
+                    priority: Priority::P0,
+                    effort: None,
+                }),
                 ..refresh("Backend title", Lifecycle::Open)
             };
 
@@ -2694,6 +2729,70 @@ mod tests {
                 ("P0".into(), "Backend title".into()),
                 "{state:?}"
             );
+        }
+    }
+
+    #[test]
+    fn refresh_effort_shield_follows_unresolved_set_ticket_effort_only() {
+        // A Backend with no Effort clears the local one, unless a pending or
+        // failed `set_ticket_effort` holds it (ADR-0054). Moving the type out
+        // of the shield in `local_shields` breaks the first two rows; reading
+        // a missing Backend value as "keep", as Priority's merge does, breaks
+        // the last two and every t2 row.
+        for (state, failure, imported) in [
+            (MutationState::Pending, None, false),
+            (
+                MutationState::Failed,
+                Some(r#"{"detail":"rejected"}"#),
+                false,
+            ),
+            (MutationState::Applied, None, true),
+            (MutationState::Skipped, None, true),
+        ] {
+            let mut conn = open_seeded();
+            seed_remote(&conn);
+            backend_ticket(&conn, "t1", "gh-1", "1", 1);
+            backend_ticket(&conn, "t2", "gh-2", "2", 2);
+            conn.execute("update items set effort = 'low'", []).unwrap();
+            insert_fixture_mutation(
+                &conn,
+                FixtureMutation {
+                    sequence: 1,
+                    payload_json: r#"{"effort":"low"}"#,
+                    state,
+                    failure_json: failure,
+                    ..FixtureMutation::new(MutationType::SetTicketEffort, "t1")
+                },
+            )
+            .unwrap();
+            let backend = BackendItemRefresh {
+                ticket_fields: Some(SharedTicketFields {
+                    priority: Priority::P0,
+                    effort: None,
+                }),
+                ..refresh("Backend title", Lifecycle::Open)
+            };
+
+            merge_backend_refreshes(
+                &mut conn,
+                BackendKind::Github,
+                &[("1".into(), backend.clone()), ("2".into(), backend)],
+                "2026-05-20T00:00:00Z",
+            )
+            .unwrap();
+
+            let read = |id: &str| -> (Option<String>, String) {
+                conn.query_row(
+                    "select effort, priority from items where id = ?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap()
+            };
+            let expected = if imported { None } else { Some("low".into()) };
+            // The Effort shield leaves t1's Priority free to import.
+            assert_eq!(read("t1"), (expected, "P0".into()), "{state:?}");
+            assert_eq!(read("t2"), (None, "P0".into()), "{state:?}");
         }
     }
 
@@ -2843,7 +2942,7 @@ mod tests {
                         body: "Stale body".into(),
                         status: Lifecycle::Done,
                         ticket_kind: Some(TicketKind::Task),
-                        priority: None,
+                        ticket_fields: None,
                     },
                 ),
                 (
@@ -2853,7 +2952,7 @@ mod tests {
                         body: "Backend body".into(),
                         status: Lifecycle::Done,
                         ticket_kind: Some(TicketKind::Bug),
-                        priority: None,
+                        ticket_fields: None,
                     },
                 ),
             ],
@@ -3060,7 +3159,7 @@ mod tests {
                     body: "Body".into(),
                     status: Lifecycle::Done,
                     ticket_kind: None,
-                    priority: None,
+                    ticket_fields: None,
                 },
             )],
             "2026-05-20T00:00:00Z",
@@ -3127,7 +3226,7 @@ mod tests {
                     body: "Backend epic body".into(),
                     status: Lifecycle::Done,
                     ticket_kind: Some(TicketKind::Task),
-                    priority: None,
+                    ticket_fields: None,
                 },
             )],
             "2026-05-20T00:00:00Z",
@@ -3674,14 +3773,14 @@ mod tests {
         let BackendCreate::Ticket {
             snapshot,
             ticket_kind,
-            priority,
+            fields,
         } = create
         else {
             panic!("expected Ticket creation")
         };
         assert_eq!(snapshot.title, "T");
         assert_eq!(ticket_kind, TicketKind::Task);
-        assert_eq!(priority, Priority::P2);
+        assert_eq!(fields.priority, Priority::P2);
     }
 
     #[test]
@@ -6044,7 +6143,7 @@ mod tests {
                     body: "Fresh body".into(),
                     status: Lifecycle::Open,
                     ticket_kind: Some(TicketKind::Bug),
-                    priority: None,
+                    ticket_fields: None,
                 },
             )],
             NOW,

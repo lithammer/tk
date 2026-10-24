@@ -87,13 +87,16 @@ Read the message from a file, or \*(Aq\-\*(Aq for stdin
 Create a bug Ticket (conflicts with \-\-epic)
 .TP
 \fB\-\-epic\fR
-Create an Epic (conflicts with \-\-bug, \-\-priority, \-\-parent)
+Create an Epic (conflicts with \-\-bug, \-\-priority, \-\-effort, \-\-parent)
 .TP
 \fB\-P\fR, \fB\-\-parent\fR \fI<EPIC>\fR
 Place the new Ticket under an Epic by Display ID or Alias
 .TP
 \fB\-p\fR, \fB\-\-priority\fR \fI<PRIORITY>\fR
 Set Priority (P0..P3). Tickets only
+.TP
+\fB\-\-effort\fR \fI<EFFORT>\fR
+Set Effort (low, medium, high). Tickets only
 .TP
 \fB\-\-triage\fR
 Capture the Ticket in triage with no Priority, pending a decision (conflicts with \-\-priority and \-\-epic)
@@ -127,6 +130,7 @@ prints:
 Created Ticket: <display-id> - <title>
 Kind: task|bug
 Priority: P0|P1|P2|P3
+Effort: low|medium|high
 Status: open
 Parent: <epic-display-id>
 .fi
@@ -137,6 +141,10 @@ A triage Ticket has no Priority, so it replaces the
 line with
 .BR "Selection: triage" .
 The
+.B Effort:
+line is printed only when
+.B \-\-effort
+is supplied. The
 .B Parent:
 line is printed only when
 .B \-\-parent
@@ -456,6 +464,18 @@ filters by item class \(em it shows Epics instead of Tickets.
 .I epic-id
 is a Scope \(em it narrows the listing to one Epic and its child Tickets.
 .PP
+A Ticket row shows its Priority as
+.BR "● P2" .
+When the Ticket has an Effort, the Priority gains
+.BR /L ,
+.BR /M ,
+or
+.B /H
+for low, medium, or high, as in
+.BR "● P2/L" .
+Triage rows show neither. Rows in search, plan, and prime, and the related
+Item rows in show, use the same form.
+.PP
 When a Scope is active,
 .B tk list
 prints a hint above the tree so a narrowed view never reads as the whole
@@ -591,8 +611,10 @@ Restrict selection to this Epic\*(Aqs child Tickets. Falls back to the `TK_SCOPE
 .PP
 .B tk next
 selects open Tickets with no unresolved Dependencies or External Blockers. It
-orders ready Tickets by Effective Priority, then own Priority, then creation
-order in the Repository Store, and never selects Epics. Effective Priority is
+orders ready Tickets by Effective Priority, then own Priority, then Effort,
+then creation order in the Repository Store, and never selects Epics. Low
+Effort comes first, and a Ticket with no Effort ranks as medium. Effort is the
+candidate's own and does not propagate. Effective Priority is
 the lowest of a candidate's own Priority and the Priorities of every unfinished
 item it transitively blocks through Dependencies and Epic Membership, so a ready
 Ticket that gates a higher-Priority Blocked Item outranks lower-priority
@@ -1056,7 +1078,7 @@ tk update [OPTIONS] <ID>
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
 .PP
-Update the title, body, priority, or parent of a Ticket or Epic
+Update the title, body, priority, effort, or parent of a Ticket or Epic
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
 .ie \n(.g .ds Aq \(aq
@@ -1075,6 +1097,12 @@ Replace the body from a UTF\-8 file, or \*(Aq\-\*(Aq for stdin; empty input clea
 .TP
 \fB\-p\fR, \fB\-\-priority\fR \fI<PRIORITY>\fR
 Set Priority (P0..P3). Tickets only
+.TP
+\fB\-\-effort\fR \fI<EFFORT>\fR
+Set Effort (low, medium, high). Tickets only
+.TP
+\fB\-\-no\-effort\fR
+Clear the Ticket\*(Aqs Effort. Tickets only
 .TP
 \fB\-P\fR, \fB\-\-parent\fR \fI<EPIC>\fR
 Set the containing Epic by Display ID or Alias. Tickets only
@@ -1100,12 +1128,16 @@ input stream clears the body. NUL is rejected in both title and body.
 .PP
 Title and body edits can be combined with
 .BR \-\-priority ,
+.BR \-\-effort ,
+.BR \-\-no\-effort ,
 .BR \-\-parent ,
 or
 .BR \-\-no\-parent
-for Tickets. All requested edits and their Mutations commit together in the
-Repository Store. Backend delivery uses complete title/body snapshots, a
-separate Priority Mutation, and separate relationship Mutations.
+for Tickets.
+.B \-\-no\-effort
+clears the Effort. All requested edits and their Mutations commit together in
+the Repository Store. Backend delivery uses complete title/body snapshots,
+separate Priority and Effort Mutations, and separate relationship Mutations.
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
 .SS "tk start"
@@ -1485,8 +1517,8 @@ Print help (see a summary with \*(Aq\-h\*(Aq)
 .PP
 Sync first pulls Backend changes for tracked open Items, then applies queued
 Mutations in order. Unresolved title/body edits protect those fields from
-Pull, and an unresolved Priority change protects Priority; other Shared Fields
-can still refresh. Sync requires a configured Remote.
+Pull, and an unresolved Priority or Effort change protects that field; other
+Shared Fields can still refresh. Sync requires a configured Remote.
 .PP
 A failed Mutation stops later Mutations from applying. Inspect it with
 .B tk sync log
@@ -1751,13 +1783,13 @@ Print help
 Backend\-native key of the issue to adopt (a bare issue number for GitHub). Passed to the Backend Adapter verbatim — tk does not normalise URLs or `#`\-prefixes before Adapter canonicalization
 .PP
 Adopt fetches one existing issue through the configured Remote. A new
-Backend Ticket starts accepted at Priority P2. Adoption records the current
+Backend Ticket starts accepted at Priority P2 with no Effort. Adoption records the current
 Backend state without queuing a Mutation.
 .PP
 If the Backend identity belongs to an Item previously detached, Re-Adopt
 binds that same Item again and takes the Backend's current Shared Fields.
-It preserves Selection State and Plan membership, and keeps Priority until
-the next Pull imports the Backend's. A Backend close
+It preserves Selection State and Plan membership, and keeps Priority and
+Effort until the next Pull imports the Backend's. A Backend close
 clears Work State; a Backend reopen clears an obsolete Closing Reason.
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '

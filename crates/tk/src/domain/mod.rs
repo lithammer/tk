@@ -1,6 +1,6 @@
 //! Pure domain helpers — no SQLite, filesystem, Git, or subprocess access.
 //!
-//! The schema-determined value types: Priority, ItemStatus, Lifecycle,
+//! The schema-determined value types: Priority, Effort, ItemStatus, Lifecycle,
 //! WorkState, SelectionState, TicketKind, ItemClass, Origin,
 //! BindingDisplayProvenance, MutationType, MutationState, MutationPayload,
 //! Backend Adapter operation contracts, BackendBinding, and
@@ -49,6 +49,7 @@ pub mod backend_operation;
 pub mod backend_outcome;
 pub mod binding_display_provenance;
 pub mod dependency_rule;
+pub mod effort;
 pub mod epic_membership_rule;
 pub mod item_class;
 pub mod lifecycle;

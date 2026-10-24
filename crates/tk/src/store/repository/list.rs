@@ -9,6 +9,7 @@
 
 use rusqlite::params;
 
+use crate::domain::effort::Effort;
 use crate::domain::item_class::ItemClass;
 use crate::domain::priority::Priority;
 use crate::domain::selection_state::SelectionState;
@@ -31,6 +32,7 @@ pub struct ListRow {
     pub item_class: ItemClass,
     pub ticket_kind: Option<TicketKind>,
     pub priority: Option<Priority>,
+    pub effort: Option<Effort>,
     pub title: String,
     pub status: ItemStatus,
     /// Internal stable ID of the parent Epic, if any.
@@ -147,7 +149,7 @@ const LIST_ROWS_SQL: &str = concat!(
 with annotated as ( \
     select i.id, i.display_value, i.item_class, i.ticket_kind, \
            i.priority, i.title, i.status, i.work_state, i.origin, \
-           i.container_id, i.selection_state, i.created_seq, \
+           i.container_id, i.selection_state, i.created_seq, i.effort, \
            exists ( \
                select 1 \
                  from dependencies d \
@@ -209,7 +211,7 @@ select id, display_value, item_class, ticket_kind, priority, title, \
        ) as has_failed_mutation, \
        work_state, ",
     pending_promotion_sql!("parent"),
-    " as has_pending_promotion \
+    " as has_pending_promotion, effort \
   from matching parent \
  where (?2 = 'any' or parent.origin = ?2) \
    and (?3 = 'any' or parent.item_class = ?3) \
@@ -255,6 +257,7 @@ pub(super) fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<ListRow>
         item_class: row.get(2)?,
         ticket_kind: row.get(3)?,
         priority: row.get(4)?,
+        effort: row.get(14)?,
         title: row.get(5)?,
         // Item Status is derived, not stored (ADR-0043): column 6 is the
         // Lifecycle and column 12 the Work State. Search shares these ordinals.

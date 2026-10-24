@@ -15,6 +15,7 @@ use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, 
 use std::str::FromStr;
 
 use crate::domain::backend_kind::BackendKind;
+use crate::domain::effort::Effort;
 use crate::domain::item_class::ItemClass;
 use crate::domain::lifecycle::Lifecycle;
 use crate::domain::mutation_state::MutationState;
@@ -83,6 +84,19 @@ impl FromSql for Priority {
 }
 
 impl ToSql for Priority {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        self.text().to_sql()
+    }
+}
+
+impl FromSql for Effort {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        let text = value.as_str()?;
+        Self::from_str(text).map_err(|_| corrupt("effort", text))
+    }
+}
+
+impl ToSql for Effort {
     fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
         self.text().to_sql()
     }
@@ -233,6 +247,10 @@ mod tests {
         assert_decodes(b"P1", Priority::P1);
         assert_decodes(b"P2", Priority::P2);
         assert_decodes(b"P3", Priority::P3);
+
+        assert_decodes(b"low", Effort::Low);
+        assert_decodes(b"medium", Effort::Medium);
+        assert_decodes(b"high", Effort::High);
 
         assert_decodes(b"triage", SelectionState::Triage);
         assert_decodes(b"accepted", SelectionState::Accepted);

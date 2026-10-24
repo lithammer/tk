@@ -1,17 +1,18 @@
-//! `tk update` — update title, body, priority, or parent of a Ticket or
-//! Epic.
+//! `tk update` — update title, body, priority, effort, or parent of a Ticket
+//! or Epic.
 //!
 //! ADR-0051: omitted fields keep their Repository Store values; an explicit
 //! body replaces the field, including empty input. Requested fields and their
-//! Mutations commit together. Epics reject Priority and parent edits.
+//! Mutations commit together. Epics reject Priority, Effort, and parent edits.
 
 use clap::Args as ClapArgs;
 
 use crate::cli::{CommandError, Deps, Exit};
 use crate::commands::resolver;
+use crate::domain::effort::Effort;
 use crate::domain::item_class::ItemClass;
 use crate::domain::priority::Priority;
-use crate::store::repository::update::{self, ParentOp, UpdateRequest};
+use crate::store::repository::update::{self, FieldEdit, UpdateRequest};
 
 /// Flags for `tk update`.
 #[derive(Debug, ClapArgs)]
@@ -31,6 +32,12 @@ pub struct Args {
     /// Set Priority (P0..P3). Tickets only.
     #[arg(short = 'p', long, value_name = "PRIORITY")]
     pub priority: Option<Priority>,
+    /// Set Effort (low, medium, high). Tickets only.
+    #[arg(long, value_name = "EFFORT", conflicts_with = "no_effort")]
+    pub effort: Option<Effort>,
+    /// Clear the Ticket's Effort. Tickets only.
+    #[arg(long = "no-effort")]
+    pub no_effort: bool,
     /// Set the containing Epic by Display ID or Alias. Tickets only.
     #[arg(short = 'P', long, value_name = "EPIC", conflicts_with = "no_parent")]
     pub parent: Option<String>,
@@ -43,15 +50,18 @@ pub struct Args {
 /// (ADR-0051).
 pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     let has_parent_op = args.parent.is_some() || args.no_parent;
+    let has_effort_op = args.effort.is_some() || args.no_effort;
     if args.title.is_none()
         && args.body.is_none()
         && args.body_file.is_none()
         && args.priority.is_none()
+        && !has_effort_op
         && !has_parent_op
     {
         return Err(CommandError::usage(
             "no changes requested; supply at least one of \
-             --title / --body / --body-file / --priority / --parent / --no-parent",
+             --title / --body / --body-file / --priority / --effort / --no-effort / \
+             --parent / --no-parent",
         ));
     }
 
@@ -92,6 +102,11 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         if args.priority.is_some() {
             return Err(CommandError::usage("--priority cannot be set on an Epic"));
         }
+        if has_effort_op {
+            return Err(CommandError::usage(
+                "--effort / --no-effort cannot be set on an Epic",
+            ));
+        }
         if has_parent_op {
             return Err(CommandError::usage(
                 "--parent / --no-parent cannot be set on an Epic",
@@ -121,9 +136,14 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     };
 
     let parent_op = match resolved_parent.as_ref() {
-        Some(epic) => ParentOp::Set(&epic.id),
-        None if args.no_parent => ParentOp::Clear,
-        None => ParentOp::Unchanged,
+        Some(epic) => FieldEdit::Set(epic.id.as_str()),
+        None if args.no_parent => FieldEdit::Clear,
+        None => FieldEdit::Unchanged,
+    };
+    let effort = match (args.effort, args.no_effort) {
+        (Some(effort), _) => FieldEdit::Set(effort),
+        (None, true) => FieldEdit::Clear,
+        (None, false) => FieldEdit::Unchanged,
     };
 
     let req = UpdateRequest {
@@ -132,6 +152,7 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         title,
         body: body.as_deref(),
         priority: args.priority,
+        effort,
         parent: parent_op,
     };
 
@@ -491,6 +512,8 @@ mod tests {
             body: None,
             body_file: None,
             priority: None,
+            effort: None,
+            no_effort: false,
             parent: None,
             no_parent: false,
         }

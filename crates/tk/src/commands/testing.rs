@@ -138,7 +138,7 @@ pub(crate) fn expect_github_pull(
     let response = serde_json::to_vec(&json!({
         "data": {
             "item_0": {
-                "issueFields": priority_fields(),
+                "issueFields": ticket_fields(),
                 "item": {
                     "__typename": "Issue",
                     "number": number,
@@ -190,15 +190,19 @@ fn expect_repo_view(h: &Harness<'_>, owner: &str, name: &str) {
     );
 }
 
-/// The account's Priority field: `F_PRIORITY`, with the options `Urgent`..`Low`
-/// as `O_P0`..`O_P3`.
-fn priority_fields() -> serde_json::Value {
+/// The account's Priority field, `F_PRIORITY` with the options `Urgent`..`Low`
+/// as `O_P0`..`O_P3`, and its Effort field, `F_EFFORT` with `O_EL`..`O_EH`.
+fn ticket_fields() -> serde_json::Value {
     json!({
         "nodes": [{"id": "F_PRIORITY", "name": "Priority", "options": [
             {"id": "O_P0", "name": "Urgent"},
             {"id": "O_P1", "name": "High"},
             {"id": "O_P2", "name": "Medium"},
             {"id": "O_P3", "name": "Low"},
+        ]}, {"id": "F_EFFORT", "name": "Effort", "options": [
+            {"id": "O_EL", "name": "Low"},
+            {"id": "O_EM", "name": "Medium"},
+            {"id": "O_EH", "name": "High"},
         ]}],
         "pageInfo": {"hasNextPage": false},
     })
@@ -232,8 +236,8 @@ pub(crate) fn expect_github_issue_type(
 }
 
 /// Queue the repository read and issue field read that resolve the Priority
-/// field for a Ticket requirement (see `priority_fields`).
-pub(crate) fn expect_github_priority_field(h: &Harness<'_>, owner: &str, name: &str) {
+/// and Effort fields for a Ticket requirement (see `ticket_fields`).
+pub(crate) fn expect_github_ticket_fields(h: &Harness<'_>, owner: &str, name: &str) {
     expect_repo_view(h, owner, name);
     h.runner.expect_exact_with_stdin(
         &GRAPHQL_ARGV,
@@ -241,7 +245,7 @@ pub(crate) fn expect_github_priority_field(h: &Harness<'_>, owner: &str, name: &
         RunOutput {
             exit_code: 0,
             stdout: serde_json::to_vec(&json!({
-                "data": {"repository": {"issueFields": priority_fields()}},
+                "data": {"repository": {"issueFields": ticket_fields()}},
             }))
             .unwrap(),
             stderr: Vec::new(),
@@ -250,7 +254,7 @@ pub(crate) fn expect_github_priority_field(h: &Harness<'_>, owner: &str, name: &
 }
 
 /// Queue one `createIssue` mutation that returns issue `number`. `priority`
-/// is the Priority option ID set in the same call, as `expect_github_priority_field`
+/// is the Priority option ID set in the same call, as `expect_github_ticket_fields`
 /// names them.
 pub(crate) fn expect_github_create(
     h: &Harness<'_>,
@@ -269,7 +273,9 @@ pub(crate) fn expect_github_create(
             title,
             body,
             type_id,
-            priority.map(|option_id| ("F_PRIORITY", option_id)),
+            priority
+                .map(|option_id| ("F_PRIORITY", option_id))
+                .as_slice(),
         ),
         RunOutput {
             exit_code: 0,

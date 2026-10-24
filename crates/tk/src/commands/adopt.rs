@@ -319,7 +319,7 @@ mod tests {
 
     use super::*;
     use crate::commands::testing::{
-        Harness, cwd, expect_git, expect_github_create, expect_github_priority_field, seed_store,
+        Harness, cwd, expect_git, expect_github_create, expect_github_ticket_fields, seed_store,
     };
     use crate::commands::{detach, list, next, promote, remote, search, show};
     use crate::domain::backend_operation::BackendItemIdentity;
@@ -1083,8 +1083,8 @@ mod tests {
         detach_item(&store, &cwd_path, "gh-42");
         let mut promote_h = Harness::new(&cwd_path, &store);
         expect_git(&promote_h, &store);
-        expect_github_priority_field(&promote_h, "o", "r");
-        expect_github_priority_field(&promote_h, "o", "r");
+        expect_github_ticket_fields(&promote_h, "o", "r");
+        expect_github_ticket_fields(&promote_h, "o", "r");
         expect_github_create(
             &promote_h,
             "o",

@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::domain::effort::Effort;
 use crate::domain::item_class::ItemClass;
 use crate::domain::priority::Priority;
 use crate::domain::selection_state::SelectionState;
@@ -93,6 +94,7 @@ pub struct PlanTicket {
     pub display_id: String,
     pub title: String,
     pub priority: Option<Priority>,
+    pub effort: Option<Effort>,
     pub status: ItemStatus,
     pub selection: SelectionState,
     pub blockers: Vec<PlanBlocker>,
@@ -146,7 +148,7 @@ pub fn read(store: &Store) -> Result<Vec<PlanTicket>, PlanError> {
 /// Read the whole Plan inside the caller's snapshot (ADR-0052).
 pub(crate) fn read_snapshot(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<PlanTicket>> {
     let mut stmt = conn.prepare(
-        concat!("select i.display_value, i.title, i.priority, i.status, i.work_state, i.selection_state, i.id, i.ticket_kind, ", pending_promotion_sql!("i"), " \
+        concat!("select i.display_value, i.title, i.priority, i.status, i.work_state, i.selection_state, i.id, i.ticket_kind, ", pending_promotion_sql!("i"), ", i.effort \
          from plan_members p join items i on i.id = p.item_id order by i.created_seq"),
     )?;
     let rows = stmt.query_map([], |row| {
@@ -158,6 +160,7 @@ pub(crate) fn read_snapshot(conn: &rusqlite::Connection) -> rusqlite::Result<Vec
                 display_id: row.get(0)?,
                 title: row.get(1)?,
                 priority: row.get(2)?,
+                effort: row.get(9)?,
                 status: ItemStatus::of(row.get(3)?, row.get(4)?),
                 selection: row.get(5)?,
                 blockers: Vec::new(),

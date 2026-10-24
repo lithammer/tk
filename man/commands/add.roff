@@ -24,6 +24,7 @@ prints:
 Created Ticket: <display-id> - <title>
 Kind: task|bug
 Priority: P0|P1|P2|P3
+Effort: low|medium|high
 Status: open
 Parent: <epic-display-id>
 .fi
@@ -34,6 +35,10 @@ A triage Ticket has no Priority, so it replaces the
 line with
 .BR "Selection: triage" .
 The
+.B Effort:
+line is printed only when
+.B \-\-effort
+is supplied. The
 .B Parent:
 line is printed only when
 .B \-\-parent
