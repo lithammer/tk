@@ -107,3 +107,25 @@ grep(1): it suppresses output and uses the exit status. `tk next -q` prints one
 line. tk-171 chose this spelling after considering the collision;
 `--id-only` and `--plain` remained viable alternatives. As a result, tk-173
 cannot use `-q` as one shared name for a low-chrome mode across read commands.
+
+## Amendment (tk-194): Effort breaks ties after own Priority
+
+`tk next` now sorts by Effective Priority, then own Priority, then
+**Effort**, then `created_seq`. Low Effort comes first. Effort is the
+candidate's own value. It does not propagate through Dependencies, so
+a high-Effort Ticket that blocks a P0 still inherits P0 and wins.
+
+An unset Effort sorts as `medium`. Every Ticket that predates Effort
+has none. If unset sorted last, marking one Ticket `high` would lift it
+over every unestimated peer. If it sorted first, skipping the estimate
+would pay. Sorting it as `medium` means a set value moves a Ticket only
+in the direction it names.
+
+A steady stream of new low-Effort Tickets can keep a high-Effort one of
+the same Priority waiting indefinitely. tk accepts that: the waiting
+Ticket loses only to work its own Priority calls equal, and raising
+that Priority is the remedy. Ageing would add a time input that
+selection does not have.
+
+The stderr rationale stays limited to inherited Priority. A pick that
+Effort decides is the ordinary case and needs no explanation.

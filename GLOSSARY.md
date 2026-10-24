@@ -30,7 +30,7 @@ _Avoid_: Unsynced Field, Sync Excluded Field
 
 **Shared Field**:
 A field whose authority **tk** shares with a **Backend**: title, body,
-**Lifecycle**, **Ticket Kind**, and **Priority**. **Backend Pull** imports it
+**Lifecycle**, **Ticket Kind**, **Priority**, and **Effort**. **Backend Pull** imports it
 and a **Mutation** may push it.
 _Avoid_: Synced Field, Backend Field, Remote Field
 
@@ -41,8 +41,12 @@ slot for it; **tk** never stores or shows it as a label.
 _Avoid_: Label, Reserved Label, Adapter Encoding
 
 **Priority**:
-A ranking for a **Ticket**: `P0`, `P1`, `P2`, or `P3`. A **Shared Field**: on GitHub it is the native Priority issue field, with `P0`..`P3` mapped to Urgent, High, Medium, and Low (ADR-0054).
+How important or urgent a **Ticket**'s work is: `P0`, `P1`, `P2`, or `P3`. A **Shared Field**: on GitHub it is the native Priority issue field, with `P0`..`P3` mapped to Urgent, High, Medium, and Low (ADR-0054).
 _Avoid_: Severity
+
+**Effort**:
+How much work a **Ticket** is expected to take, apart from how much it matters: `low`, `medium`, or `high`, or unset. A **Shared Field**: on GitHub it is the native Effort issue field (ADR-0054). **Epics** carry none.
+_Avoid_: Size, Estimate, Complexity, Story Points, Scope
 
 **Effective Priority**:
 The priority used to order a candidate **Ticket** in **`tk next`**, derived from its own **Priority** and the **Priorities** of items it transitively blocks within the selected work. **Scope** and explicit **Plan** selection bound propagation; Effective Priority is not stored, displayed by **`tk show`** or **`tk list`**, or synced to **Backends**.
