@@ -26,4 +26,7 @@ manpage:
 check-manpage:
 	cargo run --locked --example manpage -- --check
 
-.PHONY: all test lint run release clean manpage check-manpage
+hooks:
+	git config core.hooksPath .githooks
+
+.PHONY: all test lint run release clean manpage check-manpage hooks
