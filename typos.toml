@@ -1,3 +1,10 @@
 [default.extend-words]
 unparseable = "unparseable"
 unparented = "unparented"
+# Placeholder in `--priority Pn`, the `CHECKs` plural split at the capital,
+# `libgcc_s_seh-1.dll`, a hyphenated `mis-describes`, and classic grep's BRE.
+Pn = "Pn"
+CHEC = "CHEC"
+seh = "seh"
+mis = "mis"
+BRE = "BRE"
