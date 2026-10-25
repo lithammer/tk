@@ -47,4 +47,4 @@ jobs:
       # etc.) so it is checked with `-s sh`. smoke.sh is bash and uses the
       # default dialect detected from its shebang.
       - run: shellcheck -s sh scripts/install.sh
-      - run: shellcheck scripts/smoke.sh
+      - run: shellcheck scripts/smoke.sh scripts/dev-tk scripts/tk-main

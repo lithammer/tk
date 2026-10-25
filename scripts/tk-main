@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Run a tk built from origin/main in the current directory. Use it for the live
+# Repository Store (`scripts/tk-main show tk-251`): only a main build may open
+# it, and a branch build replaces target/debug/tk (ADR-0024).
+#
+# The build is cached per origin/main revision under the user cache directory;
+# a new revision rebuilds and drops the old binary. The first run builds, so it
+# takes a minute.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+cache="${XDG_CACHE_HOME:-$HOME/.cache}/tk-main"
+
+git -C "$root" fetch -q origin main
+rev="$(git -C "$root" rev-parse origin/main)"
+bin="$cache/tk-$rev"
+
+if [ ! -x "$bin" ]; then
+	src="$cache/src"
+	rm -rf "$src"
+	mkdir -p "$src"
+	git -C "$root" archive "$rev" | tar -x -C "$src"
+	cargo build -q --manifest-path "$src/Cargo.toml" --target-dir "$cache/target"
+	find "$cache" -mindepth 1 -maxdepth 1 -name 'tk-*' -delete
+	cp "$cache/target/debug/tk" "$bin"
+	rm -rf "$src"
+fi
+
+exec "$bin" "$@"
