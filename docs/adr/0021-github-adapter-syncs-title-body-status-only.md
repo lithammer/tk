@@ -20,6 +20,10 @@
 > become `set_ticket_container` and `clear_ticket_container`, and a move is one
 > `set_ticket_container`. Containment stays push-only.
 
+> **Amended by ADR-0056.** Dependencies are no longer push-only. Backend Pull
+> reads `blockedBy` and reconciles each edge whose Blocking Item is
+> backend-bound to the same Backend.
+
 The v1 GitHub Backend Adapter (tk-34) maps item *fields* between tk and a
 GitHub repository, chiefly through the `gh issue` subcommands:
 
