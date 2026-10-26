@@ -35,6 +35,35 @@ git diff --cached -U0 --no-color -- '*.rs' 'docs/*.md' GLOSSARY.md ARCHITECTURE.
 	}
 	'
 
+# A renamed term that a later edit brings back. Add a term here when a rename
+# retires it; GLOSSARY.md lists it under _Avoid_. Migration SQL is not scanned,
+# since an old migration keeps the spelling it shipped with. A line that must
+# name the old spelling, as a migration test does, carries "retired-ok".
+retired='Epic Membership|epic.membership|EpicMembership|(add_ticket_to|remove_ticket_from)_epic|EpicRef'
+git diff --cached -U0 --no-color -- '*.rs' 'man/commands/*' 'crates/tk/src/commands/*.md' README.md ARCHITECTURE.md |
+	awk -v retired="$retired" '
+	/^\+\+\+ / { file = substr($0, 7); next }
+	/^@@/ {
+		match($0, /\+[0-9]+/)
+		line = substr($0, RSTART + 1, RLENGTH - 1)
+		next
+	}
+	/^\+/ {
+		text = substr($0, 2)
+		if (text ~ retired && text !~ /retired-ok/) {
+			printf "%s:%d: retired term: %s\n", file, line, text
+			found = 1
+		}
+		line++
+	}
+	END {
+		if (found) {
+			print "pre-commit: use the current term (see GLOSSARY.md _Avoid_)"
+			exit 1
+		}
+	}
+	'
+
 if git diff --cached --name-only -- '*.rs' | grep -q .; then
 	cargo fmt --check
 fi

@@ -17,12 +17,19 @@ in the same change; remove superseded code. The exception is live data:
 changes that make an existing Repository Store incompatible must provide
 a migration path.
 
-## The Live Repository Store
+## Running `tk`
 
-Run `tk` against the user's Repository Store only with a binary built from
-`main`. A branch build that adds a migration upgrades the Store on first open,
-and every older binary then refuses it (ADR-0024). Exercise branch builds
-against a scratch `XDG_DATA_HOME`.
+Before running `tk` in this repo, pick the binary:
+
+- `scripts/tk-main <args>` reads or changes Tickets in the live Repository
+  Store. Use it when the `tk` on `PATH` refuses the Store or is not a `main`
+  build.
+- `scripts/dev-tk <args>` runs this worktree's build against a scratch Store
+  under `target/dev-tk`.
+
+Only a `main` build may open the live Store: a branch build that adds a
+migration upgrades it on first open, and every older binary then refuses it
+(ADR-0024).
 
 ## Evidence About External Tools
 

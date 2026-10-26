@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Run this worktree's tk against a scratch Repository Store. A branch build can
+# add a migration, so it must never open the live Store (ADR-0024).
+#
+#     scripts/dev-tk init
+#     scripts/dev-tk add -m "A Ticket"
+#
+# The scratch repository and data root live under target/dev-tk. Delete that
+# directory to start over.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+scratch="$root/target/dev-tk"
+
+mkdir -p "$scratch/repo"
+[ -d "$scratch/repo/.git" ] || git init -q "$scratch/repo"
+cargo build -q --manifest-path "$root/Cargo.toml"
+
+cd "$scratch/repo"
+XDG_DATA_HOME="$scratch/xdg" exec "$root/target/debug/tk" "$@"
