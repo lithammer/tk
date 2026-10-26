@@ -1,6 +1,6 @@
 # Backend Pull reconciles Dependencies between bound Items
 
-ADR-0021 shipped Dependency sync push-only: Apply sends `add_dependency` and
+Dependency sync shipped push-only (ADR-0021): Apply sends `add_dependency` and
 `remove_dependency`, but Backend Pull never reads an edge back. ADR-0049
 refuses that half-sync for a field and left edges outside its rule only
 because an edge to an un-Adopted issue has no local Item to point at. That
@@ -46,7 +46,9 @@ does not block an addition.
 
 A `pending` or `failed` `add_dependency` or `remove_dependency` shields its
 own (Blocked Item, Blocking Item) pair, in the shape ADR-0044 gives title and
-body. Every other edge on the Blocked Item still reconciles.
+body. Every other edge on the Blocked Item still reconciles. Pull reconciles
+the edges of an Item it lands as `done` in the same run, since that data is as
+fresh as the close. An added edge takes the Pull time as its `created_at`.
 
 An edge that would close a cycle in the local graph is skipped, and the rest
 of the Pull commits. The check counts each Ticket a Ticket Container holds as
@@ -86,8 +88,8 @@ not to take on.
 Rejected: one queued `tk block` would freeze unrelated edges on the same Item
 until Apply.
 
-**Paginate `blockedBy`.** Rejected for now: GitHub caps the list at 50 and the
-read asks for 100, so paging would be code no real issue reaches.
+**Paginate `blockedBy`.** Rejected for now: GitHub's changelog caps the list
+at 50 and the read asks for 100, so paging would be code no real issue reaches.
 
 ## Consequences
 
