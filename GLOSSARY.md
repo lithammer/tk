@@ -833,13 +833,13 @@ _Avoid_: ticket, tickets
   leaves mixed-**Origin** **Containment** local.
 - Re-Adopt records its restored Binding and relationship Mutations in one
   transaction but does not run sync. Its report names each queued Mutation.
-- **Backend Pull** reconciles a **Dependency** when its **Blocked Item** is in
+- **Backend Pull** reads back a **Dependency** when its **Blocked Item** is in
   the Pull and its **Blocking Item** is backend-bound to the same **Backend**,
   whatever its **Lifecycle**. The **Backend** is authoritative for those
   edges: Pull adds the ones it lists and removes the ones it lacks, except a
   pair an unresolved `add_dependency` or `remove_dependency` **Mutation**
-  shields. Pull ignores a **Backend** blocker with no backend-bound local
-  Item, and skips with a warning an edge that would close a local cycle
+  shields. Pull ignores a **Backend** blocker that has no backend-bound local
+  Item. It skips an edge that would close a local cycle and warns about it
   (ADR-0056).
 - **Containment** sync is push-only. **Backend Pull** reads no parent, so the
   **Repository Store** stays authoritative for it. **Adopting** the issues of

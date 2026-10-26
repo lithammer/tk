@@ -247,6 +247,7 @@ mod tests {
             status: Lifecycle::Open,
             ticket_kind: Some(TicketKind::Task),
             ticket_fields: None,
+            blocked_by: Vec::new(),
         }
     }
 

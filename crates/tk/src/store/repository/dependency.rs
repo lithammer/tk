@@ -9,6 +9,8 @@
 //! a typed [`AddDependencyError::Cycle`] reaches the command layer rather than
 //! a raw constraint-trigger SQLite error.
 
+use std::collections::{HashMap, VecDeque};
+
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::clock::Clock;
@@ -143,11 +145,7 @@ pub fn add_dependency<C: Clock + ?Sized>(
         return Err(AddDependencyError::Cycle);
     }
 
-    let inserted = tx.execute(
-        "insert or ignore into dependencies(blocking_id, blocked_id, created_at) \
-         values (?1, ?2, ?3)",
-        params![edge.blocking_id, edge.blocked_id, now_iso],
-    )? == 1;
+    let inserted = insert_edge(&tx, edge, &now_iso)?;
 
     if inserted && classification == DependencyClassification::BecomesBackendIntent {
         mutations::append(
@@ -186,10 +184,7 @@ pub fn remove_dependency<C: Clock + ?Sized>(
     // the Mutation Log the way it entered: a pairing the rule rejects never
     // carried a Mutation, and dropping its edge is current-state cleanup.
     let classification = classify_edge(&tx, edge)?;
-    let removed = tx.execute(
-        "delete from dependencies where blocking_id = ?1 and blocked_id = ?2",
-        params![edge.blocking_id, edge.blocked_id],
-    )? > 0;
+    let removed = delete_edge(&tx, edge)?;
 
     if removed && classification == DependencyClassification::BecomesBackendIntent {
         mutations::append(
@@ -209,6 +204,78 @@ pub fn remove_dependency<C: Clock + ?Sized>(
 
     tx.commit()?;
     Ok(())
+}
+
+/// Insert one Dependency edge and report whether it is new. Appends no
+/// Mutation: whether the edge is Backend intent is the caller's call.
+pub(crate) fn insert_edge(
+    conn: &Connection,
+    edge: DependencyEdge<'_>,
+    now_iso: &str,
+) -> rusqlite::Result<bool> {
+    Ok(conn
+        .prepare_cached(
+            "insert or ignore into dependencies(blocking_id, blocked_id, created_at) \
+             values (?1, ?2, ?3)",
+        )?
+        .execute(params![edge.blocking_id, edge.blocked_id, now_iso])?
+        == 1)
+}
+
+/// Delete one Dependency edge and report whether it existed. Appends no
+/// Mutation, as [`insert_edge`].
+pub(crate) fn delete_edge(conn: &Connection, edge: DependencyEdge<'_>) -> rusqlite::Result<bool> {
+    Ok(conn
+        .prepare_cached("delete from dependencies where blocking_id = ?1 and blocked_id = ?2")?
+        .execute(params![edge.blocking_id, edge.blocked_id])?
+        > 0)
+}
+
+/// The Items between `from` and `to` when `from` already waits on `to`, or
+/// `None` when it does not. Making `to` wait on `from` would close a cycle
+/// exactly when this is `Some`; an Item waiting on itself has nothing between.
+///
+/// A Ticket waits on its Blocking Items and, as a Ticket Container, on each
+/// Ticket it holds (ADR-0055). An Epic holds without waiting. The
+/// `dependencies_no_cycle` trigger walks Dependencies alone.
+pub(crate) fn wait_path(
+    conn: &Connection,
+    from: &str,
+    to: &str,
+) -> rusqlite::Result<Option<Vec<String>>> {
+    if from == to {
+        return Ok(Some(Vec::new()));
+    }
+    let mut waits_on = conn.prepare_cached(
+        "select blocking_id from dependencies where blocked_id = ?1 \
+         union \
+         select id from items where container_id = ?1 and container_class = 'ticket'",
+    )?;
+    let mut came_from: HashMap<String, String> = HashMap::new();
+    let mut frontier = VecDeque::from([from.to_owned()]);
+    while let Some(id) = frontier.pop_front() {
+        let waited_on = waits_on
+            .query_map(params![id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for next in waited_on {
+            if next == to {
+                let mut between = Vec::new();
+                let mut step = id;
+                while step != from {
+                    let previous = came_from[&step].clone();
+                    between.push(step);
+                    step = previous;
+                }
+                between.reverse();
+                return Ok(Some(between));
+            }
+            if next != from && !came_from.contains_key(&next) {
+                came_from.insert(next.clone(), id.clone());
+                frontier.push_back(next);
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn read_endpoint_info(

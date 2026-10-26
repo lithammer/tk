@@ -147,6 +147,7 @@ pub(crate) fn expect_github_pull(
                     "state": state,
                     "url": format!("https://github.com/{owner}/{name}/issues/{number}"),
                     "issueType": null,
+                    "blockedBy": {"nodes": [], "pageInfo": {"hasNextPage": false}},
                 },
             },
         },

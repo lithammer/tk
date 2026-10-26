@@ -1,4 +1,4 @@
-# Backend Pull reconciles Dependencies between bound Items
+# Backend Pull reads back Dependencies between bound Items
 
 Dependency sync shipped push-only (ADR-0021): Apply sends `add_dependency` and
 `remove_dependency`, but Backend Pull never reads an edge back. ADR-0049
@@ -15,13 +15,14 @@ authoritative for those edges.
 An edge round-trips when its Blocked Item is in this Pull and its Blocking
 Item holds a Backend Binding to the same Backend, whatever the Blocking Item's
 Lifecycle. A `done` Blocking Item still counts: GitHub keeps a closed blocker
-in `blockedBy`. On the live Store the one edge Pull can see, gh-77 blocked by
-gh-68, is of this kind.
+in `blockedBy`. No GitHub document says so; reads of lithammer/tk#77 and
+JavaZeroo/termforge#47 on 2026-10-26 listed closed blockers.
 
 Pull ignores every other blocker GitHub lists: a Local Item, an Item awaiting
-its Promotion receipt, a Detached Item, an issue nobody Adopted, an issue in
-another repository, and an issue this viewer cannot see. tk does not report
-them. Adopting the blocker brings the edge in on the next Pull.
+its Promotion receipt, a Detached Item, an issue nobody Adopted, and an issue
+this viewer cannot see. tk does not report them. Adopting the blocker brings
+the edge in on the next Pull, even from another repository, since Adopt takes
+any issue `gh` resolves.
 
 ### What Pull reads
 
@@ -37,32 +38,39 @@ changelog caps each relationship type at 50 per issue. `hasNextPage` is an
 Adapter read error, the same refusal the issue-field read makes for a
 truncated list, because a truncated list cannot prove an edge is absent.
 
-### How the merge reconciles
+### How the merge follows the Backend
 
-`merge_backend_refreshes` reconciles the round-tripping set in its one
-transaction. It removes an edge tk has and GitHub lacks, then adds an edge
-GitHub has and tk lacks. Removals go first, so a removal that breaks a cycle
-does not block an addition.
+`merge_backend_refreshes` brings the round-tripping set in line with GitHub in
+its one transaction. It removes an edge tk has and GitHub lacks, then adds an
+edge GitHub has and tk lacks. Removals go first, so a removal that breaks a
+cycle does not block an addition.
 
 A `pending` or `failed` `add_dependency` or `remove_dependency` shields its
 own (Blocked Item, Blocking Item) pair, in the shape ADR-0044 gives title and
-body. Every other edge on the Blocked Item still reconciles. Pull reconciles
-the edges of an Item it lands as `done` in the same run, since that data is as
-fresh as the close. An added edge takes the Pull time as its `created_at`.
+body. Every other edge on the Blocked Item still follows GitHub. Pull also
+updates the edges of an Item it lands as `done` in the same run, since that
+data is as fresh as the close. An added edge takes the Pull time as its
+`created_at`.
 
-An edge that would close a cycle in the local graph is skipped, and the rest
-of the Pull commits. The check counts each Ticket a Ticket Container holds as
-one of its Blocking Items, as the glossary's cycle rule does, which the
-`dependencies_no_cycle` trigger does not. GitHub cannot see Local Items or
-Containment, so it can hold an edge that is legal there and a cycle here. Sync
-prints one stderr warning per skipped edge, every run until someone removes
-one side, naming both Display IDs and the local path:
+Pull skips an edge that would close a cycle in the local graph and commits
+the rest. The check follows the glossary's cycle rule and counts each Ticket a
+Ticket Container holds as one of its Blocking Items; the
+`dependencies_no_cycle` trigger walks Dependencies alone. GitHub cannot see
+Local Items or Containment, so it can hold an edge that is legal there and a
+cycle here.
+
+Sync and Promotion print one stderr warning per skipped edge on every run that
+returns a report, a run stopped at a rejected Mutation included, until someone
+removes one side. A run whose Apply errors prints only that error. The warning
+names both Display IDs and any Items on the path between them. Here gh-9 holds
+a Local Ticket that waits on gh-12:
 
 ```
-warning: skipped GitHub dependency gh-12 blocked by gh-9: gh-9 already waits on gh-12, which it holds
+tk sync: warning: did not import Dependency gh-12 blocked by gh-9: gh-9 already waits on gh-12 through repo-40
 ```
 
-Adopt stays field-only, and the `N pulled, M applied` summary is unchanged.
+Adopt reads no edges; the next Pull brings them in. The `N pulled, M applied`
+summary does not count edges.
 
 ## Considered Options
 
@@ -95,8 +103,7 @@ at 50 and the read asks for 100, so paging would be code no real issue reaches.
 
 - An `add_dependency` that fails and is skipped is undone by the next Pull,
   just as ADR-0046 restores `open` after a skipped close. There is no backfill
-  of edges that ADR-0021's placeholder Apply no-op-Acknowledged. The live
-  Store has none outside GitHub.
+  of edges that ADR-0021's placeholder Apply no-op-Acknowledged.
 - Containment stays push-only. It is 0..1 and admits a Local Container, so
   this rule does not settle it. gh-151 owns its read-back and inherits the
   pair-style shield and the skip-and-warn rule.

@@ -32,6 +32,7 @@ mod pending_promotion_tests;
 pub mod plan;
 pub mod prime;
 pub mod promote;
+pub mod pull_warning;
 pub mod remote;
 pub mod resolver;
 pub mod scope;

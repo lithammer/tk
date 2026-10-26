@@ -30,8 +30,9 @@ use crate::remote::adapter::{Adapter, AdapterReadError, ApplyError};
 use crate::store::repository::RemoteWorkflowGuard;
 use crate::store::sync::{
     BackendCohortError, LoadApplicableError, PersistMutationOutcomeError, RefreshStoreError,
-    applying_mutation_sequence, begin_create, load_applicable_mutations, merge_backend_refreshes,
-    persist_create_outcome, persist_edit_outcome, resolve_backend_operation, working_set_keys,
+    SkippedDependency, applying_mutation_sequence, begin_create, load_applicable_mutations,
+    merge_backend_refreshes, persist_create_outcome, persist_edit_outcome,
+    resolve_backend_operation, working_set_keys,
 };
 
 /// Summary of one sync run for the calling command to render.
@@ -41,6 +42,9 @@ pub struct SyncReport {
     /// unresolved local content intent preserves its title and body while
     /// Pull updates Backend Lifecycle and Ticket Kind (ADR-0044).
     pub pulled_count: usize,
+    /// Dependencies the Backend lists that Pull left out because each would
+    /// close a cycle (ADR-0056). The caller warns about each one.
+    pub skipped_dependencies: Vec<SkippedDependency>,
     /// Number of Mutations that transitioned to `applied` during this run.
     pub applied_count: usize,
     /// When `Some`, the sync stopped because this Mutation's Apply returned a
@@ -135,6 +139,7 @@ impl RunSyncError {
                 | LoadApplicableError::MissingTicketKind { .. }
                 | LoadApplicableError::MissingPriority { .. },
             )
+            | Self::Refresh(RefreshStoreError::PayloadJson { .. })
             | Self::Outcome(
                 PersistMutationOutcomeError::PayloadJson { .. }
                 | PersistMutationOutcomeError::OperationShapeMismatch { .. }
@@ -217,6 +222,7 @@ pub fn run_sync(
     }
     let mut report = SyncReport {
         pulled_count: 0,
+        skipped_dependencies: Vec::new(),
         applied_count: 0,
         stopped_at_sequence: None,
     };
@@ -236,9 +242,7 @@ pub fn run_sync(
         adapter.pull(&items)?.into_refreshes()
     };
     report.pulled_count = refreshes.len();
-    if !refreshes.is_empty() {
-        merge_backend_refreshes(conn, kind, &refreshes, now)?;
-    }
+    report.skipped_dependencies = merge_backend_refreshes(conn, kind, &refreshes, now)?;
 
     // Apply loop. An environment failure from an Adapter write bubbles via `?`
     // without changing the row's prior `pending` or `failed` state; a
@@ -359,6 +363,7 @@ mod tests {
         BackendItemRefresh {
             ticket_kind: Some(TicketKind::Task),
             ticket_fields: None,
+            blocked_by: Vec::new(),
             title: title.into(),
             body: String::new(),
             status: Lifecycle::Open,
@@ -910,6 +915,7 @@ mod tests {
                 status: Lifecycle::Done,
                 ticket_kind: Some(TicketKind::Task),
                 ticket_fields: None,
+                blocked_by: Vec::new(),
             }],
             vec![EditResponse::Success],
         );

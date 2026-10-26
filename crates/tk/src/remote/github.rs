@@ -37,16 +37,16 @@ mod graphql;
 mod issue_field;
 
 use graphql::cli::CliGraphqlTransport;
+use graphql::{
+    BlockedByConnection, CreateIssueData, CreateIssueOperation, DeleteIssueFieldValueOperation,
+    GraphqlCompleted, GraphqlEnvelope, GraphqlError, GraphqlObservation, GraphqlOperation,
+    GraphqlStartFailure, GraphqlTransport, IssueFieldConnection, IssueFieldValues,
+    IssueFieldsOperation, IssueFieldsResponse, IssueTypePageResponse, IssueTypesField,
+    IssueTypesOperation, MAX_PULL_KEYS_PER_QUERY, PullData, PullObject, PullOperation,
+    PullRepository, PullTarget, SetIssueFieldValueOperation,
+};
 #[cfg(test)]
 use graphql::{CREATE_ISSUE_QUERY, GraphqlExchange, GraphqlRequest, ISSUE_TYPES_QUERY};
-use graphql::{
-    CreateIssueData, CreateIssueOperation, DeleteIssueFieldValueOperation, GraphqlCompleted,
-    GraphqlEnvelope, GraphqlError, GraphqlObservation, GraphqlOperation, GraphqlStartFailure,
-    GraphqlTransport, IssueFieldConnection, IssueFieldValues, IssueFieldsOperation,
-    IssueFieldsResponse, IssueTypePageResponse, IssueTypesField, IssueTypesOperation,
-    MAX_PULL_KEYS_PER_QUERY, PullData, PullObject, PullOperation, PullRepository, PullTarget,
-    SetIssueFieldValueOperation,
-};
 use issue_field::{ResolvedField, ResolvedFields, SingleSelect};
 
 /// Encode a one-item request through the production Pull operation.
@@ -775,6 +775,9 @@ struct GhIssue {
     /// Present only in a GraphQL Pull; `gh issue view` cannot return it.
     #[serde(default, rename = "issueFieldValues")]
     issue_field_values: Option<IssueFieldValues>,
+    /// Present only in a GraphQL Pull.
+    #[serde(default, rename = "blockedBy")]
+    blocked_by: Option<BlockedByConnection>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -977,6 +980,7 @@ fn decode_pull_item(
             )));
         }
         PullObject::Issue { issue } => {
+            let issue = *issue;
             issue.validate_key(key)?;
             issue.validate_identity()?;
             let ticket_kind = classify_ticket_kind(&issue);
@@ -1099,12 +1103,14 @@ impl GhIssue {
         ticket_fields: Option<SharedTicketFields>,
     ) -> Result<BackendItemRefresh, AdapterReadError> {
         let status = self.lifecycle()?;
+        let blocked_by = blocking_keys(self.number, self.blocked_by)?;
         Ok(BackendItemRefresh {
             title: self.title,
             body: self.body,
             status,
             ticket_kind: Some(ticket_kind),
             ticket_fields,
+            blocked_by,
         })
     }
 
@@ -1126,6 +1132,31 @@ impl GhIssue {
             ticket_kind,
         }
     }
+}
+
+/// Canonical URLs of the issues blocking issue `number`. The Repository Store
+/// removes a local edge this list lacks, so a list GitHub cut short fails the
+/// Pull instead (ADR-0056).
+fn blocking_keys(
+    number: i64,
+    connection: Option<BlockedByConnection>,
+) -> Result<Vec<String>, AdapterReadError> {
+    let connection = connection.ok_or_else(|| {
+        AdapterReadError::Failed(format!(
+            "#{number}: GitHub returned no list of the issues blocking it"
+        ))
+    })?;
+    if connection.page_info.has_next_page {
+        return Err(AdapterReadError::Failed(format!(
+            "#{number}: GitHub listed only part of the issues blocking it"
+        )));
+    }
+    Ok(connection
+        .nodes
+        .into_iter()
+        .flatten()
+        .map(|blocker| blocker.url)
+        .collect())
 }
 
 /// True when `url`'s path ends in `/pull/<digits>` — GitHub's canonical PR url
@@ -1417,7 +1448,7 @@ mod tests {
                 })
             );
             GraphqlExchange::Completed(GraphqlCompleted {
-                body: br#"{"data":{"item_0":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":1,"title":"First","body":"B1","state":"OPEN","url":"https://github.com/o/r/issues/1","issueType":{"name":"Bug"} }},"item_1":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":2,"title":"Second","body":"B2","state":"CLOSED","url":"https://github.com/p/q/issues/2","issueType":{"name":"Bug"}}}}}"#.to_vec(),
+                body: br#"{"data":{"item_0":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":1,"title":"First","body":"B1","state":"OPEN","url":"https://github.com/o/r/issues/1","issueType":{"name":"Bug"},"blockedBy":{"nodes":[],"pageInfo":{"hasNextPage":false}} }},"item_1":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":2,"title":"Second","body":"B2","state":"CLOSED","url":"https://github.com/p/q/issues/2","issueType":{"name":"Bug"},"blockedBy":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}}"#.to_vec(),
                 completion: graphql::GraphqlCompletion::Succeeded {
                     detail: String::new(),
                 },
@@ -1464,6 +1495,7 @@ mod tests {
                                 request.host
                             ),
                             "issueType": null,
+                            "blockedBy": {"nodes": [], "pageInfo": {"hasNextPage": false}},
                         }
                     }),
                 );
@@ -1524,7 +1556,7 @@ mod tests {
             let body = if call == 0 {
                 br#"{"data":{"item_0":null},"errors":[{"message":"first input failed","path":["item_0","item"]}]}"#.to_vec()
             } else {
-                br#"{"data":{"item_50":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":51,"title":"Last","body":"","state":"OPEN","url":"https://github.com/o/r/issues/51","issueType":null}}}}"#.to_vec()
+                br#"{"data":{"item_50":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":51,"title":"Last","body":"","state":"OPEN","url":"https://github.com/o/r/issues/51","issueType":null,"blockedBy":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}}"#.to_vec()
             };
             GraphqlExchange::Completed(GraphqlCompleted {
                 body,
@@ -1568,9 +1600,9 @@ mod tests {
     impl GraphqlTransport for CrossHostDecodeErrorTransport {
         fn exchange(&self, request: &GraphqlRequest) -> GraphqlExchange {
             let body = if request.host == "one.example" {
-                br#"{"data":{"item_0":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":1,"title":"Valid","body":"","state":"OPEN","url":"https://one.example/o/r/issues/1","issueType":null}},"item_2":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":3,"title":"Later","body":"","state":"FUTURE","url":"https://one.example/o/r/issues/3","issueType":null}}}}"#.to_vec()
+                br#"{"data":{"item_0":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":1,"title":"Valid","body":"","state":"OPEN","url":"https://one.example/o/r/issues/1","issueType":null,"blockedBy":{"nodes":[],"pageInfo":{"hasNextPage":false}}}},"item_2":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":3,"title":"Later","body":"","state":"FUTURE","url":"https://one.example/o/r/issues/3","issueType":null,"blockedBy":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}}"#.to_vec()
             } else {
-                br#"{"data":{"item_1":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":2,"title":"Earlier","body":"","state":"FUTURE","url":"https://two.example/o/r/issues/2","issueType":null}}}}"#.to_vec()
+                br#"{"data":{"item_1":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":2,"title":"Earlier","body":"","state":"FUTURE","url":"https://two.example/o/r/issues/2","issueType":null,"blockedBy":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}}"#.to_vec()
             };
             GraphqlExchange::Completed(GraphqlCompleted {
                 body,
@@ -1790,7 +1822,7 @@ mod tests {
             &runner,
             cwd(),
             Box::new(StaticPullTransport {
-                body: br#"{"data":{"item_0":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":1,"title":"Untyped","body":"","state":"OPEN","url":"https://github.com/o/r/issues/1","issueType":null}},"item_1":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":2,"title":"Feature","body":"","state":"OPEN","url":"https://github.com/o/r/issues/2","issueType":{"name":"Feature"}}},"item_2":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":3,"title":"Bug","body":"","state":"OPEN","url":"https://github.com/o/r/issues/3","issueType":{"name":"bug"}}},"item_3":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":4,"title":"Epic","body":"","state":"OPEN","url":"https://github.com/o/r/issues/4","issueType":{"name":"Epic"}}}}}"#.to_vec(),
+                body: br#"{"data":{"item_0":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":1,"title":"Untyped","body":"","state":"OPEN","url":"https://github.com/o/r/issues/1","issueType":null,"blockedBy":{"nodes":[],"pageInfo":{"hasNextPage":false}}}},"item_1":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":2,"title":"Feature","body":"","state":"OPEN","url":"https://github.com/o/r/issues/2","issueType":{"name":"Feature"},"blockedBy":{"nodes":[],"pageInfo":{"hasNextPage":false}}}},"item_2":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":3,"title":"Bug","body":"","state":"OPEN","url":"https://github.com/o/r/issues/3","issueType":{"name":"bug"},"blockedBy":{"nodes":[],"pageInfo":{"hasNextPage":false}}}},"item_3":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":4,"title":"Epic","body":"","state":"OPEN","url":"https://github.com/o/r/issues/4","issueType":{"name":"Epic"},"blockedBy":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}}"#.to_vec(),
             }),
         );
         let items = [
@@ -2099,11 +2131,11 @@ mod tests {
             ),
             (b"not json".as_slice(), "could not parse GitHub GraphQL response"),
             (
-                br#"{"data":{"item_0":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":1,"title":"Wrong","body":"","state":"OPEN","url":"https://github.com/o/r/issues/2","issueType":null}}}}"#.as_slice(),
+                br#"{"data":{"item_0":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":1,"title":"Wrong","body":"","state":"OPEN","url":"https://github.com/o/r/issues/2","issueType":null,"blockedBy":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}}"#.as_slice(),
                 "different issue",
             ),
             (
-                br#"{"data":{"item_0":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":1,"title":"Future","body":"","state":"FUTURE","url":"https://github.com/o/r/issues/1","issueType":null}}}}"#.as_slice(),
+                br#"{"data":{"item_0":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":1,"title":"Future","body":"","state":"FUTURE","url":"https://github.com/o/r/issues/1","issueType":null,"blockedBy":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}}"#.as_slice(),
                 "unexpected issue state",
             ),
         ];
@@ -3092,11 +3124,55 @@ mod tests {
         ]
     }
 
+    /// A blocker list GitHub cut short must fail the Pull: the merge removes
+    /// every local edge the list lacks (ADR-0056).
+    #[test]
+    fn pull_reads_blockers_and_fails_on_a_truncated_list() {
+        for has_next_page in [false, true] {
+            let body = serde_json::to_vec(&serde_json::json!({"data": {"item_0": {
+                "issueFields": ticket_fields(),
+                "item": {
+                    "__typename": "Issue",
+                    "number": 1,
+                    "title": "T",
+                    "body": "",
+                    "state": "OPEN",
+                    "url": "https://github.com/o/r/issues/1",
+                    "issueType": null,
+                    "blockedBy": {
+                        "nodes": [{"url": "https://github.com/o/r/issues/5"}, null],
+                        "pageInfo": {"hasNextPage": has_next_page},
+                    },
+                },
+            }}}))
+            .unwrap();
+            let runner = FakeRunner::new();
+            let mut adapter = GithubAdapter::with_graphql_transport(
+                &runner,
+                cwd(),
+                Box::new(StaticPullTransport { body }),
+            );
+
+            let result = adapter.pull(&[address("https://github.com/o/r/issues/1")]);
+
+            if has_next_page {
+                assert!(
+                    matches!(&result, Err(AdapterReadError::Failed(detail))
+                        if detail.contains("GitHub listed only part of the issues blocking it")),
+                    "{result:?}"
+                );
+            } else {
+                let pulled = result.unwrap().into_refreshes();
+                assert_eq!(pulled[0].1.blocked_by, ["https://github.com/o/r/issues/5"]);
+            }
+        }
+    }
+
     #[test]
     fn pull_fails_naming_a_missing_ticket_field_or_option() {
         for (fields, expected) in unusable_ticket_fields() {
             let body = format!(
-                r#"{{"data":{{"item_0":{{"issueFields":{fields},"item":{{"__typename":"Issue","number":1,"title":"T","body":"","state":"OPEN","url":"https://github.com/o/r/issues/1","issueType":null}}}}}}}}"#
+                r#"{{"data":{{"item_0":{{"issueFields":{fields},"item":{{"__typename":"Issue","number":1,"title":"T","body":"","state":"OPEN","url":"https://github.com/o/r/issues/1","issueType":null,"blockedBy":{{"nodes":[],"pageInfo":{{"hasNextPage":false}}}}}}}}}}}}"#
             );
             let runner = FakeRunner::new();
             let mut adapter = GithubAdapter::with_graphql_transport(

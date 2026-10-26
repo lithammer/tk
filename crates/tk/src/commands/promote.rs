@@ -25,6 +25,7 @@ use std::io::Write;
 use clap::{Args as ClapArgs, Subcommand};
 
 use crate::cli::{CommandError, Deps, Exit};
+use crate::commands::pull_warning::sync_and_warn;
 use crate::commands::resolver;
 use crate::domain::backend_binding::BackendBinding;
 use crate::domain::backend_kind::BackendKind;
@@ -273,7 +274,14 @@ fn reconcile(
         now,
     )
     .map_err(|err| recovery_error(err, &recovery.outgoing_display_id))?;
-    let sync_result = sync::run_sync(store.conn_mut(), adapter, workflow, now);
+    let sync_result = sync_and_warn(
+        deps.stderr,
+        "promote",
+        store.conn_mut(),
+        adapter,
+        workflow,
+        now,
+    );
     let mapping_result = render_mappings(deps.stdout, store, &mappings);
     finish_recovery(sync_result, mapping_result, RecoveryAction::Reconcile)
 }
@@ -292,7 +300,14 @@ fn retry(
     let mappings = project_recovery_mappings(mappings);
     store_promotion::retry_promotion(store.conn_mut(), workflow, recovery, now)
         .map_err(|err| recovery_error(err, &recovery.outgoing_display_id))?;
-    let sync_result = sync::run_sync(store.conn_mut(), adapter, workflow, now);
+    let sync_result = sync_and_warn(
+        deps.stderr,
+        "promote",
+        store.conn_mut(),
+        adapter,
+        workflow,
+        now,
+    );
     let mapping_result = render_mappings(deps.stdout, store, &mappings);
     finish_recovery(sync_result, mapping_result, RecoveryAction::Retry)
 }
@@ -587,7 +602,14 @@ fn promote(
 
     // Sync runs even when nothing was appended: an earlier invocation's
     // Promotion may still be pending, and this is the drain that applies it.
-    let sync_result = sync::run_sync(store.conn_mut(), adapter, workflow, now);
+    let sync_result = sync_and_warn(
+        deps.stderr,
+        "promote",
+        store.conn_mut(),
+        adapter,
+        workflow,
+        now,
+    );
 
     render_mappings(deps.stdout, store, &captured)?;
 
@@ -1311,6 +1333,7 @@ mod tests {
             status,
             ticket_kind: Some(TicketKind::Task),
             ticket_fields: None,
+            blocked_by: Vec::new(),
         }
     }
 
