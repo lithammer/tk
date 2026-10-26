@@ -12,7 +12,7 @@
 
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     str::FromStr,
 };
 use thiserror::Error;
@@ -47,6 +47,7 @@ use crate::domain::work_state::WorkState;
 use crate::store::mutations;
 use crate::store::promotion::ReadGraphError;
 use crate::store::repository::create::generate_internal_id;
+use crate::store::repository::dependency::{self, DependencyEdge};
 use crate::store::repository::{self, RemoteWorkflowGuard};
 use crate::store::sequences::{self, Counter, SequenceError};
 
@@ -139,6 +140,25 @@ pub enum RefreshStoreError {
     BackendCohort(#[from] BackendCohortError),
     #[error("Mutation {0} has an indeterminate Backend creation outcome")]
     ApplyingMutation(i64),
+    /// An unresolved Dependency Mutation's payload does not decode, so Pull
+    /// cannot tell which edge it shields.
+    #[error("mutation {sequence} ({mutation_type}) has malformed payload_json: {source}")]
+    PayloadJson {
+        sequence: i64,
+        mutation_type: MutationType,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+/// A Dependency the Backend lists that Pull did not import, because the
+/// Blocking Item already waits on the Blocked Item (ADR-0056).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedDependency {
+    pub blocked_display_id: String,
+    pub blocking_display_id: String,
+    /// The Items between them on the Blocking Item's wait path, in order.
+    pub through_display_ids: Vec<String>,
 }
 
 /// Result of canonical Backend Ticket intake.
@@ -1632,14 +1652,17 @@ pub fn working_set_keys(
 /// Merge collected refresh results atomically. Refreshes address already-known
 /// keys and therefore cannot insert or alter identity, Origin, Display ID, or
 /// Item Class.
+///
+/// Returns the Dependencies the Backend lists that the merge skipped because
+/// each would close a cycle (ADR-0056).
 pub fn merge_backend_refreshes(
     conn: &mut Connection,
     expected_kind: BackendKind,
     refreshes: &[(String, BackendItemRefresh)],
     now: &str,
-) -> Result<(), RefreshStoreError> {
+) -> Result<Vec<SkippedDependency>, RefreshStoreError> {
     if refreshes.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let tx = crate::store::write_transaction(conn)?;
     if let Some(sequence) = applying_mutation_sequence(&tx)? {
@@ -1648,6 +1671,7 @@ pub fn merge_backend_refreshes(
     ensure_refresh_remote(&tx, expected_kind)?;
     ensure_backend_cohort(&tx, expected_kind)?;
     let shields = local_shields(&tx)?;
+    let mut additions = Vec::new();
     for (key, refresh) in refreshes {
         let existing: Option<(String, ItemClass)> = tx
             .query_row(
@@ -1667,7 +1691,16 @@ pub fn merge_backend_refreshes(
             status,
             ticket_kind,
             ticket_fields,
+            blocked_by,
         } = refresh;
+        follow_backend_edges(
+            &tx,
+            expected_kind,
+            &shields,
+            &item_id,
+            blocked_by,
+            &mut additions,
+        )?;
         let priority_write = ticket_fields
             .map(|fields| fields.priority)
             .filter(|_| !shields.priority.contains(item_id.as_str()));
@@ -1706,8 +1739,103 @@ pub fn merge_backend_refreshes(
                 effort_write.is_some(), effort_write.flatten()],
         )?;
     }
+    let skipped = add_backend_edges(&tx, &additions, now)?;
     tx.commit()?;
+    Ok(skipped)
+}
+
+/// Bring one refreshed Blocked Item's edges in line with the Backend's list
+/// (ADR-0056): delete the edges it no longer lists, and queue in `additions`
+/// the ones it lists that tk lacks. Additions wait for every refresh's
+/// removals, so a removal that breaks a cycle cannot leave an addition skipped.
+///
+/// Only a Blocking Item bound to this Backend can round-trip, whatever its
+/// Lifecycle; a key tk has no bound Item for is ignored. A pair an unresolved
+/// Dependency Mutation shields is left as it is.
+///
+/// Additions come out sorted, so skip warnings print in a stable order.
+fn follow_backend_edges(
+    conn: &Connection,
+    kind: BackendKind,
+    shields: &LocalShields,
+    blocked_id: &str,
+    blocked_by: &[String],
+    additions: &mut Vec<(String, String)>,
+) -> rusqlite::Result<()> {
+    let mut bound_item =
+        conn.prepare_cached("select id from items where backend_kind = ?1 and backend_key = ?2")?;
+    let mut backend = BTreeSet::new();
+    for key in blocked_by {
+        if let Some(id) = bound_item
+            .query_row(params![kind, key], |row| row.get::<_, String>(0))
+            .optional()?
+        {
+            backend.insert(id);
+        }
+    }
+    let local = conn
+        .prepare_cached(
+            "select d.blocking_id from dependencies d \
+               join items blocking on blocking.id = d.blocking_id \
+              where d.blocked_id = ?1 \
+                and blocking.backend_kind = ?2 and blocking.backend_key is not null",
+        )?
+        .query_map(params![blocked_id, kind], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+    let shielded = |blocking_id: &String| {
+        shields
+            .dependencies
+            .contains(&(blocked_id.to_owned(), blocking_id.clone()))
+    };
+    for blocking_id in local.difference(&backend).filter(|id| !shielded(id)) {
+        dependency::delete_edge(
+            conn,
+            DependencyEdge {
+                blocked_id,
+                blocking_id,
+            },
+        )?;
+    }
+    additions.extend(
+        backend
+            .difference(&local)
+            .filter(|id| !shielded(id))
+            .map(|blocking_id| (blocked_id.to_owned(), blocking_id.clone())),
+    );
     Ok(())
+}
+
+/// Add each queued Backend edge, skipping one whose Blocking Item already
+/// waits on its Blocked Item.
+fn add_backend_edges(
+    conn: &Connection,
+    additions: &[(String, String)],
+    now: &str,
+) -> rusqlite::Result<Vec<SkippedDependency>> {
+    let mut skipped = Vec::new();
+    for (blocked_id, blocking_id) in additions {
+        match dependency::wait_path(conn, blocking_id, blocked_id)? {
+            None => {
+                dependency::insert_edge(
+                    conn,
+                    DependencyEdge {
+                        blocked_id,
+                        blocking_id,
+                    },
+                    now,
+                )?;
+            }
+            Some(between) => skipped.push(SkippedDependency {
+                blocked_display_id: repository::current_display_id(conn, blocked_id)?,
+                blocking_display_id: repository::current_display_id(conn, blocking_id)?,
+                through_display_ids: between
+                    .iter()
+                    .map(|id| repository::current_display_id(conn, id))
+                    .collect::<rusqlite::Result<_>>()?,
+            }),
+        }
+    }
+    Ok(skipped)
 }
 
 /// What unresolved local intent shields from a Backend Pull (ADR-0044).
@@ -1718,6 +1846,9 @@ struct LocalShields {
     priority: HashSet<String>,
     /// Tickets whose unresolved Effort Mutation shields Effort.
     effort: HashSet<String>,
+    /// (Blocked Item, Blocking Item) pairs an unresolved Dependency Mutation
+    /// shields (ADR-0056).
+    dependencies: HashSet<(String, String)>,
 }
 
 /// Collect the exact Items whose unresolved Mutations shield Pull fields.
@@ -1726,9 +1857,9 @@ struct LocalShields {
 /// unknown Mutation Type or Item Class spellings. The sets only add targets,
 /// so a Mutation of another kind cannot remove a shield added by an earlier
 /// row.
-fn local_shields(conn: &Connection) -> rusqlite::Result<LocalShields> {
+fn local_shields(conn: &Connection) -> Result<LocalShields, RefreshStoreError> {
     let mut stmt = conn.prepare(
-        "select item_id, item_class, mutation_type from mutations \
+        "select item_id, item_class, mutation_type, sequence, payload_json from mutations \
           where state in ('pending', 'failed')",
     )?;
     let mut rows = stmt.query([])?;
@@ -1736,6 +1867,7 @@ fn local_shields(conn: &Connection) -> rusqlite::Result<LocalShields> {
         content: HashMap::new(),
         priority: HashSet::new(),
         effort: HashSet::new(),
+        dependencies: HashSet::new(),
     };
     while let Some(row) = rows.next()? {
         let item_id: String = row.get(0)?;
@@ -1751,11 +1883,22 @@ fn local_shields(conn: &Connection) -> rusqlite::Result<LocalShields> {
             MutationType::SetTicketEffort => {
                 shields.effort.insert(item_id);
             }
+            MutationType::AddDependency | MutationType::RemoveDependency => {
+                let sequence: i64 = row.get(3)?;
+                let payload: String = row.get(4)?;
+                let blocking_id = mutations::addressed_counterpart_id(mutation_type, &payload)
+                    .map_err(|source| RefreshStoreError::PayloadJson {
+                        sequence,
+                        mutation_type,
+                        source,
+                    })?;
+                if let Some(blocking_id) = blocking_id {
+                    shields.dependencies.insert((item_id, blocking_id));
+                }
+            }
             MutationType::SetItemStatus
             | MutationType::SetTicketContainer
             | MutationType::ClearTicketContainer
-            | MutationType::AddDependency
-            | MutationType::RemoveDependency
             | MutationType::AddExternalBlocker
             | MutationType::ResolveExternalBlocker
             | MutationType::PromoteTicket
@@ -2417,6 +2560,7 @@ mod tests {
             status,
             ticket_kind: Some(TicketKind::Task),
             ticket_fields: None,
+            blocked_by: Vec::new(),
         }
     }
 
@@ -2435,6 +2579,176 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    fn blocking_ids(conn: &Connection, blocked_id: &str) -> Vec<String> {
+        let mut stmt = conn
+            .prepare(
+                "select blocking_id from dependencies where blocked_id = ?1 order by blocking_id",
+            )
+            .unwrap();
+        stmt.query_map([blocked_id], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    fn refresh_blocked_by(keys: &[&str]) -> BackendItemRefresh {
+        BackendItemRefresh {
+            blocked_by: keys.iter().map(|key| (*key).to_owned()).collect(),
+            ..refresh("Backend title", Lifecycle::Open)
+        }
+    }
+
+    #[test]
+    fn pull_adds_and_removes_dependencies_between_bound_items() {
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        backend_ticket(&conn, "t1", "gh-1", "https://github.com/o/r/issues/1", 1);
+        backend_ticket(&conn, "t2", "gh-2", "https://github.com/o/r/issues/2", 2);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "t3",
+                display: "gh-3",
+                title: "Done blocker",
+                status: "done",
+                origin: "backend",
+                backend_kind: Some("github"),
+                backend_key: Some("https://github.com/o/r/issues/3"),
+                created_seq: 3,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_dependency(&conn, "t2", "t1").unwrap();
+
+        let skipped = merge_backend_refreshes(
+            &mut conn,
+            BackendKind::Github,
+            &[(
+                "https://github.com/o/r/issues/1".into(),
+                refresh_blocked_by(&[
+                    "https://github.com/o/r/issues/3",
+                    "https://github.com/o/r/issues/99",
+                ]),
+            )],
+            "2026-05-20T00:00:00Z",
+        )
+        .unwrap();
+
+        assert!(skipped.is_empty());
+        assert_eq!(
+            blocking_ids(&conn, "t1"),
+            ["t3"],
+            "the dropped edge to gh-2 goes; the done gh-3 comes in; unknown key 99 is ignored"
+        );
+    }
+
+    #[test]
+    fn pull_dependency_shield_covers_only_its_own_pair() {
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        for (id, display, key, seq) in [
+            ("t1", "gh-1", "https://github.com/o/r/issues/1", 1),
+            ("t2", "gh-2", "https://github.com/o/r/issues/2", 2),
+            ("t3", "gh-3", "https://github.com/o/r/issues/3", 3),
+            ("t4", "gh-4", "https://github.com/o/r/issues/4", 4),
+        ] {
+            backend_ticket(&conn, id, display, key, seq);
+        }
+        insert_dependency(&conn, "t2", "t1").unwrap();
+        insert_dependency(&conn, "t3", "t1").unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 1,
+                payload_json: r#"{"blocking_id":"t2"}"#,
+                ..FixtureMutation::new(MutationType::AddDependency, "t1")
+            },
+        )
+        .unwrap();
+        insert_fixture_mutation(
+            &conn,
+            FixtureMutation {
+                sequence: 2,
+                payload_json: r#"{"blocking_id":"t4"}"#,
+                state: MutationState::Failed,
+                failure_json: Some(r#"{"detail":"prior"}"#),
+                ..FixtureMutation::new(MutationType::RemoveDependency, "t1")
+            },
+        )
+        .unwrap();
+
+        merge_backend_refreshes(
+            &mut conn,
+            BackendKind::Github,
+            &[(
+                "https://github.com/o/r/issues/1".into(),
+                refresh_blocked_by(&["https://github.com/o/r/issues/4"]),
+            )],
+            "2026-05-20T00:00:00Z",
+        )
+        .unwrap();
+
+        assert_eq!(
+            blocking_ids(&conn, "t1"),
+            ["t2"],
+            "a pending add keeps gh-2 and a failed remove keeps gh-4 out, \
+             while the unshielded gh-3 still goes"
+        );
+    }
+
+    #[test]
+    fn pull_skips_a_dependency_that_closes_a_cycle_and_commits_the_rest() {
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        backend_ticket(&conn, "t1", "gh-1", "https://github.com/o/r/issues/1", 1);
+        backend_ticket(&conn, "t2", "gh-2", "https://github.com/o/r/issues/2", 2);
+        // gh-1 holds the Local tk-3, which waits on gh-2, so gh-1 already
+        // waits on gh-2 through tk-3. Only Containment closes this cycle: if
+        // the edge comes in, the walk stopped counting held Tickets.
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "l3",
+                display: "tk-3",
+                title: "Held",
+                container_id: Some("t1"),
+                container_class: "ticket",
+                created_seq: 3,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_dependency(&conn, "t2", "l3").unwrap();
+
+        let skipped = merge_backend_refreshes(
+            &mut conn,
+            BackendKind::Github,
+            &[(
+                "https://github.com/o/r/issues/2".into(),
+                refresh_blocked_by(&["https://github.com/o/r/issues/1"]),
+            )],
+            "2026-05-20T00:00:00Z",
+        )
+        .unwrap();
+
+        assert_eq!(
+            skipped,
+            [SkippedDependency {
+                blocked_display_id: "gh-2".into(),
+                blocking_display_id: "gh-1".into(),
+                through_display_ids: vec!["tk-3".into()],
+            }]
+        );
+        assert!(blocking_ids(&conn, "t2").is_empty());
+        let title: String = conn
+            .query_row("select title from items where id = 't2'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(title, "Backend title", "the rest of the Pull commits");
     }
 
     /// Seed one Mutation per `(sequence, state)`.
@@ -2590,6 +2904,7 @@ mod tests {
                         status: Lifecycle::Done,
                         ticket_kind: Some(TicketKind::Task),
                         ticket_fields: None,
+                        blocked_by: Vec::new(),
                     },
                 )],
                 "2026-05-20T00:00:00Z",
@@ -2896,6 +3211,7 @@ mod tests {
                         status: Lifecycle::Done,
                         ticket_kind: Some(TicketKind::Task),
                         ticket_fields: None,
+                        blocked_by: Vec::new(),
                     },
                 ),
                 (
@@ -2906,6 +3222,7 @@ mod tests {
                         status: Lifecycle::Done,
                         ticket_kind: Some(TicketKind::Bug),
                         ticket_fields: None,
+                        blocked_by: Vec::new(),
                     },
                 ),
             ],
@@ -3113,6 +3430,7 @@ mod tests {
                     status: Lifecycle::Done,
                     ticket_kind: None,
                     ticket_fields: None,
+                    blocked_by: Vec::new(),
                 },
             )],
             "2026-05-20T00:00:00Z",
@@ -3180,6 +3498,7 @@ mod tests {
                     status: Lifecycle::Done,
                     ticket_kind: Some(TicketKind::Task),
                     ticket_fields: None,
+                    blocked_by: Vec::new(),
                 },
             )],
             "2026-05-20T00:00:00Z",
@@ -6097,6 +6416,7 @@ mod tests {
                     status: Lifecycle::Open,
                     ticket_kind: Some(TicketKind::Bug),
                     ticket_fields: None,
+                    blocked_by: Vec::new(),
                 },
             )],
             NOW,

@@ -20,6 +20,7 @@ use std::io::Write;
 use clap::{Args as ClapArgs, Subcommand};
 
 use crate::cli::{CommandError, Deps, Exit};
+use crate::commands::pull_warning::sync_and_warn;
 use crate::commands::resolver;
 use crate::domain::backend_outcome::FailureClass;
 use crate::remote::factory::{self, OpenError as FactoryOpenError};
@@ -30,9 +31,7 @@ use crate::store::sync::{
     self as store_sync, LogDetailRow, LogError, LogListFilter, LogListRow, MarkSkippedError,
     SkipOutcome,
 };
-use crate::sync::{
-    self, CreatedIdentityNotStoredCause, RunSyncError, RunSyncErrorCategory, SyncReport,
-};
+use crate::sync::{CreatedIdentityNotStoredCause, RunSyncError, RunSyncErrorCategory, SyncReport};
 
 const COMMAND: &str = "sync";
 const LOG_COMMAND: &str = "sync log";
@@ -144,8 +143,15 @@ fn run_sync(deps: &mut Deps<'_>, skip: Option<i64>) -> Result<Exit, Error> {
         .into());
     };
 
-    let report = sync::run_sync(store.conn_mut(), &mut *adapter, &workflow, &now)
-        .map_err(|err| run_sync_error(&err))?;
+    let report = sync_and_warn(
+        deps.stderr,
+        COMMAND,
+        store.conn_mut(),
+        &mut *adapter,
+        &workflow,
+        &now,
+    )
+    .map_err(|err| run_sync_error(&err))?;
     render_sync_report(deps.stdout, &report);
     Ok(if report.stopped_at_sequence.is_some() {
         Exit::Failure
@@ -1269,6 +1275,7 @@ mod tests {
             &mut out,
             &SyncReport {
                 pulled_count: 3,
+                skipped_dependencies: Vec::new(),
                 applied_count: 2,
                 stopped_at_sequence: Some(9),
             },

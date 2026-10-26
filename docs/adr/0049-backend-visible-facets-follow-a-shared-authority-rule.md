@@ -4,6 +4,11 @@
 > structure, and Priority crosses from Local to Shared through GitHub's native
 > Priority field rather than reserved labels.
 
+> **Amended by ADR-0056.** A Dependency whose two ends are backend-bound now
+> passes this rule: Backend Pull reads it back and the Backend is
+> authoritative for it. Containment stays push-only, and gh-151 owns its
+> read-back.
+
 gh-68 asked whether a Ticket should carry comments, labels, and assignees, and
 whether Work State should show on a Backend. Six open Tickets hang on the
 answer, and three of them — Priority on GitHub (gh-69), execution mode

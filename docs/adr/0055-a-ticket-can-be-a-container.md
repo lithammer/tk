@@ -1,5 +1,9 @@
 # A Ticket can be a Container
 
+> **Amended by ADR-0056.** ADR-0056 reads back Dependencies only. Containment
+> is 0..1 and admits a Local Container, which its rule does not settle, so
+> gh-151, not gh-66, owns Containment read-back.
+
 A Ticket may hold Tickets, as an Epic does. The two cases share one
 relationship, **Containment**, and the item that holds a Ticket is its
 **Container**: an Epic or a Ticket. **Epic Membership** is retired. A Ticket

@@ -149,6 +149,10 @@ pub struct BackendItemRefresh {
     /// The Ticket fields the Backend holds; `None` on an Epic issue
     /// preserves the stored values (ADR-0054).
     pub ticket_fields: Option<SharedTicketFields>,
+    /// Backend keys of every Blocking Item the Backend lists for this Item,
+    /// complete or the Pull fails (ADR-0056). Keys tk has no Item for are the
+    /// Repository Store's to ignore.
+    pub blocked_by: Vec<String>,
 }
 
 /// The Shared Fields only a Ticket carries.
@@ -245,6 +249,7 @@ mod tests {
                     priority: Priority::P2,
                     effort: None,
                 }),
+                blocked_by: Vec::new(),
             },
         }
     }

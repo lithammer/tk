@@ -30,8 +30,9 @@ pub(super) const DELETE_ISSUE_FIELD_VALUE_QUERY: &str = "mutation DeleteIssueFie
 /// one effect (ADR-0054).
 pub(super) const CREATE_ISSUE_QUERY: &str = "mutation CreateIssue($repositoryId: ID!, $title: String!, $body: String!, $issueTypeId: ID, $issueFields: [IssueFieldCreateOrUpdateInput!]) { createIssue(input: { repositoryId: $repositoryId, title: $title, body: $body, issueTypeId: $issueTypeId, issueFields: $issueFields }) { issue { url number } } }";
 
-/// 50 Pull targets request at most 50 repositories, 2,500 issue fields, and
-/// 2,500 issue field values, well below GitHub's 500,000-node query limit.
+/// 50 Pull targets request at most 50 repositories, 2,500 issue fields, 2,500
+/// issue field values, and 5,000 blocking issues, well below GitHub's
+/// 500,000-node query limit.
 pub(super) const MAX_PULL_KEYS_PER_QUERY: usize = 50;
 
 /// A typed GraphQL operation binds one request to its response decoder.
@@ -329,7 +330,7 @@ impl GraphqlOperation for PullOperation<'_> {
                 let index = target.input_index;
                 let alias = target.alias();
                 format!(
-                    "{alias}: repository(owner: $owner_{index}, name: $name_{index}) {{ {ISSUE_FIELDS_SELECTION} item: issueOrPullRequest(number: $number_{index}) {{ __typename ... on Issue {{ number title body state url issueType {{ name }} issueFieldValues(first: 50) {{ nodes {{ ... on IssueFieldSingleSelectValue {{ value field {{ ... on IssueFieldSingleSelect {{ name }} }} }} }} pageInfo {{ hasNextPage }} }} }} ... on PullRequest {{ number url }} }} }}"
+                    "{alias}: repository(owner: $owner_{index}, name: $name_{index}) {{ {ISSUE_FIELDS_SELECTION} item: issueOrPullRequest(number: $number_{index}) {{ __typename ... on Issue {{ number title body state url issueType {{ name }} issueFieldValues(first: 50) {{ nodes {{ ... on IssueFieldSingleSelectValue {{ value field {{ ... on IssueFieldSingleSelect {{ name }} }} }} }} pageInfo {{ hasNextPage }} }} blockedBy(first: 100) {{ nodes {{ url }} pageInfo {{ hasNextPage }} }} }} ... on PullRequest {{ number url }} }} }}"
                 )
             })
             .collect::<Vec<_>>()
@@ -520,6 +521,21 @@ pub(super) struct NativeIssueType {
     pub is_enabled: bool,
 }
 
+/// The issues blocking one issue, as Pull reads them. GitHub's schema makes
+/// each node nullable, and Pull skips a null one.
+#[derive(Debug, Deserialize)]
+pub(super) struct BlockedByConnection {
+    pub nodes: Vec<Option<BlockingIssue>>,
+    #[serde(rename = "pageInfo")]
+    pub page_info: PageInfo,
+}
+
+/// One blocking issue's canonical URL, the only part of it Pull reads.
+#[derive(Debug, Deserialize)]
+pub(super) struct BlockingIssue {
+    pub url: String,
+}
+
 /// GraphQL connection state used for exhaustive pagination.
 #[derive(Debug, Deserialize)]
 pub(super) struct PageInfo {
@@ -551,7 +567,7 @@ pub(super) struct PullRepository {
 pub(super) enum PullObject {
     Issue {
         #[serde(flatten)]
-        issue: super::GhIssue,
+        issue: Box<super::GhIssue>,
     },
     PullRequest {
         number: i64,
@@ -646,14 +662,16 @@ repository(owner: $owner_2, name: $name_2) { issueFields(first: 50) { nodes { \
 hasNextPage } } item: issueOrPullRequest(number: $number_2) { __typename ... on \
 Issue { number title body state url issueType { name } issueFieldValues(first: \
 50) { nodes { ... on IssueFieldSingleSelectValue { value field { ... on \
-IssueFieldSingleSelect { name } } } } pageInfo { hasNextPage } } } ... on \
-PullRequest { number url } } } item_5: repository(owner: $owner_5, name: \
+IssueFieldSingleSelect { name } } } } pageInfo { hasNextPage } } blockedBy(first: \
+100) { nodes { url } pageInfo { hasNextPage } } } ... on PullRequest { number url \
+} } } item_5: repository(owner: $owner_5, name: \
 $name_5) { issueFields(first: 50) { nodes { ... on IssueFieldSingleSelect { id \
 name options { id name } } } pageInfo { hasNextPage } } item: \
 issueOrPullRequest(number: $number_5) { __typename ... on Issue { number title \
 body state url issueType { name } issueFieldValues(first: 50) { nodes { ... on \
 IssueFieldSingleSelectValue { value field { ... on IssueFieldSingleSelect { \
-name } } } } pageInfo { hasNextPage } } } ... on PullRequest { number url } } } }"
+name } } } } pageInfo { hasNextPage } } blockedBy(first: 100) { nodes { url } \
+pageInfo { hasNextPage } } } ... on PullRequest { number url } } } }"
         );
     }
 }

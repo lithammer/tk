@@ -232,7 +232,7 @@ A component that maps between **tk** domain concepts and a specific **Backend**.
 _Avoid_: Facade, Provider, Connector
 
 **Backend Pull**:
-An all-or-nothing **Backend Adapter** operation that refreshes the exact set of **Adopted** **Backend** items not yet `done`, returning title, body, **Lifecycle**, optional **Ticket Kind**, **Priority**, and **Effort** values for the Repository Store to merge. It never mirrors, discovers, or changes item identity, **Origin**, **Display ID**, or **Item Class**. It never writes a Backend value to **Work State**; importing a `done` **Lifecycle** clears **Work State** to `idle` as a local consequence.
+An all-or-nothing **Backend Adapter** operation that refreshes the exact set of **Adopted** **Backend** items not yet `done`, returning title, body, **Lifecycle**, optional **Ticket Kind**, **Priority**, **Effort**, and **Blocking Item** values for the Repository Store to merge. It never mirrors, discovers, or changes item identity, **Origin**, **Display ID**, or **Item Class**. It never writes a Backend value to **Work State**; importing a `done` **Lifecycle** clears **Work State** to `idle` as a local consequence.
 When an Item has a `pending` or `failed` `UpdateTicket` or `UpdateEpic`
 **Mutation**, the Repository Store preserves its title and body; a `pending`
 or `failed` `set_ticket_priority` or `set_ticket_effort` **Mutation**
@@ -833,9 +833,16 @@ _Avoid_: ticket, tickets
   leaves mixed-**Origin** **Containment** local.
 - Re-Adopt records its restored Binding and relationship Mutations in one
   transaction but does not run sync. Its report names each queued Mutation.
-- **Dependency** and **Containment** sync are push-only. **Backend Pull**
-  refreshes fields alone and reconciles neither relationship, so the
-  **Repository Store** stays authoritative for both. **Adopting** the issues of
+- **Backend Pull** reads back a **Dependency** when its **Blocked Item** is in
+  the Pull and its **Blocking Item** is backend-bound to the same **Backend**,
+  whatever its **Lifecycle**. The **Backend** is authoritative for those
+  edges: Pull adds the ones it lists and removes the ones it lacks, except a
+  pair an unresolved `add_dependency` or `remove_dependency` **Mutation**
+  shields. Pull ignores a **Backend** blocker that has no backend-bound local
+  Item. It skips an edge that would close a local cycle and warns about it
+  (ADR-0056).
+- **Containment** sync is push-only. **Backend Pull** reads no parent, so the
+  **Repository Store** stays authoritative for it. **Adopting** the issues of
   a **Backend** tree therefore yields **Tickets** with no **Container**.
 - A **Repository Store** syncs with the one **Backend** repository its own
   version-control repository resolves through the **Backend Adapter**.
