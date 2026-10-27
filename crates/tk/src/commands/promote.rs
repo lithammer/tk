@@ -1331,9 +1331,7 @@ mod tests {
             title: title.into(),
             body: body.into(),
             status,
-            ticket_kind: Some(TicketKind::Task),
-            ticket_fields: None,
-            blocked_by: Vec::new(),
+            ..BackendItemRefresh::for_test()
         }
     }
 

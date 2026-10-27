@@ -306,10 +306,9 @@ mod tests {
     use crate::domain::lifecycle::Lifecycle;
     use crate::domain::mutation_state::MutationState;
     use crate::domain::mutation_type::MutationType;
-    use crate::domain::ticket_kind::TicketKind;
     use crate::proc::{FakeRunner, ProcError};
     use crate::remote::fake::{CreateResponse, EditResponse, FakeAdapter, PullResponse};
-    use crate::remote::github::GithubAdapter;
+    use crate::remote::github::{GithubAdapter, fixtures};
     use crate::store::migrations;
     use crate::store::testing::{
         FixtureItem, FixtureMutation, FixtureRemote, insert_fixture_item, insert_fixture_mutation,
@@ -361,12 +360,9 @@ mod tests {
 
     fn refresh(title: &str) -> BackendItemRefresh {
         BackendItemRefresh {
-            ticket_kind: Some(TicketKind::Task),
-            ticket_fields: None,
-            blocked_by: Vec::new(),
             title: title.into(),
             body: String::new(),
-            status: Lifecycle::Open,
+            ..BackendItemRefresh::for_test()
         }
     }
 
@@ -777,9 +773,7 @@ mod tests {
         runner.expect_exact_with_stdin(
             &graphql,
             &crate::remote::github::issue_fields_request_body("o", "r"),
-            ok(
-                r#"{"data":{"repository":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}}}}}"#,
-            ),
+            ok(&fixtures::issue_fields_response()),
         );
         runner.expect_exact_with_stdin_error(
             &graphql,
@@ -788,7 +782,10 @@ mod tests {
                 "Local work",
                 "",
                 None,
-                &[("F1", "O2")],
+                &[(
+                    fixtures::PRIORITY_FIELD_ID,
+                    fixtures::PRIORITY_MEDIUM_OPTION_ID,
+                )],
             ),
             ProcError::OutcomeUnobserved,
         );
@@ -913,9 +910,7 @@ mod tests {
                 title: "Stale Backend title".into(),
                 body: "Stale Backend body".into(),
                 status: Lifecycle::Done,
-                ticket_kind: Some(TicketKind::Task),
-                ticket_fields: None,
-                blocked_by: Vec::new(),
+                ..BackendItemRefresh::for_test()
             }],
             vec![EditResponse::Success],
         );

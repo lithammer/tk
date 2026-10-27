@@ -18,6 +18,9 @@ use crate::cli::Deps;
 use crate::clock::FakeClock;
 use crate::domain::lifecycle::Lifecycle;
 use crate::proc::{FakeRunner, RunOutput};
+use crate::remote::github::fixtures::{
+    PRIORITY_FIELD_ID, PullIssue, issue_fields_response, pull_item, pull_response,
+};
 use crate::render::Styler;
 use crate::store::testing::TmpStore;
 
@@ -135,24 +138,18 @@ pub(crate) fn expect_github_pull(
         Lifecycle::Done => "CLOSED",
     };
     let request = crate::remote::github::single_pull_request_body(owner, name, number);
-    let response = serde_json::to_vec(&json!({
-        "data": {
-            "item_0": {
-                "issueFields": ticket_fields(),
-                "item": {
-                    "__typename": "Issue",
-                    "number": number,
-                    "title": title,
-                    "body": body,
-                    "state": state,
-                    "url": format!("https://github.com/{owner}/{name}/issues/{number}"),
-                    "issueType": null,
-                    "blockedBy": {"nodes": [], "pageInfo": {"hasNextPage": false}},
-                },
-            },
-        },
-    }))
-    .unwrap();
+    let response = pull_response(&[(
+        0,
+        pull_item(PullIssue {
+            owner,
+            name,
+            number,
+            title,
+            body,
+            state,
+            ..PullIssue::default()
+        }),
+    )]);
     h.runner.expect_exact_with_stdin(
         &[
             "gh",
@@ -191,24 +188,6 @@ fn expect_repo_view(h: &Harness<'_>, owner: &str, name: &str) {
     );
 }
 
-/// The account's Priority field, `F_PRIORITY` with the options `Urgent`..`Low`
-/// as `O_P0`..`O_P3`, and its Effort field, `F_EFFORT` with `O_EL`..`O_EH`.
-fn ticket_fields() -> serde_json::Value {
-    json!({
-        "nodes": [{"id": "F_PRIORITY", "name": "Priority", "options": [
-            {"id": "O_P0", "name": "Urgent"},
-            {"id": "O_P1", "name": "High"},
-            {"id": "O_P2", "name": "Medium"},
-            {"id": "O_P3", "name": "Low"},
-        ]}, {"id": "F_EFFORT", "name": "Effort", "options": [
-            {"id": "O_EL", "name": "Low"},
-            {"id": "O_EM", "name": "Medium"},
-            {"id": "O_EH", "name": "High"},
-        ]}],
-        "pageInfo": {"hasNextPage": false},
-    })
-}
-
 /// Queue the repository read and Issue Type page that resolve `type_name` to
 /// `type_id` for an Epic or Bug requirement.
 pub(crate) fn expect_github_issue_type(
@@ -237,7 +216,7 @@ pub(crate) fn expect_github_issue_type(
 }
 
 /// Queue the repository read and issue field read that resolve the Priority
-/// and Effort fields for a Ticket requirement (see `ticket_fields`).
+/// and Effort fields for a Ticket requirement (see [`issue_fields_response`]).
 pub(crate) fn expect_github_ticket_fields(h: &Harness<'_>, owner: &str, name: &str) {
     expect_repo_view(h, owner, name);
     h.runner.expect_exact_with_stdin(
@@ -245,10 +224,7 @@ pub(crate) fn expect_github_ticket_fields(h: &Harness<'_>, owner: &str, name: &s
         &crate::remote::github::issue_fields_request_body(owner, name),
         RunOutput {
             exit_code: 0,
-            stdout: serde_json::to_vec(&json!({
-                "data": {"repository": {"issueFields": ticket_fields()}},
-            }))
-            .unwrap(),
+            stdout: issue_fields_response().into_bytes(),
             stderr: Vec::new(),
         },
     );
@@ -275,7 +251,7 @@ pub(crate) fn expect_github_create(
             body,
             type_id,
             priority
-                .map(|option_id| ("F_PRIORITY", option_id))
+                .map(|option_id| (PRIORITY_FIELD_ID, option_id))
                 .as_slice(),
         ),
         RunOutput {

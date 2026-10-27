@@ -155,6 +155,22 @@ pub struct BackendItemRefresh {
     pub blocked_by: Vec<String>,
 }
 
+#[cfg(test)]
+impl BackendItemRefresh {
+    /// An open Task with no fields or blockers. Tests vary it with
+    /// struct-update syntax, so a new field touches only this constructor.
+    pub(crate) fn for_test() -> Self {
+        Self {
+            title: "Title".into(),
+            body: "Body".into(),
+            status: Lifecycle::Open,
+            ticket_kind: Some(TicketKind::Task),
+            ticket_fields: None,
+            blocked_by: Vec::new(),
+        }
+    }
+}
+
 /// The Shared Fields only a Ticket carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SharedTicketFields {
@@ -243,13 +259,11 @@ mod tests {
             refresh: BackendItemRefresh {
                 title: key.into(),
                 body: String::new(),
-                status: Lifecycle::Open,
-                ticket_kind: Some(TicketKind::Task),
                 ticket_fields: Some(SharedTicketFields {
                     priority: Priority::P2,
                     effort: None,
                 }),
-                blocked_by: Vec::new(),
+                ..BackendItemRefresh::for_test()
             },
         }
     }
