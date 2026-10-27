@@ -225,10 +225,6 @@ pub struct QueuedRelationshipMutation {
 struct FormerIdentity {
     /// Stable internal Item ID that owns the identity for its lifetime.
     item_id: String,
-    /// Canonical key exactly as history stores it. Re-Adopt restores this
-    /// spelling rather than the Adapter's, so one Backend object never appears
-    /// as both an active and a former identity under two spellings.
-    backend_key: String,
     /// Backend Display ID this identity carried while it was current.
     backend_display_id: String,
 }
@@ -256,20 +252,12 @@ pub fn adopt_backend_ticket(
     ensure_adopt_available(&tx)?;
     ensure_adopt_remote(&tx, expected_kind)?;
     ensure_backend_cohort(&tx, expected_kind)?;
-    let legacy_backend_key = legacy_adopt_backend_key(expected_kind, adopted);
-    if let Some(row) = find_adopted_ticket_by_identity(
-        &tx,
-        expected_kind,
-        &adopted.backend_key,
-        legacy_backend_key,
-    )? {
+    if let Some(row) = find_adopted_ticket(&tx, expected_kind, &adopted.backend_key)? {
         return Ok(AdoptOutcome::AlreadyExists(row));
     }
     // Active identity first: an Item restored by an earlier Re-Adopt keeps the
     // matching row in history, so only a miss above makes this a former one.
-    if let Some(former) =
-        find_former_backend_identity(&tx, expected_kind, &adopted.backend_key, legacy_backend_key)?
-    {
+    if let Some(former) = find_former_backend_identity(&tx, expected_kind, &adopted.backend_key)? {
         let report = readopt_backend_item(&tx, expected_kind, &former, adopted, capabilities, now)?;
         tx.commit()?;
         return Ok(AdoptOutcome::Readopted(report));
@@ -307,13 +295,8 @@ pub fn adopt_backend_ticket(
     claim_display_id(&tx, &adopted.display_id, &id, now)?;
     tx.commit()?;
     Ok(AdoptOutcome::Inserted(
-        find_adopted_ticket_by_identity(
-            conn,
-            expected_kind,
-            &adopted.backend_key,
-            legacy_backend_key,
-        )?
-        .expect("the adopted Backend Ticket was committed"),
+        find_adopted_ticket(conn, expected_kind, &adopted.backend_key)?
+            .expect("the adopted Backend Ticket was committed"),
     ))
 }
 
@@ -325,19 +308,10 @@ pub fn readopt_requirements(
     backend_kind: BackendKind,
     adopted: &AdoptedItem,
 ) -> Result<Option<PromotionRequirements>, AdoptStoreError> {
-    let legacy_backend_key = legacy_adopt_backend_key(backend_kind, adopted);
-    if find_adopted_ticket_by_identity(
-        conn,
-        backend_kind,
-        &adopted.backend_key,
-        legacy_backend_key,
-    )?
-    .is_some()
-    {
+    if find_adopted_ticket(conn, backend_kind, &adopted.backend_key)?.is_some() {
         return Ok(None);
     }
-    let Some(former) =
-        find_former_backend_identity(conn, backend_kind, &adopted.backend_key, legacy_backend_key)?
+    let Some(former) = find_former_backend_identity(conn, backend_kind, &adopted.backend_key)?
     else {
         return Ok(None);
     };
@@ -455,7 +429,7 @@ fn readopt_backend_item(
         params![
             &former.item_id,
             backend_kind,
-            &former.backend_key,
+            adopted.backend_key,
             &former.backend_display_id,
             adopted.title,
             adopted.body,
@@ -505,7 +479,7 @@ fn readopt_backend_item(
     Ok(ReadoptReport {
         backend_display_id: former.backend_display_id.clone(),
         local_display_id: display_id,
-        backend_key: former.backend_key.clone(),
+        backend_key: adopted.backend_key.clone(),
         title: adopted.title.clone(),
         ticket_kind,
         status: ItemStatus::of(adopted.status, work_state),
@@ -534,38 +508,20 @@ fn readopt_graph(
 }
 
 /// Look up the Former Backend Identity that owns a canonical Backend key.
-///
-/// Shares Adopt's exact-key predicate, legacy spelling included: Detach copies
-/// `items.backend_key` verbatim into history, so an Item adopted before the
-/// Adapter canonicalized keys leaves a bare issue number behind. Missing it
-/// would let ordinary Adopt insert a second Item for a Backend object tk
-/// already owns.
-///
-/// Two rows can satisfy that predicate, because the ownership invariant
-/// compares key strings and the two spellings are not equal: history may hold
-/// a legacy number for one Item and the canonical URL for another. The
-/// canonical spelling is the stronger evidence — a bare number is only
-/// exact-matchable within one repository — so it wins, and the other Item
-/// keeps its reservation rather than being displaced by scan order.
 fn find_former_backend_identity(
     conn: &Connection,
     backend_kind: BackendKind,
     backend_key: &str,
-    legacy_backend_key: Option<&str>,
 ) -> rusqlite::Result<Option<FormerIdentity>> {
     conn.query_row(
-        "select item_id, backend_key, backend_display_value \
+        "select item_id, backend_display_value \
            from former_backend_identities \
-          where backend_kind = ?1 \
-            and (backend_key = ?2 or (?3 is not null and backend_key = ?3)) \
-          order by backend_key = ?2 desc \
-          limit 1",
-        params![backend_kind, backend_key, legacy_backend_key],
+          where backend_kind = ?1 and backend_key = ?2",
+        params![backend_kind, backend_key],
         |row| {
             Ok(FormerIdentity {
                 item_id: row.get(0)?,
-                backend_key: row.get(1)?,
-                backend_display_id: row.get(2)?,
+                backend_display_id: row.get(1)?,
             })
         },
     )
@@ -1509,31 +1465,20 @@ pub struct BackendItemRow {
 /// Look up a Backend Ticket for an idempotent Adopt.
 ///
 /// Exact canonical keys make a repeated Adopt Store-only without equating
-/// same-numbered issues from different repositories. Legacy numeric keys stay
-/// exact-matchable; a Backend read canonicalizes other user input before the
-/// transactional idempotence check.
+/// same-numbered issues from different repositories; a Backend read
+/// canonicalizes user input before the transactional idempotence check.
 pub fn find_adopted_ticket(
     conn: &Connection,
     backend_kind: BackendKind,
-    input: &str,
-) -> Result<Option<BackendItemRow>, AdoptStoreError> {
-    find_adopted_ticket_by_identity(conn, backend_kind, input, None)
-}
-
-fn find_adopted_ticket_by_identity(
-    conn: &Connection,
-    backend_kind: BackendKind,
     backend_key: &str,
-    legacy_backend_key: Option<&str>,
 ) -> Result<Option<BackendItemRow>, AdoptStoreError> {
     let row = conn
         .query_row(
             "select item_class, display_value, ticket_kind, priority, status, title, \
                   work_state \
            from items \
-          where backend_kind = ?1 \
-            and (backend_key = ?2 or (?3 is not null and backend_key = ?3))",
-            params![backend_kind, backend_key, legacy_backend_key],
+          where backend_kind = ?1 and backend_key = ?2",
+            params![backend_kind, backend_key],
             |row| {
                 Ok((
                     row.get::<_, ItemClass>(0)?,
@@ -1554,15 +1499,6 @@ fn find_adopted_ticket_by_identity(
         Some((ItemClass::Epic, row)) => Err(AdoptStoreError::BackendItemIsEpic(row.display_id)),
         None => Ok(None),
     }
-}
-
-fn legacy_adopt_backend_key(backend_kind: BackendKind, adopted: &AdoptedItem) -> Option<&str> {
-    if backend_kind != BackendKind::Github {
-        return None;
-    }
-    let number = adopted.display_id.strip_prefix("gh-")?;
-    let url_number = adopted.backend_key.rsplit_once("/issues/")?.1;
-    (number == url_number && number.parse::<u64>().is_ok()).then_some(number)
 }
 
 /// How many **Unresolved Mutations** the Mutation Log holds, one count per
@@ -2360,7 +2296,7 @@ mod tests {
     use std::time::Duration;
 
     const NOW: &str = "2026-08-09T00:00:00Z";
-    /// Canonical GitHub key for issue 42, whose legacy spelling is `42`.
+    /// Canonical GitHub key for issue 42.
     const URL_42: &str = "https://github.com/o/r/issues/42";
 
     fn open_seeded() -> Connection {
@@ -6136,7 +6072,7 @@ mod tests {
 
         // Canonical identity is the (Backend kind, key) pair: a key spelled
         // the same on another Backend names a different object, so Jira intake
-        // inserts rather than rebinding the legacy GitHub history.
+        // inserts rather than rebinding the GitHub history.
         let outcome = adopt_with_all_capabilities(
             &mut conn,
             BackendKind::Jira,
@@ -6156,68 +6092,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(origin, "local");
-    }
-
-    #[test]
-    fn the_canonical_spelling_wins_two_matching_history_rows() {
-        let mut conn = open_seeded();
-        seed_remote(&conn);
-        for (id, display, created_seq) in [("legacy", "tk-1", 9), ("canonical", "tk-2", 10)] {
-            insert_fixture_item(
-                &conn,
-                FixtureItem {
-                    id,
-                    display,
-                    title: "Detached work",
-                    created_seq,
-                    ..FixtureItem::default()
-                },
-            )
-            .unwrap();
-        }
-        // Both rows name issue 42. The ownership invariant compares key
-        // strings, so the two spellings coexist and Re-Adopt has to choose.
-        // The lookup's `order by` makes the canonical spelling win; this pins
-        // that as the contract, so a rewritten predicate cannot hand the
-        // identity to the other Item.
-        for (backend_key, item_id, detached_seq) in [("42", "legacy", 1), (URL_42, "canonical", 2)]
-        {
-            insert_fixture_former_identity(
-                &conn,
-                FixtureFormerIdentity {
-                    backend_key,
-                    item_id,
-                    backend_display_value: "gh-42",
-                    detached_seq,
-                    detached_at: NOW,
-                    ..FixtureFormerIdentity::default()
-                },
-            )
-            .unwrap();
-        }
-
-        let outcome = adopt_with_all_capabilities(
-            &mut conn,
-            BackendKind::Github,
-            &mut rand::rngs::StdRng::seed_from_u64(7),
-            &adopted(URL_42, "gh-42", "Fresh title", Lifecycle::Open),
-            NOW,
-        )
-        .unwrap();
-
-        let AdoptOutcome::Readopted(report) = outcome else {
-            panic!("expected Re-Adopt, got {outcome:?}");
-        };
-        assert_eq!(report.local_display_id, "tk-2");
-        assert_eq!(report.backend_key, URL_42);
-        // The Item holding the weaker spelling keeps its reservation instead of
-        // being displaced.
-        let legacy_origin: String = conn
-            .query_row("select origin from items where id = 'legacy'", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(legacy_origin, "local");
     }
 
     #[test]
