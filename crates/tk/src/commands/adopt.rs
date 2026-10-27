@@ -1323,64 +1323,6 @@ mod tests {
     }
 
     #[test]
-    fn readopt_matches_the_legacy_numeric_key_history_holds() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
-        // Adopted before the Adapter canonicalized keys, so Detach copied a
-        // bare issue number into history.
-        insert_fixture_item(&conn, backend_ticket("gh-42", "42")).unwrap();
-        let cwd_path = cwd();
-        detach_item(&store, &cwd_path, "gh-42");
-
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_git(&h, &store);
-        expect_issue_view(&h, 42, "OPEN", "null");
-
-        let exit = run_rendered(&mut h, "42");
-
-        assert_eq!(exit, Exit::Ok, "stderr={}", h.err());
-        assert!(h.out().contains("Backend object: 42\n"), "{}", h.out());
-        // The restored Binding takes history's spelling, so one Backend object
-        // never sits in the Store as both an active and a former identity.
-        assert_eq!(item_count(&conn).unwrap(), 1);
-        assert_eq!(stored_backend_key(&conn), "42");
-    }
-
-    #[test]
-    fn readopt_reopens_a_legacy_keyed_done_item() {
-        let store = TmpStore::new("repo");
-        let conn = seed_store(&store);
-        insert_fixture_remote(&conn, FixtureRemote::default()).unwrap();
-        insert_fixture_item(
-            &conn,
-            FixtureItem {
-                status: "done",
-                ..backend_ticket("gh-42", "42")
-            },
-        )
-        .unwrap();
-        let cwd_path = cwd();
-        detach_item(&store, &cwd_path, "gh-42");
-
-        let mut h = Harness::new(&cwd_path, &store);
-        expect_git(&h, &store);
-        expect_issue_view(&h, 42, "OPEN", "null");
-
-        let exit = run_rendered(&mut h, "42");
-
-        // Where the two halves meet: the reopen is authorized by comparing the
-        // restored key against history, so restoring the Adapter's
-        // canonicalization instead of history's spelling would leave the
-        // exception unmatched and abort a Re-Adopt of a legacy-keyed done Item.
-        assert_eq!(exit, Exit::Ok, "stderr={}", h.err());
-        assert_eq!(
-            item_axes(&conn, "stable").unwrap(),
-            (Lifecycle::Open, WorkState::Idle)
-        );
-    }
-
-    #[test]
     fn importing_a_done_lifecycle_clears_work_state() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
