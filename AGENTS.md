@@ -41,3 +41,6 @@ instance; the primary source settles what is possible. Read it at the tag
 matching the installed version, and say which of the two a spike, fixture, or
 classifier claim rests on. A claim that some behaviour is impossible or
 unobservable rests on the primary source.
+
+Run probes that write to GitHub in the private sandbox
+`lithammer/tk-gh-playground`; `lithammer/tk` holds real work.
