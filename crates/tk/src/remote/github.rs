@@ -36,6 +36,9 @@ use super::adapter::{Adapter, AdapterReadError, ApplyError};
 mod graphql;
 mod issue_field;
 
+#[cfg(test)]
+pub(crate) mod fixtures;
+
 use graphql::cli::CliGraphqlTransport;
 use graphql::{
     BlockedByConnection, CreateIssueData, CreateIssueOperation, DeleteIssueFieldValueOperation,
@@ -1286,6 +1289,10 @@ mod tests {
     use crate::domain::mutation_type::MutationType;
     use crate::domain::priority::Priority;
     use crate::proc::{FakeRunner, ProcError, RunOutput};
+    use crate::remote::github::fixtures::{
+        EFFORT_FIELD_ID, PRIORITY_FIELD_ID, PRIORITY_MEDIUM_OPTION_ID, PullIssue,
+        issue_fields_response, pull_item, pull_response,
+    };
 
     /// Command cwd the Adapter passes to the runner; `FakeRunner::run` ignores it.
     fn cwd() -> &'static Path {
@@ -1390,28 +1397,6 @@ mod tests {
         ]
     }
 
-    /// The account's Priority and Effort fields as GitHub's starter pack defines
-    /// them.
-    fn ticket_fields() -> serde_json::Value {
-        serde_json::json!({
-            "nodes": [{"id": "F1", "name": "Priority", "options": [
-                {"id": "O0", "name": "Urgent"},
-                {"id": "O1", "name": "High"},
-                {"id": "O2", "name": "Medium"},
-                {"id": "O3", "name": "Low"},
-            ]}, {"id": "F2", "name": "Effort", "options": [
-                {"id": "E0", "name": "Low"},
-                {"id": "E1", "name": "Medium"},
-                {"id": "E2", "name": "High"},
-            ]}],
-            "pageInfo": {"hasNextPage": false},
-        })
-    }
-
-    fn ticket_fields_json() -> String {
-        serde_json::json!({"data": {"repository": {"issueFields": ticket_fields()}}}).to_string()
-    }
-
     fn expect_graphql_fields(runner: &FakeRunner, owner: &str, name: &str, response: &str) {
         runner.expect_exact_with_stdin(
             &graphql_argv("github.com"),
@@ -1448,7 +1433,31 @@ mod tests {
                 })
             );
             GraphqlExchange::Completed(GraphqlCompleted {
-                body: br#"{"data":{"item_0":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":1,"title":"First","body":"B1","state":"OPEN","url":"https://github.com/o/r/issues/1","issueType":{"name":"Bug"},"blockedBy":{"nodes":[],"pageInfo":{"hasNextPage":false}} }},"item_1":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":2,"title":"Second","body":"B2","state":"CLOSED","url":"https://github.com/p/q/issues/2","issueType":{"name":"Bug"},"blockedBy":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}}"#.to_vec(),
+                body: pull_response(&[
+                    (
+                        0,
+                        pull_item(PullIssue {
+                            number: 1,
+                            title: "First",
+                            body: "B1",
+                            issue_type: Some("Bug"),
+                            ..PullIssue::default()
+                        }),
+                    ),
+                    (
+                        1,
+                        pull_item(PullIssue {
+                            owner: "p",
+                            name: "q",
+                            number: 2,
+                            title: "Second",
+                            body: "B2",
+                            state: "CLOSED",
+                            issue_type: Some("Bug"),
+                            ..PullIssue::default()
+                        }),
+                    ),
+                ]),
                 completion: graphql::GraphqlCompletion::Succeeded {
                     detail: String::new(),
                 },
@@ -1475,33 +1484,25 @@ mod tests {
                 .borrow_mut()
                 .push((request.host.clone(), indices.len()));
             let variables = request.variables.as_object().unwrap();
-            let mut data = serde_json::Map::new();
-            for index in indices {
-                let owner = variables[&format!("owner_{index}")].as_str().unwrap();
-                let name = variables[&format!("name_{index}")].as_str().unwrap();
-                let number = variables[&format!("number_{index}")].as_i64().unwrap();
-                data.insert(
-                    format!("item_{index}"),
-                    serde_json::json!({
-                        "issueFields": ticket_fields(),
-                        "item": {
-                            "__typename": "Issue",
-                            "number": number,
-                            "title": format!("Issue {number}"),
-                            "body": "",
-                            "state": "OPEN",
-                            "url": format!(
-                                "https://{}/{owner}/{name}/issues/{number}",
-                                request.host
-                            ),
-                            "issueType": null,
-                            "blockedBy": {"nodes": [], "pageInfo": {"hasNextPage": false}},
-                        }
-                    }),
-                );
-            }
+            let items = indices
+                .into_iter()
+                .map(|index| {
+                    let owner = variables[&format!("owner_{index}")].as_str().unwrap();
+                    let name = variables[&format!("name_{index}")].as_str().unwrap();
+                    let number = variables[&format!("number_{index}")].as_i64().unwrap();
+                    let item = pull_item(PullIssue {
+                        host: &request.host,
+                        owner,
+                        name,
+                        number,
+                        title: &format!("Issue {number}"),
+                        ..PullIssue::default()
+                    });
+                    (index, item)
+                })
+                .collect::<Vec<_>>();
             GraphqlExchange::Completed(GraphqlCompleted {
-                body: serde_json::to_vec(&serde_json::json!({"data": data})).unwrap(),
+                body: pull_response(&items),
                 completion: graphql::GraphqlCompletion::Succeeded {
                     detail: String::new(),
                 },
@@ -1556,7 +1557,14 @@ mod tests {
             let body = if call == 0 {
                 br#"{"data":{"item_0":null},"errors":[{"message":"first input failed","path":["item_0","item"]}]}"#.to_vec()
             } else {
-                br#"{"data":{"item_50":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":51,"title":"Last","body":"","state":"OPEN","url":"https://github.com/o/r/issues/51","issueType":null,"blockedBy":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}}"#.to_vec()
+                pull_response(&[(
+                    50,
+                    pull_item(PullIssue {
+                        number: 51,
+                        title: "Last",
+                        ..PullIssue::default()
+                    }),
+                )])
             };
             GraphqlExchange::Completed(GraphqlCompleted {
                 body,
@@ -1600,9 +1608,38 @@ mod tests {
     impl GraphqlTransport for CrossHostDecodeErrorTransport {
         fn exchange(&self, request: &GraphqlRequest) -> GraphqlExchange {
             let body = if request.host == "one.example" {
-                br#"{"data":{"item_0":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":1,"title":"Valid","body":"","state":"OPEN","url":"https://one.example/o/r/issues/1","issueType":null,"blockedBy":{"nodes":[],"pageInfo":{"hasNextPage":false}}}},"item_2":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":3,"title":"Later","body":"","state":"FUTURE","url":"https://one.example/o/r/issues/3","issueType":null,"blockedBy":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}}"#.to_vec()
+                pull_response(&[
+                    (
+                        0,
+                        pull_item(PullIssue {
+                            host: "one.example",
+                            number: 1,
+                            title: "Valid",
+                            ..PullIssue::default()
+                        }),
+                    ),
+                    (
+                        2,
+                        pull_item(PullIssue {
+                            host: "one.example",
+                            number: 3,
+                            title: "Later",
+                            state: "FUTURE",
+                            ..PullIssue::default()
+                        }),
+                    ),
+                ])
             } else {
-                br#"{"data":{"item_1":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":2,"title":"Earlier","body":"","state":"FUTURE","url":"https://two.example/o/r/issues/2","issueType":null,"blockedBy":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}}"#.to_vec()
+                pull_response(&[(
+                    1,
+                    pull_item(PullIssue {
+                        host: "two.example",
+                        number: 2,
+                        title: "Earlier",
+                        state: "FUTURE",
+                        ..PullIssue::default()
+                    }),
+                )])
             };
             GraphqlExchange::Completed(GraphqlCompleted {
                 body,
@@ -1680,7 +1717,7 @@ mod tests {
                         None,
                     ),
                     completed_graphql(
-                        r#"{"data":{"repository":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}}}}}"#,
+                        &issue_fields_response(),
                         None,
                     ),
                     exchange,
@@ -1822,7 +1859,43 @@ mod tests {
             &runner,
             cwd(),
             Box::new(StaticPullTransport {
-                body: br#"{"data":{"item_0":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":1,"title":"Untyped","body":"","state":"OPEN","url":"https://github.com/o/r/issues/1","issueType":null,"blockedBy":{"nodes":[],"pageInfo":{"hasNextPage":false}}}},"item_1":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":2,"title":"Feature","body":"","state":"OPEN","url":"https://github.com/o/r/issues/2","issueType":{"name":"Feature"},"blockedBy":{"nodes":[],"pageInfo":{"hasNextPage":false}}}},"item_2":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":3,"title":"Bug","body":"","state":"OPEN","url":"https://github.com/o/r/issues/3","issueType":{"name":"bug"},"blockedBy":{"nodes":[],"pageInfo":{"hasNextPage":false}}}},"item_3":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":4,"title":"Epic","body":"","state":"OPEN","url":"https://github.com/o/r/issues/4","issueType":{"name":"Epic"},"blockedBy":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}}"#.to_vec(),
+                body: pull_response(&[
+                    (
+                        0,
+                        pull_item(PullIssue {
+                            number: 1,
+                            title: "Untyped",
+                            ..PullIssue::default()
+                        }),
+                    ),
+                    (
+                        1,
+                        pull_item(PullIssue {
+                            number: 2,
+                            title: "Feature",
+                            issue_type: Some("Feature"),
+                            ..PullIssue::default()
+                        }),
+                    ),
+                    (
+                        2,
+                        pull_item(PullIssue {
+                            number: 3,
+                            title: "Bug",
+                            issue_type: Some("bug"),
+                            ..PullIssue::default()
+                        }),
+                    ),
+                    (
+                        3,
+                        pull_item(PullIssue {
+                            number: 4,
+                            title: "Epic",
+                            issue_type: Some("Epic"),
+                            ..PullIssue::default()
+                        }),
+                    ),
+                ]),
             }),
         );
         let items = [
@@ -2116,26 +2189,37 @@ mod tests {
 
     #[test]
     fn pull_rejects_missing_pull_request_malformed_and_mismatched_results() {
+        let mut other_issue = pull_item(PullIssue {
+            number: 2,
+            title: "Wrong",
+            ..PullIssue::default()
+        });
+        other_issue["number"] = serde_json::json!(1);
+        let future_state = pull_item(PullIssue {
+            title: "Future",
+            state: "FUTURE",
+            ..PullIssue::default()
+        });
         let cases = [
             (
-                br#"{"data":{"item_0":null}}"#.as_slice(),
+                br#"{"data":{"item_0":null}}"#.to_vec(),
                 "returned no repository",
             ),
             (
-                br#"{"data":{"item_0":{"item":null}}}"#.as_slice(),
+                br#"{"data":{"item_0":{"item":null}}}"#.to_vec(),
                 "returned no issue or pull request",
             ),
             (
-                br#"{"data":{"item_0":{"item":{"__typename":"PullRequest","number":1,"url":"https://github.com/o/r/pull/1"}}}}"#.as_slice(),
+                br#"{"data":{"item_0":{"item":{"__typename":"PullRequest","number":1,"url":"https://github.com/o/r/pull/1"}}}}"#.to_vec(),
                 "returned a pull request",
             ),
-            (b"not json".as_slice(), "could not parse GitHub GraphQL response"),
+            (b"not json".to_vec(), "could not parse GitHub GraphQL response"),
             (
-                br#"{"data":{"item_0":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":1,"title":"Wrong","body":"","state":"OPEN","url":"https://github.com/o/r/issues/2","issueType":null,"blockedBy":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}}"#.as_slice(),
+                pull_response(&[(0, other_issue)]),
                 "different issue",
             ),
             (
-                br#"{"data":{"item_0":{"issueFields":{"nodes":[{"id":"F1","name":"Priority","options":[{"id":"O0","name":"Urgent"},{"id":"O1","name":"High"},{"id":"O2","name":"Medium"},{"id":"O3","name":"Low"}]},{"id":"F2","name":"Effort","options":[{"id":"E0","name":"Low"},{"id":"E1","name":"Medium"},{"id":"E2","name":"High"}]}],"pageInfo":{"hasNextPage":false}},"item":{"__typename":"Issue","number":1,"title":"Future","body":"","state":"FUTURE","url":"https://github.com/o/r/issues/1","issueType":null,"blockedBy":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}}"#.as_slice(),
+                pull_response(&[(0, future_state)]),
                 "unexpected issue state",
             ),
         ];
@@ -2144,9 +2228,7 @@ mod tests {
             let mut adapter = GithubAdapter::with_graphql_transport(
                 &runner,
                 cwd(),
-                Box::new(StaticPullTransport {
-                    body: body.to_vec(),
-                }),
+                Box::new(StaticPullTransport { body }),
             );
 
             let error = adapter
@@ -2847,14 +2929,14 @@ mod tests {
             None,
             r#"{"data":{"repository":{"issueTypes":{"nodes":[{"id":"IT_1","name":"Bug","isEnabled":true}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#,
         );
-        expect_graphql_fields(&runner, "o", "r", &ticket_fields_json());
+        expect_graphql_fields(&runner, "o", "r", &issue_fields_response());
         expect_typed_create(
             &runner,
             "R_1",
             "Bug title",
             "Bug body",
             Some("IT_1"),
-            Some(("F1", "O2")),
+            Some((PRIORITY_FIELD_ID, PRIORITY_MEDIUM_OPTION_ID)),
             r#"{"data":{"createIssue":{"issue":{"url":"https://github.com/o/r/issues/42","number":42}}}}"#,
         );
         let mut adapter = GithubAdapter::new(&runner, cwd());
@@ -3129,23 +3211,15 @@ mod tests {
     #[test]
     fn pull_reads_blockers_and_fails_on_a_truncated_list() {
         for has_next_page in [false, true] {
-            let body = serde_json::to_vec(&serde_json::json!({"data": {"item_0": {
-                "issueFields": ticket_fields(),
-                "item": {
-                    "__typename": "Issue",
-                    "number": 1,
-                    "title": "T",
-                    "body": "",
-                    "state": "OPEN",
-                    "url": "https://github.com/o/r/issues/1",
-                    "issueType": null,
-                    "blockedBy": {
-                        "nodes": [{"url": "https://github.com/o/r/issues/5"}, null],
-                        "pageInfo": {"hasNextPage": has_next_page},
-                    },
-                },
-            }}}))
-            .unwrap();
+            let body = pull_response(&[(
+                0,
+                pull_item(PullIssue {
+                    title: "T",
+                    blocked_by: &[Some("https://github.com/o/r/issues/5"), None],
+                    blocked_by_has_next_page: has_next_page,
+                    ..PullIssue::default()
+                }),
+            )]);
             let runner = FakeRunner::new();
             let mut adapter = GithubAdapter::with_graphql_transport(
                 &runner,
@@ -3171,16 +3245,16 @@ mod tests {
     #[test]
     fn pull_fails_naming_a_missing_ticket_field_or_option() {
         for (fields, expected) in unusable_ticket_fields() {
-            let body = format!(
-                r#"{{"data":{{"item_0":{{"issueFields":{fields},"item":{{"__typename":"Issue","number":1,"title":"T","body":"","state":"OPEN","url":"https://github.com/o/r/issues/1","issueType":null,"blockedBy":{{"nodes":[],"pageInfo":{{"hasNextPage":false}}}}}}}}}}}}"#
-            );
+            let body = serde_json::to_vec(&serde_json::json!({"data": {"item_0": {
+                "issueFields": serde_json::from_str::<serde_json::Value>(fields).unwrap(),
+                "item": pull_item(PullIssue { title: "T", ..PullIssue::default() }),
+            }}}))
+            .unwrap();
             let runner = FakeRunner::new();
             let mut adapter = GithubAdapter::with_graphql_transport(
                 &runner,
                 cwd(),
-                Box::new(StaticPullTransport {
-                    body: body.into_bytes(),
-                }),
+                Box::new(StaticPullTransport { body }),
             );
 
             let result = adapter.pull(&[address("https://github.com/o/r/issues/1")]);
@@ -3227,8 +3301,8 @@ mod tests {
 
     #[test]
     fn clearing_effort_deletes_the_effort_field_value_and_needs_success() {
-        // A clear names the issue's node ID and the Effort field (`F2`), not
-        // Priority's (`F1`), and only `success: true` acknowledges it.
+        // A clear names the issue's node ID and the Effort field (`F_EFFORT`),
+        // not Priority's (`F_PRIORITY`), and only `success: true` acknowledges it.
         let key = "https://github.com/o/r/issues/1";
         for (response, acknowledged) in [
             (
@@ -3242,7 +3316,7 @@ mod tests {
             (r#"{"data":{"deleteIssueFieldValue":null}}"#, false),
         ] {
             let runner = FakeRunner::new();
-            expect_graphql_fields(&runner, "o", "r", &ticket_fields_json());
+            expect_graphql_fields(&runner, "o", "r", &issue_fields_response());
             runner.expect_exact(
                 &["gh", "issue", "view", key, "--json", ISSUE_JSON_FIELDS],
                 ok(&format!(
@@ -3252,8 +3326,9 @@ mod tests {
             runner.expect_exact_with_stdin(
                 &graphql_argv("github.com"),
                 format!(
-                    r#"{{"query":{},"operationName":"DeleteIssueFieldValue","variables":{{"fieldId":"F2","issueId":"I_1"}}}}"#,
+                    r#"{{"query":{},"operationName":"DeleteIssueFieldValue","variables":{{"fieldId":"{}","issueId":"I_1"}}}}"#,
                     json_string(graphql::DELETE_ISSUE_FIELD_VALUE_QUERY),
+                    EFFORT_FIELD_ID,
                 )
                 .as_bytes(),
                 ok(response),

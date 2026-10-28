@@ -237,17 +237,11 @@ impl Adapter for FakeAdapter {
 mod tests {
     use super::*;
     use crate::domain::backend_operation::BackendItemAddress;
-    use crate::domain::lifecycle::Lifecycle;
-    use crate::domain::ticket_kind::TicketKind;
 
     fn refresh(title: &str) -> BackendItemRefresh {
         BackendItemRefresh {
             title: title.into(),
-            body: "Body".into(),
-            status: Lifecycle::Open,
-            ticket_kind: Some(TicketKind::Task),
-            ticket_fields: None,
-            blocked_by: Vec::new(),
+            ..BackendItemRefresh::for_test()
         }
     }
 

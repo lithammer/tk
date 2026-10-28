@@ -2492,11 +2492,8 @@ mod tests {
     fn refresh(title: &str, status: Lifecycle) -> BackendItemRefresh {
         BackendItemRefresh {
             title: title.into(),
-            body: "Body".into(),
             status,
-            ticket_kind: Some(TicketKind::Task),
-            ticket_fields: None,
-            blocked_by: Vec::new(),
+            ..BackendItemRefresh::for_test()
         }
     }
 
@@ -2838,9 +2835,7 @@ mod tests {
                         title: "Stale Backend title".into(),
                         body: "Stale Backend body".into(),
                         status: Lifecycle::Done,
-                        ticket_kind: Some(TicketKind::Task),
-                        ticket_fields: None,
-                        blocked_by: Vec::new(),
+                        ..BackendItemRefresh::for_test()
                     },
                 )],
                 "2026-05-20T00:00:00Z",
@@ -3145,9 +3140,7 @@ mod tests {
                         title: "Stale title".into(),
                         body: "Stale body".into(),
                         status: Lifecycle::Done,
-                        ticket_kind: Some(TicketKind::Task),
-                        ticket_fields: None,
-                        blocked_by: Vec::new(),
+                        ..BackendItemRefresh::for_test()
                     },
                 ),
                 (
@@ -3157,8 +3150,7 @@ mod tests {
                         body: "Backend body".into(),
                         status: Lifecycle::Done,
                         ticket_kind: Some(TicketKind::Bug),
-                        ticket_fields: None,
-                        blocked_by: Vec::new(),
+                        ..BackendItemRefresh::for_test()
                     },
                 ),
             ],
@@ -3362,11 +3354,9 @@ mod tests {
                 "1".into(),
                 BackendItemRefresh {
                     title: "Backend title".into(),
-                    body: "Body".into(),
                     status: Lifecycle::Done,
                     ticket_kind: None,
-                    ticket_fields: None,
-                    blocked_by: Vec::new(),
+                    ..BackendItemRefresh::for_test()
                 },
             )],
             "2026-05-20T00:00:00Z",
@@ -3432,9 +3422,7 @@ mod tests {
                     title: "Backend epic title".into(),
                     body: "Backend epic body".into(),
                     status: Lifecycle::Done,
-                    ticket_kind: Some(TicketKind::Task),
-                    ticket_fields: None,
-                    blocked_by: Vec::new(),
+                    ..BackendItemRefresh::for_test()
                 },
             )],
             "2026-05-20T00:00:00Z",
@@ -6287,10 +6275,8 @@ mod tests {
                 BackendItemRefresh {
                     title: "Fresh".into(),
                     body: "Fresh body".into(),
-                    status: Lifecycle::Open,
                     ticket_kind: Some(TicketKind::Bug),
-                    ticket_fields: None,
-                    blocked_by: Vec::new(),
+                    ..BackendItemRefresh::for_test()
                 },
             )],
             NOW,
