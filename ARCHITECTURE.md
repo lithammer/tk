@@ -206,8 +206,11 @@ Important stable contracts:
   a Container, which is an Epic or a Ticket, and the composite foreign key pins
   the class to the Container's real class. No constraint spans rows, so
   `store/repository/containment.rs` enforces the depth cap (a Ticket held by a
-  Ticket holds nothing) inside the transaction that sets the Container
-  ([ADR 0055](./docs/adr/0055-a-ticket-can-be-a-container.md)).
+  Ticket holds nothing) and the cycle rule (a Ticket Container must not wait
+  on itself) inside the transaction that sets the Container, and owns that
+  write for both `tk update` and Backend Pull
+  ([ADR 0055](./docs/adr/0055-a-ticket-can-be-a-container.md),
+  [ADR 0057](./docs/adr/0057-backend-pull-reads-back-containment-between-bound-items.md)).
 - `plan_members` holds the single local Plan's Ticket identities. Its composite
   foreign key restricts membership to Tickets. `store/repository/plan.rs`
   owns atomic batch validation and a consistent read of members and blockers;

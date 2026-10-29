@@ -1,4 +1,7 @@
-//! The Containment depth cap (ADR-0055): nesting stops at Epic, Ticket, Ticket.
+//! The Containment rules no constraint can hold (ADR-0055): nesting stops at
+//! Epic, Ticket, Ticket, and a Ticket Container must not wait on itself.
+//! `set` and `clear` change an existing Ticket's Container for `tk update`
+//! and Backend Pull; `tk add` calls `check` before its insert.
 //!
 //! A CHECK constraint cannot span rows, so the write that sets a Ticket's
 //! Container calls `check` inside its own transaction. A check made earlier,
@@ -9,9 +12,11 @@ use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 
 use crate::domain::item_class::ItemClass;
+use crate::store::repository::{current_display_id, dependency};
 
 /// Why a Ticket cannot be held by the named Container. Each variant is an
-/// expected outcome the command renders at exit 1.
+/// expected outcome: `tk add` and `tk update` render it at exit 1, and
+/// Backend Pull skips the Containment and warns with it (ADR-0057).
 #[derive(Debug, Error)]
 pub enum ContainmentError {
     /// The Ticket names itself.
@@ -25,12 +30,21 @@ pub enum ContainmentError {
     /// both by Display ID.
     #[error("{ticket} holds Tickets, so only an Epic can hold it, not Ticket {container}")]
     TicketHoldsTickets { ticket: String, container: String },
+    /// The Ticket already waits on the Ticket Container, which would then
+    /// wait on it. Names both, and the Items between them on the Ticket's
+    /// wait path in order, by Display ID.
+    #[error("{ticket} already waits on {container}{}", dependency::through_clause(.through))]
+    WaitsOnContainer {
+        ticket: String,
+        container: String,
+        through: Vec<String>,
+    },
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
 }
 
 /// Check that `ticket` (`None` for one not yet created) may be held by
-/// `container_id`.
+/// `container_id` under the depth cap and the cycle rule.
 ///
 /// Reads the graph inside the caller's transaction, before the write. The
 /// stored graph cannot show a Ticket naming itself, so `check` tests that
@@ -69,7 +83,43 @@ pub(crate) fn check(
         if let Some(ticket) = holding_ticket {
             return Err(ContainmentError::TicketHoldsTickets { ticket, container });
         }
+        // A Ticket Container waits on each Ticket it holds, so holding this
+        // one closes a cycle when it already waits on the Container.
+        if let Some(through) = dependency::wait_path_display_ids(conn, ticket_id, container_id)? {
+            return Err(ContainmentError::WaitsOnContainer {
+                ticket: current_display_id(conn, ticket_id)?,
+                container,
+                through,
+            });
+        }
     }
+    Ok(())
+}
+
+/// Set `ticket_id`'s Container once [`check`] allows it.
+pub(crate) fn set(
+    conn: &Connection,
+    ticket_id: &str,
+    container_id: &str,
+) -> Result<(), ContainmentError> {
+    check(conn, Some(ticket_id), container_id)?;
+    write(conn, ticket_id, Some(container_id))?;
+    Ok(())
+}
+
+/// Clear `ticket_id`'s Container, which no rule refuses.
+pub(crate) fn clear(conn: &Connection, ticket_id: &str) -> rusqlite::Result<()> {
+    write(conn, ticket_id, None)
+}
+
+/// Write the Container, taking its Item Class from its row.
+fn write(conn: &Connection, ticket_id: &str, container_id: Option<&str>) -> rusqlite::Result<()> {
+    conn.prepare_cached(
+        "update items set container_id = ?2, \
+                          container_class = (select item_class from items where id = ?2) \
+          where id = ?1",
+    )?
+    .execute(params![ticket_id, container_id])?;
     Ok(())
 }
 

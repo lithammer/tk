@@ -429,6 +429,7 @@ mod tests {
     use crate::render::Styler;
     use crate::store::sync::{
         BackendCohortError, LoadApplicableError, PersistMutationOutcomeError, RefreshStoreError,
+        SkippedRelationships,
     };
     use crate::store::testing::{
         FixtureItem, FixtureMutation, FixtureRemote, TmpStore, insert_fixture_item,
@@ -1275,7 +1276,7 @@ mod tests {
             &mut out,
             &SyncReport {
                 pulled_count: 3,
-                skipped_dependencies: Vec::new(),
+                skipped: SkippedRelationships::default(),
                 applied_count: 2,
                 stopped_at_sequence: Some(9),
             },

@@ -50,9 +50,16 @@ pub enum AddDependencyError {
     /// The Blocking Item is already `Done`; v1 only models live blocking.
     #[error("blocking item is done")]
     BlockingDone,
-    /// The edge would close a cycle in the Dependency graph.
-    #[error("dependency cycle")]
-    Cycle,
+    /// The edge would make an Item wait on itself, counting each Ticket a
+    /// Ticket Container holds as one of its Blocking Items (ADR-0055). Names
+    /// both ends, and the Items between them on the Blocking Item's wait
+    /// path in order, by Display ID.
+    #[error("{blocking} already waits on {blocked}{}", through_clause(.through))]
+    Cycle {
+        blocked: String,
+        blocking: String,
+        through: Vec<String>,
+    },
     /// A backend-bound Blocked Item cannot wait on a Blocking Item with no
     /// backend intent: the Mutation would target an unaddressable reference.
     #[error("backend blocked item cannot depend on a local blocking item")]
@@ -127,22 +134,12 @@ pub fn add_dependency<C: Clock + ?Sized>(
         return Err(rejection.into());
     }
 
-    let cycles_into_existing = tx
-        .query_row(
-            "with recursive reachable(id) as (\
-                select ?2 \
-                union \
-                select d.blocking_id \
-                  from dependencies d, reachable \
-                 where d.blocked_id = reachable.id\
-              ) \
-              select 1 from reachable where id = ?1",
-            params![edge.blocked_id, edge.blocking_id],
-            |r| r.get::<_, i64>(0),
-        )
-        .optional()?;
-    if cycles_into_existing.is_some() {
-        return Err(AddDependencyError::Cycle);
+    if let Some(through) = wait_path_display_ids(&tx, edge.blocking_id, edge.blocked_id)? {
+        return Err(AddDependencyError::Cycle {
+            blocked: super::current_display_id(&tx, edge.blocked_id)?,
+            blocking: super::current_display_id(&tx, edge.blocking_id)?,
+            through,
+        });
     }
 
     let inserted = insert_edge(&tx, edge, &now_iso)?;
@@ -276,6 +273,33 @@ pub(crate) fn wait_path(
         }
     }
     Ok(None)
+}
+
+/// [`wait_path`] with the Items between named by Display ID, for a message
+/// that shows the path.
+pub(crate) fn wait_path_display_ids(
+    conn: &Connection,
+    from: &str,
+    to: &str,
+) -> rusqlite::Result<Option<Vec<String>>> {
+    wait_path(conn, from, to)?
+        .map(|between| {
+            between
+                .iter()
+                .map(|id| super::current_display_id(conn, id))
+                .collect()
+        })
+        .transpose()
+}
+
+/// The ` through A, B` tail that names the Items on a wait path, or nothing
+/// when the path is direct.
+pub(crate) fn through_clause(through: &[String]) -> String {
+    if through.is_empty() {
+        String::new()
+    } else {
+        format!(" through {}", through.join(", "))
+    }
 }
 
 fn read_endpoint_info(
@@ -538,7 +562,7 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert!(matches!(err, AddDependencyError::Cycle));
+        assert!(matches!(err, AddDependencyError::Cycle { .. }));
         let edges: i64 = store
             .conn
             .query_row("select count(*) from dependencies", [], |r| r.get(0))
