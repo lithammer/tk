@@ -275,8 +275,7 @@ pub(crate) fn wait_path(
     Ok(None)
 }
 
-/// [`wait_path`] with the Items between named by Display ID, for a message
-/// that shows the path.
+/// [`wait_path`] with the Items between named by Display ID.
 pub(crate) fn wait_path_display_ids(
     conn: &Connection,
     from: &str,

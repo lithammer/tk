@@ -844,7 +844,7 @@ _Avoid_: ticket, tickets
   Item. It skips an edge that would close a local cycle and warns about it
   (ADR-0056).
 - **Backend Pull** reads back a **Ticket**'s **Containment** when the
-  **Ticket** is in the Pull and the **Backend**'s parent, or the local
+  **Ticket** is in the Pull and the **Backend**'s parent, or its current
   **Container**, is backend-bound to the same **Backend**, whatever its
   **Lifecycle**. The **Backend** is authoritative for it: Pull sets a bound
   parent, replacing a Local **Container**, and clears a bound **Container**

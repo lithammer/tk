@@ -203,8 +203,6 @@ pub fn update_item<C: Clock + ?Sized>(
         .filter(|requested| current.priority != Some(*requested));
     let new_effort = req.effort.against(current.effort);
 
-    // Parent delta: `parent` carries the new Container for both
-    // containment::set or clear and set_ticket_container.
     let parent = req.parent.against(current.container_id.as_deref());
 
     let title_or_body_changed = new_title.is_some() || new_body.is_some();

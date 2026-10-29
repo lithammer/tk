@@ -10,8 +10,8 @@ with no bound Item, and skips an edge that would make an Item wait on itself,
 with a warning on stderr.
 .PP
 Pull also brings in each Ticket's parent when that parent is an Item bound
-to the Backend: it replaces the Ticket's Container, even a Local one, and a
-bound Container the Backend no longer lists is cleared. An unresolved parent
+to the Backend: it replaces the Ticket's Container, even a Local one, and
+clears a bound Container the Backend no longer lists. An unresolved parent
 change protects the Ticket's Container. A Local Container stays while the
 Backend lists no bound parent. Pull skips a parent tk cannot nest or that
 would make an Item wait on itself, with a warning on stderr; the Ticket then

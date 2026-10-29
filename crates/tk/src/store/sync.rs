@@ -1717,8 +1717,8 @@ pub fn merge_backend_refreshes(
     Ok(skipped)
 }
 
-/// A Container Pull sets after it adds Dependencies, and the Local Container
-/// it took the Ticket out of to make room.
+/// A Container Pull sets after Dependencies land, with the Local Container
+/// [`follow_backend_container`] cleared from the Ticket.
 struct QueuedContainer {
     ticket_id: String,
     container_id: String,
@@ -1732,9 +1732,8 @@ struct QueuedContainer {
 /// in `containments` a bound Container it lists that tk lacks. A Local
 /// Container stays until the Backend lists a bound one, which replaces it.
 ///
-/// Every Container the Ticket leaves is cleared here, before Dependencies
-/// land, so their cycle check does not count a Ticket Container that is
-/// about to let go of it.
+/// Clears happen here, before Dependencies land, so their cycle check never
+/// counts a Container the Ticket is leaving.
 ///
 /// A bound Container counts whatever its Lifecycle; a key tk has no bound
 /// Item for counts as none. A Ticket an unresolved Containment Mutation
@@ -2846,7 +2845,7 @@ mod tests {
     }
 
     /// GitHub cannot hold a Local Container, so a Pull that lists no parent
-    /// must keep it. If this fails, every sync strips the local grouping of
+    /// must keep it. If this fails, every sync drops the Local Container of
     /// a Backend Ticket (ADR-0057).
     #[test]
     fn pull_keeps_a_local_container_when_the_backend_lists_no_parent() {
