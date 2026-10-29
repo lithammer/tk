@@ -34,5 +34,5 @@
 
 ## Scope
 
-- `tk next <epic-id>` - Show the next ready Ticket under an Epic.
-- `tk list <epic-id>` - List an Epic and its child Tickets.
+- `tk next <epic-id>` - Show the next ready Ticket under an Epic or Ticket Container.
+- `tk list <epic-id>` - List an Epic or Ticket Container and the Tickets it holds.

@@ -10,7 +10,7 @@
 //! (via <contributor>)`) in both modes.
 //!
 //! Scope is the optional `<epic-id>` argument or `TK_SCOPE` (ADR-0022),
-//! resolved Epic-only here before selection runs.
+//! resolved as a Container here before selection runs.
 //! Plan membership intersects that Scope when `--plan` is supplied (ADR-0050).
 
 use std::io::Write;
@@ -30,15 +30,15 @@ use crate::store::repository::next::{
 /// Flags for `tk next`.
 #[derive(Debug, ClapArgs)]
 pub struct Args {
-    /// Restrict selection to this Epic's child Tickets. Falls back to the
-    /// `TK_SCOPE` environment variable; absent both, all ready Tickets are
-    /// considered.
+    /// Restrict selection to this Epic or Ticket Container and the Tickets it
+    /// holds. Falls back to the `TK_SCOPE` environment variable; absent both,
+    /// all ready Tickets are considered.
     #[arg(value_name = "EPIC_ID")]
     pub epic: Option<String>,
     /// Print only the bare Display ID, omitting the title.
     #[arg(short = 'q', long = "quiet")]
     pub quiet: bool,
-    /// Select only Plan members, intersecting any Epic Scope.
+    /// Select only Plan members, intersecting any Scope.
     #[arg(long)]
     pub plan: bool,
 }
@@ -52,12 +52,14 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     let store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock, deps.data_root)
         .map_err(|err| resolver::open_error(&err))?;
 
-    let scope_epic = scope::resolve(&store, args.epic.as_deref())?;
+    let scope = scope::resolve(&store, args.epic.as_deref())?;
 
-    let next_scope = match (&scope_epic, args.plan) {
+    let next_scope = match (&scope, args.plan) {
         (None, false) => NextScope::None,
-        (Some(epic), false) => NextScope::Epic(epic.id.as_str()),
-        (epic, true) => NextScope::Plan(epic.as_ref().map(|epic| epic.id.as_str())),
+        (Some(container), false) => NextScope::Container(container.id.as_str()),
+        (container, true) => {
+            NextScope::Plan(container.as_ref().map(|container| container.id.as_str()))
+        }
     };
 
     match next::next_ready_ticket(&store, NextOptions { scope: next_scope }) {
@@ -86,14 +88,19 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
             }
             Ok(Exit::Ok)
         }
-        Ok(None) if args.plan => Err(CommandError::failure(match &scope_epic {
+        Ok(None) if args.plan => Err(CommandError::failure(match &scope {
             None => "no ready Tickets in Plan".to_owned(),
-            Some(epic) => format!("no ready Tickets in Plan and Epic {}", epic.display_id),
+            Some(container) => format!(
+                "no ready Tickets in Plan and {} {}",
+                container.item_class.label(),
+                container.display_id
+            ),
         })),
-        Ok(None) => match &scope_epic {
-            Some(epic) => Err(CommandError::failure(format!(
-                "no ready Tickets in Epic {}",
-                epic.display_id
+        Ok(None) => match &scope {
+            Some(container) => Err(CommandError::failure(format!(
+                "no ready Tickets in {} {}",
+                container.item_class.label(),
+                container.display_id
             ))),
             None => Err(CommandError::failure("no ready Tickets")),
         },
@@ -603,7 +610,9 @@ mod tests {
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(
-            stderr.contains("tk next: scope 'tk-1' is not an Epic"),
+            stderr.contains(
+                "tk next: scope 'tk-1' is neither an Epic nor a Ticket that holds Tickets"
+            ),
             "stderr={stderr:?}"
         );
     }

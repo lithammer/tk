@@ -754,7 +754,7 @@ fn list_scoped_to_an_epic_fences_the_scope_hint_from_the_tree() {
     p.run("add --parent project-1 -m 'Build child Ticket'"); // project-2
 
     tk!(p, "list project-1", @r"
-    Scope: project-1 (Epic + child Tickets)
+    Scope: project-1 (and the Tickets it holds)
 
     ○ project-1 [epic] Feature Epic
     └── ○ project-2 ● P2 Build child Ticket
@@ -787,7 +787,7 @@ fn list_fences_a_stacked_scope_and_sync_banner_block_from_the_tree() {
     p.seed_mutation("project-2", "failed", Some(r#"{"detail":"boom"}"#));
 
     tk!(p, "list project-1", @r"
-    Scope: project-1 (Epic + child Tickets)
+    Scope: project-1 (and the Tickets it holds)
     Sync: Mutation 1 failed on project-2 (tk sync log 1)
 
     ○ project-1 [epic] Feature Epic
@@ -1344,7 +1344,7 @@ fn prime_scope_limits_current_work_but_keeps_the_whole_plan() {
     p.run("plan add repo-2 repo-3");
     let output = p.run_env("prime", &[("TK_SCOPE", "repo-1")]);
     assert!(
-        output.contains("Scope: repo-1 (Epic + child Tickets)\n"),
+        output.contains("Scope: repo-1 (and the Tickets it holds)\n"),
         "{output}"
     );
     assert!(output.contains("Next in Plan within Scope repo-1: repo-2: Child\n"));
@@ -1363,7 +1363,7 @@ fn prime_scope_limits_current_work_but_keeps_the_whole_plan() {
     );
     for (scope, reason) in [
         ("missing", "not a known Display ID or Alias"),
-        ("repo-2", "not an Epic"),
+        ("repo-2", "neither an Epic nor a Ticket that holds Tickets"),
     ] {
         let output = p.run_env("prime", &[("TK_SCOPE", scope)]);
         let current = output.split("## Finding Work").next().unwrap();
@@ -1564,7 +1564,7 @@ fn tk_scope_env_filters_list_to_the_epic() {
 
     let out = p.run_env("list", &[("TK_SCOPE", "project-1")]);
     assert!(
-        out.contains("Scope: project-1 (Epic + child Tickets)"),
+        out.contains("Scope: project-1 (and the Tickets it holds)"),
         "out={out}"
     );
     assert!(out.contains("project-2"), "out={out}");

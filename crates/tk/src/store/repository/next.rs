@@ -2,10 +2,11 @@
 //!
 //! A ready Ticket is one whose Item Status is `open` — an open Lifecycle and
 //! an idle Work State (ADR-0043), so work already under way is never offered
-//! again — with no unresolved Dependencies and no unresolved External
-//! Blockers. Each ready candidate's *Effective Priority* is the lowest
-//! Priority reachable through unresolved Dependency edges or an Epic's
-//! Containment edges, bounded by Epic Scope and Plan membership (ADR-0050).
+//! again — with no unresolved Dependencies, no unresolved External Blockers,
+//! and every Ticket it holds `done` (ADR-0055). Each ready candidate's
+//! *Effective Priority* is the lowest Priority reachable through unresolved
+//! Dependency edges, an Epic's Containment edges, or a Ticket Container it is
+//! held by, bounded by Scope and Plan membership (ADR-0050).
 //! Selection sorts by `(effective_priority, own_priority, effort, created_seq)` so a ticket inherits
 //! urgency from work that transitively waits on it, and smaller work wins among
 //! equally important candidates (ADR-0015).
@@ -48,12 +49,13 @@ pub struct Rationale {
 pub enum NextScope<'a> {
     /// No Scope; consider every ready Ticket in the store.
     None,
-    /// Restrict selection to a resolved Epic's child Tickets, carrying the
-    /// stable `items.id`. The command layer resolves the `<epic-id>`
-    /// argument / `TK_SCOPE` and rejects a Ticket before reaching here, so
-    /// the store trusts the value is an Epic (ADR-0022).
-    Epic(&'a str),
-    /// Plan membership, optionally intersected with a resolved Epic Scope.
+    /// Restrict selection to a resolved Container and every Ticket it holds,
+    /// directly or through a Ticket it holds, carrying the stable `items.id`.
+    /// The command layer resolves the `<epic-id>` argument / `TK_SCOPE` and
+    /// rejects a Ticket that holds none before reaching here, so the store
+    /// trusts the value is a Container (ADR-0022, ADR-0055).
+    Container(&'a str),
+    /// Plan membership, optionally intersected with a resolved Container Scope.
     Plan(Option<&'a str>),
 }
 
@@ -95,11 +97,12 @@ pub enum NextError {
 /// though Epics cannot be members. Readiness still checks blockers outside
 /// this boundary (ADR-0050).
 const NEXT_READY_TICKET_SQL: &str = concat!(
-    "\
-with recursive \
+    "with recursive ",
+    scoped_ids_sql!("?2"),
+    ", \
   selected as ( \
       select i.* from items i \
-       where (?1 = 'all' or i.id = ?2 or i.container_id = ?2) \
+       where (?1 = 'all' or i.id in (select id from scoped)) \
          and (not ?3 \
               or exists (select 1 from plan_members p where p.item_id = i.id) \
               or (i.item_class = 'epic' and exists ( \
@@ -120,6 +123,9 @@ with recursive \
                   where d.blocked_id = i.id \
                     and blocking.status <> 'done' \
              ) as has_unresolved_dependency, \
+             ",
+    has_unfinished_held_ticket_sql!("i"),
+    " as has_unfinished_held_ticket, \
              exists ( \
                  select 1 \
                    from external_blockers eb \
@@ -139,6 +145,12 @@ with recursive \
        where i.container_class = 'epic' \
          and i.item_class = 'ticket' \
          and i.status <> 'done' \
+      union all \
+      select held.id, c.id \
+        from selected c \
+        join items held on held.container_id = c.id \
+       where held.container_class = 'ticket' \
+         and c.status <> 'done' \
   ), \
   reachable(start_id, node_id, path, depth) as ( \
       select id, id, ',' || id || ',', 0 \
@@ -187,6 +199,7 @@ select ann.display_value, ann.priority, eff.ep, \
    and ann.work_state = 'idle' \
    and ann.selection_state = 'accepted' \
    and not ann.has_unresolved_dependency \
+   and not ann.has_unfinished_held_ticket \
    and not ann.has_unresolved_external_blocker \
  order by eff.ep asc, ann.priority asc, \
           case ann.effort when 'low' then 0 when 'high' then 2 else 1 end asc, \
@@ -201,9 +214,9 @@ pub fn next_ready_ticket(
 ) -> Result<Option<NextTicket>, NextError> {
     let (scope_mode, scope_id, plan) = match options.scope {
         NextScope::None => ("all", "", false),
-        NextScope::Epic(id) => ("epic", id, false),
+        NextScope::Container(id) => ("container", id, false),
         NextScope::Plan(None) => ("all", "", true),
-        NextScope::Plan(Some(id)) => ("epic", id, true),
+        NextScope::Plan(Some(id)) => ("container", id, true),
     };
 
     store
@@ -509,12 +522,109 @@ mod tests {
         let ticket = next_ready_ticket(
             &store,
             NextOptions {
-                scope: NextScope::Epic("epic"),
+                scope: NextScope::Container("epic"),
             },
         )
         .unwrap()
         .expect("a ready ticket");
         assert_eq!(ticket.display_id, "tk-2");
+    }
+
+    fn seed_held(
+        store: &Store,
+        id: &str,
+        display: &str,
+        priority: &str,
+        container: &str,
+        seq: i64,
+    ) {
+        insert_fixture_item(
+            &store.conn,
+            FixtureItem {
+                id,
+                display,
+                title: id,
+                priority: Some(priority),
+                container_id: Some(container),
+                container_class: "ticket",
+                created_seq: seq,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+    }
+
+    fn mark_done(store: &Store, id: &str) {
+        store
+            .conn
+            .execute("update items set status = 'done' where id = ?1", [id])
+            .unwrap();
+    }
+
+    fn pick(store: &Store, scope: NextScope<'_>) -> Option<NextTicket> {
+        next_ready_ticket(store, NextOptions { scope }).unwrap()
+    }
+
+    #[test]
+    fn ticket_container_waits_on_every_held_ticket_whatever_its_selection_state() {
+        let store = open_seeded();
+        seed(&store, "box", "tk-1", "P0", 1);
+        seed_held(&store, "done-held", "tk-2", "P3", "box", 2);
+        seed_held(&store, "parked-held", "tk-3", "P3", "box", 3);
+        store
+            .conn
+            .execute(
+                "update items set selection_state = 'parked' where id = 'parked-held'",
+                [],
+            )
+            .unwrap();
+        mark_done(&store, "done-held");
+
+        // The parked Ticket is not offered, yet it still holds the Container.
+        assert_eq!(pick(&store, NextScope::None), None);
+
+        mark_done(&store, "parked-held");
+        assert_eq!(pick(&store, NextScope::None).unwrap().display_id, "tk-1");
+    }
+
+    #[test]
+    fn held_ticket_inherits_the_priority_of_its_ticket_container() {
+        let store = open_seeded();
+        seed(&store, "box", "tk-1", "P0", 1);
+        seed_held(&store, "held", "tk-2", "P3", "box", 2);
+        seed(&store, "rival", "tk-3", "P1", 3);
+
+        let ticket = pick(&store, NextScope::None).unwrap();
+        assert_eq!(ticket.display_id, "tk-2");
+        let rationale = ticket.rationale.expect("inherited urgency");
+        assert_eq!(rationale.effective_priority, Priority::P0);
+        assert_eq!(rationale.blocked_display_id, "tk-1");
+    }
+
+    #[test]
+    fn scope_reaches_tickets_held_through_a_ticket_container() {
+        let store = open_seeded();
+        seed_epic(&store, "epic", "tk-1", 1);
+        seed_child(&store, "box", "tk-2", "P2", "epic", 2);
+        seed_held(&store, "held", "tk-3", "P3", "box", 3);
+        seed(&store, "outside", "tk-4", "P0", 4);
+
+        for scope in ["epic", "box"] {
+            let ticket = pick(&store, NextScope::Container(scope)).unwrap();
+            assert_eq!(ticket.display_id, "tk-3", "scope {scope}");
+        }
+    }
+
+    #[test]
+    fn plan_member_container_waits_on_a_held_ticket_outside_the_plan() {
+        let store = open_seeded();
+        seed(&store, "box", "tk-1", "P1", 1);
+        seed_held(&store, "held", "tk-2", "P1", "box", 2);
+        store
+            .conn
+            .execute("insert into plan_members(item_id) values ('box')", [])
+            .unwrap();
+        assert_eq!(pick(&store, NextScope::Plan(None)), None);
     }
 
     #[test]
@@ -527,7 +637,7 @@ mod tests {
         let outcome = next_ready_ticket(
             &store,
             NextOptions {
-                scope: NextScope::Epic("epic"),
+                scope: NextScope::Container("epic"),
             },
         )
         .unwrap();

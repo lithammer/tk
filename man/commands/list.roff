@@ -7,7 +7,7 @@ Totals count all displayed Items, including contextual Epics.
 .PP
 .B \-\-ready
 shows open, idle, accepted Tickets with no unresolved Dependencies or
-External Blockers.
+External Blockers, and with every Ticket they hold done.
 .B \-\-blocked
 shows open or active Tickets with unresolved Dependencies or External
 Blockers, excluding triage.
@@ -40,7 +40,7 @@ are different tools despite the shared word.
 .B \-\-epic
 filters by item class \(em it shows Epics instead of Tickets.
 .I epic-id
-is a Scope \(em it narrows the listing to one Epic and its child Tickets.
+is a Scope \(em it narrows the listing to one Epic or Ticket Container and the Tickets it holds.
 .PP
 A Ticket row shows its Priority as
 .BR "● P2" .
@@ -61,7 +61,7 @@ store:
 .PP
 .RS 4
 .nf
-Scope: project-1 (Epic + child Tickets)
+Scope: project-1 (and the Tickets it holds)
 .fi
 .RE
 .PP

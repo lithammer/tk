@@ -1,11 +1,13 @@
 .B tk next
-selects open Tickets with no unresolved Dependencies or External Blockers. It
+selects open Tickets with no unresolved Dependencies or External Blockers and
+with every Ticket they hold done. It
 orders ready Tickets by Effective Priority, then own Priority, then Effort,
 then creation order in the Repository Store, and never selects Epics. Low
 Effort comes first, and a Ticket with no Effort ranks as medium. Unlike
 Priority, Effort does not pass along Dependencies. Effective Priority is
 the lowest of a candidate's own Priority and the Priorities of every unfinished
-item it transitively blocks through Dependencies and an Epic's Containment, so a ready
+item it transitively blocks through Dependencies, an Epic's Containment, and
+the Ticket Container that holds it, so a ready
 Ticket that gates a higher-Priority Blocked Item outranks lower-priority
 direct work. Effective Priority does not cross the Scope boundary, so the same
 Ticket can rank differently scoped and unscoped.
@@ -51,12 +53,13 @@ to begin work on the selected Ticket.
 .PP
 An optional positional
 .I epic-id
-scopes selection to that Epic and its child Tickets, falling back to
+scopes selection to that Epic or Ticket Container and every Ticket it holds,
+directly or through a Ticket it holds, falling back to
 .B TK_SCOPE
 when the argument is absent. Absent both,
 .B tk next
 considers every ready Ticket in the Repository Store. A Ticket supplied where
-an Epic is expected is a failure, not a single-item selection.
+a Container is expected is a failure, not a single-item selection.
 .PP
 .B tk next
 answers with one Ticket. To inspect the whole ready set instead, use
@@ -90,16 +93,17 @@ Display ID line is the machine interface.
 If no ready Ticket matches,
 .B tk next
 returns exit status 1 and reports on standard error that nothing is ready,
-naming the Epic when a Scope was active. A Scope that names no known item, or
-names a Ticket rather than an Epic, fails the same way without selecting
+naming the Scope when a Scope was active. A Scope that names no known item, or
+names a Ticket that holds no Tickets, fails the same way without selecting
 anything.
 .PP
 .B \-\-plan
-restricts selection to the current Plan. An Epic argument or
+restricts selection to the current Plan. A Scope argument or
 .B TK_SCOPE
 intersects that membership; the argument still wins over the environment.
-Effective Priority stops at the combined boundary. Outside Dependencies still
-block readiness, but their Items are never included or selected automatically.
-An empty result names the Plan and any Epic Scope. Without
+Effective Priority stops at the combined boundary. Outside Dependencies and
+held Tickets outside the Plan still block readiness, but their Items are never
+included or selected automatically.
+An empty result names the Plan and any Scope. Without
 .BR \-\-plan ,
 Plan membership does not narrow selection.

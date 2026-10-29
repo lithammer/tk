@@ -60,8 +60,8 @@ pub struct Args {
     /// Show only Epics.
     #[arg(long)]
     pub epic: bool,
-    /// Scope the listing to this Epic and its child Tickets. Falls back to
-    /// the `TK_SCOPE` environment variable.
+    /// Scope the listing to this Epic or Ticket Container and the Tickets it
+    /// holds. Falls back to the `TK_SCOPE` environment variable.
     #[arg(value_name = "EPIC_ID")]
     pub epic_id: Option<String>,
 }
@@ -70,13 +70,13 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     let store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock, deps.data_root)
         .map_err(|err| resolver::open_error(&err))?;
 
-    let scope_epic = scope::resolve(&store, args.epic_id.as_deref())?;
+    let scope = scope::resolve(&store, args.epic_id.as_deref())?;
 
     let options = ListOptions {
         view: select_view(&args),
         origin: select_origin(&args),
         class: select_class(&args),
-        scope: scope_epic.as_ref().map(|epic| epic.id.as_str()),
+        scope: scope.as_ref().map(|container| container.id.as_str()),
     };
 
     let rows = list::list_rows(&store, options).map_err(|err| resolver::storage_error(&err))?;
@@ -94,7 +94,9 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
 
     let out = deps.styler.for_stdout();
 
-    let scope_display_id = scope_epic.as_ref().map(|epic| epic.display_id.as_str());
+    let scope_display_id = scope
+        .as_ref()
+        .map(|container| container.display_id.as_str());
     if let Err(err) = render_banners(deps.stdout, scope_display_id, banner_head.as_ref(), out) {
         return cli::write_error(&err);
     }
@@ -132,7 +134,7 @@ fn render_banners<W: Write + ?Sized>(
 
 /// One-line banner above a Scope-filtered List Tree: a bold `Scope:` label,
 /// the Epic Display ID in the Epic colour (matching the tree's `[epic]`
-/// badge), and a dim reminder that child Tickets are included.
+/// badge), and a dim reminder that held Tickets are included.
 fn render_scope_hint<W: Write + ?Sized>(
     stdout: &mut W,
     display_id: &str,
@@ -143,7 +145,7 @@ fn render_scope_hint<W: Write + ?Sized>(
         "{} {} {}",
         styler.wrap(palette::HEADER, "Scope:"),
         styler.wrap(palette::KIND_EPIC, display_id),
-        styler.wrap(palette::SEPARATOR, "(Epic + child Tickets)"),
+        styler.wrap(palette::SEPARATOR, "(and the Tickets it holds)"),
     )
 }
 
@@ -641,7 +643,7 @@ mod tests {
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         insta::assert_snapshot!(stdout, @"
-        Scope: tk-1 (Epic + child Tickets)
+        Scope: tk-1 (and the Tickets it holds)
 
         ✓ tk-1 [epic] Epic
         └── ○ tk-2 ● P2 Child
@@ -686,7 +688,9 @@ mod tests {
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(
-            stderr.contains("tk list: scope 'tk-1' is not an Epic"),
+            stderr.contains(
+                "tk list: scope 'tk-1' is neither an Epic nor a Ticket that holds Tickets"
+            ),
             "stderr={stderr:?}"
         );
     }
@@ -1424,7 +1428,7 @@ mod tests {
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         insta::assert_snapshot!(stdout, @"
-        Scope: tk-1 (Epic + child Tickets)
+        Scope: tk-1 (and the Tickets it holds)
         Sync: Mutation 1 failed on tk-3 (tk sync log 1)
 
         ○ tk-1 [epic] Epic
@@ -1479,7 +1483,7 @@ mod tests {
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert_eq!(
             stdout,
-            "Scope: tk-1 (Epic + child Tickets)\n\nNo local epics.\n"
+            "Scope: tk-1 (and the Tickets it holds)\n\nNo local epics.\n"
         );
     }
 }

@@ -107,6 +107,11 @@ pub enum PlanBlocker {
         display_id: String,
         outside_plan: bool,
     },
+    /// An unfinished Ticket the member holds (ADR-0055).
+    HeldTicket {
+        display_id: String,
+        outside_plan: bool,
+    },
     External {
         reason: String,
     },
@@ -185,6 +190,25 @@ pub(crate) fn read_snapshot(conn: &rusqlite::Connection) -> rusqlite::Result<Vec
         Ok((
             row.get::<_, String>(0)?,
             PlanBlocker::Dependency {
+                display_id: row.get(1)?,
+                outside_plan: row.get(2)?,
+            },
+        ))
+    })? {
+        let (id, blocker) = row?;
+        tickets[indices[&id]].blockers.push(blocker);
+    }
+    let mut held = conn.prepare(
+        "select h.container_id, h.display_value, \
+                not exists (select 1 from plan_members where item_id = h.id) \
+         from items h join plan_members p on p.item_id = h.container_id \
+         where h.container_class = 'ticket' and h.status <> 'done' \
+         order by h.created_seq",
+    )?;
+    for row in held.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            PlanBlocker::HeldTicket {
                 display_id: row.get(1)?,
                 outside_plan: row.get(2)?,
             },
@@ -292,6 +316,70 @@ mod tests {
         assert_eq!(members[0].status, ItemStatus::Done);
         assert_eq!(members[0].title, "Updated remotely");
         assert!(crate::store::sync::mutation_log_is_empty(&store.conn).unwrap());
+    }
+
+    #[test]
+    fn plan_names_each_unfinished_held_ticket_and_whether_it_is_outside() {
+        let tmp = TmpStore::new("tk");
+        let conn = seed_store(&tmp);
+        for mut item in [
+            FixtureItem {
+                id: "box",
+                display: "tk-1",
+                created_seq: 1,
+                ..FixtureItem::default()
+            },
+            FixtureItem {
+                id: "inside",
+                display: "tk-2",
+                container_id: Some("box"),
+                container_class: "ticket",
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+            FixtureItem {
+                id: "outside",
+                display: "tk-3",
+                container_id: Some("box"),
+                container_class: "ticket",
+                created_seq: 3,
+                ..FixtureItem::default()
+            },
+            FixtureItem {
+                id: "finished",
+                display: "tk-4",
+                status: "done",
+                container_id: Some("box"),
+                container_class: "ticket",
+                created_seq: 4,
+                ..FixtureItem::default()
+            },
+        ] {
+            item.title = item.id;
+            insert_fixture_item(&conn, item).unwrap();
+        }
+        let mut store = Store::for_test(conn);
+        edit_membership(
+            &mut store,
+            &["tk-1".into(), "tk-2".into()],
+            MembershipEdit::Add,
+        )
+        .unwrap();
+
+        let members = read(&store).unwrap();
+        let held: Vec<_> = members[0]
+            .blockers
+            .iter()
+            .map(|blocker| match blocker {
+                PlanBlocker::HeldTicket {
+                    display_id,
+                    outside_plan,
+                } => (display_id.as_str(), *outside_plan),
+                other => panic!("unexpected blocker {other:?}"),
+            })
+            .collect();
+        assert_eq!(held, [("tk-2", false), ("tk-3", true)]);
+        assert_eq!(members[0].section(), PlanSection::Waiting);
     }
 
     #[test]

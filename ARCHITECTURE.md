@@ -130,7 +130,7 @@ small boundary module after the second caller proves the shape.
   commits the `PromotionPlan` it returns; the dependency runs one way —
   `store/` does not import `promotion/`.
 - `commands/scope.rs` owns Scope resolution (ADR-0022): the `<epic-id>`
-  argument / `TK_SCOPE` precedence and Epic-only validation. `tk next` and
+  argument / `TK_SCOPE` precedence and Container validation. `tk next` and
   `tk list` compose it; tk neither stores, infers, nor manages git worktrees.
 
 `cli::Deps` carries explicit dependencies: stdout/stderr/stdin writers, cwd
@@ -318,23 +318,27 @@ Display ID structure.
 
 ## Scope
 
-Scope ([ADR-0022](./docs/adr/0022-scope-is-an-explicit-epic-argument-not-persisted-state.md))
-is the Epic that narrows `tk next` and `tk list`. It is supplied per
-invocation as an explicit `<epic-id>` argument or the `TK_SCOPE` environment
-variable — the argument wins — and is never persisted or inferred from git
-state. `commands/scope.rs` owns the argument/`TK_SCOPE` precedence; the command
-resolves the value Epic-only (a Ticket is a typed error) before the
-store-facing selection runs, so the store receives an already-resolved Epic id.
+Scope ([ADR-0022](./docs/adr/0022-scope-is-an-explicit-epic-argument-not-persisted-state.md),
+[ADR-0055](./docs/adr/0055-a-ticket-can-be-a-container.md))
+is the Container that narrows `tk next` and `tk list`: an Epic, or a Ticket
+that holds Tickets. It is supplied per invocation as an explicit `<epic-id>`
+argument or the `TK_SCOPE` environment variable — the argument wins — and is
+never persisted or inferred from git state. `commands/scope.rs` owns the
+argument/`TK_SCOPE` precedence; the command resolves the value as a Container
+(a Ticket that holds none is a typed error) before the store-facing selection
+runs, so the store receives an already-resolved Container id. A Scope covers
+its Container and every Ticket it holds, directly or through a Ticket it holds.
 
 Scope is a selection context, not an implicit item target. Commands that
 inspect, update, or promote a specific item require explicit Display IDs;
 agents should pass IDs selected by `tk next` or `tk list`.
 
-`tk next --plan` intersects Plan membership with any Epic Scope. The query
+`tk next --plan` intersects Plan membership with any Scope. The query
 keeps Epic nodes needed to carry Dependency paths to selected child Tickets,
 but only Tickets inside the intersection can contribute Effective Priority.
-Outside Dependencies still block readiness. `commands/plan.rs` owns the
-dedicated whole-Plan view, which ignores `TK_SCOPE` (ADR-0050).
+Outside Dependencies and outside held Tickets still block readiness.
+`commands/plan.rs` owns the dedicated whole-Plan view, which ignores
+`TK_SCOPE` (ADR-0050).
 
 tk does not create or manage git worktrees; `git worktree` is the user's or
 harness's tool. An orchestrated / AFK run exports `TK_SCOPE=<epic-id>` so every

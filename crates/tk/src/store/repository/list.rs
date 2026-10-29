@@ -122,10 +122,10 @@ impl ListClassFilter {
 
 /// Read options for the List Tree query.
 ///
-/// `scope` is the stable `items.id` of an Epic when a Scope is active
-/// (ADR-0022), confining rows to that Epic and its direct child Tickets;
-/// `None` reads the whole store. The command layer resolves and
-/// Epic-validates the `<epic-id>` argument / `TK_SCOPE` before setting it.
+/// `scope` is the stable `items.id` of a Container when a Scope is active
+/// (ADR-0022, ADR-0055), confining rows to that Container and every Ticket it
+/// holds; `None` reads the whole store. The command layer resolves and
+/// validates the `<epic-id>` argument / `TK_SCOPE` before setting it.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ListOptions<'a> {
     pub view: ListView,
@@ -138,15 +138,18 @@ pub struct ListOptions<'a> {
 ///   `?1` — [`ListView::sql_text`] selecting which items match.
 ///   `?2` — [`ListOriginFilter::sql_text`] filtering stored Origin.
 ///   `?3` — [`ListClassFilter::sql_text`] narrowing to a single Item class.
-///   `?4` — Scope (ADR-0022): the stable `items.id` of an Epic, or `''`
-///          for no Scope. When set, rows are confined to that Epic and its
-///          direct child Tickets.
+///   `?4` — Scope (ADR-0022, ADR-0055): the stable `items.id` of a Container,
+///          or `''` for no Scope. When set, rows are confined to that
+///          Container and every Ticket it holds, directly or through a
+///          Ticket it holds.
 ///
 /// The `case ?1 when '<tag>' then ...` arms cover every [`ListView`]
 /// variant; the per-view tests below cover the arms.
 const LIST_ROWS_SQL: &str = concat!(
-    "\
-with annotated as ( \
+    "with recursive ",
+    scoped_ids_sql!("?4"),
+    ", \
+annotated as ( \
     select i.id, i.display_value, i.item_class, i.ticket_kind, \
            i.priority, i.title, i.status, i.work_state, i.origin, \
            i.container_id, i.selection_state, i.created_seq, i.effort, \
@@ -157,6 +160,9 @@ with annotated as ( \
                 where d.blocked_id = i.id \
                   and blocking.status <> 'done' \
            ) as has_unresolved_dependency, \
+           ",
+    has_unfinished_held_ticket_sql!("i"),
+    " as has_unfinished_held_ticket, \
            exists ( \
                select 1 \
                  from external_blockers eb \
@@ -174,6 +180,7 @@ matching as ( \
                                and work_state = 'idle' \
                                and selection_state = 'accepted' \
                                and not has_unresolved_dependency \
+                               and not has_unfinished_held_ticket \
                                and not has_unresolved_external_blocker \
              when 'blocked' then item_class = 'ticket' \
                                  and status = 'open' \
@@ -215,7 +222,7 @@ select id, display_value, item_class, ticket_kind, priority, title, \
   from matching parent \
  where (?2 = 'any' or parent.origin = ?2) \
    and (?3 = 'any' or parent.item_class = ?3) \
-   and (?4 = '' or parent.id = ?4 or parent.container_id = ?4) \
+   and (?4 = '' or parent.id in (select id from scoped)) \
    and ( \
        parent.self_matches \
        or ( \
@@ -777,6 +784,82 @@ mod tests {
         )
         .unwrap();
         assert_eq!(display_ids(&rows), vec!["tk-1", "tk-2"]);
+    }
+
+    /// Epic `epic` holds Ticket Container `box`, which holds `held`; `loose`
+    /// holds nothing and sits outside.
+    fn seed_nested_container(store: &Store) {
+        seed_epic(store, "epic", "tk-1", "open", 1);
+        insert_fixture_item(
+            &store.conn,
+            FixtureItem {
+                id: "box",
+                display: "tk-2",
+                title: "Box",
+                container_id: Some("epic"),
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        insert_fixture_item(
+            &store.conn,
+            FixtureItem {
+                id: "held",
+                display: "tk-3",
+                title: "Held",
+                container_id: Some("box"),
+                container_class: "ticket",
+                created_seq: 3,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        seed_ticket(store, "loose", "tk-4", "open", 4);
+    }
+
+    #[test]
+    fn scope_reaches_tickets_held_through_a_ticket_container() {
+        let store = open_seeded();
+        seed_nested_container(&store);
+        for (scope, expected) in [
+            ("epic", vec!["tk-1", "tk-2", "tk-3"]),
+            ("box", vec!["tk-2", "tk-3"]),
+        ] {
+            let rows = list_rows(
+                &store,
+                ListOptions {
+                    scope: Some(scope),
+                    ..ListOptions::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(display_ids(&rows), expected, "scope {scope}");
+        }
+    }
+
+    #[test]
+    fn ready_view_omits_a_ticket_container_until_its_held_tickets_are_done() {
+        let store = open_seeded();
+        seed_nested_container(&store);
+        let ready = |store: &Store| {
+            list_rows(
+                store,
+                ListOptions {
+                    view: ListView::Ready,
+                    scope: Some("box"),
+                    ..ListOptions::default()
+                },
+            )
+            .unwrap()
+        };
+        assert_eq!(display_ids(&ready(&store)), vec!["tk-3"]);
+
+        store
+            .conn
+            .execute("update items set status = 'done' where id = 'held'", [])
+            .unwrap();
+        assert_eq!(display_ids(&ready(&store)), vec!["tk-2"]);
     }
 
     fn seed_triage(store: &Store, id: &str, display: &str, created_seq: i64) {

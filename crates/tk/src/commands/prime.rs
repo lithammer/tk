@@ -65,10 +65,10 @@ impl Briefing {
         let plan = plan::read_snapshot(&tx).map_err(|e| resolver::storage_error(&e))?;
         let work = match scope::resolve(store, None) {
             Ok(scope) => {
-                let epic_id = scope.as_ref().map(|epic| epic.id.as_str());
-                let selection = match (plan.is_empty(), epic_id) {
-                    (false, epic) => next::NextScope::Plan(epic),
-                    (true, Some(epic)) => next::NextScope::Epic(epic),
+                let container_id = scope.as_ref().map(|container| container.id.as_str());
+                let selection = match (plan.is_empty(), container_id) {
+                    (false, container) => next::NextScope::Plan(container),
+                    (true, Some(container)) => next::NextScope::Container(container),
                     (true, None) => next::NextScope::None,
                 };
                 let next = next::next_ready_ticket(store, next::NextOptions { scope: selection })
@@ -77,7 +77,7 @@ impl Briefing {
                     store,
                     list::ListOptions {
                         view: list::ListView::Active,
-                        scope: epic_id,
+                        scope: container_id,
                         ..Default::default()
                     },
                 )
@@ -168,15 +168,19 @@ impl CurrentWork {
                 return Ok(());
             }
         };
-        if let Some(epic) = scope {
-            writeln!(out, "Scope: {} (Epic + child Tickets)\n", epic.display_id)?;
+        if let Some(container) = scope {
+            writeln!(
+                out,
+                "Scope: {} (and the Tickets it holds)\n",
+                container.display_id
+            )?;
         }
         write!(out, "Next")?;
         if in_plan {
             write!(out, " in Plan")?;
         }
-        if let Some(epic) = scope {
-            write!(out, " within Scope {}", epic.display_id)?;
+        if let Some(container) = scope {
+            write!(out, " within Scope {}", container.display_id)?;
         }
         write!(out, ": ")?;
         if let Some(ticket) = next {

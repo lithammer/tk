@@ -7,7 +7,7 @@ Render the Repository Store List Tree
 Usage: tk list [OPTIONS] [EPIC_ID]
 
 Arguments:
-  [EPIC_ID]  Scope the listing to this Epic and its child Tickets. Falls back to the `TK_SCOPE` environment variable
+  [EPIC_ID]  Scope the listing to this Epic or Ticket Container and the Tickets it holds. Falls back to the `TK_SCOPE` environment variable
 
 Options:
       --ready    Show open, idle, accepted Tickets with no unresolved blockers
