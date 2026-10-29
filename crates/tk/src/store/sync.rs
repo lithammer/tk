@@ -46,6 +46,7 @@ use crate::domain::ticket_kind::TicketKind;
 use crate::domain::work_state::WorkState;
 use crate::store::mutations;
 use crate::store::promotion::ReadGraphError;
+use crate::store::repository::containment::{self, ContainmentError};
 use crate::store::repository::create::generate_internal_id;
 use crate::store::repository::dependency::{self, DependencyEdge};
 use crate::store::repository::{self, RemoteWorkflowGuard};
@@ -159,6 +160,23 @@ pub struct SkippedDependency {
     pub blocking_display_id: String,
     /// The Items between them on the Blocking Item's wait path, in order.
     pub through_display_ids: Vec<String>,
+}
+
+/// A Containment the Backend lists that Pull did not import, because tk
+/// refuses it (ADR-0057).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedContainment {
+    pub ticket_display_id: String,
+    pub container_display_id: String,
+    /// The [`ContainmentError`] that refused it, as the user reads it.
+    pub reason: String,
+}
+
+/// What a Pull left out of the local graph and warns about.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkippedRelationships {
+    pub dependencies: Vec<SkippedDependency>,
+    pub containments: Vec<SkippedContainment>,
 }
 
 /// Result of canonical Backend Ticket intake.
@@ -1589,16 +1607,16 @@ pub fn working_set_keys(
 /// keys and therefore cannot insert or alter identity, Origin, Display ID, or
 /// Item Class.
 ///
-/// Returns the Dependencies the Backend lists that the merge skipped because
-/// each would close a cycle (ADR-0056).
+/// Returns the relationships the Backend lists that the merge skipped
+/// because tk refuses them (ADR-0056, ADR-0057).
 pub fn merge_backend_refreshes(
     conn: &mut Connection,
     expected_kind: BackendKind,
     refreshes: &[(String, BackendItemRefresh)],
     now: &str,
-) -> Result<Vec<SkippedDependency>, RefreshStoreError> {
+) -> Result<SkippedRelationships, RefreshStoreError> {
     if refreshes.is_empty() {
-        return Ok(Vec::new());
+        return Ok(SkippedRelationships::default());
     }
     let tx = crate::store::write_transaction(conn)?;
     if let Some(sequence) = applying_mutation_sequence(&tx)? {
@@ -1608,6 +1626,7 @@ pub fn merge_backend_refreshes(
     ensure_backend_cohort(&tx, expected_kind)?;
     let shields = local_shields(&tx)?;
     let mut additions = Vec::new();
+    let mut containments = Vec::new();
     for (key, refresh) in refreshes {
         let existing: Option<(String, ItemClass)> = tx
             .query_row(
@@ -1628,6 +1647,7 @@ pub fn merge_backend_refreshes(
             ticket_kind,
             ticket_fields,
             blocked_by,
+            container,
         } = refresh;
         follow_backend_edges(
             &tx,
@@ -1637,6 +1657,16 @@ pub fn merge_backend_refreshes(
             blocked_by,
             &mut additions,
         )?;
+        if item_class == ItemClass::Ticket {
+            follow_backend_container(
+                &tx,
+                expected_kind,
+                &shields,
+                &item_id,
+                container.as_deref(),
+                &mut containments,
+            )?;
+        }
         let priority_write = ticket_fields
             .map(|fields| fields.priority)
             .filter(|_| !shields.priority.contains(item_id.as_str()));
@@ -1675,8 +1705,113 @@ pub fn merge_backend_refreshes(
                 effort_write.is_some(), effort_write.flatten()],
         )?;
     }
-    let skipped = add_backend_edges(&tx, &additions, now)?;
+    // Every removal and clear above lands before any addition. Dependencies
+    // go before Containment, so when both arrive in this Pull and together
+    // would close a cycle, Pull drops the Containment, which costs only
+    // grouping (ADR-0057).
+    let skipped = SkippedRelationships {
+        dependencies: add_backend_edges(&tx, &additions, now)?,
+        containments: set_backend_containers(&tx, &containments)?,
+    };
     tx.commit()?;
+    Ok(skipped)
+}
+
+/// A Container Pull sets after Dependencies land, with the Local Container
+/// [`follow_backend_container`] cleared from the Ticket.
+struct QueuedContainer {
+    ticket_id: String,
+    container_id: String,
+    /// Put back if tk refuses `container_id`, so a refused parent leaves a
+    /// Local Container as it was (ADR-0057).
+    local: Option<String>,
+}
+
+/// Bring one refreshed Ticket's Containment in line with the Backend
+/// (ADR-0057): clear a bound Container the Backend no longer lists, and queue
+/// in `containments` a bound Container it lists that tk lacks. A Local
+/// Container stays until the Backend lists a bound one, which replaces it.
+///
+/// Clears happen here, before Dependencies land, so their cycle check never
+/// counts a Container the Ticket is leaving.
+///
+/// A bound Container counts whatever its Lifecycle; a key tk has no bound
+/// Item for counts as none. A Ticket an unresolved Containment Mutation
+/// shields is left as it is.
+fn follow_backend_container(
+    conn: &Connection,
+    kind: BackendKind,
+    shields: &LocalShields,
+    ticket_id: &str,
+    container: Option<&str>,
+    containments: &mut Vec<QueuedContainer>,
+) -> rusqlite::Result<()> {
+    if shields.containers.contains(ticket_id) {
+        return Ok(());
+    }
+    let listed = match container {
+        Some(key) => bound_item_id(conn, kind, key)?,
+        None => None,
+    };
+    let (stored, stored_is_bound): (Option<String>, bool) = conn
+        .prepare_cached(
+            "select t.container_id, \
+                    coalesce(c.backend_kind = ?2 and c.backend_key is not null, 0) \
+               from items t left join items c on c.id = t.container_id \
+              where t.id = ?1",
+        )?
+        .query_row(params![ticket_id, kind], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
+    if listed == stored || (listed.is_none() && !stored_is_bound) {
+        return Ok(());
+    }
+    if stored.is_some() {
+        containment::clear(conn, ticket_id)?;
+    }
+    if let Some(container_id) = listed {
+        containments.push(QueuedContainer {
+            ticket_id: ticket_id.to_owned(),
+            container_id,
+            local: stored.filter(|_| !stored_is_bound),
+        });
+    }
+    Ok(())
+}
+
+/// Set each queued Backend Container, skipping one [`containment::check`]
+/// refuses and putting back the Local Container it would have replaced.
+///
+/// The Local Container goes back through the same check, so a Dependency
+/// this Pull added wins over it: if putting it back would close a cycle, the
+/// Ticket keeps no Container.
+fn set_backend_containers(
+    conn: &Connection,
+    containments: &[QueuedContainer],
+) -> rusqlite::Result<Vec<SkippedContainment>> {
+    let mut skipped = Vec::new();
+    for QueuedContainer {
+        ticket_id,
+        container_id,
+        local,
+    } in containments
+    {
+        let refusal = match containment::set(conn, ticket_id, container_id) {
+            Ok(()) => continue,
+            Err(ContainmentError::Sqlite(err)) => return Err(err),
+            Err(refusal) => refusal,
+        };
+        skipped.push(SkippedContainment {
+            ticket_display_id: repository::current_display_id(conn, ticket_id)?,
+            container_display_id: repository::current_display_id(conn, container_id)?,
+            reason: refusal.to_string(),
+        });
+        if let Some(local) = local
+            && let Err(ContainmentError::Sqlite(err)) = containment::set(conn, ticket_id, local)
+        {
+            return Err(err);
+        }
+    }
     Ok(skipped)
 }
 
@@ -1698,14 +1833,9 @@ fn follow_backend_edges(
     blocked_by: &[String],
     additions: &mut Vec<(String, String)>,
 ) -> rusqlite::Result<()> {
-    let mut bound_item =
-        conn.prepare_cached("select id from items where backend_kind = ?1 and backend_key = ?2")?;
     let mut backend = BTreeSet::new();
     for key in blocked_by {
-        if let Some(id) = bound_item
-            .query_row(params![kind, key], |row| row.get::<_, String>(0))
-            .optional()?
-        {
+        if let Some(id) = bound_item_id(conn, kind, key)? {
             backend.insert(id);
         }
     }
@@ -1741,6 +1871,18 @@ fn follow_backend_edges(
     Ok(())
 }
 
+/// The Item bound to `key` on this Backend, whatever its Lifecycle, or `None`
+/// when tk has none.
+fn bound_item_id(
+    conn: &Connection,
+    kind: BackendKind,
+    key: &str,
+) -> rusqlite::Result<Option<String>> {
+    conn.prepare_cached("select id from items where backend_kind = ?1 and backend_key = ?2")?
+        .query_row(params![kind, key], |row| row.get(0))
+        .optional()
+}
+
 /// Add each queued Backend edge, skipping one whose Blocking Item already
 /// waits on its Blocked Item.
 fn add_backend_edges(
@@ -1750,7 +1892,7 @@ fn add_backend_edges(
 ) -> rusqlite::Result<Vec<SkippedDependency>> {
     let mut skipped = Vec::new();
     for (blocked_id, blocking_id) in additions {
-        match dependency::wait_path(conn, blocking_id, blocked_id)? {
+        match dependency::wait_path_display_ids(conn, blocking_id, blocked_id)? {
             None => {
                 dependency::insert_edge(
                     conn,
@@ -1761,13 +1903,10 @@ fn add_backend_edges(
                     now,
                 )?;
             }
-            Some(between) => skipped.push(SkippedDependency {
+            Some(through_display_ids) => skipped.push(SkippedDependency {
                 blocked_display_id: repository::current_display_id(conn, blocked_id)?,
                 blocking_display_id: repository::current_display_id(conn, blocking_id)?,
-                through_display_ids: between
-                    .iter()
-                    .map(|id| repository::current_display_id(conn, id))
-                    .collect::<rusqlite::Result<_>>()?,
+                through_display_ids,
             }),
         }
     }
@@ -1785,6 +1924,9 @@ struct LocalShields {
     /// (Blocked Item, Blocking Item) pairs an unresolved Dependency Mutation
     /// shields (ADR-0056).
     dependencies: HashSet<(String, String)>,
+    /// Tickets whose unresolved Containment Mutation shields their Container
+    /// (ADR-0057).
+    containers: HashSet<String>,
 }
 
 /// Collect the exact Items whose unresolved Mutations shield Pull fields.
@@ -1804,6 +1946,7 @@ fn local_shields(conn: &Connection) -> Result<LocalShields, RefreshStoreError> {
         priority: HashSet::new(),
         effort: HashSet::new(),
         dependencies: HashSet::new(),
+        containers: HashSet::new(),
     };
     while let Some(row) = rows.next()? {
         let item_id: String = row.get(0)?;
@@ -1832,9 +1975,10 @@ fn local_shields(conn: &Connection) -> Result<LocalShields, RefreshStoreError> {
                     shields.dependencies.insert((item_id, blocking_id));
                 }
             }
+            MutationType::SetTicketContainer | MutationType::ClearTicketContainer => {
+                shields.containers.insert(item_id);
+            }
             MutationType::SetItemStatus
-            | MutationType::SetTicketContainer
-            | MutationType::ClearTicketContainer
             | MutationType::AddExternalBlocker
             | MutationType::ResolveExternalBlocker
             | MutationType::PromoteTicket
@@ -2570,7 +2714,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(skipped.is_empty());
+        assert_eq!(skipped, SkippedRelationships::default());
         assert_eq!(
             blocking_ids(&conn, "t1"),
             ["t3"],
@@ -2668,7 +2812,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            skipped,
+            skipped.dependencies,
             [SkippedDependency {
                 blocked_display_id: "gh-2".into(),
                 blocking_display_id: "gh-1".into(),
@@ -2682,6 +2826,106 @@ mod tests {
             })
             .unwrap();
         assert_eq!(title, "Backend title", "the rest of the Pull commits");
+    }
+
+    fn container_id(conn: &Connection, id: &str) -> Option<String> {
+        conn.query_row(
+            "select container_id from items where id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    fn refresh_container(key: Option<&str>) -> BackendItemRefresh {
+        BackendItemRefresh {
+            container: key.map(str::to_owned),
+            ..BackendItemRefresh::for_test()
+        }
+    }
+
+    /// GitHub cannot hold a Local Container, so a Pull that lists no parent
+    /// must keep it. If this fails, every sync drops the Local Container of
+    /// a Backend Ticket (ADR-0057).
+    #[test]
+    fn pull_keeps_a_local_container_when_the_backend_lists_no_parent() {
+        let mut conn = open_seeded();
+        seed_remote(&conn);
+        backend_ticket(&conn, "t1", "gh-1", "https://github.com/o/r/issues/1", 1);
+        insert_fixture_item(
+            &conn,
+            FixtureItem {
+                id: "l2",
+                display: "tk-2",
+                title: "Local grouping",
+                item_class: "epic",
+                ticket_kind: None,
+                priority: None,
+                created_seq: 2,
+                ..FixtureItem::default()
+            },
+        )
+        .unwrap();
+        containment::set(&conn, "t1", "l2").unwrap();
+
+        merge_backend_refreshes(
+            &mut conn,
+            BackendKind::Github,
+            &[(
+                "https://github.com/o/r/issues/1".into(),
+                refresh_container(None),
+            )],
+            "2026-05-20T00:00:00Z",
+        )
+        .unwrap();
+
+        assert_eq!(container_id(&conn, "t1").as_deref(), Some("l2"));
+    }
+
+    /// An unresolved Containment Mutation shields the Ticket's whole
+    /// Containment. If this fails, Pull moves the Ticket while its own move
+    /// waits to apply, and the next Apply moves it back (ADR-0057).
+    #[test]
+    fn pull_containment_shield_covers_the_whole_ticket() {
+        for mutation_type in [
+            MutationType::SetTicketContainer,
+            MutationType::ClearTicketContainer,
+        ] {
+            let mut conn = open_seeded();
+            seed_remote(&conn);
+            backend_ticket(&conn, "t1", "gh-1", "https://github.com/o/r/issues/1", 1);
+            backend_ticket(&conn, "t2", "gh-2", "https://github.com/o/r/issues/2", 2);
+            backend_ticket(&conn, "t3", "gh-3", "https://github.com/o/r/issues/3", 3);
+            containment::set(&conn, "t1", "t2").unwrap();
+            insert_fixture_mutation(
+                &conn,
+                FixtureMutation {
+                    sequence: 1,
+                    payload_json: r#"{"container_id":"t2"}"#,
+                    ..FixtureMutation::new(mutation_type, "t1")
+                },
+            )
+            .unwrap();
+
+            for listed in [Some("https://github.com/o/r/issues/3"), None] {
+                merge_backend_refreshes(
+                    &mut conn,
+                    BackendKind::Github,
+                    &[(
+                        "https://github.com/o/r/issues/1".into(),
+                        refresh_container(listed),
+                    )],
+                    "2026-05-20T00:00:00Z",
+                )
+                .unwrap();
+
+                assert_eq!(
+                    container_id(&conn, "t1").as_deref(),
+                    Some("t2"),
+                    "{mutation_type:?} shields gh-1 from a listed {listed:?}"
+                );
+            }
+        }
     }
 
     /// Seed one Mutation per `(sequence, state)`.

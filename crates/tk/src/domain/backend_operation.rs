@@ -153,6 +153,10 @@ pub struct BackendItemRefresh {
     /// complete or the Pull fails (ADR-0056). Keys tk has no Item for are the
     /// Repository Store's to ignore.
     pub blocked_by: Vec<String>,
+    /// Backend key of the Container the Backend lists for this Item, or
+    /// `None` when it lists none (ADR-0057). A key tk has no Item for is the
+    /// Repository Store's to ignore.
+    pub container: Option<String>,
 }
 
 #[cfg(test)]
@@ -167,6 +171,7 @@ impl BackendItemRefresh {
             ticket_kind: Some(TicketKind::Task),
             ticket_fields: None,
             blocked_by: Vec::new(),
+            container: None,
         }
     }
 }

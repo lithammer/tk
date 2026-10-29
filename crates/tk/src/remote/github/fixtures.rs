@@ -36,7 +36,7 @@ pub(crate) fn issue_fields_response() -> String {
 }
 
 /// One Issue in a Pull response; `Default` is an open, untyped, unblocked
-/// issue 1 in `github.com/o/r`.
+/// issue 1 in `github.com/o/r` with no parent.
 #[derive(Clone, Copy)]
 pub(crate) struct PullIssue<'a> {
     pub host: &'a str,
@@ -92,6 +92,7 @@ pub(crate) fn pull_item(issue: PullIssue<'_>) -> Value {
             "nodes": blockers,
             "pageInfo": {"hasNextPage": issue.blocked_by_has_next_page},
         },
+        "parent": null,
     })
 }
 

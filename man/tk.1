@@ -1526,6 +1526,14 @@ an edge an unresolved block or unblock still protects. Pull ignores a blocker
 with no bound Item, and skips an edge that would make an Item wait on itself,
 with a warning on stderr.
 .PP
+Pull also brings in each Ticket's parent when that parent is an Item bound
+to the Backend: it replaces the Ticket's Container, even a Local one, and
+clears a bound Container the Backend no longer lists. An unresolved parent
+change protects the Ticket's Container. A Local Container stays while the
+Backend lists no bound parent. Pull skips a parent tk cannot nest or that
+would make an Item wait on itself, with a warning on stderr; the Ticket then
+keeps a Local Container but loses a bound one.
+.PP
 A failed Mutation stops later Mutations from applying. Inspect it with
 .B tk sync log
 and retry sync after fixing the cause. Use

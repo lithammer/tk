@@ -54,7 +54,7 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
             "blocking '{}' is done",
             args.blocking
         ))),
-        Err(AddDependencyError::Cycle) => Err(CommandError::failure("dependency cycle")),
+        Err(err @ AddDependencyError::Cycle { .. }) => Err(CommandError::failure(err.to_string())),
         Err(AddDependencyError::BackendBlockedLocalBlocking) => {
             Err(CommandError::failure(format!(
                 "Backend blocked '{}' cannot depend on Local blocking item '{}'",

@@ -31,8 +31,8 @@ pub(super) const DELETE_ISSUE_FIELD_VALUE_QUERY: &str = "mutation DeleteIssueFie
 pub(super) const CREATE_ISSUE_QUERY: &str = "mutation CreateIssue($repositoryId: ID!, $title: String!, $body: String!, $issueTypeId: ID, $issueFields: [IssueFieldCreateOrUpdateInput!]) { createIssue(input: { repositoryId: $repositoryId, title: $title, body: $body, issueTypeId: $issueTypeId, issueFields: $issueFields }) { issue { url number } } }";
 
 /// 50 Pull targets request at most 50 repositories, 2,500 issue fields, 2,500
-/// issue field values, and 5,000 blocking issues, well below GitHub's
-/// 500,000-node query limit.
+/// issue field values, 5,000 blocking issues, and 50 parents, well below
+/// GitHub's 500,000-node query limit.
 pub(super) const MAX_PULL_KEYS_PER_QUERY: usize = 50;
 
 /// A typed GraphQL operation binds one request to its response decoder.
@@ -330,7 +330,7 @@ impl GraphqlOperation for PullOperation<'_> {
                 let index = target.input_index;
                 let alias = target.alias();
                 format!(
-                    "{alias}: repository(owner: $owner_{index}, name: $name_{index}) {{ {ISSUE_FIELDS_SELECTION} item: issueOrPullRequest(number: $number_{index}) {{ __typename ... on Issue {{ number title body state url issueType {{ name }} issueFieldValues(first: 50) {{ nodes {{ ... on IssueFieldSingleSelectValue {{ value field {{ ... on IssueFieldSingleSelect {{ name }} }} }} }} pageInfo {{ hasNextPage }} }} blockedBy(first: 100) {{ nodes {{ url }} pageInfo {{ hasNextPage }} }} }} ... on PullRequest {{ number url }} }} }}"
+                    "{alias}: repository(owner: $owner_{index}, name: $name_{index}) {{ {ISSUE_FIELDS_SELECTION} item: issueOrPullRequest(number: $number_{index}) {{ __typename ... on Issue {{ number title body state url issueType {{ name }} issueFieldValues(first: 50) {{ nodes {{ ... on IssueFieldSingleSelectValue {{ value field {{ ... on IssueFieldSingleSelect {{ name }} }} }} }} pageInfo {{ hasNextPage }} }} blockedBy(first: 100) {{ nodes {{ url }} pageInfo {{ hasNextPage }} }} parent {{ url }} }} ... on PullRequest {{ number url }} }} }}"
                 )
             })
             .collect::<Vec<_>>()
@@ -525,14 +525,15 @@ pub(super) struct NativeIssueType {
 /// each node nullable, and Pull skips a null one.
 #[derive(Debug, Deserialize)]
 pub(super) struct BlockedByConnection {
-    pub nodes: Vec<Option<BlockingIssue>>,
+    pub nodes: Vec<Option<LinkedIssue>>,
     #[serde(rename = "pageInfo")]
     pub page_info: PageInfo,
 }
 
-/// One blocking issue's canonical URL, the only part of it Pull reads.
+/// One blocking or parent issue's canonical URL, the only part of it Pull
+/// reads.
 #[derive(Debug, Deserialize)]
-pub(super) struct BlockingIssue {
+pub(super) struct LinkedIssue {
     pub url: String,
 }
 
@@ -663,15 +664,15 @@ hasNextPage } } item: issueOrPullRequest(number: $number_2) { __typename ... on 
 Issue { number title body state url issueType { name } issueFieldValues(first: \
 50) { nodes { ... on IssueFieldSingleSelectValue { value field { ... on \
 IssueFieldSingleSelect { name } } } } pageInfo { hasNextPage } } blockedBy(first: \
-100) { nodes { url } pageInfo { hasNextPage } } } ... on PullRequest { number url \
-} } } item_5: repository(owner: $owner_5, name: \
+100) { nodes { url } pageInfo { hasNextPage } } parent { url } } ... on \
+PullRequest { number url } } } item_5: repository(owner: $owner_5, name: \
 $name_5) { issueFields(first: 50) { nodes { ... on IssueFieldSingleSelect { id \
 name options { id name } } } pageInfo { hasNextPage } } item: \
 issueOrPullRequest(number: $number_5) { __typename ... on Issue { number title \
 body state url issueType { name } issueFieldValues(first: 50) { nodes { ... on \
 IssueFieldSingleSelectValue { value field { ... on IssueFieldSingleSelect { \
 name } } } } pageInfo { hasNextPage } } blockedBy(first: 100) { nodes { url } \
-pageInfo { hasNextPage } } } ... on PullRequest { number url } } } }"
+pageInfo { hasNextPage } } parent { url } } ... on PullRequest { number url } } } }"
         );
     }
 }

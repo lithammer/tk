@@ -4,6 +4,10 @@
 > is 0..1 and admits a Local Container, which its rule does not settle, so
 > gh-151, not gh-66, owns Containment read-back.
 
+> **Amended by ADR-0057.** Containment is no longer push-only. Backend Pull
+> reads each refreshed Ticket's parent and follows it when the parent is
+> backend-bound to the same Backend.
+
 A Ticket may hold Tickets, as an Epic does. The two cases share one
 relationship, **Containment**, and the item that holds a Ticket is its
 **Container**: an Epic or a Ticket. **Epic Membership** is retired. A Ticket

@@ -45,7 +45,7 @@ use graphql::{
     GraphqlCompleted, GraphqlEnvelope, GraphqlError, GraphqlObservation, GraphqlOperation,
     GraphqlStartFailure, GraphqlTransport, IssueFieldConnection, IssueFieldValues,
     IssueFieldsOperation, IssueFieldsResponse, IssueTypePageResponse, IssueTypesField,
-    IssueTypesOperation, MAX_PULL_KEYS_PER_QUERY, PullData, PullObject, PullOperation,
+    IssueTypesOperation, LinkedIssue, MAX_PULL_KEYS_PER_QUERY, PullData, PullObject, PullOperation,
     PullRepository, PullTarget, SetIssueFieldValueOperation,
 };
 #[cfg(test)]
@@ -781,6 +781,25 @@ struct GhIssue {
     /// Present only in a GraphQL Pull.
     #[serde(default, rename = "blockedBy")]
     blocked_by: Option<BlockedByConnection>,
+    /// Present only in a GraphQL Pull; `None` means the response left the
+    /// key out.
+    #[serde(default, deserialize_with = "present")]
+    parent: Option<Parent>,
+}
+
+/// An issue's `parent` key, null for an issue with no parent.
+#[derive(Debug, Deserialize)]
+#[serde(transparent)]
+struct Parent(Option<LinkedIssue>);
+
+/// Deserialize a key that is present, null or not, as `Some`, so a field
+/// marked `default` tells a missing key from a null one.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1107,6 +1126,14 @@ impl GhIssue {
     ) -> Result<BackendItemRefresh, AdapterReadError> {
         let status = self.lifecycle()?;
         let blocked_by = blocking_keys(self.number, self.blocked_by)?;
+        // The Repository Store clears a bound Container GitHub does not name,
+        // so a response without the key fails the Pull instead (ADR-0057).
+        let container = self.parent.ok_or_else(|| {
+            AdapterReadError::Failed(format!(
+                "#{}: GitHub returned no parent field for it",
+                self.number
+            ))
+        })?;
         Ok(BackendItemRefresh {
             title: self.title,
             body: self.body,
@@ -1114,6 +1141,7 @@ impl GhIssue {
             ticket_kind: Some(ticket_kind),
             ticket_fields,
             blocked_by,
+            container: container.0.map(|parent| parent.url),
         })
     }
 
@@ -3240,6 +3268,37 @@ mod tests {
                 assert_eq!(pulled[0].1.blocked_by, ["https://github.com/o/r/issues/5"]);
             }
         }
+    }
+
+    /// A null parent reads as none, but a response without the `parent` key
+    /// must fail the Pull: the merge clears every bound Container GitHub does
+    /// not name (ADR-0057).
+    #[test]
+    fn pull_reads_a_null_parent_as_none_and_fails_without_the_key() {
+        let pull = |item| {
+            let runner = FakeRunner::new();
+            let mut adapter = GithubAdapter::with_graphql_transport(
+                &runner,
+                cwd(),
+                Box::new(StaticPullTransport {
+                    body: pull_response(&[(0, item)]),
+                }),
+            );
+            adapter.pull(&[address("https://github.com/o/r/issues/1")])
+        };
+        let null_parent = pull_item(PullIssue::default());
+        let mut no_parent_key = null_parent.clone();
+        no_parent_key.as_object_mut().unwrap().remove("parent");
+
+        let pulled = pull(null_parent).unwrap().into_refreshes();
+        assert_eq!(pulled[0].1.container, None);
+
+        let result = pull(no_parent_key);
+        assert!(
+            matches!(&result, Err(AdapterReadError::Failed(detail))
+                if detail.contains("GitHub returned no parent field")),
+            "{result:?}"
+        );
     }
 
     #[test]

@@ -151,7 +151,6 @@ struct ColumnWrites<'a> {
     /// column untouched.
     priority: Option<Priority>,
     effort: FieldEdit<Effort>,
-    parent: FieldEdit<&'a str>,
 }
 
 /// Apply per-field updates to a Ticket or Epic.
@@ -204,13 +203,7 @@ pub fn update_item<C: Clock + ?Sized>(
         .filter(|requested| current.priority != Some(*requested));
     let new_effort = req.effort.against(current.effort);
 
-    // Parent delta: `parent` carries the new Container for both the column
-    // write and set_ticket_container.
     let parent = req.parent.against(current.container_id.as_deref());
-    // The depth cap reads the graph inside this transaction (ADR-0055).
-    if let FieldEdit::Set(container_id) = parent {
-        containment::check(&tx, Some(req.id), container_id)?;
-    }
 
     let title_or_body_changed = new_title.is_some() || new_body.is_some();
     let any_change = title_or_body_changed
@@ -238,10 +231,14 @@ pub fn update_item<C: Clock + ?Sized>(
             body: effective_body,
             priority: new_priority,
             effort: new_effort,
-            parent,
         },
         &now_iso,
     )?;
+    match parent {
+        FieldEdit::Set(container_id) => containment::set(&tx, req.id, container_id)?,
+        FieldEdit::Clear => containment::clear(&tx, req.id)?,
+        FieldEdit::Unchanged => {}
+    }
 
     // Backend Binding, not Origin, decides whether the edit is also backend
     // intent (ADR-0036): a title change made between `tk promote` and the next
@@ -353,16 +350,11 @@ fn write_columns(
     writes: &ColumnWrites<'_>,
     now_iso: &str,
 ) -> Result<(), rusqlite::Error> {
-    let (parent_changed, new_container_id) = writes.parent.column();
     let (effort_changed, new_effort) = writes.effort.column();
     conn.execute(
         "update items set title = ?2, body = ?3, priority = coalesce(?4, priority), \
                           effort = case when ?5 then ?6 else effort end, \
-                          container_id = case when ?7 then ?8 else container_id end, \
-                          container_class = case when ?7 \
-                              then (select item_class from items where id = ?8) \
-                              else container_class end, \
-                          updated_at = ?9 \
+                          updated_at = ?7 \
           where id = ?1",
         params![
             id,
@@ -371,8 +363,6 @@ fn write_columns(
             writes.priority,
             effort_changed,
             new_effort,
-            parent_changed,
-            new_container_id,
             now_iso
         ],
     )?;

@@ -98,7 +98,8 @@ pub fn containment_error(err: &ContainmentError) -> CommandError {
         ContainmentError::Sqlite(e) => storage_error(e),
         ContainmentError::HoldsItself
         | ContainmentError::ContainerHeldByTicket { .. }
-        | ContainmentError::TicketHoldsTickets { .. } => CommandError::failure(err.to_string()),
+        | ContainmentError::TicketHoldsTickets { .. }
+        | ContainmentError::WaitsOnContainer { .. } => CommandError::failure(err.to_string()),
     }
 }
 
