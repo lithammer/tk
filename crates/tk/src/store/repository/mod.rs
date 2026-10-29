@@ -49,6 +49,32 @@ macro_rules! pending_promotion_sql {
     };
 }
 
+/// The Scope CTE: `scoped(id)` lists the Container that bind parameter `$root`
+/// names and every Ticket it holds, directly or through a Ticket it holds
+/// (ADR-0055). The query must say `with recursive`.
+macro_rules! scoped_ids_sql {
+    ($root:literal) => {
+        concat!(
+            "scoped(id) as ( select ",
+            $root,
+            " union \
+             select held.id from items held join scoped s on held.container_id = s.id )"
+        )
+    };
+}
+
+/// True when the Item table alias `$item` holds a Ticket that is not `done`,
+/// whatever that Ticket's Selection State: the Item is not ready (ADR-0055).
+macro_rules! has_unfinished_held_ticket_sql {
+    ($item:literal) => {
+        concat!(
+            "exists ( select 1 from items held where held.container_id = ",
+            $item,
+            ".id and held.container_class = 'ticket' and held.status <> 'done' )"
+        )
+    };
+}
+
 pub mod containment;
 pub mod create;
 pub mod dependency;
@@ -328,17 +354,16 @@ pub struct ResolvedItemRef {
     pub item_class: ItemClass,
 }
 
-/// Why resolving a Display ID or Alias that must be an Epic failed. Shared by
-/// [`resolve_as_epic`] and re-exported as
-/// `resolver::ResolveEpicError`; the command picks the exit-1 phrasing per
-/// variant. With only Ticket and Epic in v1, "not an Epic" means "is a
-/// Ticket", so `NotAnEpic` carries no payload.
+/// Why resolving a Display ID or Alias that must be a Container failed. Shared
+/// by [`resolve_as_container`] and re-exported as
+/// `resolver::ResolveContainerError`; the command picks the exit-1 phrasing per
+/// variant. A Ticket that holds no Ticket is not a Container.
 #[derive(Debug, Error)]
-pub enum ResolveEpicError {
+pub enum ResolveContainerError {
     #[error("Display ID or Alias not found")]
     NotFound,
-    #[error("resolved Item is not an Epic")]
-    NotAnEpic,
+    #[error("resolved Item is neither an Epic nor a Ticket that holds Tickets")]
+    NotAContainer,
     #[error(transparent)]
     Storage(#[from] rusqlite::Error),
 }
@@ -384,21 +409,30 @@ pub(crate) fn next_display_id(
     Ok(prefix.map(|prefix| format!("{prefix}-{display_seq}")))
 }
 
-/// Resolve a Display ID or Alias to an Epic reference, classifying the
-/// outcome so callers can render `not_found` vs `not_an_epic` differently.
+/// Resolve a Display ID or Alias to a Container reference, classifying the
+/// outcome so callers can render `not_found` vs `not_a_container` differently.
 ///
-/// Scope validation uses this: ADR-0022 limits a Scope to an Epic.
-pub fn resolve_as_epic(
+/// Scope validation uses this: ADR-0055 limits a Scope to an Epic or a Ticket
+/// that holds Tickets.
+pub fn resolve_as_container(
     conn: &Connection,
     display_arg: &str,
-) -> Result<ResolvedItemRef, ResolveEpicError> {
+) -> Result<ResolvedItemRef, ResolveContainerError> {
     let Some(resolved) = resolve_item_ref(conn, display_arg)? else {
-        return Err(ResolveEpicError::NotFound);
+        return Err(ResolveContainerError::NotFound);
     };
     if resolved.item_class == ItemClass::Epic {
+        return Ok(resolved);
+    }
+    let holds_tickets = conn.query_row(
+        "select exists (select 1 from items where container_id = ?1 and container_class = 'ticket')",
+        params![resolved.id],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if holds_tickets {
         Ok(resolved)
     } else {
-        Err(ResolveEpicError::NotAnEpic)
+        Err(ResolveContainerError::NotAContainer)
     }
 }
 
@@ -511,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_as_epic_returns_epic_for_an_epic_display_id() {
+    fn resolve_as_container_returns_an_epic() {
         let conn = open_seeded();
         insert_fixture_item(
             &conn,
@@ -527,11 +561,11 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(resolve_as_epic(&conn, "tk-1").unwrap().id, "e1");
+        assert_eq!(resolve_as_container(&conn, "tk-1").unwrap().id, "e1");
     }
 
     #[test]
-    fn resolve_as_epic_flags_a_ticket_resolution() {
+    fn resolve_as_container_flags_a_ticket_that_holds_none() {
         let conn = open_seeded();
         insert_fixture_item(
             &conn,
@@ -545,17 +579,17 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            resolve_as_epic(&conn, "tk-1"),
-            Err(ResolveEpicError::NotAnEpic)
+            resolve_as_container(&conn, "tk-1"),
+            Err(ResolveContainerError::NotAContainer)
         ));
     }
 
     #[test]
-    fn resolve_as_epic_returns_not_found_for_unknown_value() {
+    fn resolve_as_container_returns_not_found_for_unknown_value() {
         let conn = open_seeded();
         assert!(matches!(
-            resolve_as_epic(&conn, "missing"),
-            Err(ResolveEpicError::NotFound)
+            resolve_as_container(&conn, "missing"),
+            Err(ResolveContainerError::NotFound)
         ));
     }
 

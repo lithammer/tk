@@ -22,7 +22,7 @@ use crate::store::repository::{self, ResolvedItemRef, Store};
 /// Errors re-exported from the store layer, where the operations that produce
 /// them live. [`OpenError`] is turned into a [`CommandError`] by [`open_error`];
 /// the resolve errors are matched and rendered by each command.
-pub use crate::store::repository::{OpenError, ResolveEpicError};
+pub use crate::store::repository::{OpenError, ResolveContainerError};
 
 /// Failure of [`resolve`].
 #[derive(Debug, Error)]
@@ -56,9 +56,12 @@ pub fn resolve(store: &Store, arg: &str) -> Result<ResolvedItemRef, ResolveError
     }
 }
 
-/// Resolve a Display ID or Alias that must refer to an Epic.
-pub fn resolve_epic(store: &Store, arg: &str) -> Result<ResolvedItemRef, ResolveEpicError> {
-    repository::resolve_as_epic(store.conn(), arg)
+/// Resolve a Display ID or Alias that must refer to a Container.
+pub fn resolve_container(
+    store: &Store,
+    arg: &str,
+) -> Result<ResolvedItemRef, ResolveContainerError> {
+    repository::resolve_as_container(store.conn(), arg)
 }
 
 /// Build the [`CommandError`] for an [`OpenError`] (ADR-0032). The body is the

@@ -60,8 +60,8 @@ pub struct Args {
     /// Show only Epics.
     #[arg(long)]
     pub epic: bool,
-    /// Scope the listing to this Epic and its child Tickets. Falls back to
-    /// the `TK_SCOPE` environment variable.
+    /// Scope the listing to this Epic or Ticket Container and the Tickets it
+    /// holds. Falls back to the `TK_SCOPE` environment variable.
     #[arg(value_name = "EPIC_ID")]
     pub epic_id: Option<String>,
 }
@@ -697,7 +697,9 @@ mod tests {
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(
-            stderr.contains("tk list: scope 'tk-1' is not an Epic"),
+            stderr.contains(
+                "tk list: scope 'tk-1' is neither an Epic nor a Ticket that holds Tickets"
+            ),
             "stderr={stderr:?}"
         );
     }

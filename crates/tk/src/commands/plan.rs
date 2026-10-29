@@ -1,6 +1,6 @@
 //! Dedicated Plan editing and progress view (ADR-0050).
 //!
-//! The view ignores Epic Scope and always counts the whole Plan. Its sections
+//! The view ignores Scope and always counts the whole Plan. Its sections
 //! are independent of List Tree filters; titles and blocker reasons are sanitized here.
 
 use std::io::Write;
@@ -149,6 +149,16 @@ pub(crate) fn render(
                             outside_plan,
                         } => {
                             write!(out, " [blocked by {display_id}")?;
+                            if *outside_plan {
+                                write!(out, " (outside Plan)")?;
+                            }
+                            write!(out, "]")?;
+                        }
+                        PlanBlocker::HeldTicket {
+                            display_id,
+                            outside_plan,
+                        } => {
+                            write!(out, " [holds {display_id}")?;
                             if *outside_plan {
                                 write!(out, " (outside Plan)")?;
                             }

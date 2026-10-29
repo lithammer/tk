@@ -7,9 +7,9 @@ Select the next ready Ticket
 Usage: tk next [OPTIONS] [EPIC_ID]
 
 Arguments:
-  [EPIC_ID]  Restrict selection to this Epic's child Tickets. Falls back to the `TK_SCOPE` environment variable; absent both, all ready Tickets are considered
+  [EPIC_ID]  Restrict selection to this Epic or Ticket Container and the Tickets it holds. Falls back to the `TK_SCOPE` environment variable; absent both, all ready Tickets are considered
 
 Options:
   -q, --quiet  Print only the bare Display ID, omitting the title
-      --plan   Select only Plan members, intersecting any Epic Scope
+      --plan   Select only Plan members, intersecting any Scope
   -h, --help   Print help

@@ -1363,7 +1363,7 @@ fn prime_scope_limits_current_work_but_keeps_the_whole_plan() {
     );
     for (scope, reason) in [
         ("missing", "not a known Display ID or Alias"),
-        ("repo-2", "not an Epic"),
+        ("repo-2", "neither an Epic nor a Ticket that holds Tickets"),
     ] {
         let output = p.run_env("prime", &[("TK_SCOPE", scope)]);
         let current = output.split("## Finding Work").next().unwrap();
