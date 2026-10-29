@@ -169,7 +169,12 @@ impl CurrentWork {
             }
         };
         if let Some(epic) = scope {
-            writeln!(out, "Scope: {} (Epic + child Tickets)\n", epic.display_id)?;
+            writeln!(
+                out,
+                "Scope: {} {}\n",
+                epic.display_id,
+                scope::extent(epic.item_class)
+            )?;
         }
         write!(out, "Next")?;
         if in_plan {
