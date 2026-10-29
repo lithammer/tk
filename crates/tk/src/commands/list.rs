@@ -17,10 +17,10 @@ use clap::Args as ClapArgs;
 use crate::cli::{self, CommandError, Deps, Exit};
 use crate::commands::item_row::{MutationMarkers, render_chrome, render_row};
 use crate::commands::{resolver, scope};
-use crate::domain::item_class::ItemClass;
 use crate::domain::mutation_state::MutationState;
 use crate::render::palette;
 use crate::render::styler::SubStyler;
+use crate::store::repository::ResolvedItemRef;
 use crate::store::repository::list::{
     self, ListClassFilter, ListOptions, ListOriginFilter, ListRow, ListView,
 };
@@ -70,13 +70,13 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     let store = resolver::open_for_command(deps.runner, deps.cwd, deps.clock, deps.data_root)
         .map_err(|err| resolver::open_error(&err))?;
 
-    let scope = scope::resolve(&store, args.epic_id.as_deref())?;
+    let scope_item = scope::resolve(&store, args.epic_id.as_deref())?;
 
     let options = ListOptions {
         view: select_view(&args),
         origin: select_origin(&args),
         class: select_class(&args),
-        scope: scope.as_ref().map(|container| container.id.as_str()),
+        scope: scope_item.as_ref().map(|epic| epic.id.as_str()),
     };
 
     let rows = list::list_rows(&store, options).map_err(|err| resolver::storage_error(&err))?;
@@ -94,10 +94,7 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
 
     let out = deps.styler.for_stdout();
 
-    let scope_display_id = scope
-        .as_ref()
-        .map(|container| container.display_id.as_str());
-    if let Err(err) = render_banners(deps.stdout, scope_display_id, banner_head.as_ref(), out) {
+    if let Err(err) = render_banners(deps.stdout, scope_item.as_ref(), banner_head.as_ref(), out) {
         return cli::write_error(&err);
     }
 
@@ -113,14 +110,14 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
 /// ARCHITECTURE.md records the separator rules.
 fn render_banners<W: Write + ?Sized>(
     stdout: &mut W,
-    scope_display_id: Option<&str>,
+    scope: Option<&ResolvedItemRef>,
     banner_head: Option<&MutationSummary>,
     styler: SubStyler,
 ) -> std::io::Result<()> {
     let mut block = Vec::new();
     // Hint so a Scope-filtered tree never reads as the full store (ADR-0022).
-    if let Some(display_id) = scope_display_id {
-        render_scope_hint(&mut block, display_id, styler)?;
+    if let Some(scope) = scope {
+        render_scope_hint(&mut block, scope, styler)?;
     }
     if let Some(head) = banner_head {
         render_sync_banner(&mut block, head, styler)?;
@@ -133,19 +130,19 @@ fn render_banners<W: Write + ?Sized>(
 }
 
 /// One-line banner above a Scope-filtered List Tree: a bold `Scope:` label,
-/// the Epic Display ID in the Epic colour (matching the tree's `[epic]`
-/// badge), and a dim reminder that held Tickets are included.
+/// the Container Display ID in its class colour (matching the tree's badge),
+/// and a dim reminder of what the Scope includes.
 fn render_scope_hint<W: Write + ?Sized>(
     stdout: &mut W,
-    display_id: &str,
+    scope: &ResolvedItemRef,
     styler: SubStyler,
 ) -> std::io::Result<()> {
     writeln!(
         stdout,
         "{} {} {}",
         styler.wrap(palette::HEADER, "Scope:"),
-        styler.wrap(palette::KIND_EPIC, display_id),
-        styler.wrap(palette::SEPARATOR, "(and the Tickets it holds)"),
+        styler.wrap(palette::id_style(scope.item_class), &scope.display_id),
+        styler.wrap(palette::SEPARATOR, scope::extent(scope.item_class)),
     )
 }
 
@@ -230,13 +227,11 @@ fn render<W: Write + ?Sized>(
     } else {
         let mut markers = MutationMarkers::default();
         for row in rows {
-            if nests_under_epic_row(rows, row) {
+            if nests_under_container_row(rows, row) {
                 continue;
             }
             markers = markers.merge(render_row(stdout, row, "", styler)?);
-            if row.item_class == ItemClass::Epic {
-                markers = markers.merge(render_children(stdout, rows, row, styler)?);
-            }
+            markers = markers.merge(render_children(stdout, rows, row, "", styler)?);
         }
         render_chrome(stdout, rows, markers, styler)?;
     }
@@ -288,10 +283,13 @@ fn render_unresolved_counts<W: Write + ?Sized>(
     writeln!(stdout, "\nMutation Log: {}", parts.join(", "))
 }
 
+/// Render the rows `parent` holds, then the rows each of those holds. `indent`
+/// is the guide column inherited from the ancestors.
 fn render_children<W: Write + ?Sized>(
     stdout: &mut W,
     rows: &[ListRow],
     parent: &ListRow,
+    indent: &str,
     styler: SubStyler,
 ) -> std::io::Result<MutationMarkers> {
     let mut children = rows
@@ -300,24 +298,35 @@ fn render_children<W: Write + ?Sized>(
         .peekable();
     let mut markers = MutationMarkers::default();
     while let Some(child) = children.next() {
-        let prefix = if children.peek().is_none() {
-            "\u{2514}\u{2500}\u{2500} "
+        let (connector, guide) = if children.peek().is_none() {
+            ("\u{2514}\u{2500}\u{2500} ", "    ")
         } else {
-            "\u{251c}\u{2500}\u{2500} "
+            ("\u{251c}\u{2500}\u{2500} ", "\u{2502}   ")
         };
-        markers = markers.merge(render_row(stdout, child, prefix, styler)?);
+        markers = markers.merge(render_row(
+            stdout,
+            child,
+            &format!("{indent}{connector}"),
+            styler,
+        )?);
+        markers = markers.merge(render_children(
+            stdout,
+            rows,
+            child,
+            &format!("{indent}{guide}"),
+            styler,
+        )?);
     }
     Ok(markers)
 }
 
-/// Whether an Epic row in the view nests `row`. Only Epic rows nest Tickets,
-/// so a Ticket held by a Ticket stays a top-level row.
-fn nests_under_epic_row(rows: &[ListRow], row: &ListRow) -> bool {
+/// Whether the Container of `row` is itself in the view, so the tree nests
+/// `row` under it instead of listing it at the top level.
+fn nests_under_container_row(rows: &[ListRow], row: &ListRow) -> bool {
     let Some(container_id) = row.container_id.as_deref() else {
         return false;
     };
-    rows.iter()
-        .any(|r| r.id == container_id && r.item_class == ItemClass::Epic)
+    rows.iter().any(|r| r.id == container_id)
 }
 
 fn empty_message(options: ListOptions<'_>) -> &'static str {
@@ -643,7 +652,7 @@ mod tests {
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         insta::assert_snapshot!(stdout, @"
-        Scope: tk-1 (and the Tickets it holds)
+        Scope: tk-1 (Epic + child Tickets)
 
         ✓ tk-1 [epic] Epic
         └── ○ tk-2 ● P2 Child
@@ -1428,7 +1437,7 @@ mod tests {
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         insta::assert_snapshot!(stdout, @"
-        Scope: tk-1 (and the Tickets it holds)
+        Scope: tk-1 (Epic + child Tickets)
         Sync: Mutation 1 failed on tk-3 (tk sync log 1)
 
         ○ tk-1 [epic] Epic
@@ -1483,7 +1492,7 @@ mod tests {
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert_eq!(
             stdout,
-            "Scope: tk-1 (and the Tickets it holds)\n\nNo local epics.\n"
+            "Scope: tk-1 (Epic + child Tickets)\n\nNo local epics.\n"
         );
     }
 }

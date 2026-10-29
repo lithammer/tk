@@ -171,8 +171,9 @@ impl CurrentWork {
         if let Some(container) = scope {
             writeln!(
                 out,
-                "Scope: {} (and the Tickets it holds)\n",
-                container.display_id
+                "Scope: {} {}\n",
+                container.display_id,
+                scope::extent(container.item_class)
             )?;
         }
         write!(out, "Next")?;

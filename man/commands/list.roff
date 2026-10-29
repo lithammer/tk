@@ -1,9 +1,11 @@
 The default view shows open and active Tickets and Epics. Epics render as
-top-level rows, child Tickets render under their Epic with tree glyphs, and
-unparented Tickets render as top-level rows. Every view retains an Epic as
-context when it has a matching child Ticket, even when the Epic is done.
-Done Tickets and done Epics without matching children stay hidden.
-Totals count all displayed Items, including contextual Epics.
+top-level rows, and a Ticket renders under its Container with tree glyphs,
+however deep Containment goes: under an Epic, and under a Ticket that holds
+Tickets. Tickets without a Container render as top-level rows. Every view
+retains a Container as context when a Ticket it holds matches, directly or
+through another Ticket, even when the Container is done. Done Tickets and
+done Epics holding no matching Ticket stay hidden.
+Totals count all displayed Items, including contextual Containers.
 .PP
 .B \-\-ready
 shows open, idle, accepted Tickets with no unresolved Dependencies or
@@ -25,7 +27,8 @@ shows only items with Local Origin, including Pending Promotions.
 .B \-\-remote
 shows only items with Backend Origin. A Pending Promotion retains Local
 Origin until tk records its Backend identity. Origin filters apply to both
-parent and child; a matching Ticket whose Epic is excluded renders at top level.
+Container and held Ticket; a matching Ticket whose Container is excluded
+renders at top level.
 .PP
 .B \-\-epic
 restricts the listing to Epics and composes with any view or Origin filter.
@@ -61,7 +64,7 @@ store:
 .PP
 .RS 4
 .nf
-Scope: project-1 (and the Tickets it holds)
+Scope: project-1 (Epic + child Tickets)
 .fi
 .RE
 .PP
