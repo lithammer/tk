@@ -24,6 +24,10 @@
 > reads `blockedBy` and follows it for each edge whose Blocking Item is
 > backend-bound to the same Backend.
 
+> **Amended by ADR-0057.** Containment is no longer push-only. Backend Pull
+> reads `parent` and follows it when the parent is backend-bound to the same
+> Backend.
+
 The v1 GitHub Backend Adapter (tk-34) maps item *fields* between tk and a
 GitHub repository, chiefly through the `gh issue` subcommands:
 

@@ -232,11 +232,13 @@ A component that maps between **tk** domain concepts and a specific **Backend**.
 _Avoid_: Facade, Provider, Connector
 
 **Backend Pull**:
-An all-or-nothing **Backend Adapter** operation that refreshes the exact set of **Adopted** **Backend** items not yet `done`, returning title, body, **Lifecycle**, optional **Ticket Kind**, **Priority**, **Effort**, and **Blocking Item** values for the Repository Store to merge. It never mirrors, discovers, or changes item identity, **Origin**, **Display ID**, or **Item Class**. It never writes a Backend value to **Work State**; importing a `done` **Lifecycle** clears **Work State** to `idle` as a local consequence.
+An all-or-nothing **Backend Adapter** operation that refreshes the exact set of **Adopted** **Backend** items not yet `done`, returning title, body, **Lifecycle**, optional **Ticket Kind**, **Priority**, **Effort**, **Blocking Item**, and **Container** values for the Repository Store to merge. It never mirrors, discovers, or changes item identity, **Origin**, **Display ID**, or **Item Class**. It never writes a Backend value to **Work State**; importing a `done` **Lifecycle** clears **Work State** to `idle` as a local consequence.
 When an Item has a `pending` or `failed` `UpdateTicket` or `UpdateEpic`
 **Mutation**, the Repository Store preserves its title and body; a `pending`
 or `failed` `set_ticket_priority` or `set_ticket_effort` **Mutation**
-preserves **Priority** or **Effort**. Pull still
+preserves **Priority** or **Effort**, and a `pending` or `failed`
+`set_ticket_container` or `clear_ticket_container` **Mutation** preserves the
+**Ticket**'s **Container**. Pull still
 imports **Lifecycle** and a present **Ticket Kind**; `None` keeps the stored
 Kind. The merge keeps `updated_at` at the later of the stored value and refresh
 time. The Repository Store, not the **Backend Adapter**, owns these field rules.
@@ -841,9 +843,16 @@ _Avoid_: ticket, tickets
   shields. Pull ignores a **Backend** blocker that has no backend-bound local
   Item. It skips an edge that would close a local cycle and warns about it
   (ADR-0056).
-- **Containment** sync is push-only. **Backend Pull** reads no parent, so the
-  **Repository Store** stays authoritative for it. **Adopting** the issues of
-  a **Backend** tree therefore yields **Tickets** with no **Container**.
+- **Backend Pull** reads back a **Ticket**'s **Containment** when the
+  **Ticket** is in the Pull and the **Backend**'s parent, or the local
+  **Container**, is backend-bound to the same **Backend**, whatever its
+  **Lifecycle**. The **Backend** is authoritative for it: Pull sets a bound
+  parent, replacing a Local **Container**, and clears a bound **Container**
+  the **Backend** no longer lists, unless an unresolved
+  `set_ticket_container` or `clear_ticket_container` **Mutation** shields the
+  **Ticket**. A Local **Container** stays while the **Backend** lists no
+  bound parent. Pull ignores an **Epic**'s parent. It skips a **Container**
+  the depth cap or the cycle rule refuses and warns about it (ADR-0057).
 - A **Repository Store** syncs with the one **Backend** repository its own
   version-control repository resolves through the **Backend Adapter**.
   **Dependencies** and **Containment** spanning two **Backend**

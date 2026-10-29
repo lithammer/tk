@@ -1,5 +1,8 @@
 # Backend Pull reads back Dependencies between bound Items
 
+> **Amended by ADR-0057.** Containment read-back shields a Ticket's whole
+> Containment, not a pair, and runs after Dependency additions.
+
 Dependency sync shipped push-only (ADR-0021): Apply sends `add_dependency` and
 `remove_dependency`, but Backend Pull never reads an edge back. ADR-0049
 refuses that half-sync for a field and left edges outside its rule only
