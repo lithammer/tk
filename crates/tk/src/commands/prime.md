@@ -12,7 +12,7 @@
   title, the rest is the body.
 - `tk add --bug -F -` - Create a local Bug Ticket.
 - `tk add --epic -F -` - Create a local Epic.
-- `tk add --parent <epic-id> -F -` - Create a Ticket under an Epic.
+- `tk add --parent <container-id> -F -` - Create a Ticket held by an Epic or Ticket.
 - `tk update <id> --title "New title"` - Change the title.
 - `tk update <id> --body-file -` - Replace the body from stdin.
 - `tk start <id>` - Mark an Item active; required before working on it.
@@ -35,4 +35,4 @@
 ## Scope
 
 - `tk next <epic-id>` - Show the next ready Ticket under an Epic.
-- `tk list <epic-id>` - List an Epic and its child Tickets.
+- `tk list <epic-id>` - List an Epic and the Tickets under it.

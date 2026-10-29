@@ -11,6 +11,7 @@
 
 use crate::cli::CommandError;
 use crate::commands::resolver::{self, ResolveEpicError};
+use crate::domain::item_class::ItemClass;
 use crate::store::repository::{ResolvedItemRef, Store};
 
 /// Environment variable carrying a session Scope for orchestrated / AFK runs.
@@ -52,6 +53,15 @@ pub fn resolve(store: &Store, arg: Option<&str>) -> Result<Option<ResolvedItemRe
         Err(ResolveEpicError::NotFound) => Err(ScopeError::NotFound(value)),
         Err(ResolveEpicError::NotAnEpic) => Err(ScopeError::NotAnEpic(value)),
         Err(ResolveEpicError::Storage(err)) => Err(ScopeError::Storage(err)),
+    }
+}
+
+/// What a Scope of this class covers, for the hint above a Scope-filtered view.
+#[must_use]
+pub fn extent(class: ItemClass) -> &'static str {
+    match class {
+        ItemClass::Epic => "(Epic + child Tickets)",
+        ItemClass::Ticket => "(Ticket + held Tickets)",
     }
 }
 

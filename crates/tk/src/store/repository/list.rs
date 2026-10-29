@@ -5,7 +5,8 @@
 //! derivation (an Item is *blocked* when it has any unresolved Dependency
 //! or unresolved External Blocker). The command-side renderer owns the
 //! tree glyph and the compact plain-text row shape, so the query returns
-//! typed [`ListRow`]s for matches and their Epic context, not rendered strings.
+//! typed [`ListRow`]s for matches and their Container context, not rendered
+//! strings.
 
 use rusqlite::params;
 
@@ -48,8 +49,8 @@ pub struct ListRow {
     pub has_failed_mutation: bool,
 }
 
-/// Item-selection mode for `tk list`. Every view retains Epics as context
-/// for matching child Tickets, regardless of the Epic's Lifecycle.
+/// Item-selection mode for `tk list`. Every view retains Containers as context
+/// for the Tickets they hold, regardless of the Container's Lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ListView {
     /// Open and active Items.
@@ -123,9 +124,10 @@ impl ListClassFilter {
 /// Read options for the List Tree query.
 ///
 /// `scope` is the stable `items.id` of an Epic when a Scope is active
-/// (ADR-0022), confining rows to that Epic and its direct child Tickets;
-/// `None` reads the whole store. The command layer resolves and
-/// Epic-validates the `<epic-id>` argument / `TK_SCOPE` before setting it.
+/// (ADR-0022), confining rows to that Epic and the Tickets under it, directly
+/// or through a Ticket it holds; `None` reads the whole store. The command
+/// layer resolves and Epic-validates the `<epic-id>` argument / `TK_SCOPE`
+/// before setting it.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ListOptions<'a> {
     pub view: ListView,
@@ -139,14 +141,14 @@ pub struct ListOptions<'a> {
 ///   `?2` — [`ListOriginFilter::sql_text`] filtering stored Origin.
 ///   `?3` — [`ListClassFilter::sql_text`] narrowing to a single Item class.
 ///   `?4` — Scope (ADR-0022): the stable `items.id` of an Epic, or `''`
-///          for no Scope. When set, rows are confined to that Epic and its
-///          direct child Tickets.
+///          for no Scope. When set, rows are confined to that Epic and the
+///          Tickets under it, directly or through a Ticket it holds.
 ///
 /// The `case ?1 when '<tag>' then ...` arms cover every [`ListView`]
 /// variant; the per-view tests below cover the arms.
 const LIST_ROWS_SQL: &str = concat!(
     "\
-with annotated as ( \
+with recursive annotated as ( \
     select i.id, i.display_value, i.item_class, i.ticket_kind, \
            i.priority, i.title, i.status, i.work_state, i.origin, \
            i.container_id, i.selection_state, i.created_seq, i.effort, \
@@ -191,6 +193,19 @@ matching as ( \
                                 and selection_state = 'parked' \
            end as self_matches \
       from annotated \
+), \
+context(id) as ( \
+    select container_id \
+      from matching \
+     where self_matches \
+       and container_id is not null \
+       and (?2 = 'any' or origin = ?2) \
+    union \
+    select m.container_id \
+      from matching m \
+      join context c on m.id = c.id \
+     where m.container_id is not null \
+       and (?2 = 'any' or m.origin = ?2) \
 ) \
 select id, display_value, item_class, ticket_kind, priority, title, \
        status, container_id, selection_state, \
@@ -215,20 +230,13 @@ select id, display_value, item_class, ticket_kind, priority, title, \
   from matching parent \
  where (?2 = 'any' or parent.origin = ?2) \
    and (?3 = 'any' or parent.item_class = ?3) \
-   and (?4 = '' or parent.id = ?4 or parent.container_id = ?4) \
    and ( \
-       parent.self_matches \
-       or ( \
-           parent.item_class = 'epic' \
-           and exists ( \
-               select 1 \
-                 from matching child \
-                where child.container_id = parent.id \
-                  and child.self_matches \
-                  and (?2 = 'any' or child.origin = ?2) \
-           ) \
-       ) \
+       ?4 = '' \
+       or parent.id = ?4 \
+       or parent.container_id = ?4 \
+       or parent.container_id in (select id from items where container_id = ?4) \
    ) \
+   and (parent.self_matches or parent.id in (select id from context)) \
  order by created_seq asc"
 );
 
