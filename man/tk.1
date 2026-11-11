@@ -1868,6 +1868,19 @@ Usage error.
 Unexpected internal error.
 .SH ENVIRONMENT
 .TP
+.BR GH_TOKEN ", " GITHUB_TOKEN
+Authenticate the GitHub Releases API query in
+.BR "tk self-update" .
+The first nonempty value wins, in the order shown; otherwise tk queries
+anonymously. tk sends the token only to the release API.
+Use your GitHub CLI token for one update:
+.PP
+.RS 4
+.nf
+GH_TOKEN="$(gh auth token --hostname github.com)" tk self-update
+.fi
+.RE
+.TP
 .B TK_SCOPE
 Supplies a Scope to
 .B tk next

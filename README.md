@@ -31,6 +31,13 @@ restart your terminal afterwards. `tk self-update` keeps it current.
 Use `tk self-update`. Re-running the install script is also supported. Use the
 variables below for version pinning or ABI switching.
 
+If GitHub's unauthenticated API rate limit blocks an update, use your
+GitHub CLI token:
+
+```sh
+GH_TOKEN="$(gh auth token --hostname github.com)" tk self-update
+```
+
 ### Environment variables
 
 | Variable | Default | Effect |
@@ -38,6 +45,7 @@ variables below for version pinning or ABI switching.
 | `TK_INSTALL_DIR` | `~/.local/bin` on Linux and macOS; `%LOCALAPPDATA%\tk\bin` on Windows | Install directory. |
 | `TK_VERSION` | latest release | Release version to install. |
 | `TK_LINUX_ABI` | `musl` | Linux ABI variant: `musl`, or `gnu` on x86_64 Linux. |
+| `GH_TOKEN`, `GITHUB_TOKEN` | unset (anonymous) | Authenticate release API queries for `tk self-update`. First nonempty value wins, in the order shown. |
 
 ### Build from source <a id="build-from-source"></a>
 

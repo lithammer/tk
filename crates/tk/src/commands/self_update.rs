@@ -39,6 +39,12 @@ const API_URL: &str = "https://api.github.com/repos/lithammer/tk/releases/latest
 /// a 404 (`<base>/tag/<tag>`) are built from this constant.
 const RELEASES_BASE_URL: &str = "https://github.com/lithammer/tk/releases";
 
+const INSTALL_COMMAND: &str = if cfg!(windows) {
+    "irm https://github.com/lithammer/tk/releases/latest/download/install.ps1 | iex"
+} else {
+    "curl -fsSL https://github.com/lithammer/tk/releases/latest/download/install.sh | sh"
+};
+
 /// Stage-file prefix inside the exe directory. Hidden-dot keeps the staged
 /// binary out of `ls` output; the hex suffix is 64 random bits via
 /// [`Deps::rng`] so concurrent self-updates against the same exe directory
@@ -83,10 +89,12 @@ pub struct Args {
     pub check: bool,
 }
 
-/// Run `tk self-update`. On failure returns the [`CommandError`] for the
-/// dispatch seam to frame as `tk self-update:` (ADR-0032). The seam needs
-/// `stderr` to render the returned error, so this borrows `Deps` and reborrows
-/// it into the by-value pipeline below.
+enum Authentication {
+    Anonymous,
+    Authenticated(String),
+}
+
+/// Leave failure framing to the dispatch seam (ADR-0032).
 pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     let reborrow = Deps {
         data_root: deps.data_root,
@@ -100,23 +108,28 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         cwd: deps.cwd,
         styler: deps.styler,
     };
-    run_with(reborrow, args, embedded_version(), embedded_triple())
+    let authentication = ["GH_TOKEN", "GITHUB_TOKEN"]
+        .into_iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .find(|value| !value.is_empty())
+        .map_or(Authentication::Anonymous, Authentication::Authenticated);
+
+    run_with(
+        reborrow,
+        args,
+        embedded_version(),
+        embedded_triple(),
+        authentication,
+    )
 }
 
-/// Workhorse for `tk self-update`. `embedded_version` and `embedded_triple`
-/// are threaded explicitly so tests can exercise the dev refusal, the
-/// comparison branches, and the smoke check independently.
-///
-/// Refusal on dev builds is symmetric across `tk self-update` and
-/// `tk self-update --check`: both exit 1 with the same diagnostic before
-/// any networking happens. A dev build has no canonical upstream tag to
-/// compare against, so even the read-only `--check` query has nothing
-/// meaningful to report.
+/// Development builds have no release target, so even `--check` refuses them.
 fn run_with(
     mut deps: Deps<'_>,
     args: Args,
     embedded_version: &str,
     embedded_triple: &str,
+    authentication: Authentication,
 ) -> Result<Exit, CommandError> {
     if embedded_triple == DEV_TRIPLE {
         return Err(CommandError::failure(
@@ -124,8 +137,23 @@ fn run_with(
         ));
     }
 
-    let tag =
-        fetch_latest_tag(deps.runner, deps.cwd, embedded_version).map_err(CommandError::failure)?;
+    if let Authentication::Authenticated(token) = &authentication {
+        if token.bytes().any(|byte| byte.is_ascii_control()) {
+            return Err(CommandError::failure(
+                "GH_TOKEN or GITHUB_TOKEN contains an invalid token",
+            ));
+        }
+    }
+
+    let tag = fetch_latest_tag(deps.runner, deps.cwd, embedded_version, authentication).map_err(|err| {
+        if matches!(err, QueryError::HttpStatus(403)) {
+            CommandError::failure(format!(
+                "{err}\nSet GH_TOKEN or GITHUB_TOKEN to authenticate, or install manually:\n  {INSTALL_COMMAND}"
+            ))
+        } else {
+            CommandError::failure(err)
+        }
+    })?;
 
     let cmp = compare_versions(embedded_version, &tag).map_err(CommandError::failure)?;
 
@@ -168,13 +196,25 @@ fn fetch_latest_tag<R: crate::proc::ProcRunner + ?Sized>(
     runner: &R,
     cwd: &Path,
     embedded_version: &str,
+    authentication: Authentication,
 ) -> Result<String, QueryError> {
     let user_agent = format!("{USER_AGENT_PREFIX}{embedded_version}");
-    let argv = curl_get_argv(&user_agent, API_URL, None);
+    let mut argv = curl_get_argv(&user_agent, API_URL, None);
+    let header = match authentication {
+        Authentication::Anonymous => None,
+        Authentication::Authenticated(token) => {
+            argv.extend(["--header".to_string(), "@-".to_string()]);
+            Some(format!("Authorization: Bearer {token}\n"))
+        }
+    };
+
     let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-    let output = runner
-        .run(&argv_refs, cwd)
-        .map_err(|_| QueryError::Network)?;
+    // Pass the API token through stdin so process arguments cannot reveal it.
+    let output = match header {
+        Some(header) => runner.run_with_stdin(&argv_refs, cwd, header.as_bytes()),
+        None => runner.run(&argv_refs, cwd),
+    }
+    .map_err(|_| QueryError::Network)?;
     let (body, status) = split_body_and_status(&output.stdout)?;
     classify_curl_outcome(output.exit_code, status)?;
     parse_release_tag(body)
@@ -747,6 +787,7 @@ fn smoke_output_contains_token(text: &[u8], token: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::Authentication::Anonymous;
     use super::*;
     use crate::clock::FakeClock;
     use crate::proc::{FakeRunner, ProcRunner, RunOutput};
@@ -837,7 +878,7 @@ mod tests {
                 &cwd,
             );
             let code = rendered(
-                run_with(deps, Args { check }, "v0.0.1", DEV_TRIPLE),
+                run_with(deps, Args { check }, "v0.0.1", DEV_TRIPLE, Anonymous),
                 &mut stderr,
             );
             assert_eq!(code, Exit::Failure);
@@ -873,7 +914,7 @@ mod tests {
             &cwd,
         );
         let code = rendered(
-            run_with(deps, Args { check: true }, "v0.5.0", TEST_TRIPLE),
+            run_with(deps, Args { check: true }, "v0.5.0", TEST_TRIPLE, Anonymous),
             &mut stderr,
         );
         assert_eq!(code, Exit::Ok);
@@ -902,7 +943,7 @@ mod tests {
             &cwd,
         );
         let code = rendered(
-            run_with(deps, Args { check: true }, "v0.5.0", TEST_TRIPLE),
+            run_with(deps, Args { check: true }, "v0.5.0", TEST_TRIPLE, Anonymous),
             &mut stderr,
         );
         assert_eq!(code, Exit::Failure);
@@ -931,7 +972,7 @@ mod tests {
             &cwd,
         );
         let code = rendered(
-            run_with(deps, Args { check: true }, "v0.5.0", TEST_TRIPLE),
+            run_with(deps, Args { check: true }, "v0.5.0", TEST_TRIPLE, Anonymous),
             &mut stderr,
         );
         assert_eq!(code, Exit::Ok);
@@ -960,7 +1001,7 @@ mod tests {
             &cwd,
         );
         let code = rendered(
-            run_with(deps, Args { check: true }, "v0.5.0", TEST_TRIPLE),
+            run_with(deps, Args { check: true }, "v0.5.0", TEST_TRIPLE, Anonymous),
             &mut stderr,
         );
         assert_eq!(code, Exit::Failure);
@@ -996,7 +1037,7 @@ mod tests {
             &cwd,
         );
         let code = rendered(
-            run_with(deps, Args { check: true }, "v0.5.0", TEST_TRIPLE),
+            run_with(deps, Args { check: true }, "v0.5.0", TEST_TRIPLE, Anonymous),
             &mut stderr,
         );
         assert_eq!(code, Exit::Failure);
@@ -1032,7 +1073,7 @@ mod tests {
             &cwd,
         );
         let code = rendered(
-            run_with(deps, Args { check: true }, "v0.5.0", TEST_TRIPLE),
+            run_with(deps, Args { check: true }, "v0.5.0", TEST_TRIPLE, Anonymous),
             &mut stderr,
         );
         assert_eq!(code, Exit::Failure);
@@ -1060,7 +1101,7 @@ mod tests {
             &cwd,
         );
         let code = rendered(
-            run_with(deps, Args { check: true }, "v0.5.0", TEST_TRIPLE),
+            run_with(deps, Args { check: true }, "v0.5.0", TEST_TRIPLE, Anonymous),
             &mut stderr,
         );
         assert_eq!(code, Exit::Failure);
@@ -1088,7 +1129,7 @@ mod tests {
             &cwd,
         );
         let code = rendered(
-            run_with(deps, Args { check: true }, "v0.5.0", TEST_TRIPLE),
+            run_with(deps, Args { check: true }, "v0.5.0", TEST_TRIPLE, Anonymous),
             &mut stderr,
         );
         assert_eq!(code, Exit::Failure);
@@ -1116,7 +1157,7 @@ mod tests {
             &cwd,
         );
         let code = rendered(
-            run_with(deps, Args { check: true }, "v0.5.0", TEST_TRIPLE),
+            run_with(deps, Args { check: true }, "v0.5.0", TEST_TRIPLE, Anonymous),
             &mut stderr,
         );
         assert_eq!(code, Exit::Failure);
@@ -1144,7 +1185,13 @@ mod tests {
             &cwd,
         );
         let code = rendered(
-            run_with(deps, Args { check: true }, "not-semver", TEST_TRIPLE),
+            run_with(
+                deps,
+                Args { check: true },
+                "not-semver",
+                TEST_TRIPLE,
+                Anonymous,
+            ),
             &mut stderr,
         );
         assert_eq!(code, Exit::Failure);
