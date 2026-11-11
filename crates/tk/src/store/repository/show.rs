@@ -6,6 +6,7 @@
 //! the item. The Repository Store owns the SQL; the command-side renderer owns
 //! the tree-block layout and styled output.
 
+use jiff::Timestamp;
 use rusqlite::{OptionalExtension, params};
 
 use crate::domain::backend_kind::BackendKind;
@@ -17,6 +18,7 @@ use crate::domain::priority::Priority;
 use crate::domain::selection_state::SelectionState;
 use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
+use crate::store::read_timestamp;
 
 use super::{Store, resolve_item_ref};
 
@@ -76,8 +78,8 @@ pub struct ItemDetail {
     /// column CHECK keeps it non-null unless `status = 'done'`.
     pub closing_reason: Option<String>,
     pub status: ItemStatus,
-    pub created_at: String,
-    pub updated_at: String,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
     pub parent: Option<ItemSummary>,
     pub children: Vec<ItemSummary>,
     pub blocked_by: Vec<ItemSummary>,
@@ -130,8 +132,8 @@ pub fn show_item(store: &Store, display_arg: &str) -> Result<Option<ItemDetail>,
                     r.get::<_, Option<String>>(7)?,
                     // Item Status is derived, not stored (ADR-0043).
                     ItemStatus::of(r.get(8)?, r.get(12)?),
-                    r.get::<_, String>(9)?,
-                    r.get::<_, String>(10)?,
+                    read_timestamp(r, 9)?,
+                    read_timestamp(r, 10)?,
                     r.get::<_, Option<String>>(11)?,
                     r.get::<_, bool>(13)?,
                     r.get::<_, Option<Effort>>(14)?,

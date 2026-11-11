@@ -242,8 +242,8 @@ fn render_match<W: Write + ?Sized>(
             priority: item.priority,
             effort: item.effort,
             ticket_kind: item.ticket_kind,
-            created_at: &item.created_at,
-            updated_at: &item.updated_at,
+            created_at: item.created_at,
+            updated_at: item.updated_at,
         },
         Some(re),
         styler,
@@ -435,7 +435,7 @@ mod tests {
         let stdout = String::from_utf8(h.stdout).unwrap();
         // Facet bar identical to `tk show`'s for a default Ticket.
         assert!(
-            stdout.contains("  P2 \u{b7} Task \u{b7} Created: 2026-05-09\n"),
+            stdout.contains("  P2 \u{b7} Task \u{b7} Created: 2026-05-09 00:00\n"),
             "stdout={stdout:?}"
         );
         assert!(!stdout.contains("DESCRIPTION"), "stdout={stdout:?}");
@@ -1451,7 +1451,7 @@ mod tests {
         assert_eq!(code, Exit::Ok);
         let out = String::from_utf8(h.stdout).unwrap();
         assert!(
-            out.contains("  Epic \u{b7} Created: 2026-05-09"),
+            out.contains("  Epic \u{b7} Created: 2026-05-09 00:00"),
             "out={out:?}"
         );
         assert!(!out.contains("Task"), "out={out:?}");

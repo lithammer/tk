@@ -10,11 +10,14 @@
 
 use std::ops::ControlFlow;
 
+use jiff::Timestamp;
+
 use crate::domain::effort::Effort;
 use crate::domain::item_class::ItemClass;
 use crate::domain::priority::Priority;
 use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
+use crate::store::read_timestamp;
 
 use super::Store;
 
@@ -32,8 +35,8 @@ pub struct GrepItem {
     pub title: String,
     pub body: String,
     pub status: ItemStatus,
-    pub created_at: String,
-    pub updated_at: String,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 /// Failure from [`scan`]. Splits a Repository Store read fault from a visitor
@@ -91,8 +94,8 @@ fn item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GrepItem> {
         // Item Status is derived, not stored (ADR-0043): Lifecycle and Work
         // State together.
         status: ItemStatus::of(row.get(6)?, row.get(9)?),
-        created_at: row.get(7)?,
-        updated_at: row.get(8)?,
+        created_at: read_timestamp(row, 7)?,
+        updated_at: read_timestamp(row, 8)?,
     })
 }
 

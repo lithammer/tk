@@ -47,3 +47,9 @@ pub fn write_transaction(
 ) -> rusqlite::Result<rusqlite::Transaction<'_>> {
     conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
 }
+
+fn read_timestamp(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<jiff::Timestamp> {
+    row.get::<_, String>(index)?.parse().map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(index, rusqlite::types::Type::Text, Box::new(err))
+    })
+}

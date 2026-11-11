@@ -10,6 +10,7 @@
 //! Write helpers open their own transaction and take `&mut Connection`; read
 //! helpers take `&Connection`.
 
+use jiff::Timestamp;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
@@ -44,13 +45,13 @@ use crate::domain::selection_state::SelectionState;
 use crate::domain::status::ItemStatus;
 use crate::domain::ticket_kind::TicketKind;
 use crate::domain::work_state::WorkState;
-use crate::store::mutations;
 use crate::store::promotion::ReadGraphError;
 use crate::store::repository::containment::{self, ContainmentError};
 use crate::store::repository::create::generate_internal_id;
 use crate::store::repository::dependency::{self, DependencyEdge};
 use crate::store::repository::{self, RemoteWorkflowGuard};
 use crate::store::sequences::{self, Counter, SequenceError};
+use crate::store::{mutations, read_timestamp};
 
 // ──────────────────────────────────────────────────────────────────────────
 // Canonical Adopt insertion and Backend cohort errors
@@ -2274,7 +2275,7 @@ pub struct LogListRow {
     /// Class of the target Item, mirroring [`LogDetailRow::item_class`] so
     /// both log views describe their target the same way.
     pub item_class: ItemClass,
-    pub created_at: String,
+    pub created_at: Timestamp,
     /// Decoded `Failure.detail`; set for failed and indeterminate applying rows.
     pub failure_detail: Option<String>,
     /// Decoded `Failure.class`; set for rows carrying failure evidence. `Some(Unknown)` is
@@ -2293,8 +2294,8 @@ pub struct LogDetailRow {
     pub payload_json: String,
     pub failure_detail: Option<String>,
     pub failure_class: Option<FailureClass>,
-    pub created_at: String,
-    pub state_changed_at: String,
+    pub created_at: Timestamp,
+    pub state_changed_at: Timestamp,
 }
 
 /// Error returned by [`list_mutation_log`] and [`show_mutation_log`].
@@ -2363,7 +2364,7 @@ pub fn list_mutation_log(
             mutation_type: row.get(2)?,
             target_display_id: row.get(3)?,
             item_class: row.get(4)?,
-            created_at: row.get(5)?,
+            created_at: read_timestamp(row, 5)?,
             failure_detail,
             failure_class,
         });
@@ -2396,8 +2397,8 @@ pub fn show_mutation_log(conn: &Connection, sequence: i64) -> Result<LogDetailRo
                         payload_json: r.get(5)?,
                         failure_detail: None,
                         failure_class: None,
-                        created_at: r.get(7)?,
-                        state_changed_at: r.get(8)?,
+                        created_at: read_timestamp(r, 7)?,
+                        state_changed_at: read_timestamp(r, 8)?,
                     },
                     raw_failure,
                 ))
