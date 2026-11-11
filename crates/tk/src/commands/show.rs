@@ -103,8 +103,8 @@ fn render<W: Write + ?Sized>(
             priority: detail.priority,
             effort: detail.effort,
             ticket_kind: detail.ticket_kind,
-            created_at: &detail.created_at,
-            updated_at: &detail.updated_at,
+            created_at: detail.created_at,
+            updated_at: detail.updated_at,
         },
         None,
         styler,
@@ -331,8 +331,8 @@ mod tests {
             body: String::new(),
             closing_reason: None,
             status: crate::domain::status::ItemStatus::Open,
-            created_at: "2026-05-09T00:00:00.000Z".into(),
-            updated_at: "2026-05-09T00:00:00.000Z".into(),
+            created_at: "2026-05-09T00:00:00.000Z".parse().unwrap(),
+            updated_at: "2026-05-09T00:00:00.000Z".parse().unwrap(),
             parent: None,
             children: Vec::new(),
             blocked_by: Vec::new(),
@@ -491,14 +491,14 @@ mod tests {
             stdout.contains("\u{25cb} tk-1 \u{b7} Plain ticket\n"),
             "stdout={stdout:?}"
         );
-        // Facet bar: P2 · Task · Created: 2026-05-09 — the fixture leaves
+        // Facet bar: P2 · Task · Created: 2026-05-09 00:00 — the fixture leaves
         // updated_at == created_at, so the Updated facet is omitted.
-        assert!(stdout.contains("  P2 \u{b7} Task \u{b7} Created: 2026-05-09\n"));
+        assert!(stdout.contains("  P2 \u{b7} Task \u{b7} Created: 2026-05-09 00:00\n"));
         assert!(!stdout.contains("Updated:"), "stdout={stdout:?}");
         // Selection State (ADR-0027) renders on its own line directly under the
         // facet bar; a normal ticket is accepted.
         assert!(
-            stdout.contains("\u{b7} Created: 2026-05-09\n  Selection: accepted\n"),
+            stdout.contains("\u{b7} Created: 2026-05-09 00:00\n  Selection: accepted\n"),
             "stdout={stdout:?}"
         );
     }
@@ -531,7 +531,7 @@ mod tests {
         // The facet bar opens at the Kind — no Priority token — and the
         // Selection line carries the triage cue (ADR-0027).
         assert!(
-            stdout.contains("  Task \u{b7} Created: 2026-05-09\n  Selection: triage\n"),
+            stdout.contains("  Task \u{b7} Created: 2026-05-09 00:00\n  Selection: triage\n"),
             "stdout={stdout:?}"
         );
         assert!(
@@ -566,8 +566,9 @@ mod tests {
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(
-            stdout
-                .contains("  P2 \u{b7} Task \u{b7} Created: 2026-05-16 \u{b7} Updated: 2026-05-29"),
+            stdout.contains(
+                "  P2 \u{b7} Task \u{b7} Created: 2026-05-16 00:00 \u{b7} Updated: 2026-05-29 12:34"
+            ),
             "stdout={stdout:?}"
         );
     }
@@ -620,7 +621,7 @@ mod tests {
         // the shortest header block `tk show` renders. Anchored on the leading
         // `  Epic \u{b7}` so the Epic's title cannot satisfy it by chance.
         assert!(
-            stdout.contains("  Epic \u{b7} Created: 2026-05-09\n\nTICKETS\n  \u{2193} "),
+            stdout.contains("  Epic \u{b7} Created: 2026-05-09 00:00\n\nTICKETS\n  \u{2193} "),
             "stdout={stdout:?}"
         );
         assert!(stdout.contains("tk-2: Child ticket"));
@@ -721,8 +722,8 @@ mod tests {
             body: "First line.\nSecond line.".into(),
             closing_reason: Some("Shipped in PR #42".into()),
             status: crate::domain::status::ItemStatus::Done,
-            created_at: "2026-05-09T00:00:00.000Z".into(),
-            updated_at: "2026-05-29T12:00:00.000Z".into(),
+            created_at: "2026-05-09T00:00:00.000Z".parse().unwrap(),
+            updated_at: "2026-05-29T12:00:00.000Z".parse().unwrap(),
             parent: Some(summary(
                 "tk-9",
                 "Parent epic",
@@ -781,7 +782,7 @@ mod tests {
         render(&mut out, &detail, Styler::plain().for_stdout()).unwrap();
         insta::assert_snapshot!(String::from_utf8(out).unwrap(), @"
         ✓ tk-1 · Wire the thing
-          P1 · Task · Created: 2026-05-09 · Updated: 2026-05-29
+          P1 · Task · Created: 2026-05-09 00:00 · Updated: 2026-05-29 12:00
           Selection: accepted
 
         DESCRIPTION
@@ -952,7 +953,7 @@ mod tests {
         let stdout = String::from_utf8(h.stdout).unwrap();
         insta::assert_snapshot!(stdout, @"
         ○ tk-1 · Ticket with mutations
-          P2 · Task · Created: 2026-05-09
+          P2 · Task · Created: 2026-05-09 00:00
           Selection: accepted
 
         UNRESOLVED MUTATIONS

@@ -352,9 +352,9 @@ macro_rules! tk {
     ($repo:expr, $cmd:expr, @$snapshot:literal) => {
         insta::assert_snapshot!($repo.run($cmd), @$snapshot)
     };
-    // `dated:` redacts the facet bar's creation date, which varies by day.
+    // `dated:` redacts the facet bar's creation timestamp.
     (dated: $repo:expr, $cmd:expr, @$snapshot:literal) => {
-        insta::with_settings!({filters => vec![(r"Created: \d{4}-\d{2}-\d{2}", "Created: [DATE]")]}, {
+        insta::with_settings!({filters => vec![(r"Created: \d{4}-\d{2}-\d{2} \d{2}:\d{2}", "Created: [DATE]")]}, {
             insta::assert_snapshot!($repo.run($cmd), @$snapshot)
         })
     };

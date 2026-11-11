@@ -341,7 +341,7 @@ fn render_log_row<W: Write + ?Sized>(stdout: &mut W, row: &LogListRow, styler: S
         styler.wrap(palette::mutation_state_style(row.state), row.state.text()),
         row.mutation_type,
         styler.wrap(palette::id_style(row.item_class), &row.target_display_id),
-        row.created_at
+        row.created_at.strftime("%Y-%m-%dT%H:%M:%S.%3fZ")
     );
     if let Some(detail) = &row.failure_detail {
         let _ = write!(stdout, "  └─ ");
@@ -386,8 +386,16 @@ fn render_log_detail<W: Write + ?Sized>(stdout: &mut W, detail: &LogDetailRow, s
         ),
         detail.item_class
     );
-    let _ = writeln!(stdout, "Created:    {}", detail.created_at);
-    let _ = writeln!(stdout, "Updated:    {}", detail.state_changed_at);
+    let _ = writeln!(
+        stdout,
+        "Created:    {}",
+        detail.created_at.strftime("%Y-%m-%dT%H:%M:%S.%3fZ")
+    );
+    let _ = writeln!(
+        stdout,
+        "Updated:    {}",
+        detail.state_changed_at.strftime("%Y-%m-%dT%H:%M:%S.%3fZ")
+    );
     // `payload_json` is `serde_json` output, whose escaping is narrower than
     // it looks: the `ESCAPE` table covers `0x00..=0x1F` and leaves DEL and
     // the whole C1 block alone. A Ticket title holding U+009B — the 8-bit CSI

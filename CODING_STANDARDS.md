@@ -9,6 +9,16 @@ its values with a Rust enum whose `text()` method owns the SQL spelling.
 When a type depends on evidence from a future Backend Adapter, defer its
 shape until that consumer exists (ADR-0016).
 
+## Timestamps
+
+Use `jiff::Timestamp` for timestamps in Rust read models. Parse SQLite text
+with `store::read_timestamp` when reading a row, and format it at the output
+boundary. Keep stored timestamps in the existing UTC ISO format. Tests that
+check stored bytes may assert raw strings.
+
+In review, check timestamp fields added to read models for `String` or `&str`
+and check that new timestamp reads use the shared parser.
+
 ## Shared APIs
 
 When a shared API changes, including a test helper, inspect callers for

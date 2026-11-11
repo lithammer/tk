@@ -12,6 +12,7 @@
 
 use std::io::Write;
 
+use jiff::Timestamp;
 use regex::Regex;
 
 use crate::domain::effort::Effort;
@@ -36,8 +37,8 @@ pub(crate) struct Header<'a> {
     pub priority: Option<Priority>,
     pub effort: Option<Effort>,
     pub ticket_kind: Option<TicketKind>,
-    pub created_at: &'a str,
-    pub updated_at: &'a str,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 /// Render the label line, facet bar, and optional Pending Promotion Binding.
@@ -111,25 +112,15 @@ pub(crate) fn render_header<W: Write + ?Sized>(
             }
         }
     }
-    let created_date = date_prefix(header.created_at);
-    write!(stdout, " \u{b7} Created: {created_date}")?;
+    let created_at = header.created_at.strftime("%Y-%m-%d %H:%M");
+    write!(stdout, " \u{b7} Created: {created_at}")?;
     if header.updated_at != header.created_at {
-        let updated_date = date_prefix(header.updated_at);
-        write!(stdout, " \u{b7} Updated: {updated_date}")?;
+        let updated_at = header.updated_at.strftime("%Y-%m-%d %H:%M");
+        write!(stdout, " \u{b7} Updated: {updated_at}")?;
     }
     stdout.write_all(b"\n")?;
     if header.has_pending_promotion {
         stdout.write_all(b"  Binding: pending promotion\n")?;
     }
     Ok(())
-}
-
-/// The `YYYY-MM-DD` date prefix of an ISO-8601 timestamp. Truncates by char
-/// count (created_at / updated_at are ASCII in practice), so a future
-/// multi-byte stamp cannot split a char boundary.
-fn date_prefix(timestamp: &str) -> &str {
-    match timestamp.char_indices().nth(10) {
-        Some((idx, _)) => &timestamp[..idx],
-        None => timestamp,
-    }
 }
