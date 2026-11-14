@@ -215,6 +215,9 @@ Important stable contracts:
   foreign key restricts membership to Tickets. `store/repository/plan.rs`
   owns atomic batch validation and a consistent read of members and blockers;
   membership edits neither update Items nor append Mutations (ADR-0050).
+- `items.priority` is optional in every Ticket Selection State and absent on
+  Epics. Pull imports unset as NULL unless an unresolved Priority Mutation
+  shields it. Only automatic ranking substitutes P2 (ADR-0054, ADR-0015).
 - `items.work_state` is a Local Field. `tk start` and `tk stop` write it
   directly; `tk done` and Backend Pull may clear it only when closing an Item.
   Work State itself is never recorded as a Mutation (ADR-0043).

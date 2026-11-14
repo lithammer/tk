@@ -1,5 +1,9 @@
 # Schema CHECK changes use a foreign-keys-off table rebuild
 
+> **Amended by ADR-0054.** Priority is optional in every Selection State.
+> Selection State still applies only to Tickets, and active Tickets must be
+> accepted. Migration 022 removes the Priority constraint described below.
+
 tk-74 introduces triage Tickets, which carry no Priority. The migration-001
 `items` table CHECK hard-codes `ticket ⟹ priority is not null`, so admitting
 a null-Priority Ticket requires changing that table-level CHECK. SQLite

@@ -131,23 +131,25 @@ impl ResolvedFields {
         })
     }
 
-    /// The wire values that set `fields`; an unset Effort is left out.
+    /// The wire values that set `fields`; unset fields are left out.
     pub(super) fn values(&self, fields: SharedTicketFields) -> Vec<FieldValue<'_>> {
-        std::iter::once(self.priority.value(fields.priority))
+        fields
+            .priority
+            .map(|priority| self.priority.value(priority))
+            .into_iter()
             .chain(fields.effort.map(|effort| self.effort.value(effort)))
             .collect()
     }
 }
 
-/// The Priority and Effort an issue's field values hold. No Priority, or an
-/// option tk does not name, reads as the default `P2`; no Effort reads as none
-/// (ADR-0054).
+/// The Priority and Effort an issue holds. Missing values and options tk does
+/// not name read as unset (ADR-0054).
 pub(super) fn read_ticket_fields(
     values: Option<&IssueFieldValues>,
     owner: &str,
 ) -> Result<SharedTicketFields, AdapterReadError> {
     Ok(SharedTicketFields {
-        priority: read::<Priority>(values, owner)?.unwrap_or_default(),
+        priority: read::<Priority>(values, owner)?,
         effort: read::<Effort>(values, owner)?,
     })
 }
@@ -216,7 +218,7 @@ mod tests {
                 read_ticket_fields(Some(&priority_value(option)), "o")
                     .unwrap()
                     .priority,
-                expected,
+                Some(expected),
                 "{option}"
             );
         }
@@ -247,17 +249,14 @@ mod tests {
     }
 
     #[test]
-    fn no_value_or_an_unnamed_option_reads_as_the_default() {
+    fn no_value_or_an_unnamed_option_reads_as_unset() {
         let other_field = values(
             r#"{"nodes":[{"value":"Urgent","field":{"name":"Effort"}}],"pageInfo":{"hasNextPage":false}}"#,
         );
         let unnamed = priority_value("Someday");
         let empty = values(r#"{"nodes":[],"pageInfo":{"hasNextPage":false}}"#);
         for values in [None, Some(&other_field), Some(&unnamed), Some(&empty)] {
-            assert_eq!(
-                read_ticket_fields(values, "o").unwrap().priority,
-                Priority::P2
-            );
+            assert_eq!(read_ticket_fields(values, "o").unwrap().priority, None);
         }
     }
 

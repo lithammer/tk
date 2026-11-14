@@ -275,6 +275,13 @@ pub const MIGRATION_21: Migration = Migration {
     foreign_keys: ForeignKeys::Off,
 };
 
+/// Makes Priority optional in every Selection State without changing stored values.
+pub const MIGRATION_22: Migration = Migration {
+    version: 22,
+    sql: include_str!("migrations/022_optional_priority.sql"),
+    foreign_keys: ForeignKeys::Off,
+};
+
 /// Ordered migration list applied by [`apply_all`].
 pub const ALL_MIGRATIONS: &[Migration] = &[
     MIGRATION_1,
@@ -298,13 +305,14 @@ pub const ALL_MIGRATIONS: &[Migration] = &[
     MIGRATION_19,
     MIGRATION_20,
     MIGRATION_21,
+    MIGRATION_22,
 ];
 
 /// Highest schema version this binary can apply. Named so future migrations
 /// surface the threshold to `grep` instead of hiding it behind `.last()`.
 /// Adding a migration is a two-line patch: append to `ALL_MIGRATIONS`, bump
 /// this constant, with a debug_assert below catching the drift.
-pub const MAX_KNOWN_VERSION: u32 = MIGRATION_21.version;
+pub const MAX_KNOWN_VERSION: u32 = MIGRATION_22.version;
 
 /// Errors returned while applying migrations.
 ///
@@ -1541,11 +1549,7 @@ mod tests {
     }
 
     #[test]
-    fn accepted_ticket_with_null_priority_is_rejected() {
-        // AC traceability (tk-73): "accepted Tickets require Priority". In v1
-        // the standing Ticket-requires-priority CHECK already enforces this;
-        // the dedicated combined invariant lands with triage in tk-74. Pinning
-        // it here documents the invariant the acceptance criterion names.
+    fn accepted_ticket_with_null_priority_is_allowed() {
         use crate::store::testing::{FixtureItem, insert_fixture_item};
 
         let mut conn = open_memory();
@@ -1562,13 +1566,8 @@ mod tests {
         )
         .unwrap();
 
-        let err = conn
-            .execute("update items set priority = null where id = 't1'", [])
-            .unwrap_err();
-        assert!(
-            format!("{err}").contains("CHECK"),
-            "an accepted Ticket without a Priority must violate the CHECK: {err}"
-        );
+        conn.execute("update items set priority = null where id = 't1'", [])
+            .unwrap();
     }
 
     #[test]
@@ -1605,10 +1604,7 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_rejects_a_parked_ticket_without_priority() {
-        // The other half of the combined invariant: accepted/parked require a
-        // Priority. (Parked is reachable only via tk-75, but the schema rule
-        // baked in here is total.)
+    fn rebuild_admits_a_parked_ticket_without_priority() {
         use crate::store::testing::{FixtureItem, insert_fixture_item};
 
         let mut conn = open_memory();
@@ -1626,13 +1622,8 @@ mod tests {
         )
         .unwrap();
 
-        let err = conn
-            .execute("update items set priority = null where id = 't1'", [])
-            .unwrap_err();
-        assert!(
-            format!("{err}").contains("CHECK"),
-            "a parked Ticket without a Priority must violate the CHECK: {err}"
-        );
+        conn.execute("update items set priority = null where id = 't1'", [])
+            .unwrap();
     }
 
     #[test]

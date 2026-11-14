@@ -24,11 +24,9 @@ use crate::store::sequences;
 use super::containment::{self, ContainmentError};
 use super::{Store, insert_display_resolver, next_display_id};
 
-/// The Selection State a `tk add` can create, with its Priority where one
-/// applies (ADR-0027). The two creatable combinations — triage carries no
-/// Priority, accepted carries one — are modelled as a sum type so the illegal
-/// `(triage, Priority)` pair is unconstructable; the schema CHECK is the
-/// backstop. `parked` is not creatable via `tk add` and so has no variant.
+/// The intake choices `tk add` exposes: unranked triage or ranked
+/// accepted work. The Store admits optional Priority in every Selection State.
+/// `parked` is not creatable via `tk add` and so has no variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NewTicketSelection {
     Triage,

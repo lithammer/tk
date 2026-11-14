@@ -136,8 +136,7 @@ impl RunSyncError {
                 LoadApplicableError::PayloadJson { .. }
                 | LoadApplicableError::OperationShapeMismatch { .. }
                 | LoadApplicableError::MissingBackendIdentity { .. }
-                | LoadApplicableError::MissingTicketKind { .. }
-                | LoadApplicableError::MissingPriority { .. },
+                | LoadApplicableError::MissingTicketKind { .. },
             )
             | Self::Refresh(RefreshStoreError::PayloadJson { .. })
             | Self::Outcome(

@@ -3,7 +3,10 @@ selects open Tickets with no unresolved Dependencies or External Blockers and
 with every Ticket they hold done. It
 orders ready Tickets by Effective Priority, then own Priority, then Effort,
 then creation order in the Repository Store, and never selects Epics. Low
-Effort comes first, and a Ticket with no Effort ranks as medium. Unlike
+Effort comes first, and a Ticket with no Effort ranks as medium. Unset Priority
+ranks as P2 for ordering and propagation only; tk never stores or pushes this
+fallback. Triage and parked Tickets are neither candidates nor Priority
+contributors. Unlike
 Priority, Effort does not pass along Dependencies. Effective Priority is
 the lowest of a candidate's own Priority and the Priorities of every unfinished
 item it transitively blocks through Dependencies, an Epic's Containment, and

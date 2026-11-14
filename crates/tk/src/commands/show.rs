@@ -254,7 +254,9 @@ fn render_sub_row<W: Write + ?Sized>(
     }
     item_row::render_pending_promotion(stdout, item.has_pending_promotion)?;
     sanitize::write_sanitized_line(stdout, item.title.as_bytes())?;
-    item_row::render_ticket_markers(stdout, item.priority, item.effort, None, styler)?;
+    if item.item_class == ItemClass::Ticket {
+        item_row::render_ticket_markers(stdout, item.priority, item.effort, None, styler)?;
+    }
     stdout.write_all(b"\n")
 }
 
@@ -504,7 +506,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_triage_ticket_without_a_priority_token() {
+    fn renders_triage_ticket_with_unset_priority() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_item(
@@ -528,10 +530,8 @@ mod tests {
         let code = run_rendered(&mut h, Args { id: "tk-1".into() });
         assert_eq!(code, Exit::Ok);
         let stdout = String::from_utf8(h.stdout).unwrap();
-        // The facet bar opens at the Kind — no Priority token — and the
-        // Selection line carries the triage cue (ADR-0027).
         assert!(
-            stdout.contains("  Task \u{b7} Created: 2026-05-09 00:00\n  Selection: triage\n"),
+            stdout.contains("  Priority: unset \u{b7} Task \u{b7} Created: 2026-05-09 00:00\n  Selection: triage\n"),
             "stdout={stdout:?}"
         );
         assert!(

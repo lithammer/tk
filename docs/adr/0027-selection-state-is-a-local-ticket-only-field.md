@@ -1,5 +1,9 @@
 # Selection State is a local, Ticket-only field separate from Item Status
 
+> **Amended by ADR-0054.** Priority is optional in every Selection State.
+> Selection State still applies only to Tickets, and active Tickets must be
+> accepted. Migration 022 removes the Priority constraint described below.
+
 The tk-72 epic adds **Selection State**, a Ticket-only field with three
 values — `triage`, `accepted`, and `parked` — that decides whether an open
 Ticket is *selectable now*. `accepted` is the default for normal `tk add`

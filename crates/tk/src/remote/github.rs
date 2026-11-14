@@ -193,7 +193,7 @@ impl Adapter for GithubAdapter<'_> {
                 &snapshot.body,
             ]),
             BackendEdit::SetTicketPriority { ticket, change } => {
-                self.set_ticket_field(&ticket.backend_key, Some(change.priority))
+                self.set_ticket_field(&ticket.backend_key, change.priority)
             }
             BackendEdit::SetTicketEffort { ticket, change } => {
                 self.set_ticket_field(&ticket.backend_key, change.effort)
@@ -1764,7 +1764,7 @@ mod tests {
             },
             ticket_kind: TicketKind::Bug,
             fields: SharedTicketFields {
-                priority: Priority::P2,
+                priority: Some(Priority::P2),
                 effort: None,
             },
         });
@@ -2975,7 +2975,7 @@ mod tests {
             },
             ticket_kind: TicketKind::Bug,
             fields: SharedTicketFields {
-                priority: Priority::P2,
+                priority: Some(Priority::P2),
                 effort: None,
             },
         });

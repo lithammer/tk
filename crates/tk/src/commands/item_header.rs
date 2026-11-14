@@ -87,17 +87,16 @@ pub(crate) fn render_header<W: Write + ?Sized>(
             )?;
         }
         ItemClass::Ticket => {
-            // A triage Ticket carries no Priority (ADR-0027); drop the Priority
-            // token and its separator so the facet bar opens at the Kind. The
-            // `Selection:` line in `tk show` carries the triage cue.
             if let Some(priority) = header.priority {
                 write!(
                     stdout,
                     "{}",
                     styler.wrap(palette::priority_style(priority), priority.text())
                 )?;
-                stdout.write_all(" \u{b7} ".as_bytes())?;
+            } else {
+                stdout.write_all(b"Priority: unset")?;
             }
+            stdout.write_all(" \u{b7} ".as_bytes())?;
             if let Some(effort) = header.effort {
                 write!(stdout, "Effort: {effort} \u{b7} ")?;
             }

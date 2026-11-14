@@ -162,12 +162,10 @@ fn read_selection_row(
 /// Outcome of a successful [`park_ticket`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParkOutcome {
-    /// An accepted Ticket moved to parked; its Priority is preserved and echoed
-    /// so the caller can confirm the held work stays ranked.
     Parked {
         display_id: String,
         title: String,
-        priority: Priority,
+        priority: Option<Priority>,
     },
     /// The Ticket was already parked — an idempotent no-op that does not touch
     /// `updated_at`.
@@ -237,11 +235,7 @@ pub fn park_ticket<C: Clock + ?Sized>(
             if work_state == WorkState::Active {
                 return Err(ParkError::Active);
             }
-            // Accepted Tickets carry a Priority by the schema invariant
-            // (ADR-0028); it is preserved across the hold so unparking returns
-            // the work at the same rank. A NULL here would be store corruption,
-            // mapped to NotATicket like the None arm below rather than a panic.
-            let priority = priority.ok_or(ParkError::NotATicket)?;
+
             tx.execute(
                 "update items set selection_state = 'parked', updated_at = ?2 where id = ?1",
                 params![id, clock.now_iso()],
@@ -270,7 +264,7 @@ pub enum UnparkOutcome {
     Unparked {
         display_id: String,
         title: String,
-        priority: Priority,
+        priority: Option<Priority>,
     },
     /// The Ticket was already accepted — an idempotent no-op that does not touch
     /// `updated_at`.
@@ -332,11 +326,6 @@ pub fn unpark_ticket<C: Clock + ?Sized>(
     // would be store corruption, treated like the Epic case rather than a panic.
     match selection_state {
         Some(SelectionState::Parked) => {
-            // Parked Tickets carry a Priority by the schema invariant
-            // (ADR-0028); it rides through unchanged so the work re-enters
-            // selection at the same rank. A NULL here would be store corruption,
-            // mapped to NotATicket like the None arm below rather than a panic.
-            let priority = priority.ok_or(UnparkError::NotATicket)?;
             tx.execute(
                 "update items set selection_state = 'accepted', updated_at = ?2 where id = ?1",
                 params![id, clock.now_iso()],
@@ -512,7 +501,7 @@ mod tests {
             ParkOutcome::Parked {
                 display_id: "t".into(),
                 title: "t".into(),
-                priority: Priority::P1
+                priority: Some(Priority::P1)
             }
         );
         let (priority, selection, _) = selection_of(&store, "t");
@@ -626,7 +615,7 @@ mod tests {
             UnparkOutcome::Unparked {
                 display_id: "t".into(),
                 title: "t".into(),
-                priority: Priority::P1
+                priority: Some(Priority::P1)
             }
         );
         let (priority, selection, _) = selection_of(&store, "t");

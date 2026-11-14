@@ -184,10 +184,8 @@ pub fn update_item<C: Clock + ?Sized>(
         return Err(UpdateError::NotFound);
     };
 
-    // Priority is the acceptance boundary (ADR-0027): a triage Ticket has no
-    // Priority and cannot be reprioritized directly — it must be accepted.
-    // Rejecting before any write keeps a mixed `--priority --title` update
-    // atomic (nothing is applied).
+    // The update command reserves triage ranking for acceptance.
+    // Reject before any write so a mixed priority/title edit stays atomic.
     if req.priority.is_some() && current.selection_state == Some(SelectionState::Triage) {
         return Err(UpdateError::PriorityOnTriage);
     }
@@ -298,7 +296,9 @@ pub fn update_item<C: Clock + ?Sized>(
                     mutation_type: MutationType::SetTicketPriority,
                     item_id: req.id,
                     item_class: req.item_class,
-                    payload: &MutationPayload::Priority(PriorityChange { priority }),
+                    payload: &MutationPayload::Priority(PriorityChange {
+                        priority: Some(priority),
+                    }),
                     promotion_operation_id: None,
                     now_iso: &now_iso,
                 },
