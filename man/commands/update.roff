@@ -10,12 +10,15 @@ input stream clears the body. NUL is rejected in both title and body.
 .PP
 Title and body edits can be combined with
 .BR \-\-priority ,
+.BR \-\-no\-priority ,
 .BR \-\-effort ,
 .BR \-\-no\-effort ,
 .BR \-\-parent ,
 or
 .BR \-\-no\-parent
-for Tickets.
+for Tickets, in any Selection State.
+.B \-\-no\-priority
+clears Priority without changing Selection State.
 .B \-\-no\-effort
 clears the Effort. All requested edits and their Mutations commit together in
 the Repository Store. Backend delivery uses complete title/body snapshots,

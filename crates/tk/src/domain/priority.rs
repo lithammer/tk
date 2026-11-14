@@ -14,14 +14,11 @@ use thiserror::Error;
 
 /// Ticket ranking. Lower discriminants sort before higher ones, so
 /// `Priority::P0` is the highest-priority ticket and `Priority::P3` the lowest.
-/// `Priority::P2` is the default for newly-created local Tickets.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
-)]
+/// Unset Priority ranks as P2 only during automatic selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Priority {
     P0,
     P1,
-    #[default]
     P2,
     P3,
 }
@@ -108,11 +105,6 @@ mod tests {
             Priority::from_str("high").unwrap_err().to_string(),
             "invalid priority `high` (expected P0..P3, p0..p3, or 0..3)",
         );
-    }
-
-    #[test]
-    fn default_is_p2() {
-        assert_eq!(Priority::default(), Priority::P2);
     }
 
     #[test]

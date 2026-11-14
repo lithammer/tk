@@ -50,9 +50,8 @@ pub struct Args {
     /// Set Effort (low, medium, high). Tickets only.
     #[arg(long, value_name = "EFFORT")]
     pub effort: Option<Effort>,
-    /// Capture the Ticket in triage with no Priority, pending a decision
-    /// (conflicts with --priority and --epic).
-    #[arg(long, conflicts_with_all = ["priority", "epic"])]
+    /// Capture the Ticket for evaluation before it is suitable to take on.
+    #[arg(long, conflicts_with = "epic")]
     pub triage: bool,
 }
 
@@ -105,13 +104,10 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     } else {
         TicketKind::Task
     };
-    // `--triage` captures unranked work (no Priority); otherwise the Ticket is
-    // accepted at the requested or default Priority (ADR-0027). clap's
-    // conflicts_with rules out `--triage --priority`, so the two never collide.
     let selection = if args.triage {
         NewTicketSelection::Triage
     } else {
-        NewTicketSelection::Accepted(args.priority.unwrap_or_default())
+        NewTicketSelection::Accepted
     };
     let parent_id = parent_ref.as_ref().map(|r| r.id.as_str());
 
@@ -122,6 +118,7 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         CreateLocalTicketInput {
             kind,
             selection,
+            priority: args.priority,
             effort: args.effort,
             parent_id,
             title: &parsed.title,
@@ -136,15 +133,13 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         ticket.display_id, ticket.title
     );
     let _ = writeln!(deps.stdout, "Kind: {}", ticket.kind);
-    // A triage Ticket has no Priority, so it surfaces its Selection State
-    // instead; accepted Tickets stay the quiet default and show only Priority.
-    match ticket.priority {
-        Some(priority) => {
-            let _ = writeln!(deps.stdout, "Priority: {priority}");
-        }
-        None => {
-            let _ = writeln!(deps.stdout, "Selection: {}", ticket.selection_state);
-        }
+    let _ = writeln!(
+        deps.stdout,
+        "Priority: {}",
+        ticket.priority.map_or("unset", Priority::text)
+    );
+    if args.triage {
+        let _ = writeln!(deps.stdout, "Selection: {}", ticket.selection_state);
     }
     if let Some(effort) = ticket.effort {
         let _ = writeln!(deps.stdout, "Effort: {effort}");
@@ -224,7 +219,7 @@ mod tests {
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(stdout.contains("Created Ticket: tk-1 - Ship it"));
         assert!(stdout.contains("Kind: task"));
-        assert!(stdout.contains("Priority: P2"));
+        assert!(stdout.contains("Priority: unset"));
         assert!(stdout.contains("Status: open"));
     }
 
@@ -257,9 +252,8 @@ mod tests {
         assert_eq!(code, Exit::Ok, "stderr={:?}", String::from_utf8(h.stderr));
         let stdout = String::from_utf8(h.stdout).unwrap();
         assert!(stdout.contains("Kind: bug"));
-        // A triage Ticket surfaces its Selection State, not a Priority line.
         assert!(stdout.contains("Selection: triage"), "stdout={stdout:?}");
-        assert!(!stdout.contains("Priority:"), "stdout={stdout:?}");
+        assert!(stdout.contains("Priority: unset"), "stdout={stdout:?}");
     }
 
     #[test]

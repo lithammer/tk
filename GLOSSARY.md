@@ -102,7 +102,7 @@ derived from its **Lifecycle** and **Work State** rather than stored.
 _Avoid_: Todo, In Progress, Closed, Blocked
 
 **Selection State**:
-A local-only, **Ticket**-only intake and selection policy: `triage`, `accepted`, or `parked`. `accepted` is the default and the only state **`tk next`** selects; `triage` is captured work awaiting a human decision; `parked` is accepted work intentionally held out of automatic selection. A **Local Field**, distinct from **Item Status** and from **Priority** ranking; not synced to a **Backend** and never recorded as a **Mutation**.
+A local-only, **Ticket**-only intake and selection policy: `triage`, `accepted`, or `parked`. `accepted` is the default and the only state **`tk next`** selects; `triage` is work that needs evaluation before it is suitable to take on; `parked` is accepted work intentionally held out of automatic selection. A **Local Field**, distinct from **Item Status** and from **Priority** ranking; not synced to a **Backend** and never recorded as a **Mutation**.
 _Avoid_: Status, Triage Status, Queue State, Workflow State
 
 **Closing Reason**:
@@ -152,7 +152,7 @@ The **`tk`** command intent for moving an active **Ticket** or **Epic** back to 
 _Avoid_: Reopen, Pause
 
 **Accept**:
-The **`tk`** command intent for moving a **Ticket** from `triage` **Selection State** to `accepted`, assigning a **Priority** in the same step.
+The **`tk`** command intent for moving a **Ticket** from `triage` **Selection State** to `accepted`, retaining its **Priority** unless an explicit value supplies or replaces it.
 _Avoid_: Approve, Triage, Promote
 
 **Park**:
@@ -517,7 +517,7 @@ _Avoid_: ticket, tickets
 - A **Ticket** has exactly one **Ticket Kind**.
 - A **Ticket** has at most one **Priority**, independently of **Selection State**.
 - **Priority** is a **Shared Field**. **Promotion** sets it, a local change records a `set_ticket_priority` **Mutation**, and **Backend Pull** imports it unless an unresolved `set_ticket_priority` **Mutation** shields it. An issue with no Priority, or an option **tk** does not name, reads as unset. An **Epic** has none to share (ADR-0054).
-- Unset **Priority** ranks as `P2` for automatic selection only; the fallback is never stored or pushed. `tk add` assigns `P2` to accepted work unless overridden.
+- Unset **Priority** ranks as `P2` for automatic selection only; the fallback is never stored or pushed. `tk add` leaves Priority unset unless supplied.
 - A **Ticket** has at most one **Effort**; an **Epic** has none.
 - **Effort** is a **Shared Field**. **Promotion** sets it when present, a local change records a `set_ticket_effort` **Mutation**, and **Backend Pull** imports it unless an unresolved `set_ticket_effort` **Mutation** shields it. An issue with no Effort, or an option **tk** does not name, reads as no **Effort** (ADR-0054).
 - **`tk next`** breaks ties in **Effective Priority** and own **Priority** by **Effort**, low first; a **Ticket** with no **Effort** ranks as `medium` (ADR-0015).
@@ -546,7 +546,8 @@ _Avoid_: ticket, tickets
 - **Selection State** is a **Local Field**.
 - The default **Selection State** is `accepted`; a newly **Adopted** **Backend Ticket** also defaults to `accepted`, since **Adopting** an issue is the choice to work it.
 - **Priority** may be unset on `triage`, `accepted`, and `parked` **Tickets**.
-- **Accept** moves a `triage` **Ticket** to `accepted` and assigns its **Priority**; accepting an already `accepted` **Ticket** is a harmless no-op.
+- Triage requires evaluation of whether work is suitable to take on, not answers to every question in its body. A well-scoped research or decision Ticket can be accepted work.
+- **Accept** moves a `triage` **Ticket** to `accepted`. It requires an explicit **Priority** only when unset, and otherwise keeps the stored value unless overridden. Accepting an already `accepted` **Ticket** without a Priority argument is a no-op; an explicit Priority is refused.
 - **Accept** preserves a **Ticket**'s **Dependencies** and **External Blockers**, so an accepted **Ticket** may be immediately blocked.
 - **Park** moves an `accepted` **Ticket** to `parked` and preserves its **Priority**; parking an already `parked` **Ticket** is a harmless no-op.
 - **Unpark** moves a `parked` **Ticket** to `accepted` and preserves its **Priority**; unparking an already `accepted` **Ticket** is a harmless no-op.
@@ -556,7 +557,7 @@ _Avoid_: ticket, tickets
 - **Park** rejects an `active` **Ticket**, which must be **Stopped** before it can be held.
 - **`done`** is allowed from any **Selection State** — `triage`, `accepted`, or `parked` — so rejected or obsolete captured work can be closed without **Accepting** it first.
 - **`tk next`** and **`tk list --ready`** select only `accepted` **Tickets**; `triage` and `parked` **Tickets** are excluded both as candidates and as **Effective Priority** contributors.
-- **Selection State** changes are not **Mutations** and are not synced to a **Backend**; **Backend Pull** preserves a local **Selection State** and its **Priority**.
+- **Selection State** changes are not **Mutations** and are not synced to a **Backend**; **Backend Pull** preserves local **Selection State**, while importing **Priority** unless a pending or failed Priority Mutation shields it.
 - **Backend Pull** cannot flip locally held work into progress: Adapter
   refreshes carry **Lifecycle** but no **Work State**. Pull preserves Work State
   when importing `open` and clears it when importing `done`.

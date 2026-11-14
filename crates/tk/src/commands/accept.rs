@@ -1,10 +1,9 @@
 //! `tk accept` — move a triage Ticket into accepted work with a Priority.
 //!
-//! `tk accept <id> --priority Pn` assigns the requested Priority and moves
-//! captured work to accepted (ADR-0027). Re-accepting an already-accepted
-//! Ticket without a Priority argument is an idempotent success;
+//! Acceptance retains Priority unless overridden. A changed Priority queues a
+//! Mutation for a Backend-bound Ticket; Selection State stays local.
+//! Re-accepting without a Priority argument is an idempotent success;
 //! supplying a Priority then is rejected — reprioritizing is `tk update`'s job.
-//! Selection State is a Local Field, so acceptance never emits a Mutation.
 
 use clap::Args as ClapArgs;
 
@@ -19,8 +18,7 @@ pub struct Args {
     /// Display ID or Alias of the Ticket to accept.
     #[arg(value_name = "ID")]
     pub id: String,
-    /// Priority to assign while accepting (P0..P3); required for a triage
-    /// Ticket.
+    /// Priority to assign while accepting (P0..P3); required only when unset.
     #[arg(short = 'p', long, value_name = "PRIORITY")]
     pub priority: Option<Priority>,
 }
@@ -75,6 +73,10 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         Err(AcceptError::Parked) => Err(CommandError::failure(format!(
             "'{id}' is parked; restore it with 'tk unpark {id}'",
             id = args.id
+        ))),
+        Err(AcceptError::BackendBinding(err)) => Err(resolver::backend_binding_error(&err)),
+        Err(AcceptError::Mutation(err)) => Err(CommandError::failure(format!(
+            "failed to append Mutation: {err}"
         ))),
         Err(AcceptError::Sqlite(err)) => Err(resolver::storage_error(&err)),
     }

@@ -1,8 +1,9 @@
-By default, tk add creates a task Ticket at Priority P2. A triage Ticket
-has no Priority and is excluded from
+By default, tk add creates an accepted task Ticket with unset Priority.
+.B \-\-triage
+captures work that needs evaluation before it is suitable to take on, with or
+without Priority. Ranked triage work remains excluded from
 .B tk next
-until accepted with
-.BR "tk accept \fIid\fR \-\-priority \fIPn\fR" .
+and cannot be started or promoted until accepted.
 .PP
 Supply a message with
 .B \-m
@@ -23,16 +24,14 @@ prints:
 .nf
 Created Ticket: <display-id> - <title>
 Kind: task|bug
-Priority: P0|P1|P2|P3
+Priority: P0|P1|P2|P3|unset
 Effort: low|medium|high
 Status: open
 Parent: <container-display-id>
 .fi
 .RE
 .PP
-A triage Ticket has no Priority, so it replaces the
-.B Priority:
-line with
+A triage Ticket also prints
 .BR "Selection: triage" .
 The
 .B Effort:

@@ -99,16 +99,17 @@ Set Priority (P0..P3). Tickets only
 Set Effort (low, medium, high). Tickets only
 .TP
 \fB\-\-triage\fR
-Capture the Ticket in triage with no Priority, pending a decision (conflicts with \-\-priority and \-\-epic)
+Capture the Ticket for evaluation before it is suitable to take on
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help
 .PP
-By default, tk add creates a task Ticket at Priority P2. A triage Ticket
-has no Priority and is excluded from
+By default, tk add creates an accepted task Ticket with unset Priority.
+.B \-\-triage
+captures work that needs evaluation before it is suitable to take on, with or
+without Priority. Ranked triage work remains excluded from
 .B tk next
-until accepted with
-.BR "tk accept \fIid\fR \-\-priority \fIPn\fR" .
+and cannot be started or promoted until accepted.
 .PP
 Supply a message with
 .B \-m
@@ -129,16 +130,14 @@ prints:
 .nf
 Created Ticket: <display-id> - <title>
 Kind: task|bug
-Priority: P0|P1|P2|P3
+Priority: P0|P1|P2|P3|unset
 Effort: low|medium|high
 Status: open
 Parent: <container-display-id>
 .fi
 .RE
 .PP
-A triage Ticket has no Priority, so it replaces the
-.B Priority:
-line with
+A triage Ticket also prints
 .BR "Selection: triage" .
 The
 .B Effort:
@@ -183,7 +182,7 @@ Accept a triage Ticket into ranked, selectable work
 \fBArguments and options\fR
 .TP
 \fB\-p\fR, \fB\-\-priority\fR \fI<PRIORITY>\fR
-Priority to assign while accepting (P0..P3); required for a triage Ticket
+Priority to assign while accepting (P0..P3); required only when unset
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help
@@ -191,13 +190,20 @@ Print help
 <\fIID\fR>
 Display ID or Alias of the Ticket to accept
 .PP
-Acceptance assigns a Priority to a triage Ticket and makes it eligible for
+Acceptance makes a triage Ticket eligible for
 .BR "tk next" .
-An already accepted Ticket succeeds without a Priority; use
+It requires an explicit Priority only when unset; otherwise it keeps the
+stored Priority unless overridden.
+.PP
+An already accepted Ticket succeeds without a Priority argument and refuses
+an explicit one; use
 .B tk update
 to change its Priority. Use
 .B tk unpark
-for a parked Ticket. Selection State is local and creates no Mutation.
+for a parked Ticket.
+.PP
+Selection State stays local. A changed Priority on a Backend-bound Ticket
+queues a Mutation in the same transaction as acceptance.
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
 .SS "tk park"
@@ -1113,6 +1119,9 @@ Replace the body from a UTF\-8 file, or \*(Aq\-\*(Aq for stdin; empty input clea
 \fB\-p\fR, \fB\-\-priority\fR \fI<PRIORITY>\fR
 Set Priority (P0..P3). Tickets only
 .TP
+\fB\-\-no\-priority\fR
+Clear the Ticket\*(Aqs Priority. Tickets only
+.TP
 \fB\-\-effort\fR \fI<EFFORT>\fR
 Set Effort (low, medium, high). Tickets only
 .TP
@@ -1143,12 +1152,15 @@ input stream clears the body. NUL is rejected in both title and body.
 .PP
 Title and body edits can be combined with
 .BR \-\-priority ,
+.BR \-\-no\-priority ,
 .BR \-\-effort ,
 .BR \-\-no\-effort ,
 .BR \-\-parent ,
 or
 .BR \-\-no\-parent
-for Tickets.
+for Tickets, in any Selection State.
+.B \-\-no\-priority
+clears Priority without changing Selection State.
 .B \-\-no\-effort
 clears the Effort. All requested edits and their Mutations commit together in
 the Repository Store. Backend delivery uses complete title/body snapshots,

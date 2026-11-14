@@ -141,7 +141,7 @@ fn plan_membership_is_local_and_explicit() {
     assert_eq!(repo.run("plan add plan-1"), "Added to Plan: plan-1\n");
     assert_eq!(
         repo.run("plan"),
-        "Ready\n  ○ plan-1 ● P2 First release work\n\n1 remaining · 0/1 done\n"
+        "Ready\n  ○ plan-1 ● unset First release work\n\n1 remaining · 0/1 done\n"
     );
     assert_eq!(
         repo.run("plan remove plan-1"),
@@ -176,18 +176,18 @@ fn plan_view_covers_every_state_and_ignores_scope() {
     repo.run("plan add plan-1 plan-2 plan-4 plan-5 plan-6 plan-7");
     insta::assert_snapshot!(repo.run_env("plan", &[("TK_SCOPE", "not-an-epic")]), @"
     Ready
-      ○ plan-1 ● P2 Ready work
+      ○ plan-1 ● unset Ready work
 
     In progress
-      ◐ plan-2 ● P2 Active work
+      ◐ plan-2 ● unset Active work
 
     Waiting
-      ○ plan-4 ● P2 Blocked work [blocked by plan-3 (outside Plan)]
-      ○ plan-5 ● P2 Parked work [parked]
+      ○ plan-4 ● unset Blocked work [blocked by plan-3 (outside Plan)]
+      ○ plan-5 ● unset Parked work [parked]
       ○ plan-6 ● unset Needs triage [triage]
 
     Done
-      ✓ plan-7 ● P2 Finished work
+      ✓ plan-7 ● unset Finished work
 
     5 remaining · 1/6 done
     ");
@@ -197,7 +197,7 @@ fn plan_view_covers_every_state_and_ignores_scope() {
     repo.run("plan add plan-7");
     insta::assert_snapshot!(repo.run("plan"), @"
     Done
-      ✓ plan-7 ● P2 Finished work
+      ✓ plan-7 ● unset Finished work
 
     0 remaining · 1/1 done
     ");
@@ -723,16 +723,16 @@ fn create_epic_child() {
     Created Epic: project-1 - Feature Epic
     Status: open
     ");
-    tk!(p, "add --parent project-1 -m 'Build child Ticket'", @r"
+    tk!(p, "add --parent project-1 -m 'Build child Ticket'", @"
     Created Ticket: project-2 - Build child Ticket
     Kind: task
-    Priority: P2
+    Priority: unset
     Status: open
     Parent: project-1
     ");
-    tk!(p, "list", @r"
+    tk!(p, "list", @"
     ○ project-1 [epic] Feature Epic
-    └── ○ project-2 ● P2 Build child Ticket
+    └── ○ project-2 ● unset Build child Ticket
     --------------------------------------------------------------------------------
     Total: 2 items (2 open)
 
@@ -753,11 +753,11 @@ fn list_scoped_to_an_epic_fences_the_scope_hint_from_the_tree() {
     p.run("add --epic -m 'Feature Epic'"); // project-1
     p.run("add --parent project-1 -m 'Build child Ticket'"); // project-2
 
-    tk!(p, "list project-1", @r"
+    tk!(p, "list project-1", @"
     Scope: project-1 (Epic + child Tickets)
 
     ○ project-1 [epic] Feature Epic
-    └── ○ project-2 ● P2 Build child Ticket
+    └── ○ project-2 ● unset Build child Ticket
     --------------------------------------------------------------------------------
     Total: 2 items (2 open)
 
@@ -786,12 +786,12 @@ fn list_fences_a_stacked_scope_and_sync_banner_block_from_the_tree() {
     // `failed` is one of the two queue-head states that earn a `Sync:` banner.
     p.seed_mutation("project-2", "failed", Some(r#"{"detail":"boom"}"#));
 
-    tk!(p, "list project-1", @r"
+    tk!(p, "list project-1", @"
     Scope: project-1 (Epic + child Tickets)
     Sync: Mutation 1 failed on project-2 (tk sync log 1)
 
     ○ project-1 [epic] Feature Epic
-    └── ○ project-2 ● P2 ⚑ Build child Ticket
+    └── ○ project-2 ● unset ⚑ Build child Ticket
     --------------------------------------------------------------------------------
     Total: 2 items (2 open)
 
@@ -901,21 +901,21 @@ fn show_separates_the_first_section_from_the_header_block() {
     p.run("add --epic -m 'Big work'"); // project-1
     p.run("add -m 'Small step' --parent project-1"); // project-2
 
-    tk!(dated: p, "show project-2", @r"
+    tk!(dated: p, "show project-2", @"
     ○ project-2 · Small step
-      P2 · Task · Created: [DATE]
+      Priority: unset · Task · Created: [DATE]
       Selection: accepted
 
     PARENT
       ↑ ○ project-1: (Epic) Big work
     ");
 
-    tk!(dated: p, "show project-1", @r"
+    tk!(dated: p, "show project-1", @"
     ○ project-1 · Big work
       Epic · Created: [DATE]
 
     TICKETS
-      ↓ ○ project-2: Small step ● P2
+      ↓ ○ project-2: Small step ● unset
     ");
 }
 
@@ -925,18 +925,18 @@ fn triage_capture_and_acceptance_flow() {
     p.run("init");
 
     // Capture a triage bug — no Priority, surfaces its Selection State.
-    tk!(p, "add --triage --bug -m 'Investigate flaky test'", @r"
+    tk!(p, "add --triage --bug -m 'Investigate flaky test'", @"
     Created Ticket: project-1 - Investigate flaky test
     Kind: bug
+    Priority: unset
     Selection: triage
     Status: open
     ");
 
-    // Both AC2 rejections, asserted independently of the help doc-comment
-    // (clap renders that prose verbatim and would not catch a dropped
-    // conflict): `--triage --priority` and `--epic --triage` are exit 2.
-    let conflict = p.run("add --triage --priority P1 -m 'nope'");
-    assert!(conflict.contains("exit 2"), "conflict={conflict}");
+    let ranked = p.run("add --triage --priority P1 -m 'Ranked capture'");
+    assert!(ranked.contains("Priority: P1"), "ranked={ranked}");
+    assert!(ranked.contains("Selection: triage"), "ranked={ranked}");
+
     let epic_conflict = p.run("add --epic --triage -m 'nope'");
     assert!(
         epic_conflict.contains("exit 2"),
@@ -956,15 +956,10 @@ fn triage_capture_and_acceptance_flow() {
         "triage_view={triage_view}"
     );
 
-    // Reprioritizing via update is refused with a pointer to accept.
     let upd = p.run("update project-1 --priority P1");
-    assert!(
-        upd.contains("tk update: 'project-1' is in triage; set a Priority by accepting it with 'tk accept project-1 --priority Pn'"),
-        "upd={upd}"
-    );
+    assert!(upd.contains("Updated Ticket: project-1"), "upd={upd}");
 
-    // Accept ranks it and makes it selectable.
-    tk!(p, "accept project-1 --priority P1", @r"
+    tk!(p, "accept project-1", @r"
     Accepted Ticket: project-1 - Investigate flaky test
     Priority: P1
     ");
@@ -1017,13 +1012,12 @@ fn parking_and_unparking_flow() {
     p.run("init");
 
     // An accepted Ticket is selectable by default.
-    p.run("add -m 'Build the thing'"); // project-1 (accepted, P2)
+    p.run("add -m 'Build the thing'"); // project-1 (accepted, unset)
     assert_eq!(p.run("next").trim(), "project-1: Build the thing");
 
-    // Park it: the Priority is preserved and echoed (the held work stays ranked).
-    tk!(p, "park project-1", @r"
+    tk!(p, "park project-1", @"
     Parked Ticket: project-1 - Build the thing
-    Priority: P2
+    Priority: unset
     ");
 
     // Parked work drops out of automatic selection but stays visible: the
@@ -1079,7 +1073,7 @@ fn parking_and_unparking_flow() {
     let park_triage = p.run("park project-2");
     assert!(
         park_triage.contains(
-            "tk park: 'project-2' is in triage; accept it first with 'tk accept project-2 --priority P0..P3'"
+            "tk park: 'project-2' is in triage; accept it first with 'tk accept project-2'"
         ),
         "park_triage={park_triage}"
     );
@@ -1090,7 +1084,7 @@ fn next_shows_the_title_by_default_and_quiet_restores_the_bare_id() {
     let p = Repo::new("project");
     p.run("init");
 
-    p.run("add -m 'Ship the feature'"); // project-1 (accepted, P2)
+    p.run("add -m 'Ship the feature'"); // project-1 (accepted, unset)
 
     tk!(p, "next", @"project-1: Ship the feature");
     tk!(p, "next -q", @"project-1");
@@ -1105,16 +1099,16 @@ fn plain_list_badges_every_selection_state() {
     let p = Repo::new("project");
     p.run("init");
 
-    p.run("add -m 'Accepted work'"); // project-1 (accepted, P2)
+    p.run("add -m 'Accepted work'"); // project-1 (accepted, unset)
     p.run("add --triage -m 'Captured idea'"); // project-2 (triage)
-    p.run("add -m 'Held work'"); // project-3 (accepted, P2)
+    p.run("add -m 'Held work'"); // project-3 (accepted, unset)
     p.run("park project-3"); // project-3 -> parked
     p.run("block project-2 project-1"); // triage Ticket carries an unresolved blocker
 
     tk!(p, "list", @"
-    ○ project-1 ● P2 Accepted work
+    ○ project-1 ● unset Accepted work
     ○ project-2 ⊘ ● unset [triage] Captured idea
-    ○ project-3 ● P2 [parked] Held work
+    ○ project-3 ● unset [parked] Held work
     --------------------------------------------------------------------------------
     Total: 3 items (3 open)
 
@@ -1137,11 +1131,11 @@ fn plain_list_badges_every_selection_state() {
 fn a_ticket_is_started_stopped_restarted_and_then_closed() {
     let p = Repo::new("project");
     p.run("init");
-    p.run("add -m 'Auth rework'"); // project-1 (accepted, P2)
+    p.run("add -m 'Auth rework'"); // project-1 (accepted, unset)
 
     tk!(p, "start project-1", @"Started Ticket: project-1 - Auth rework");
     tk!(p, "list", @"
-    ◐ project-1 ● P2 Auth rework
+    ◐ project-1 ● unset Auth rework
     --------------------------------------------------------------------------------
     Total: 1 item (1 active)
 
@@ -1151,7 +1145,7 @@ fn a_ticket_is_started_stopped_restarted_and_then_closed() {
 
     tk!(p, "stop project-1", @"Stopped Ticket: project-1 - Auth rework");
     tk!(p, "list", @"
-    ○ project-1 ● P2 Auth rework
+    ○ project-1 ● unset Auth rework
     --------------------------------------------------------------------------------
     Total: 1 item (1 open)
 
@@ -1165,7 +1159,7 @@ fn a_ticket_is_started_stopped_restarted_and_then_closed() {
 
     tk!(p, "done project-1", @"Done Ticket: project-1 - Auth rework");
     tk!(p, "search auth", @"
-    ✓ project-1 ● P2 Auth rework
+    ✓ project-1 ● unset Auth rework
     --------------------------------------------------------------------------------
     Total: 1 item (1 done)
 
@@ -1184,7 +1178,7 @@ fn lifecycle_guards_respect_selection_state() {
     let start_triage = p.run("start project-1");
     assert!(
         start_triage.contains(
-            "tk start: 'project-1' is in triage; accept it first with 'tk accept project-1 --priority P0..P3'"
+            "tk start: 'project-1' is in triage; accept it first with 'tk accept project-1'"
         ),
         "start_triage={start_triage}"
     );
@@ -1210,9 +1204,9 @@ fn lifecycle_guards_respect_selection_state() {
         "park_active={park_active}"
     );
     p.run("stop project-3");
-    tk!(p, "park project-3", @r"
+    tk!(p, "park project-3", @"
     Parked Ticket: project-3 - Active work
-    Priority: P2
+    Priority: unset
     ");
 
     // done closes captured work from any Selection State without accepting it.
@@ -1314,7 +1308,7 @@ fn prime_selects_from_the_plan_and_shows_all_progress() {
     );
     assert!(current.contains("`tk start repo-2`"));
     assert!(current.contains("◐ repo-4 [epic] Active Epic"));
-    assert!(current.contains("◐ repo-5 ● P2 Active child"));
+    assert!(current.contains("◐ repo-5 ● unset Active child"));
     assert!(current.contains(&p.run("plan")));
     assert!(!current.contains("Unplanned"));
     p.run("block repo-1 repo-3");
@@ -1348,7 +1342,7 @@ fn prime_scope_limits_current_work_but_keeps_the_whole_plan() {
         "{output}"
     );
     assert!(output.contains("Next in Plan within Scope repo-1: repo-2: Child\n"));
-    assert!(output.contains("◐ repo-4 ● P2 Busy child"));
+    assert!(output.contains("◐ repo-4 ● unset Busy child"));
     assert!(!output.contains("Busy outside"));
     assert!(output.contains(&p.run("plan")));
     p.run("plan clear");
@@ -1704,9 +1698,9 @@ fn search_matches_titles_across_statuses() {
 
     tk!(p, "search auth", @"
     ○ project-1 [epic] Auth rework
-    ◐ project-2 ● P2 Add auth middleware
-    ✓ project-3 ● P2 Auth token refresh
-    ○ project-5 ● P2 Auth login form
+    ◐ project-2 ● unset Add auth middleware
+    ✓ project-3 ● unset Auth token refresh
+    ○ project-5 ● unset Auth login form
     --------------------------------------------------------------------------------
     Total: 4 items (2 open, 1 active, 1 done)
 
@@ -1736,7 +1730,7 @@ fn search_requires_a_query_and_double_dash_escapes_it() {
     For more information, try '--help'.
     ");
     tk!(p, "search -- -v", @"
-    ○ project-1 ● P2 Investigate the -v verbose flag
+    ○ project-1 ● unset Investigate the -v verbose flag
     --------------------------------------------------------------------------------
     Total: 1 item (1 open)
 
@@ -1764,11 +1758,11 @@ fn grep_renders_show_style_match_context() {
     // stable across days.
     tk!(dated: p, "grep auth", @"
     ○ project-2 · Add middleware
-      P2 · Task · Created: [DATE]
+      Priority: unset · Task · Created: [DATE]
       the handler validates the auth token
 
     ○ project-3 · Refactor auth layer
-      P2 · Task · Created: [DATE]
+      Priority: unset · Task · Created: [DATE]
     ");
 }
 
@@ -1798,7 +1792,7 @@ fn grep_fixed_strings_matches_a_literal() {
 
     tk!(dated: p, "grep 'a(b' -F", @"
     ○ project-1 · Fix parser
-      P2 · Task · Created: [DATE]
+      Priority: unset · Task · Created: [DATE]
       the token a(b breaks the lexer
     ");
 }
@@ -1815,7 +1809,7 @@ fn grep_context_zero_shows_only_the_matching_line() {
 
     tk!(dated: p, "grep needle -C 0", @"
     ○ project-1 · Subject
-      P2 · Task · Created: [DATE]
+      Priority: unset · Task · Created: [DATE]
       second needle paragraph
     ");
 }
@@ -2014,7 +2008,7 @@ fn grep_whitespace_pattern_matches_a_double_space() {
 
     tk!(dated: p, "grep '  ' -F", @"
     ○ project-1 · Format output
-      P2 · Task · Created: [DATE]
+      Priority: unset · Task · Created: [DATE]
       aligns the  columns by padding
     ");
 }

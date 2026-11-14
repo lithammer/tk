@@ -3,6 +3,8 @@
 > **Amended by ADR-0054.** Priority is optional in every Selection State.
 > Selection State still applies only to Tickets, and active Tickets must be
 > accepted. Migration 022 removes the Priority constraint described below.
+> Acceptance retains or assigns Priority; a changed Priority queues a Mutation
+> for a Backend-bound Ticket. Selection State itself stays local.
 
 The tk-72 epic adds **Selection State**, a Ticket-only field with three
 values — `triage`, `accepted`, and `parked` — that decides whether an open

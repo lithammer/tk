@@ -911,7 +911,7 @@ fn refusal(
 fn render_finding(finding: &PromotionFinding, backend: BackendKind) -> String {
     match finding {
         PromotionFinding::TriageTicket { item } => format!(
-            "{id} is in triage; run 'tk accept {id} --priority P0..P3' before promoting it.",
+            "{id} is in triage; run 'tk accept {id}' before promoting it.",
             id = item.display_id
         ),
         PromotionFinding::ItemClassNotRepresentable { item, item_class } => format!(
@@ -1515,7 +1515,7 @@ mod tests {
         assert_eq!(
             h.err(),
             "tk promote: cannot promote tk-1:\n  \
-             tk-3 is in triage; run 'tk accept tk-3 --priority P0..P3' before promoting it.\n  \
+             tk-3 is in triage; run 'tk accept tk-3' before promoting it.\n  \
              tk-2 would be backend-backed while its Blocking Item tk-4 stays local. \
              Promote tk-4 in the same operation, or run 'tk unblock tk-2 tk-4' to drop the Dependency.\n"
         );
@@ -2550,7 +2550,7 @@ mod tests {
             String::from_utf8(out).unwrap(),
             "tk promote: cannot promote tk-1:\n  \
              tk-1: the github Backend cannot create Epics under Promotion.\n  \
-             tk-2 is in triage; run 'tk accept tk-2 --priority P0..P3' before promoting it.\n  \
+             tk-2 is in triage; run 'tk accept tk-2' before promoting it.\n  \
              tk-2 is held by tk-1, and the github Backend cannot represent Containment under Promotion.\n"
         );
     }
