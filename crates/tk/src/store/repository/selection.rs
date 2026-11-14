@@ -1,27 +1,26 @@
 //! Selection State transitions: `tk accept`, `tk park`, and `tk unpark`.
 //!
-//! Selection State is a Local Field (ADR-0027): these transitions update
-//! current state only and never append a Mutation, even for a Backend Ticket,
-//! and they leave Dependencies and External Blockers untouched, so accepting a
-//! blocked triage Ticket keeps it blocked. `accept` and `unpark` touch only
-//! `selection_state` / `priority`; `park` additionally reads `work_state` to
-//! refuse an `active` Ticket, upholding the `active ⟹ accepted` invariant the
-//! relocated ADR-0029 conjunct now states over that column (ADR-0043).
+//! Selection State stays local. Acceptance also queues a changed Priority for
+//! Backend-bound Tickets, in the same transaction as the Selection State change.
+//! These transitions leave Dependencies and External Blockers untouched.
 
 use rusqlite::{OptionalExtension, params};
 
 use crate::clock::Clock;
 use crate::domain::item_class::ItemClass;
+use crate::domain::mutation_payload::{MutationPayload, PriorityChange};
+use crate::domain::mutation_type::MutationType;
 use crate::domain::priority::Priority;
 use crate::domain::selection_state::SelectionState;
 use crate::domain::work_state::WorkState;
+use crate::store::mutations;
 
 use super::Store;
 
 /// Outcome of a successful [`accept_ticket`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AcceptOutcome {
-    /// A triage Ticket moved to accepted at the supplied Priority.
+    /// A triage Ticket moved to accepted with its retained or requested Priority.
     Accepted {
         display_id: String,
         title: String,
@@ -43,8 +42,7 @@ pub enum AcceptError {
     /// The target is an Epic; Selection State applies to Tickets only.
     #[error("item is an Epic")]
     NotATicket,
-    /// The Ticket is in triage and no Priority was supplied; acceptance must
-    /// rank the work.
+    /// Neither the triage Ticket nor the request has a Priority.
     #[error("triage Ticket needs a Priority")]
     PriorityRequired,
     /// The Ticket is already accepted and a Priority was supplied; Priority
@@ -56,6 +54,10 @@ pub enum AcceptError {
     Parked,
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
+    #[error(transparent)]
+    BackendBinding(#[from] mutations::BackendBindingError),
+    #[error(transparent)]
+    Mutation(#[from] mutations::AppendError),
 }
 
 /// Accept a Ticket: move it from triage to accepted with a Priority, or
@@ -76,9 +78,7 @@ pub fn accept_ticket<C: Clock + ?Sized>(
         title,
         item_class,
         selection_state,
-        // Acceptance takes its Priority from the caller's `--priority`, not
-        // from the row, and is invariant-safe at any Work State, so neither
-        // `priority` nor `work_state` is consulted here.
+        priority: current_priority,
         ..
     }) = read_selection_row(&tx, id)?
     else {
@@ -93,14 +93,33 @@ pub fn accept_ticket<C: Clock + ?Sized>(
     // would be store corruption, treated like the Epic case rather than a panic.
     match selection_state {
         Some(SelectionState::Triage) => {
-            let Some(priority) = priority else {
+            let Some(priority) = priority.or(current_priority) else {
                 return Err(AcceptError::PriorityRequired);
             };
+            let now_iso = clock.now_iso();
+
             tx.execute(
                 "update items set selection_state = 'accepted', priority = ?2, updated_at = ?3 \
                  where id = ?1",
-                params![id, priority, clock.now_iso()],
+                params![id, priority, now_iso],
             )?;
+            if current_priority != Some(priority)
+                && mutations::resolve_backend_binding(&tx, id)?.is_backend_bound()
+            {
+                mutations::append(
+                    &tx,
+                    mutations::AppendRequest {
+                        mutation_type: MutationType::SetTicketPriority,
+                        item_id: id,
+                        item_class: ItemClass::Ticket,
+                        payload: &MutationPayload::Priority(PriorityChange {
+                            priority: Some(priority),
+                        }),
+                        promotion_operation_id: None,
+                        now_iso: &now_iso,
+                    },
+                )?;
+            }
             tx.commit()?;
             Ok(AcceptOutcome::Accepted {
                 display_id,
@@ -183,8 +202,6 @@ pub enum ParkError {
     /// The target is an Epic; Selection State applies to Tickets only.
     #[error("item is an Epic")]
     NotATicket,
-    /// The Ticket is in triage; it must be accepted (which assigns a Priority)
-    /// before it can be parked.
     #[error("triage Ticket must be accepted first")]
     Triage,
     /// The Ticket is `active`; it must be stopped (`tk stop`) before it can be
@@ -282,8 +299,6 @@ pub enum UnparkError {
     /// The target is an Epic; Selection State applies to Tickets only.
     #[error("item is an Epic")]
     NotATicket,
-    /// The Ticket is in triage; it must be accepted (which assigns a Priority)
-    /// before it makes sense to talk about unparking.
     #[error("triage Ticket must be accepted first")]
     Triage,
     #[error(transparent)]

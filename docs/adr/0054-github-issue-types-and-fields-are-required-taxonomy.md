@@ -124,11 +124,20 @@ an explicit choice from an old default. Unset ranks as P2 only during automatic
 selection (ADR-0015), never during storage or Backend writes. Triage and parked
 Tickets stay outside selection and do not contribute Effective Priority.
 
-The CLI has narrower intake rules than the Store: `tk add` supplies P2 for
-accepted work. Accepting a triage Ticket requires an explicit Priority and
-assigns it locally; accepting an already accepted Ticket without a Priority
-argument is a no-op. `tk update` refuses Priority changes on triage Tickets and
-has no Priority-clear flag.
+`tk add` creates accepted work with unset Priority unless supplied. `--triage`
+chooses intake state independently, so `tk add --triage -p P0` captures urgent
+work that still needs evaluation. Triage means work needs evaluation before it
+is suitable to take on; a well-scoped research or decision Ticket can be
+accepted even though its body asks questions.
+
+Accepting a triage Ticket requires `--priority` only when its Priority is unset.
+Otherwise it retains the stored value unless overridden. A changed Priority
+queues a normal Mutation for a Backend-bound Ticket in the same transaction as
+acceptance; Selection State stays local. Accepting an already accepted Ticket
+without a Priority argument is a no-op; an explicit Priority is refused.
+`tk update --priority` and `--no-priority` set and clear Priority in any
+Selection State. Neither changes that state. Start and Promotion still refuse
+triage Tickets, even when ranked.
 
 ### Effort replaces the planned Ticket Size
 

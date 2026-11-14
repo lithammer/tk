@@ -30,8 +30,16 @@ pub struct Args {
     #[arg(long, value_name = "PATH")]
     pub body_file: Option<String>,
     /// Set Priority (P0..P3). Tickets only.
-    #[arg(short = 'p', long, value_name = "PRIORITY")]
+    #[arg(
+        short = 'p',
+        long,
+        value_name = "PRIORITY",
+        conflicts_with = "no_priority"
+    )]
     pub priority: Option<Priority>,
+    /// Clear the Ticket's Priority. Tickets only.
+    #[arg(long = "no-priority")]
+    pub no_priority: bool,
     /// Set Effort (low, medium, high). Tickets only.
     #[arg(long, value_name = "EFFORT", conflicts_with = "no_effort")]
     pub effort: Option<Effort>,
@@ -54,18 +62,19 @@ pub struct Args {
 /// Commit field edits and their Mutations together in the Repository Store
 /// (ADR-0051).
 pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
+    let has_priority_op = args.priority.is_some() || args.no_priority;
     let has_parent_op = args.parent.is_some() || args.no_parent;
     let has_effort_op = args.effort.is_some() || args.no_effort;
     if args.title.is_none()
         && args.body.is_none()
         && args.body_file.is_none()
-        && args.priority.is_none()
+        && !has_priority_op
         && !has_effort_op
         && !has_parent_op
     {
         return Err(CommandError::usage(
             "no changes requested; supply at least one of \
-             --title / --body / --body-file / --priority / --effort / --no-effort / \
+             --title / --body / --body-file / --priority / --no-priority / --effort / --no-effort / \
              --parent / --no-parent",
         ));
     }
@@ -104,8 +113,10 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     };
 
     if resolved.item_class == ItemClass::Epic {
-        if args.priority.is_some() {
-            return Err(CommandError::usage("--priority cannot be set on an Epic"));
+        if has_priority_op {
+            return Err(CommandError::usage(
+                "--priority / --no-priority cannot be set on an Epic",
+            ));
         }
         if has_effort_op {
             return Err(CommandError::usage(
@@ -139,6 +150,11 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         None if args.no_parent => FieldEdit::Clear,
         None => FieldEdit::Unchanged,
     };
+    let priority = match (args.priority, args.no_priority) {
+        (Some(priority), _) => FieldEdit::Set(priority),
+        (None, true) => FieldEdit::Clear,
+        (None, false) => FieldEdit::Unchanged,
+    };
     let effort = match (args.effort, args.no_effort) {
         (Some(effort), _) => FieldEdit::Set(effort),
         (None, true) => FieldEdit::Clear,
@@ -150,7 +166,7 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         item_class: resolved.item_class,
         title,
         body: body.as_deref(),
-        priority: args.priority,
+        priority,
         effort,
         parent: parent_op,
     };
@@ -170,11 +186,6 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         }
         Err(update::UpdateError::NotFound) => Err(CommandError::failure(format!(
             "'{id}' is not a known Display ID or Alias",
-            id = args.id
-        ))),
-        Err(update::UpdateError::PriorityOnTriage) => Err(CommandError::failure(format!(
-            "'{id}' is in triage; set a Priority by accepting it with \
-             'tk accept {id} --priority Pn'",
             id = args.id
         ))),
         Err(update::UpdateError::Containment(err)) => Err(resolver::containment_error(&err)),
@@ -512,6 +523,7 @@ mod tests {
             body: None,
             body_file: None,
             priority: None,
+            no_priority: false,
             effort: None,
             no_effort: false,
             parent: None,
@@ -532,7 +544,7 @@ mod tests {
     }
 
     #[test]
-    fn priority_on_a_triage_ticket_points_at_accept() {
+    fn priority_on_a_triage_ticket_preserves_selection() {
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_item(
@@ -556,15 +568,18 @@ mod tests {
         let mut a = args("tk-1");
         a.priority = Some(crate::domain::priority::Priority::P1);
         let code = run_rendered(&mut h, a);
-        assert_eq!(code, Exit::Failure);
-        let stderr = String::from_utf8(h.stderr).unwrap();
-        assert!(
-            stderr.contains(
-                "tk update: 'tk-1' is in triage; set a Priority by accepting it with \
-                 'tk accept tk-1 --priority Pn'"
-            ),
-            "stderr={stderr:?}"
-        );
+        assert_eq!(code, Exit::Ok);
+
+        let conn = rusqlite::Connection::open(store.db_path()).unwrap();
+        let (priority, selection): (String, String) = conn
+            .query_row(
+                "select priority, selection_state from items where id = 't1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(priority, "P1");
+        assert_eq!(selection, "triage");
     }
 
     #[test]
@@ -662,7 +677,7 @@ mod tests {
         let code = run_rendered(&mut h, a);
         assert_eq!(code, Exit::Usage);
         let stderr = String::from_utf8(h.stderr).unwrap();
-        assert!(stderr.contains("tk update: --priority cannot be set on an Epic"));
+        assert!(stderr.contains("tk update: --priority / --no-priority cannot be set on an Epic"));
     }
 
     #[test]

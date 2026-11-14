@@ -64,7 +64,7 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         ))),
         Err(UnparkError::Triage) => Err(CommandError::failure(format!(
             "'{id}' is in triage; accept it first with \
-             'tk accept {id} --priority P0..P3'",
+             'tk accept {id}'",
             id = args.id
         ))),
         Err(UnparkError::Sqlite(err)) => Err(resolver::storage_error(&err)),
@@ -164,7 +164,8 @@ mod tests {
         assert_eq!(code, Exit::Failure);
         let stderr = String::from_utf8(h.stderr).unwrap();
         assert!(
-            stderr.contains("tk unpark: 'tk-1' is in triage; accept it first with 'tk accept tk-1 --priority P0..P3'"),
+            stderr
+                .contains("tk unpark: 'tk-1' is in triage; accept it first with 'tk accept tk-1'"),
             "stderr={stderr:?}"
         );
     }

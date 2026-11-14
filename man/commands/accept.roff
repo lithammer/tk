@@ -1,7 +1,14 @@
-Acceptance assigns a Priority to a triage Ticket and makes it eligible for
+Acceptance makes a triage Ticket eligible for
 .BR "tk next" .
-An already accepted Ticket succeeds without a Priority; use
+It requires an explicit Priority only when unset; otherwise it keeps the
+stored Priority unless overridden.
+.PP
+An already accepted Ticket succeeds without a Priority argument and refuses
+an explicit one; use
 .B tk update
 to change its Priority. Use
 .B tk unpark
-for a parked Ticket. Selection State is local and creates no Mutation.
+for a parked Ticket.
+.PP
+Selection State stays local. A changed Priority on a Backend-bound Ticket
+queues a Mutation in the same transaction as acceptance.

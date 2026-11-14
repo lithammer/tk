@@ -14,6 +14,7 @@ Options:
   -b, --body <BODY>          Replace the body with literal text; an empty value clears it
       --body-file <PATH>     Replace the body from a UTF-8 file, or '-' for stdin; empty input clears it
   -p, --priority <PRIORITY>  Set Priority (P0..P3). Tickets only
+      --no-priority          Clear the Ticket's Priority. Tickets only
       --effort <EFFORT>      Set Effort (low, medium, high). Tickets only
       --no-effort            Clear the Ticket's Effort. Tickets only
   -P, --parent <CONTAINER>   Set the Container (an Epic or a Ticket) by Display ID or Alias. Tickets only

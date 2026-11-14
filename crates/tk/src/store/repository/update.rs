@@ -32,7 +32,6 @@ use crate::domain::mutation_payload::{
 };
 use crate::domain::mutation_type::MutationType;
 use crate::domain::priority::Priority;
-use crate::domain::selection_state::SelectionState;
 use crate::store::mutations;
 
 use super::Store;
@@ -87,10 +86,8 @@ pub struct UpdateRequest<'a> {
     pub item_class: ItemClass,
     pub title: Option<&'a str>,
     pub body: Option<&'a str>,
-    /// New Priority for Tickets, or `None` to leave unchanged. The caller
-    /// is responsible for ensuring this is `None` when `item_class` is
-    /// [`ItemClass::Epic`] — Epics have no Priority column.
-    pub priority: Option<Priority>,
+    /// The caller keeps this unchanged on Epics; the schema rejects a value.
+    pub priority: FieldEdit<Priority>,
     /// Like `priority`, the caller keeps this [`FieldEdit::Unchanged`] on an
     /// Epic; the `items.effort` CHECK backs that up.
     pub effort: FieldEdit<Effort>,
@@ -114,11 +111,6 @@ pub enum UpdateError {
     /// `id` does not resolve to a live row.
     #[error("item not found")]
     NotFound,
-    /// `--priority` was requested for a triage Ticket; Priority is assigned by
-    /// accepting (ADR-0027), not by `tk update`. The command points the user
-    /// at `tk accept`.
-    #[error("triage Ticket cannot be reprioritized via update")]
-    PriorityOnTriage,
     /// `parent` names a Container the depth cap refuses (ADR-0055).
     #[error(transparent)]
     Containment(#[from] ContainmentError),
@@ -135,7 +127,6 @@ struct Current {
     body: String,
     priority: Option<Priority>,
     effort: Option<Effort>,
-    selection_state: Option<SelectionState>,
     container_id: Option<String>,
     display_id: String,
 }
@@ -147,9 +138,7 @@ struct Current {
 struct ColumnWrites<'a> {
     title: &'a str,
     body: &'a str,
-    /// `Some` only when the priority actually changed; `None` leaves the
-    /// column untouched.
-    priority: Option<Priority>,
+    priority: FieldEdit<Priority>,
     effort: FieldEdit<Effort>,
 }
 
@@ -164,7 +153,7 @@ pub fn update_item<C: Clock + ?Sized>(
 
     let current = tx
         .query_row(
-            "select title, body, priority, selection_state, container_id, display_value, effort \
+            "select title, body, priority, container_id, display_value, effort \
                from items where id = ?1",
             params![req.id],
             |r| {
@@ -172,10 +161,9 @@ pub fn update_item<C: Clock + ?Sized>(
                     title: r.get(0)?,
                     body: r.get(1)?,
                     priority: r.get(2)?,
-                    selection_state: r.get(3)?,
-                    container_id: r.get(4)?,
-                    display_id: r.get(5)?,
-                    effort: r.get(6)?,
+                    container_id: r.get(3)?,
+                    display_id: r.get(4)?,
+                    effort: r.get(5)?,
                 })
             },
         )
@@ -184,28 +172,20 @@ pub fn update_item<C: Clock + ?Sized>(
         return Err(UpdateError::NotFound);
     };
 
-    // The update command reserves triage ranking for acceptance.
-    // Reject before any write so a mixed priority/title edit stays atomic.
-    if req.priority.is_some() && current.selection_state == Some(SelectionState::Triage) {
-        return Err(UpdateError::PriorityOnTriage);
-    }
-
     let new_title: Option<&str> = req
         .title
         .filter(|requested| *requested != current.title.as_str());
     let new_body: Option<&str> = req
         .body
         .filter(|requested| *requested != current.body.as_str());
-    let new_priority: Option<Priority> = req
-        .priority
-        .filter(|requested| current.priority != Some(*requested));
+    let new_priority = req.priority.against(current.priority);
     let new_effort = req.effort.against(current.effort);
 
     let parent = req.parent.against(current.container_id.as_deref());
 
     let title_or_body_changed = new_title.is_some() || new_body.is_some();
     let any_change = title_or_body_changed
-        || new_priority.is_some()
+        || new_priority != FieldEdit::Unchanged
         || new_effort != FieldEdit::Unchanged
         || parent != FieldEdit::Unchanged;
 
@@ -289,16 +269,14 @@ pub fn update_item<C: Clock + ?Sized>(
                 },
             )?;
         }
-        if let Some(priority) = new_priority {
+        if let (true, priority) = new_priority.column() {
             mutations::append(
                 &tx,
                 mutations::AppendRequest {
                     mutation_type: MutationType::SetTicketPriority,
                     item_id: req.id,
                     item_class: req.item_class,
-                    payload: &MutationPayload::Priority(PriorityChange {
-                        priority: Some(priority),
-                    }),
+                    payload: &MutationPayload::Priority(PriorityChange { priority }),
                     promotion_operation_id: None,
                     now_iso: &now_iso,
                 },
@@ -350,9 +328,10 @@ fn write_columns(
     writes: &ColumnWrites<'_>,
     now_iso: &str,
 ) -> Result<(), rusqlite::Error> {
+    let (priority_changed, new_priority) = writes.priority.column();
     let (effort_changed, new_effort) = writes.effort.column();
     conn.execute(
-        "update items set title = ?2, body = ?3, priority = coalesce(?4, priority), \
+        "update items set title = ?2, body = ?3, priority = case when ?8 then ?4 else priority end, \
                           effort = case when ?5 then ?6 else effort end, \
                           updated_at = ?7 \
           where id = ?1",
@@ -360,10 +339,11 @@ fn write_columns(
             id,
             writes.title,
             writes.body,
-            writes.priority,
+            new_priority,
             effort_changed,
             new_effort,
-            now_iso
+            now_iso,
+            priority_changed
         ],
     )?;
     Ok(())
@@ -656,7 +636,7 @@ mod tests {
             UpdateRequest {
                 id: "t1",
                 item_class: ItemClass::Ticket,
-                priority: Some(Priority::P0),
+                priority: FieldEdit::Set(Priority::P0),
                 ..UpdateRequest::default()
             },
         )
@@ -728,9 +708,6 @@ mod tests {
 
     #[test]
     fn priority_update_is_allowed_for_a_parked_ticket() {
-        // tk-75 AC: `tk update --priority` stays valid for parked Tickets. The
-        // PriorityOnTriage guard keys on `triage` only, so parked passes
-        // through; the hold (selection_state) is untouched by the reprioritize.
         let mut store = open_seeded();
         insert_fixture_item(
             &store.conn,
@@ -752,7 +729,7 @@ mod tests {
             UpdateRequest {
                 id: "t1",
                 item_class: ItemClass::Ticket,
-                priority: Some(Priority::P0),
+                priority: FieldEdit::Set(Priority::P0),
                 ..UpdateRequest::default()
             },
         )

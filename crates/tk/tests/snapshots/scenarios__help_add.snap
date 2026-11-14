@@ -14,5 +14,5 @@ Options:
   -P, --parent <CONTAINER>   Place the new Ticket under an Epic or Ticket by Display ID or Alias
   -p, --priority <PRIORITY>  Set Priority (P0..P3). Tickets only
       --effort <EFFORT>      Set Effort (low, medium, high). Tickets only
-      --triage               Capture the Ticket in triage with no Priority, pending a decision (conflicts with --priority and --epic)
+      --triage               Capture the Ticket for evaluation before it is suitable to take on
   -h, --help                 Print help

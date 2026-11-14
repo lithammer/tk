@@ -24,13 +24,11 @@ use crate::store::sequences;
 use super::containment::{self, ContainmentError};
 use super::{Store, insert_display_resolver, next_display_id};
 
-/// The intake choices `tk add` exposes: unranked triage or ranked
-/// accepted work. The Store admits optional Priority in every Selection State.
-/// `parked` is not creatable via `tk add` and so has no variant.
+/// `tk add` creates triage or accepted work; parking is a later choice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NewTicketSelection {
     Triage,
-    Accepted(Priority),
+    Accepted,
 }
 
 /// Input shape for creating a local Ticket.
@@ -38,6 +36,7 @@ pub enum NewTicketSelection {
 pub struct CreateLocalTicketInput<'a> {
     pub kind: TicketKind,
     pub selection: NewTicketSelection,
+    pub priority: Option<Priority>,
     pub effort: Option<Effort>,
     /// Internal stable `items.id` of the Container, an Epic or a Ticket.
     pub parent_id: Option<&'a str>,
@@ -58,7 +57,6 @@ pub struct CreatedTicket {
     pub id: String,
     pub display_id: String,
     pub kind: TicketKind,
-    /// `None` for a triage Ticket, which carries no Priority (ADR-0027).
     pub priority: Option<Priority>,
     pub effort: Option<Effort>,
     pub selection_state: SelectionState,
@@ -121,13 +119,12 @@ where
     let display_id = next_display_id(&tx)?.ok_or(CreateError::DisplayPrefixMissing)?;
     let created_seq = sequences::next(&tx, sequences::Counter::ItemCreated)?;
 
-    // Triage carries no Priority; accepted carries one (ADR-0027). The sum
-    // type makes the pair consistent by construction; the combined schema
-    // CHECK (ADR-0028) is the backstop.
-    let (selection_state, priority) = match input.selection {
-        NewTicketSelection::Triage => (SelectionState::Triage, None),
-        NewTicketSelection::Accepted(priority) => (SelectionState::Accepted, Some(priority)),
+    let selection_state = match input.selection {
+        NewTicketSelection::Triage => SelectionState::Triage,
+        NewTicketSelection::Accepted => SelectionState::Accepted,
     };
+    let priority = input.priority;
+
     if let Some(container_id) = input.parent_id {
         containment::check(&tx, None, container_id)?;
     }
@@ -282,7 +279,8 @@ mod tests {
             &mut rng,
             CreateLocalTicketInput {
                 kind: TicketKind::Task,
-                selection: NewTicketSelection::Accepted(Priority::P1),
+                selection: NewTicketSelection::Accepted,
+                priority: Some(Priority::P1),
                 effort: None,
                 parent_id: None,
                 title: "Ship it",
@@ -375,6 +373,7 @@ mod tests {
             CreateLocalTicketInput {
                 kind: TicketKind::Bug,
                 selection: NewTicketSelection::Triage,
+                priority: None,
                 effort: None,
                 parent_id: None,
                 title: "Maybe a bug",
@@ -422,7 +421,8 @@ mod tests {
             &mut rng,
             CreateLocalTicketInput {
                 kind: TicketKind::Task,
-                selection: NewTicketSelection::Accepted(Priority::P2),
+                selection: NewTicketSelection::Accepted,
+                priority: Some(Priority::P2),
                 effort: None,
                 parent_id: Some(&epic.id),
                 title: "Child",
@@ -456,7 +456,8 @@ mod tests {
             &mut rng,
             CreateLocalTicketInput {
                 kind: TicketKind::Task,
-                selection: NewTicketSelection::Accepted(Priority::P2),
+                selection: NewTicketSelection::Accepted,
+                priority: Some(Priority::P2),
                 effort: None,
                 parent_id: None,
                 title: "A",
@@ -470,7 +471,8 @@ mod tests {
             &mut rng,
             CreateLocalTicketInput {
                 kind: TicketKind::Task,
-                selection: NewTicketSelection::Accepted(Priority::P2),
+                selection: NewTicketSelection::Accepted,
+                priority: Some(Priority::P2),
                 effort: None,
                 parent_id: None,
                 title: "B",
