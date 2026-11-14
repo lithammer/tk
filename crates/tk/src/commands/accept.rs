@@ -1,9 +1,8 @@
 //! `tk accept` — move a triage Ticket into accepted work with a Priority.
 //!
-//! Acceptance is the boundary where captured work becomes selectable: a triage
-//! Ticket carries no Priority, and `tk accept <id> --priority Pn` ranks it and
-//! flips its Selection State to `accepted` (ADR-0027). Re-accepting an
-//! already-accepted Ticket without a Priority is an idempotent success;
+//! `tk accept <id> --priority Pn` assigns the requested Priority and moves
+//! captured work to accepted (ADR-0027). Re-accepting an already-accepted
+//! Ticket without a Priority argument is an idempotent success;
 //! supplying a Priority then is rejected — reprioritizing is `tk update`'s job.
 //! Selection State is a Local Field, so acceptance never emits a Mutation.
 

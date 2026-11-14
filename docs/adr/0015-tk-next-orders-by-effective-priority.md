@@ -134,3 +134,10 @@ selection does not have.
 
 The stderr rationale stays limited to inherited Priority. A pick that
 Effort decides is the ordinary case and needs no explanation.
+
+## Amendment: unset Priority ranks as P2
+
+The ranking query treats unset Priority as P2 when sorting Tickets, computing
+Effective Priority, and choosing the Blocked Item named in a rationale. It
+never stores or pushes that fallback. Triage and parked Tickets neither qualify
+for selection nor contribute Effective Priority, even when ranked.

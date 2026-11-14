@@ -103,24 +103,32 @@ Priority becomes a Shared Field (ADR-0049): Promotion sets it, a local change
 pushes it, and Pull imports it, shielded while a local Priority Mutation is
 pending. A single-select holds one value, so the ambiguous label sets rule 3
 covers cannot arise. An issue with no Priority, or with an option
-tk does not name, maps to `P2`, the default a new Ticket gets. Epics have no
-Priority, so tk neither sets nor reads it on an Epic issue.
+tk does not name, maps to unset. Priority is optional in every Selection State;
+Epics have no Priority, so tk neither sets nor reads it on an Epic issue.
 
-A local Priority change queues a `set_ticket_priority` Mutation. Its payload is the target
-level, and Apply sends it as a GraphQL `setIssueFieldValue`, which a probe
-showed replaces an existing value (playground #26: unset, then Medium, then
-Low). Pull shields Priority per Ticket while that Mutation is `pending` or
-`failed`, in the shape ADR-0044 gives title and body. A triage Ticket has no
-Priority, so Pull leaves it unset. Promotion refuses triage and no command
-returns a Ticket to triage, so a backend-bound triage Ticket does not arise;
-if one ever does, `tk accept` assigns its Priority locally without a push.
+A `set_ticket_priority` Mutation carries the target level or null. Apply sends
+a level as `setIssueFieldValue` and null as `deleteIssueFieldValue`, just as
+Effort does. Promotion omits an unset field. Pull shields Priority while its
+Mutation is `pending` or `failed`, including a clear, and otherwise imports
+both set and unset values without changing Selection State.
 
 Pull treats an issue typed `Epic` as an Epic: it reads no Priority and needs
 no Priority field. For any other issue it requires the field and all four
 options, and fails with the named error otherwise. Adopt does not read
-Priority, because `gh` 2.100.0 cannot (`gh issue view --json issueFieldValues`
-is rejected); an Adopted Ticket starts at `P2` and the next Pull imports the
-Backend value.
+Priority; an Adopted Ticket starts unset and the next Pull imports the Backend
+value.
+
+Migration 022 removes the Priority/Selection State coupling without changing
+any stored value. Historical P2 values stay P2: tk has no record that can tell
+an explicit choice from an old default. Unset ranks as P2 only during automatic
+selection (ADR-0015), never during storage or Backend writes. Triage and parked
+Tickets stay outside selection and do not contribute Effective Priority.
+
+The CLI has narrower intake rules than the Store: `tk add` supplies P2 for
+accepted work. Accepting a triage Ticket requires an explicit Priority and
+assigns it locally; accepting an already accepted Ticket without a Priority
+argument is a no-op. `tk update` refuses Priority changes on triage Tickets and
+has no Priority-clear flag.
 
 ### Effort replaces the planned Ticket Size
 
@@ -178,9 +186,9 @@ organization they do not administer.
 - Backend data is already migrated: `lithammer/tk` issues #52, #53, and #54,
   the only ones that carried the `bug` Label, now carry the `Bug` type
   instead, and the open Epics (gh-43, gh-61, gh-65) carry the `Epic` type.
-- Before Pull reads Priority, tk must push the current Priority of every
-  Adopted Ticket that is not `done`. Otherwise the first Pull maps each
-  unset issue to `P2`. Migration 019 does it: it queues one `pending`
+- Migration 019 pushed the current Priority of every Adopted Ticket that
+  Pull could reach. At that upgrade, Pull would otherwise have mapped an unset
+  issue to `P2`. The migration queues one `pending`
   `set_ticket_priority` Mutation per Backend Ticket Pull can reach (open, or
   done with an unresolved close), and that row is the
   Pull shield, so no Pull can run between the upgrade and the push. Skipping a

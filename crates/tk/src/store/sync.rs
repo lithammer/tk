@@ -298,7 +298,7 @@ pub fn adopt_backend_ticket(
             adopted.display_id,
             ItemClass::Ticket,
             adopted.ticket_kind,
-            "P2",
+            None::<Priority>,
             adopted.title,
             adopted.body,
             expected_kind,
@@ -627,11 +627,6 @@ pub enum LoadApplicableError {
         mutation_type: MutationType,
         item_id: String,
     },
-    #[error("mutation {mutation_type} requires Priority for Item {item_id}")]
-    MissingPriority {
-        mutation_type: MutationType,
-        item_id: String,
-    },
 }
 
 /// One applicable Mutation Log entry, decoded but not yet bound to a backend
@@ -822,10 +817,6 @@ pub fn resolve_backend_operation(
                     mutation_type,
                     item_id: item_id.clone(),
                 })?;
-            let priority = priority.ok_or_else(|| LoadApplicableError::MissingPriority {
-                mutation_type,
-                item_id: item_id.clone(),
-            })?;
             BackendOperation::Create(BackendCreate::Ticket {
                 snapshot: TitleBody { title, body },
                 ticket_kind,
@@ -1668,11 +1659,11 @@ pub fn merge_backend_refreshes(
                 &mut containments,
             )?;
         }
+        // None leaves the field unchanged; Some(None) clears it. Keep the
+        // write flag separate from the value so a shield also protects clears.
         let priority_write = ticket_fields
             .map(|fields| fields.priority)
             .filter(|_| !shields.priority.contains(item_id.as_str()));
-        // Effort needs a separate "write" flag: a Backend with no Effort
-        // clears the local one, so `None` is a value here, not "keep".
         let effort_write = ticket_fields
             .map(|fields| fields.effort)
             .filter(|_| !shields.effort.contains(item_id.as_str()));
@@ -1688,22 +1679,19 @@ pub fn merge_backend_refreshes(
         // Pull never imports Work State. A Backend close still clears it as a
         // local consequence, while an open refresh must not undo `tk start`
         // (ADR-0043, ADR-0021). Title/body shielding does not affect Lifecycle
-        // or Ticket Kind (ADR-0044). A triage Ticket holds no Priority
-        // (ADR-0027), so Pull leaves it unset; the table CHECK would abort the
-        // whole merge otherwise. Effort is written only on a Ticket for the
-        // same reason: the CHECK rejects one on an Epic.
+        // or Ticket Kind (ADR-0044). Only Tickets carry Priority and Effort;
+        // Selection State does not constrain either field.
         tx.execute(
             "update items set title = coalesce(?2, title), body = coalesce(?3, body), updated_at = max(updated_at, ?5), \
               ticket_kind = case when item_class = 'ticket' then coalesce(?6, ticket_kind) else ticket_kind end, \
-              priority = case when item_class = 'ticket' and selection_state <> 'triage' \
-                              then coalesce(?8, priority) else priority end, \
+              priority = case when item_class = 'ticket' and ?11 then ?8 else priority end, \
               effort = case when item_class = 'ticket' and ?9 then ?10 else effort end, \
               status = ?4, \
               work_state = coalesce(?7, work_state) \
               where id = ?1",
             params![item_id, title_write, body_write, status, now,
-                ticket_kind, work_state_write, priority_write,
-                effort_write.is_some(), effort_write.flatten()],
+                ticket_kind, work_state_write, priority_write.flatten(),
+                effort_write.is_some(), effort_write.flatten(), priority_write.is_some()],
         )?;
     }
     // Every removal and clear above lands before any addition. Dependencies
@@ -3035,10 +3023,8 @@ mod tests {
         assert_eq!(origin, "backend");
         assert_eq!(kind, "github");
         assert_eq!(source, "display");
-        // Imported Backend Tickets default to accepted at Priority P2 (ADR-0027);
-        // tripwire on both seed literals so a wrong value cannot pass silently.
         assert_eq!(selection.as_deref(), Some("accepted"));
-        assert_eq!(priority.as_deref(), Some("P2"));
+        assert_eq!(priority, None);
     }
 
     #[test]
@@ -3137,7 +3123,7 @@ mod tests {
             .unwrap();
             let backend = BackendItemRefresh {
                 ticket_fields: Some(SharedTicketFields {
-                    priority: Priority::P0,
+                    priority: Some(Priority::P0),
                     effort: None,
                 }),
                 ..refresh("Backend title", Lifecycle::Open)
@@ -3178,11 +3164,9 @@ mod tests {
 
     #[test]
     fn refresh_effort_shield_follows_unresolved_set_ticket_effort_only() {
-        // A Backend with no Effort clears the local one, unless a pending or
-        // failed `set_ticket_effort` holds it (ADR-0054). Moving the type out
-        // of the shield in `local_shields` breaks the first two rows; reading
-        // a missing Backend value as "keep", as Priority's merge does, breaks
-        // the last two and every t2 row.
+        // If a pending or failed edit loses its value, restore its Pull shield.
+        // If an unshielded value survives, make the merge treat Backend absence
+        // as a clear (ADR-0054).
         for (state, failure, imported) in [
             (MutationState::Pending, None, false),
             (
@@ -3211,7 +3195,7 @@ mod tests {
             .unwrap();
             let backend = BackendItemRefresh {
                 ticket_fields: Some(SharedTicketFields {
-                    priority: Priority::P0,
+                    priority: Some(Priority::P0),
                     effort: None,
                 }),
                 ..refresh("Backend title", Lifecycle::Open)
@@ -4221,7 +4205,7 @@ mod tests {
         };
         assert_eq!(snapshot.title, "T");
         assert_eq!(ticket_kind, TicketKind::Task);
-        assert_eq!(fields.priority, Priority::P2);
+        assert_eq!(fields.priority, Some(Priority::P2));
     }
 
     #[test]

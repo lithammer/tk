@@ -1,7 +1,9 @@
 Sync first pulls Backend changes for tracked open Items, then applies queued
 Mutations in order. Unresolved title/body edits protect those fields from
-Pull, and an unresolved Priority or Effort change protects that field; other
-Shared Fields can still refresh. Sync requires a configured Remote.
+Pull, and an unresolved Priority or Effort change protects that field, including
+an explicit clear. Other Shared Fields can still refresh. Pull clears Priority
+when the Backend has none, without changing Selection State. Sync requires a
+configured Remote.
 .PP
 Pull also brings in the Backend's Dependencies between Items bound to it: it
 adds the ones the Backend lists and removes the ones it no longer does, except

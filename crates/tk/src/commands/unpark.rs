@@ -1,17 +1,15 @@
 //! `tk unpark` — return a parked Ticket to accepted, selectable work.
 //!
-//! Unparking is the inverse of `tk park` (ADR-0027): it moves a parked Ticket
-//! back to `accepted` so `tk next` can select it again, without requiring a
-//! Priority flag — the held Priority rides through unchanged, and the success
-//! line echoes the rank the work re-enters the queue at. Unparking an
-//! already-accepted Ticket is an idempotent success; a triage Ticket must be
-//! accepted first. Selection State is a Local Field, so unparking never emits a
-//! Mutation.
+//! Unparking preserves Priority, including unset, and returns the Ticket to
+//! automatic selection (ADR-0027). Unparking an already-accepted Ticket is a
+//! no-op; a triage Ticket must be accepted first. Selection State is a Local
+//! Field, so unparking never emits a Mutation.
 
 use clap::Args as ClapArgs;
 
 use crate::cli::{CommandError, Deps, Exit};
 use crate::commands::resolver;
+use crate::domain::priority::Priority;
 use crate::store::repository::selection::{self, UnparkError, UnparkOutcome};
 
 /// Flags for `tk unpark`.
@@ -44,7 +42,11 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
             priority,
         }) => {
             let _ = writeln!(deps.stdout, "Unparked Ticket: {display_id} - {title}");
-            let _ = writeln!(deps.stdout, "Priority: {priority}");
+            let _ = writeln!(
+                deps.stdout,
+                "Priority: {}",
+                priority.map_or("unset", Priority::text)
+            );
             Ok(Exit::Ok)
         }
         Ok(UnparkOutcome::AlreadyAccepted { display_id }) => {

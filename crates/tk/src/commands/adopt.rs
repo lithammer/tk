@@ -123,6 +123,8 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
     }
     if let Some(priority) = stored.priority {
         let _ = writeln!(deps.stdout, "Priority: {priority}");
+    } else {
+        let _ = writeln!(deps.stdout, "Priority: unset");
     }
     let _ = writeln!(deps.stdout, "Status: {}", stored.status);
     Ok(Exit::Ok)
@@ -404,7 +406,7 @@ mod tests {
             "{stdout}"
         );
         assert!(stdout.contains("Kind: task"), "{stdout}");
-        assert!(stdout.contains("Priority: P2"), "{stdout}");
+        assert!(stdout.contains("Priority: unset"), "{stdout}");
         assert!(stdout.contains("Status: open"), "{stdout}");
 
         // The merged row is an accepted, backend-origin Ticket — and Adopt is a

@@ -87,10 +87,12 @@ pub struct LifecycleChange {
 }
 
 /// Priority-change payload used by `set_ticket_priority`. The target value,
-/// not a delta, so replaying it converges.
+/// not a delta, so replaying it converges; `None` clears Priority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PriorityChange {
-    pub priority: Priority,
+    // A missing field is malformed intent; only explicit null clears Priority.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub priority: Option<Priority>,
 }
 
 /// Effort-change payload used by `set_ticket_effort`. The target value, so
@@ -172,7 +174,7 @@ mod tests {
     #[test]
     fn priority_change_json_is_flat() {
         let json = MutationPayload::Priority(PriorityChange {
-            priority: Priority::P0,
+            priority: Some(Priority::P0),
         })
         .to_json_string();
         assert_eq!(json, r#"{"priority":"P0"}"#);

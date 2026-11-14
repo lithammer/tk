@@ -103,9 +103,8 @@ pub enum BackendCreate {
         /// Current Ticket Kind from the Repository Store. This is transient
         /// delivery data, not persisted Promotion intent.
         ticket_kind: TicketKind,
-        /// Current Priority and Effort from the Repository Store. Promotion
-        /// refuses a triage Ticket, the only Ticket without a Priority
-        /// (ADR-0027). Transient delivery data, like `ticket_kind`.
+        /// Current Priority and Effort from the Repository Store.
+        /// Transient delivery data, like `ticket_kind`.
         fields: SharedTicketFields,
     },
     Epic {
@@ -176,11 +175,11 @@ impl BackendItemRefresh {
     }
 }
 
-/// The Shared Fields only a Ticket carries.
+/// The Shared Fields only a Ticket carries. Pull clears an unset field;
+/// Promotion omits it from Backend creation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SharedTicketFields {
-    pub priority: Priority,
-    /// `None` when the Backend holds no Effort, which clears the local one.
+    pub priority: Option<Priority>,
     pub effort: Option<Effort>,
 }
 
@@ -265,7 +264,7 @@ mod tests {
                 title: key.into(),
                 body: String::new(),
                 ticket_fields: Some(SharedTicketFields {
-                    priority: Priority::P2,
+                    priority: Some(Priority::P2),
                     effort: None,
                 }),
                 ..BackendItemRefresh::for_test()

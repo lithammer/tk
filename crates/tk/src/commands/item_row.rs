@@ -34,22 +34,16 @@ pub(crate) fn selection_badge(selection_state: Option<SelectionState>) -> Option
     }
 }
 
-/// The compact row token for a Priority, with any Effort fused on as `/L`,
-/// `/M`, or `/H`: `P2/L`. One token, because Effort only orders Tickets that
-/// share a Priority.
-fn priority_token(priority: Priority, effort: Option<Effort>) -> String {
+fn priority_token(priority: Option<Priority>, effort: Option<Effort>) -> String {
     let letter = match effort {
         None => "",
         Some(Effort::Low) => "/L",
         Some(Effort::Medium) => "/M",
         Some(Effort::High) => "/H",
     };
-    format!("{}{letter}", priority.text())
+    format!("{}{letter}", priority.map_or("unset", Priority::text))
 }
 
-/// Shared Priority and Bug markers for List, Search and Plan rows.
-/// Triage omits Priority, and with it Effort, but keeps the Bug marker
-/// (ADR-0027).
 pub(crate) fn render_ticket_markers<W: Write + ?Sized>(
     out: &mut W,
     priority: Option<Priority>,
@@ -57,15 +51,14 @@ pub(crate) fn render_ticket_markers<W: Write + ?Sized>(
     kind: Option<TicketKind>,
     styler: SubStyler,
 ) -> std::io::Result<()> {
-    if let Some(priority) = priority {
-        let style = palette::priority_style(priority);
-        write!(
-            out,
-            " {} {}",
-            styler.wrap(style, "●"),
-            styler.wrap(style, &priority_token(priority, effort))
-        )?;
-    }
+    let style = priority.map_or_else(Default::default, palette::priority_style);
+    write!(
+        out,
+        " {} {}",
+        styler.wrap(style, "●"),
+        styler.wrap(style, &priority_token(priority, effort))
+    )?;
+
     if kind == Some(TicketKind::Bug) {
         write!(out, " {}", styler.wrap(palette::KIND_BUG, "[bug]"))?;
     }

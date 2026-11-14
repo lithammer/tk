@@ -90,6 +90,7 @@ pub enum NextError {
 /// contributor sub-SELECT picks the lowest-`created_seq` Ticket carrying
 /// that Priority to ensure a deterministic rationale row.
 ///
+/// Unset Priority ranks as P2 only in this query; stored values stay unset.
 /// The Effort rank sorts an unset Effort with `medium`, so setting one moves a
 /// Ticket only in the direction it names (ADR-0015).
 ///
@@ -113,7 +114,7 @@ const NEXT_READY_TICKET_SQL: &str = concat!(
               ))) \
   ), \
   annotated as ( \
-      select i.id, i.display_value, i.item_class, i.priority, i.status, \
+      select i.id, i.display_value, i.item_class, coalesce(i.priority, 'P2') as priority, i.status, \
              i.work_state, i.selection_state, i.container_id, i.created_seq, \
              i.title, i.origin, i.effort, \
              exists ( \
@@ -166,12 +167,11 @@ const NEXT_READY_TICKET_SQL: &str = concat!(
          and instr(r.path, ',' || e.dst || ',') = 0 \
   ), \
   eff(start_id, ep) as ( \
-      select r.start_id, min(i.priority) \
+      select r.start_id, min(coalesce(i.priority, 'P2')) \
         from reachable r \
         join items i on i.id = r.node_id \
        where i.item_class = 'ticket' \
          and i.status <> 'done' \
-         and i.priority is not null \
          and i.selection_state = 'accepted' \
        group by r.start_id \
   ) \
@@ -184,7 +184,7 @@ select ann.display_value, ann.priority, eff.ep, \
               and contributor.item_class = 'ticket' \
               and contributor.status <> 'done' \
               and contributor.selection_state = 'accepted' \
-              and contributor.priority = eff.ep \
+              and coalesce(contributor.priority, 'P2') = eff.ep \
               and r2.node_id <> ann.id \
             order by contributor.created_seq asc \
             limit 1 \

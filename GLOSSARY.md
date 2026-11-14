@@ -41,7 +41,7 @@ slot for it; **tk** never stores or shows it as a label.
 _Avoid_: Label, Reserved Label, Adapter Encoding
 
 **Priority**:
-How important or urgent a **Ticket**'s work is: `P0`, `P1`, `P2`, or `P3`. A **Shared Field**: on GitHub it is the native Priority issue field, with `P0`..`P3` mapped to Urgent, High, Medium, and Low (ADR-0054).
+How important or urgent a **Ticket**'s work is: `P0`, `P1`, `P2`, `P3`, or unset. It is optional in every **Selection State**; **Epics** carry none. A **Shared Field**: on GitHub it is the native Priority issue field, with `P0`..`P3` mapped to Urgent, High, Medium, and Low (ADR-0054).
 _Avoid_: Severity
 
 **Effort**:
@@ -49,7 +49,7 @@ How much work a **Ticket** is expected to take, apart from how much it matters: 
 _Avoid_: Size, Estimate, Complexity, Story Points, Scope
 
 **Effective Priority**:
-The priority used to order a candidate **Ticket** in **`tk next`**, derived from its own **Priority** and the **Priorities** of items it transitively blocks within the selected work. **Scope** and explicit **Plan** selection bound propagation; Effective Priority is not stored, displayed by **`tk show`** or **`tk list`**, or synced to **Backends**.
+The priority used to order a candidate **Ticket** in **`tk next`**, derived from its own **Priority** and the **Priorities** of items it transitively blocks within the selected work. **Scope** and explicit **Plan** selection bound propagation. Unset Priority ranks as `P2` only for automatic selection, without storing or pushing that fallback. Triage and parked Tickets neither qualify for selection nor contribute Effective Priority. Effective Priority is not stored, displayed by **`tk show`** or **`tk list`**, or synced to **Backends**.
 _Avoid_: Inherited Priority, Critical Path Priority, Derived Priority
 
 **List Tree**:
@@ -515,9 +515,9 @@ _Avoid_: ticket, tickets
   holds **Tickets** has no **Container** except an **Epic**. The longest chain is
   **Epic**, **Ticket**, **Ticket**.
 - A **Ticket** has exactly one **Ticket Kind**.
-- A **Ticket** has exactly one **Priority**.
-- **Priority** is a **Shared Field**. **Promotion** sets it, a local change records a `set_ticket_priority` **Mutation**, and **Backend Pull** imports it unless an unresolved `set_ticket_priority` **Mutation** shields it. An issue with no Priority, or an option **tk** does not name, reads as `P2`. An **Epic** and a `triage` **Ticket** have none to share (ADR-0054).
-- The default **Priority** is `P2`.
+- A **Ticket** has at most one **Priority**, independently of **Selection State**.
+- **Priority** is a **Shared Field**. **Promotion** sets it, a local change records a `set_ticket_priority` **Mutation**, and **Backend Pull** imports it unless an unresolved `set_ticket_priority` **Mutation** shields it. An issue with no Priority, or an option **tk** does not name, reads as unset. An **Epic** has none to share (ADR-0054).
+- Unset **Priority** ranks as `P2` for automatic selection only; the fallback is never stored or pushed. `tk add` assigns `P2` to accepted work unless overridden.
 - A **Ticket** has at most one **Effort**; an **Epic** has none.
 - **Effort** is a **Shared Field**. **Promotion** sets it when present, a local change records a `set_ticket_effort` **Mutation**, and **Backend Pull** imports it unless an unresolved `set_ticket_effort` **Mutation** shields it. An issue with no Effort, or an option **tk** does not name, reads as no **Effort** (ADR-0054).
 - **`tk next`** breaks ties in **Effective Priority** and own **Priority** by **Effort**, low first; a **Ticket** with no **Effort** ranks as `medium` (ADR-0015).
@@ -545,7 +545,7 @@ _Avoid_: ticket, tickets
 - An **Epic** has no **Selection State**.
 - **Selection State** is a **Local Field**.
 - The default **Selection State** is `accepted`; a newly **Adopted** **Backend Ticket** also defaults to `accepted`, since **Adopting** an issue is the choice to work it.
-- A `triage` **Ticket** carries no **Priority**; `accepted` and `parked` **Tickets** carry a **Priority**.
+- **Priority** may be unset on `triage`, `accepted`, and `parked` **Tickets**.
 - **Accept** moves a `triage` **Ticket** to `accepted` and assigns its **Priority**; accepting an already `accepted` **Ticket** is a harmless no-op.
 - **Accept** preserves a **Ticket**'s **Dependencies** and **External Blockers**, so an accepted **Ticket** may be immediately blocked.
 - **Park** moves an `accepted` **Ticket** to `parked` and preserves its **Priority**; parking an already `parked` **Ticket** is a harmless no-op.

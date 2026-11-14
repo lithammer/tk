@@ -184,7 +184,7 @@ fn plan_view_covers_every_state_and_ignores_scope() {
     Waiting
       ○ plan-4 ● P2 Blocked work [blocked by plan-3 (outside Plan)]
       ○ plan-5 ● P2 Parked work [parked]
-      ○ plan-6 Needs triage [triage]
+      ○ plan-6 ● unset Needs triage [triage]
 
     Done
       ✓ plan-7 ● P2 Finished work
@@ -1113,7 +1113,7 @@ fn plain_list_badges_every_selection_state() {
 
     tk!(p, "list", @"
     ○ project-1 ● P2 Accepted work
-    ○ project-2 ⊘ [triage] Captured idea
+    ○ project-2 ⊘ ● unset [triage] Captured idea
     ○ project-3 ● P2 [parked] Held work
     --------------------------------------------------------------------------------
     Total: 3 items (3 open)

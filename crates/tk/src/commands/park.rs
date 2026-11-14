@@ -1,16 +1,15 @@
 //! `tk park` — hold an accepted Ticket out of automatic selection.
 //!
-//! Parking keeps accepted work visible and ranked but excludes it from
-//! `tk next` until it is unparked (ADR-0027). It preserves the Ticket's
-//! Priority, so the held work returns to the queue at the same rank; the
-//! success line echoes that Priority. Parking an already-parked Ticket is an
-//! idempotent success; a triage Ticket must be accepted first. Selection State
-//! is a Local Field, so parking never emits a Mutation.
+//! Parking preserves Priority, including unset, and excludes the Ticket from
+//! `tk next` until unparked (ADR-0027). Parking an already-parked Ticket is a
+//! no-op; a triage Ticket must be accepted first. Selection State is a Local
+//! Field, so parking never emits a Mutation.
 
 use clap::Args as ClapArgs;
 
 use crate::cli::{CommandError, Deps, Exit};
 use crate::commands::resolver;
+use crate::domain::priority::Priority;
 use crate::store::repository::selection::{self, ParkError, ParkOutcome};
 
 /// Flags for `tk park`.
@@ -43,7 +42,11 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
             priority,
         }) => {
             let _ = writeln!(deps.stdout, "Parked Ticket: {display_id} - {title}");
-            let _ = writeln!(deps.stdout, "Priority: {priority}");
+            let _ = writeln!(
+                deps.stdout,
+                "Priority: {}",
+                priority.map_or("unset", Priority::text)
+            );
             Ok(Exit::Ok)
         }
         Ok(ParkOutcome::AlreadyParked { display_id }) => {

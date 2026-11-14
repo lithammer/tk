@@ -17,9 +17,9 @@ use std::fmt;
 /// `SelectionState::Accepted` is the default for normal `tk add` and the value
 /// newly imported Backend Tickets take: real work that can become ready for
 /// `tk next`. `Triage` is captured-but-unaccepted work that needs a human
-/// decision (and carries no Priority); `Parked` is accepted work intentionally
-/// held out of automatic selection. Triage and parked Tickets are excluded
-/// from `tk next` and do not contribute Effective Priority.
+/// decision; `Parked` is accepted work held out of automatic selection.
+/// Triage and parked Tickets are excluded from `tk next` and do not contribute
+/// Effective Priority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SelectionState {
     Triage,
