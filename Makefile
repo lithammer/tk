@@ -9,7 +9,7 @@ test:
 	cargo test
 
 lint:
-	cargo clippy
+	cargo clippy --all-targets
 
 run:
 	cargo run -- $(ARGS)
