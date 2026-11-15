@@ -1165,6 +1165,8 @@ clears Priority without changing Selection State.
 clears the Effort. All requested edits and their Mutations commit together in
 the Repository Store. Backend delivery uses complete title/body snapshots,
 separate Priority and Effort Mutations, and separate relationship Mutations.
+An Effort edit queues a Mutation only on a Backend that shares it (GitHub). On Jira,
+Effort stays local through edits, Pull, and Promotion.
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
 .SS "tk start"
@@ -1832,7 +1834,8 @@ Backend state without queuing a Mutation.
 If the Backend identity belongs to an Item previously detached, Re-Adopt
 binds that same Item again and takes the Backend's current Shared Fields.
 It preserves Selection State and Plan membership, and keeps Priority and
-Effort until the next Pull imports the Backend's. A Backend close
+Effort until the next Pull. Pull imports Priority and supported Effort;
+unsupported Effort stays local. A Backend close
 clears Work State; a Backend reopen clears an obsolete Closing Reason.
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '

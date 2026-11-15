@@ -25,13 +25,13 @@ The category of a **Ticket**: `task` or `bug`.
 _Avoid_: Type
 
 **Local Field**:
-A field the **Repository Store** owns outright; no **Backend** reads or writes it.
+A field the **Repository Store** owns outright for a given **Backend**; that Backend neither reads nor writes it.
 _Avoid_: Unsynced Field, Sync Excluded Field
 
 **Shared Field**:
 A field whose authority **tk** shares with a **Backend**: title, body,
-**Lifecycle**, **Ticket Kind**, **Priority**, and **Effort**. **Backend Pull** imports it
-and a **Mutation** may push it.
+**Lifecycle**, **Ticket Kind**, **Priority**, and **Effort** where the Backend
+supports it. **Backend Pull** imports it and a **Mutation** may push it.
 _Avoid_: Synced Field, Backend Field, Remote Field
 
 **Reserved Representation**:
@@ -45,7 +45,7 @@ How important or urgent a **Ticket**'s work is: `P0`, `P1`, `P2`, `P3`, or unset
 _Avoid_: Severity
 
 **Effort**:
-How much work a **Ticket** is expected to take, apart from how much it matters: `low`, `medium`, or `high`, or unset. A **Shared Field**: on GitHub it is the native Effort issue field (ADR-0054). **Epics** carry none.
+How much work a **Ticket** is expected to take, apart from how much it matters: `low`, `medium`, or `high`, or unset. A **Shared Field** on GitHub through its native Effort issue field; a **Local Field** on Jira (ADR-0054). **Epics** carry none.
 _Avoid_: Size, Estimate, Complexity, Story Points, Scope
 
 **Effective Priority**:
@@ -519,7 +519,7 @@ _Avoid_: ticket, tickets
 - **Priority** is a **Shared Field**. **Promotion** sets it, a local change records a `set_ticket_priority` **Mutation**, and **Backend Pull** imports it unless an unresolved `set_ticket_priority` **Mutation** shields it. An issue with no Priority, or an option **tk** does not name, reads as unset. An **Epic** has none to share (ADR-0054).
 - Unset **Priority** ranks as `P2` for automatic selection only; the fallback is never stored or pushed. `tk add` leaves Priority unset unless supplied.
 - A **Ticket** has at most one **Effort**; an **Epic** has none.
-- **Effort** is a **Shared Field**. **Promotion** sets it when present, a local change records a `set_ticket_effort` **Mutation**, and **Backend Pull** imports it unless an unresolved `set_ticket_effort` **Mutation** shields it. An issue with no Effort, or an option **tk** does not name, reads as no **Effort** (ADR-0054).
+- **Effort** is a **Shared Field** on GitHub. **Promotion** sets it when present, a local change records a `set_ticket_effort` **Mutation**, and **Backend Pull** imports it unless an unresolved `set_ticket_effort` **Mutation** shields it. An issue with no Effort, or an option **tk** does not name, reads as no **Effort** (ADR-0054). On Jira, **Effort** stays a **Local Field**: edits queue no Mutation, Promotion sends no value, and Pull preserves it.
 - **`tk next`** breaks ties in **Effective Priority** and own **Priority** by **Effort**, low first; a **Ticket** with no **Effort** ranks as `medium` (ADR-0015).
 - Lower **Priority** numbers sort before higher **Priority** numbers.
 - A candidate **Ticket**'s **Effective Priority** is the lowest of its own **Priority** and the **Effective Priorities** of every unfinished **Blocked Item** (**Item Status** `open` or `active`) it reaches through transitive `blocked_by` **Dependencies** within the active **Scope**. A **Ticket** **Container** counts as a **Blocked Item** of each **Ticket** it holds.

@@ -184,6 +184,7 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
             );
             Ok(Exit::Ok)
         }
+        Err(update::UpdateError::BackendKind(err)) => Err(CommandError::failure(err.to_string())),
         Err(update::UpdateError::NotFound) => Err(CommandError::failure(format!(
             "'{id}' is not a known Display ID or Alias",
             id = args.id

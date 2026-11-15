@@ -22,13 +22,13 @@ use crate::domain::backend_binding::BackendBinding;
 use crate::domain::backend_kind::BackendKind;
 use crate::domain::backend_operation::{
     AdoptedItem, BackendCreate, BackendEdit, BackendItemAddress, BackendItemRefresh,
-    BackendOperation, SharedTicketFields,
+    BackendOperation, BackendTicketFields,
 };
 use crate::domain::backend_outcome::{
     BackendCreateOutcome, BackendEditOutcome, Failure, FailureClass,
 };
 use crate::domain::binding_display_provenance::BindingDisplayProvenance;
-use crate::domain::effort::Effort;
+use crate::domain::effort::{BackendEffort, Effort};
 use crate::domain::item_class::ItemClass;
 use crate::domain::lifecycle::Lifecycle;
 use crate::domain::mutation_payload::{
@@ -589,6 +589,8 @@ pub fn ensure_adopt_available(conn: &Connection) -> Result<(), AdoptStoreError> 
 #[derive(Debug, Error)]
 pub enum LoadApplicableError {
     #[error(transparent)]
+    BackendKind(#[from] crate::domain::backend_kind::ParseBackendKindError),
+    #[error(transparent)]
     Storage(#[from] rusqlite::Error),
     /// SQL CHECK accepted a `mutation_type` text value the [`MutationType`]
     /// enum does not decode — fires when schema and enum drift.
@@ -820,7 +822,10 @@ pub fn resolve_backend_operation(
             BackendOperation::Create(BackendCreate::Ticket {
                 snapshot: TitleBody { title, body },
                 ticket_kind,
-                fields: SharedTicketFields { priority, effort },
+                fields: BackendTicketFields {
+                    priority,
+                    effort: BackendEffort::for_backend(promotion.backend_kind.parse()?, effort),
+                },
             })
         }
         (MutationType::PromoteEpic, MutationPayload::Promotion(promotion)) => {
@@ -1665,7 +1670,7 @@ pub fn merge_backend_refreshes(
             .map(|fields| fields.priority)
             .filter(|_| !shields.priority.contains(item_id.as_str()));
         let effort_write = ticket_fields
-            .map(|fields| fields.effort)
+            .and_then(|fields| fields.effort.shared())
             .filter(|_| !shields.effort.contains(item_id.as_str()));
         let (title_write, body_write) = if preserve_content {
             (None, None)
@@ -3122,9 +3127,9 @@ mod tests {
             )
             .unwrap();
             let backend = BackendItemRefresh {
-                ticket_fields: Some(SharedTicketFields {
+                ticket_fields: Some(BackendTicketFields {
                     priority: Some(Priority::P0),
-                    effort: None,
+                    effort: BackendEffort::Supported(None),
                 }),
                 ..refresh("Backend title", Lifecycle::Open)
             };
@@ -3194,9 +3199,9 @@ mod tests {
             )
             .unwrap();
             let backend = BackendItemRefresh {
-                ticket_fields: Some(SharedTicketFields {
+                ticket_fields: Some(BackendTicketFields {
                     priority: Some(Priority::P0),
-                    effort: None,
+                    effort: BackendEffort::Supported(None),
                 }),
                 ..refresh("Backend title", Lifecycle::Open)
             };

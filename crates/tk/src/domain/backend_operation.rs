@@ -5,7 +5,7 @@
 //! fields for an existing Backend Item, so a Backend Pull cannot redefine its
 //! Repository Store identity or Item Class (ADR-0034).
 
-use super::effort::Effort;
+use super::effort::BackendEffort;
 use super::lifecycle::Lifecycle;
 use super::mutation_payload::{EffortChange, LifecycleChange, PriorityChange, TitleBody};
 use super::priority::Priority;
@@ -103,9 +103,9 @@ pub enum BackendCreate {
         /// Current Ticket Kind from the Repository Store. This is transient
         /// delivery data, not persisted Promotion intent.
         ticket_kind: TicketKind,
-        /// Current Priority and Effort from the Repository Store.
-        /// Transient delivery data, like `ticket_kind`.
-        fields: SharedTicketFields,
+        /// Current Priority and supported Effort from the Repository Store.
+        /// Read at delivery time, not frozen in the Promotion payload.
+        fields: BackendTicketFields,
     },
     Epic {
         snapshot: TitleBody,
@@ -147,7 +147,7 @@ pub struct BackendItemRefresh {
     pub ticket_kind: Option<TicketKind>,
     /// The Ticket fields the Backend holds; `None` on an Epic issue
     /// preserves the stored values (ADR-0054).
-    pub ticket_fields: Option<SharedTicketFields>,
+    pub ticket_fields: Option<BackendTicketFields>,
     /// Backend keys of every Blocking Item the Backend lists for this Item,
     /// complete or the Pull fails (ADR-0056). Keys tk has no Item for are the
     /// Repository Store's to ignore.
@@ -175,12 +175,12 @@ impl BackendItemRefresh {
     }
 }
 
-/// The Shared Fields only a Ticket carries. Pull clears an unset field;
-/// Promotion omits it from Backend creation.
+/// Ticket fields at the Adapter boundary. Pull clears supported unset values;
+/// unsupported Effort stays local and carries no value to Backend creation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SharedTicketFields {
+pub struct BackendTicketFields {
     pub priority: Option<Priority>,
-    pub effort: Option<Effort>,
+    pub effort: BackendEffort,
 }
 
 /// One keyed refresh returned as part of a Backend Pull.
@@ -263,9 +263,9 @@ mod tests {
             refresh: BackendItemRefresh {
                 title: key.into(),
                 body: String::new(),
-                ticket_fields: Some(SharedTicketFields {
+                ticket_fields: Some(BackendTicketFields {
                     priority: Some(Priority::P2),
-                    effort: None,
+                    effort: BackendEffort::Supported(None),
                 }),
                 ..BackendItemRefresh::for_test()
             },

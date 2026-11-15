@@ -21,7 +21,7 @@ use serde::Deserialize;
 use crate::domain::backend_kind::BackendKind;
 use crate::domain::backend_operation::{
     AdoptedItem, BackendCreate, BackendEdit, BackendItemAddress, BackendItemIdentity,
-    BackendItemInspection, BackendItemRefresh, BackendPull, BackendPullItem, SharedTicketFields,
+    BackendItemInspection, BackendItemRefresh, BackendPull, BackendPullItem, BackendTicketFields,
 };
 use crate::domain::backend_outcome::{
     BackendCreateOutcome, BackendEditOutcome, Failure, FailureClass,
@@ -469,7 +469,7 @@ impl GithubAdapter<'_> {
         &self,
         repository: &'r RepositoryContext,
         type_name: Option<&str>,
-        ticket_fields: Option<SharedTicketFields>,
+        ticket_fields: Option<BackendTicketFields>,
     ) -> Result<CreationTaxonomy<'r>, AdapterReadError> {
         let host = repository.host()?;
         let issue_type_id = type_name
@@ -853,7 +853,7 @@ impl RepositoryContext {
 type CreationTaxonomy<'a> = (
     &'a str,
     Option<String>,
-    Option<(ResolvedFields, SharedTicketFields)>,
+    Option<(ResolvedFields, BackendTicketFields)>,
 );
 
 struct PullGroup {
@@ -1122,7 +1122,7 @@ impl GhIssue {
     fn into_refresh(
         self,
         ticket_kind: TicketKind,
-        ticket_fields: Option<SharedTicketFields>,
+        ticket_fields: Option<BackendTicketFields>,
     ) -> Result<BackendItemRefresh, AdapterReadError> {
         let status = self.lifecycle()?;
         let blocked_by = blocking_keys(self.number, self.blocked_by)?;
@@ -1310,6 +1310,7 @@ fn rejected_edit(output: &RunOutput) -> BackendEditOutcome {
 mod tests {
     use super::*;
     use crate::domain::backend_operation::BackendItemAddress;
+    use crate::domain::effort::BackendEffort;
     use crate::domain::item_class::ItemClass;
     use crate::domain::mutation_payload::{
         ContainerRef, EffortChange, LifecycleChange, MutationPayload, TitleBody,
@@ -1763,9 +1764,9 @@ mod tests {
                 body: "Bug body".into(),
             },
             ticket_kind: TicketKind::Bug,
-            fields: SharedTicketFields {
+            fields: BackendTicketFields {
                 priority: Some(Priority::P2),
-                effort: None,
+                effort: BackendEffort::Supported(None),
             },
         });
 
@@ -2974,9 +2975,9 @@ mod tests {
                 body: "Bug body".into(),
             },
             ticket_kind: TicketKind::Bug,
-            fields: SharedTicketFields {
+            fields: BackendTicketFields {
                 priority: Some(Priority::P2),
-                effort: None,
+                effort: BackendEffort::Supported(None),
             },
         });
 
