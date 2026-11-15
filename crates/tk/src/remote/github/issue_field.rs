@@ -1,8 +1,8 @@
 //! Priority and Effort as GitHub's native single-select issue fields
 //! (ADR-0054).
 
-use crate::domain::backend_operation::SharedTicketFields;
-use crate::domain::effort::Effort;
+use crate::domain::backend_operation::BackendTicketFields;
+use crate::domain::effort::{BackendEffort, Effort};
 use crate::domain::priority::Priority;
 use crate::remote::adapter::AdapterReadError;
 
@@ -132,12 +132,18 @@ impl ResolvedFields {
     }
 
     /// The wire values that set `fields`; unset fields are left out.
-    pub(super) fn values(&self, fields: SharedTicketFields) -> Vec<FieldValue<'_>> {
+    pub(super) fn values(&self, fields: BackendTicketFields) -> Vec<FieldValue<'_>> {
         fields
             .priority
             .map(|priority| self.priority.value(priority))
             .into_iter()
-            .chain(fields.effort.map(|effort| self.effort.value(effort)))
+            .chain(
+                fields
+                    .effort
+                    .shared()
+                    .flatten()
+                    .map(|effort| self.effort.value(effort)),
+            )
             .collect()
     }
 }
@@ -147,10 +153,10 @@ impl ResolvedFields {
 pub(super) fn read_ticket_fields(
     values: Option<&IssueFieldValues>,
     owner: &str,
-) -> Result<SharedTicketFields, AdapterReadError> {
-    Ok(SharedTicketFields {
+) -> Result<BackendTicketFields, AdapterReadError> {
+    Ok(BackendTicketFields {
         priority: read::<Priority>(values, owner)?,
-        effort: read::<Effort>(values, owner)?,
+        effort: BackendEffort::Supported(read::<Effort>(values, owner)?),
     })
 }
 
@@ -242,7 +248,7 @@ mod tests {
             ));
             assert_eq!(
                 read_ticket_fields(Some(&values), "o").unwrap().effort,
-                Some(expected),
+                BackendEffort::Supported(Some(expected)),
                 "{option}"
             );
         }

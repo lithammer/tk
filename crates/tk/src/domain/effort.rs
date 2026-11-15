@@ -1,4 +1,4 @@
-//! Effort is a Shared Field: how much work a Ticket is expected to take,
+//! Effort is how much work a Ticket is expected to take,
 //! apart from how much it matters (ADR-0054).
 //!
 //! The three-variant set is mirrored verbatim in the `items.effort` CHECK
@@ -8,6 +8,7 @@
 use std::fmt;
 use std::str::FromStr;
 
+use super::backend_kind::BackendKind;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -55,6 +56,35 @@ impl FromStr for Effort {
             "medium" => Ok(Self::Medium),
             "high" => Ok(Self::High),
             other => Err(ParseEffortError(other.to_string())),
+        }
+    }
+}
+
+/// Effort at the Adapter boundary. Unsupported preserves the local value on
+/// Pull and carries no value to Promotion; supported `None` clears on Pull.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendEffort {
+    Unsupported,
+    Supported(Option<Effort>),
+}
+
+impl BackendEffort {
+    /// Effort support is fixed per Backend, independent of repository taxonomy
+    /// (ADR-0054).
+    #[must_use]
+    pub fn for_backend(backend: BackendKind, value: Option<Effort>) -> Self {
+        match backend {
+            BackendKind::Github => Self::Supported(value),
+            BackendKind::Jira => Self::Unsupported,
+        }
+    }
+
+    /// `None` leaves local Effort untouched; `Some(None)` clears it on Pull.
+    #[must_use]
+    pub fn shared(self) -> Option<Option<Effort>> {
+        match self {
+            Self::Unsupported => None,
+            Self::Supported(value) => Some(value),
         }
     }
 }

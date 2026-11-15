@@ -35,8 +35,8 @@ The GitHub Adapter requires these by exact, case-insensitive name:
 A missing one fails the operation with an error that names it and the owner,
 for example `required issue type 'Epic' is missing on lithammer`. tk never
 creates taxonomy (ADR-0049 rule 1). There is no stored capability record and
-no per-field switch between Shared and Local: if tk uses it, the Backend must
-have it.
+no per-repository switch between Shared and Local: GitHub must have these
+fields. Effort authority differs by Backend, as described below.
 
 Promotion reports a missing type as an Adapter read error from capability
 resolution, which aborts preflight and leaves the outbox empty; the planner
@@ -145,8 +145,8 @@ tk-194 planned a local Size: how much work a Ticket is expected to take,
 apart from how much it matters. GitHub's Effort field is that concept, and it
 sits only on Task and Bug in the starter pack, which matches tk-194's rule
 that Epics carry none. Effort is optional, takes `low`, `medium`, or `high`,
-and crosses as a Shared Field. An issue with no Effort, or an option tk does
-not name, maps to unset.
+and crosses as a Shared Field on GitHub. An issue with no Effort, or an option
+tk does not name, maps to unset.
 
 A local change queues a `set_ticket_effort` Mutation whose payload is the
 target value or none. Apply sends a value as `setIssueFieldValue` and none as
@@ -154,6 +154,25 @@ target value or none. Apply sends a value as `setIssueFieldValue` and none as
 reports `success` both when it removes a value and when the field is already
 unset, so a replayed clear converges. Pull shields Effort per Ticket while that
 Mutation is `pending` or `failed`, as it does Priority.
+
+### Effort stays local on Jira
+
+Jira Effort stays Local. Story Points do not mean tk's Ticket-only
+low/medium/high Effort, and tk does not add labels or taxonomy to sync it.
+Setting or clearing Effort writes the Repository Store without an Effort
+Mutation, including while Promotion is pending. Promotion keeps the stored
+value but sends none; its capability checks require no Effort representation.
+Pull preserves it. Selection State, including parked, stays Local on every
+Backend.
+
+The Adapter boundary distinguishes unsupported Effort from supported-but-unset
+Effort. Unsupported carries no value; supported carries a value or an explicit
+clear. Each Backend has a fixed policy. GitHub requires its native Effort field
+and options; a missing field is an error, never a reason to make Effort Local.
+Pending and failed GitHub Effort Mutations shield local values and clears on Pull.
+
+The stored Effort column and Mutation payloads keep their shape, so no migration
+is needed.
 
 ## Considered Options
 

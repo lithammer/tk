@@ -3,11 +3,10 @@
 //!
 //! Diffs each requested field against the stored value inside the same
 //! `begin immediate` transaction the read used, writes only the changed
-//! columns, and — for a backend-bound Item — emits one Mutation per changed
-//! field-group (title/body becomes a single full snapshot; a parent change is
-//! one `set_ticket_container` or `clear_ticket_container`, never a pair
-//! (ADR-0055); a priority change is `set_ticket_priority` and an effort change
-//! `set_ticket_effort`, ADR-0054).
+//! columns. For a backend-bound Item, title/body edits emit one full snapshot;
+//! a parent change emits one `set_ticket_container` or `clear_ticket_container`,
+//! never a pair (ADR-0055). Priority changes emit `set_ticket_priority`; Effort
+//! changes emit `set_ticket_effort` only where Effort is Shared (ADR-0054).
 //!
 //! Title/body names one Item, so the Ticket's own Backend Binding gates it. A
 //! Containment Mutation names two, so `set_ticket_container` is emitted only
@@ -25,7 +24,7 @@ use rusqlite::{OptionalExtension, params};
 
 use crate::clock::Clock;
 use crate::domain::backend_binding::BackendBinding;
-use crate::domain::effort::Effort;
+use crate::domain::effort::{BackendEffort, Effort};
 use crate::domain::item_class::ItemClass;
 use crate::domain::mutation_payload::{
     ContainerRef, EffortChange, MutationPayload, PriorityChange, TitleBody,
@@ -108,6 +107,8 @@ pub struct UpdatedItem {
 /// id into its own line.
 #[derive(Debug, thiserror::Error)]
 pub enum UpdateError {
+    #[error(transparent)]
+    BackendKind(#[from] crate::domain::backend_kind::ParseBackendKindError),
     /// `id` does not resolve to a live row.
     #[error("item not found")]
     NotFound,
@@ -223,7 +224,7 @@ pub fn update_item<C: Clock + ?Sized>(
     // `tk sync` belongs in the Mutation Log, ordered behind the Promotion that
     // will give the Item its backend identity.
     let intent = mutations::resolve_backend_binding(&tx, req.id)?;
-    if intent.is_backend_bound() {
+    if let Some(backend) = intent.backend_kind() {
         let container_mutation = match parent {
             FieldEdit::Set(new_id) if containment_is_backend_intent(&tx, &intent, new_id)? => {
                 Some((MutationType::SetTicketContainer, new_id))
@@ -282,7 +283,10 @@ pub fn update_item<C: Clock + ?Sized>(
                 },
             )?;
         }
-        if let (true, effort) = new_effort.column() {
+        if let (true, effort) = new_effort.column()
+            && let BackendEffort::Supported(effort) =
+                BackendEffort::for_backend(backend.parse()?, effort)
+        {
             mutations::append(
                 &tx,
                 mutations::AppendRequest {

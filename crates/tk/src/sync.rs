@@ -133,7 +133,8 @@ impl RunSyncError {
                 | LoadApplicableError::PayloadVariantMissing(_),
             ) => RunSyncErrorCategory::MutationSchemaDrift(self),
             Self::Load(
-                LoadApplicableError::PayloadJson { .. }
+                LoadApplicableError::BackendKind(_)
+                | LoadApplicableError::PayloadJson { .. }
                 | LoadApplicableError::OperationShapeMismatch { .. }
                 | LoadApplicableError::MissingBackendIdentity { .. }
                 | LoadApplicableError::MissingTicketKind { .. },

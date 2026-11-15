@@ -24,11 +24,13 @@ it to the concepts gh-68 named.
 
 ### Two classes of field, and one test between them
 
-A field on a Ticket or Epic is one of two classes.
+A field on a Ticket or Epic is one of two classes for a given Backend.
+Effort is Shared on GitHub and Local on Jira (ADR-0054). A Backend without
+a suitable slot keeps the field Local; tk does not create taxonomy to sync it.
 
-The Repository Store owns a **Local Field** outright. No Backend reads or
-writes it. Selection State, Work State, Closing Reason, and today Priority
-are Local Fields.
+The Repository Store owns a **Local Field** outright; the Backend neither
+reads nor writes it. Selection State, Work State, and Closing Reason are
+Local on every Backend.
 
 A **Shared Field** is one whose authority tk shares with a Backend: Backend
 Pull imports it, and a Mutation may push it. Title, body, Lifecycle, and Ticket
