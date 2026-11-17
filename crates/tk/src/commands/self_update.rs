@@ -766,7 +766,7 @@ fn smoke_output_contains_token(text: &[u8], token: &str) -> bool {
         return false;
     }
     let bytes = token.as_bytes();
-    let separators = [b' ', b'\t', b'\r', b'\n', b'(', b')'];
+    let separators = *b" \t\r\n()";
     let mut start = 0;
     let len = text.len();
     while start < len {
