@@ -244,7 +244,7 @@ mod tests {
                 .map(String::from)
                 .collect();
             assert_eq!(crate::cli::run_argv(h.deps(), &argv).unwrap(), Exit::Usage);
-            assert!(h.out().is_empty());
+            assert_eq!(h.out(), "");
             assert_eq!(h.stdin.position(), 0);
         }
     }

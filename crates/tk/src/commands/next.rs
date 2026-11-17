@@ -279,7 +279,7 @@ mod tests {
                 },
             );
             assert_eq!(code, Exit::Failure);
-            assert!(h.stdout.is_empty());
+            assert_eq!(h.stdout, [] as [u8; 0]);
             let stderr = String::from_utf8(h.stderr).unwrap();
             assert!(stderr.contains("tk next: no ready Tickets"));
             assert!(!stderr.contains("Epic"));

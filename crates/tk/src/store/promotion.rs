@@ -1600,7 +1600,7 @@ mod tests {
         assert_eq!(graph.target_id, "t1");
         assert!(!graph.children_requested);
         assert_eq!(item_ids(&graph), vec!["t1"]);
-        assert!(graph.dependencies.is_empty());
+        assert_eq!(graph.dependencies, []);
 
         let target = &graph.items[0];
         assert_eq!(target.display_id, "tk-1");
@@ -3336,7 +3336,7 @@ mod tests {
         let report = cancel(&mut conn, "t1").unwrap();
 
         assert_eq!(state_of(&conn, 1).unwrap(), MutationState::Abandoned);
-        assert!(report.cancelled_promotions.is_empty());
+        assert_eq!(report.cancelled_promotions, []);
         assert_eq!(report.abandoned_promotions.len(), 1);
         assert_eq!(
             mutations::resolve_backend_binding(&conn, "t1").unwrap(),

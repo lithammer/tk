@@ -882,7 +882,7 @@ mod tests {
                 &mut stderr,
             );
             assert_eq!(code, Exit::Failure);
-            assert!(stdout.is_empty());
+            assert_eq!(stdout, [] as [u8; 0]);
             let s = String::from_utf8(stderr).unwrap();
             assert!(s.contains("development builds cannot self-update"));
         }
@@ -920,7 +920,7 @@ mod tests {
         assert_eq!(code, Exit::Ok);
         let s = String::from_utf8(stdout).unwrap();
         assert!(s.contains("already on latest release v0.5.0"));
-        assert!(stderr.is_empty());
+        assert_eq!(stderr, [] as [u8; 0]);
     }
 
     #[test]
@@ -1451,7 +1451,7 @@ mod tests {
 
             assert_eq!(code, Exit::Failure);
             assert_eq!(String::from_utf8(stderr).unwrap(), expected);
-            assert!(stdout.is_empty());
+            assert_eq!(stdout, [] as [u8; 0]);
             assert!(!stage_path.exists());
             assert!(!target_dir.join("tk").exists());
             runner.assert_all_consumed();

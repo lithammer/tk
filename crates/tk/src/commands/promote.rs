@@ -2414,7 +2414,7 @@ mod tests {
         let mut stderr = Vec::new();
         error.render(&mut stderr, "promote", Styler::plain().for_stderr());
 
-        assert!(stdout.is_empty());
+        assert_eq!(stdout, [] as [u8; 0]);
         assert_eq!(
             String::from_utf8(stderr).unwrap(),
             "tk promote: Repository Store corruption: Promotion alias tk-2 changed ownership\n"

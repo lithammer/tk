@@ -462,7 +462,7 @@ mod tests {
                 let exit = run_argv(h.deps_with(Styler { stdout, stderr }), &args).unwrap();
 
                 assert_eq!(exit, Exit::Failure);
-                assert!(h.stdout.is_empty());
+                assert_eq!(h.stdout, [] as [u8; 0]);
                 assert_eq!(
                     h.err(),
                     match stderr {
@@ -486,7 +486,7 @@ mod tests {
         let exit = run_argv(h.deps_with(Styler::always()), &args).unwrap();
 
         assert_eq!(exit, Exit::Usage);
-        assert!(h.stdout.is_empty());
+        assert_eq!(h.stdout, [] as [u8; 0]);
         assert_eq!(
             h.err(),
             "\x1b[1m\x1b[31mtk grep:\x1b[39m\x1b[22m pattern must not be empty\n"
@@ -521,8 +521,8 @@ mod tests {
         let exit = run_argv(h.deps_with(Styler::always()), &args).unwrap();
 
         assert_eq!(exit, Exit::NoMatch);
-        assert!(h.stdout.is_empty());
-        assert!(h.stderr.is_empty());
+        assert_eq!(h.stdout, [] as [u8; 0]);
+        assert_eq!(h.stderr, [] as [u8; 0]);
     }
 
     #[test]
@@ -535,7 +535,7 @@ mod tests {
         let exit = run_argv(h.deps_with(Styler::always()), &args).unwrap();
 
         assert_eq!(exit, Exit::Usage);
-        assert!(h.stdout.is_empty());
+        assert_eq!(h.stdout, [] as [u8; 0]);
         assert!(h.err().contains("unexpected argument '--unknown'"));
         assert!(!h.stderr.contains(&0x1b));
     }

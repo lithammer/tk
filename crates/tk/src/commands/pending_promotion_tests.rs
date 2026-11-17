@@ -58,7 +58,7 @@ fn grep_identifies_pending_promotion_without_changing_content_matches() {
         "{output}"
     );
     assert!(output.contains("needle"), "{output}");
-    assert!(run(&store, &["grep", "--quiet", "needle"]).is_empty());
+    assert_eq!(run(&store, &["grep", "--quiet", "needle"]), "");
 }
 
 #[test]

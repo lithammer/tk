@@ -866,7 +866,7 @@ mod tests {
                 [],
             )
             .unwrap();
-        assert!(ready(&store).is_empty());
+        assert_eq!(ready(&store), []);
 
         store
             .conn

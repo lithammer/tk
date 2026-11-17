@@ -215,7 +215,7 @@ mod tests {
         let store = open_seeded();
         seed_ticket(&store, "t1", "tk-1", "Auth rework", "open", 1);
         let rows = search_rows(&store, "nonexistent").unwrap();
-        assert!(rows.is_empty());
+        assert_eq!(rows, []);
     }
 
     #[test]

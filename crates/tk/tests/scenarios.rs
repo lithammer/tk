@@ -33,7 +33,7 @@ fn stderr_diagnostics_honor_forced_color_and_no_color() {
     ] {
         let out = support::run(&repo.cwd, &repo.root, &args, &env);
         assert_eq!(out.status.code(), Some(1));
-        assert!(out.stdout.is_empty());
+        assert_eq!(out.stdout, [] as [u8; 0]);
         assert_eq!(out.stderr, expected.as_bytes(), "env={env:?}");
     }
 }
