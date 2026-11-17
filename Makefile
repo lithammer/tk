@@ -3,7 +3,7 @@
 .SUFFIXES:
 
 all:
-	cargo build
+	cargo build --bin tk
 
 test:
 	cargo test
@@ -12,10 +12,10 @@ lint:
 	cargo clippy --all-targets
 
 run:
-	cargo run -- $(ARGS)
+	cargo run --bin tk -- $(ARGS)
 
 release:
-	cargo build --release
+	cargo build --release --bin tk
 
 clean:
 	cargo clean

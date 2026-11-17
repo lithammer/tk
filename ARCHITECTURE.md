@@ -41,6 +41,7 @@ crates/tk/src/
   sync.rs                  sync engine orchestration
 crates/tk/tests/
   scenarios.rs             real-Git command scenarios (insta, isolated child processes)
+  support/cli.rs           tk-test-helper process entrypoint for CLI tests
 ```
 
 Only add modules when a slice needs them. Prefer moving reusable behavior into a

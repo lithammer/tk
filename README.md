@@ -49,7 +49,8 @@ GH_TOKEN="$(gh auth token --hostname github.com)" tk self-update
 
 ### Build from source <a id="build-from-source"></a>
 
-Run `cargo build --release`; the binary is written to `target/release/tk`.
+Run `cargo build --release --bin tk`; the binary is written to
+`target/release/tk`.
 
 For changes to command help or the manual, follow
 [Editing the manual](man/README.md).

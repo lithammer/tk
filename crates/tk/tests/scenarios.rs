@@ -1,6 +1,6 @@
 //! Real-Git CLI scenarios through the command dependency seam (ADR-0053).
 //!
-//! Each command runs in a child test process with an isolated data root.
+//! Each command runs through tk-test-helper with an isolated data root.
 //! Environment changes stay per-child; Store IDs and dates are redacted only
 //! where their values are outside the rendered contract.
 
