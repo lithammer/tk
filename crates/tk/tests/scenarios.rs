@@ -3027,36 +3027,32 @@ fn legacy_migration_refuses_old_wal_connections_and_includes_uncheckpointed_data
     old.pragma_update(None, "journal_mode", "wal").unwrap();
     old.execute("update items set title = 'Old process write'", [])
         .unwrap();
+
     let out = p.run("init");
+
     assert!(out.contains("database is locked"), "{out}");
     assert!(path.is_file());
-    drop(old);
-    let output = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "legacy_wal_child", "--ignored"])
-        .env("TK_TEST_LEGACY_DATABASE", &path)
-        .output()
+
+    old.set_db_config(
+        rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+        true,
+    )
+    .unwrap();
+    old.execute("update items set title = 'Uncheckpointed WAL write'", [])
         .unwrap();
-    assert!(output.status.success());
+    old.close().unwrap();
+
     assert!(
         fs::metadata(path.with_file_name("tk.db-wal"))
             .unwrap()
             .len()
             > 32
     );
+
     let out = p.run("init");
+
     assert!(out.contains("Migrated Repository Store"), "{out}");
     assert!(p.run("show legacy-1").contains("Uncheckpointed WAL write"));
-}
-
-#[test]
-#[ignore = "legacy SQLite process exits without closing its WAL connection"]
-fn legacy_wal_child() {
-    let path = std::env::var_os("TK_TEST_LEGACY_DATABASE").unwrap();
-    let conn = rusqlite::Connection::open(PathBuf::from(path)).unwrap();
-    conn.pragma_update(None, "journal_mode", "wal").unwrap();
-    conn.execute("update items set title = 'Uncheckpointed WAL write'", [])
-        .unwrap();
-    std::process::exit(0);
 }
 
 #[test]
