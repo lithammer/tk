@@ -20,7 +20,7 @@ if [ ! -x "$bin" ]; then
 	rm -rf "$src"
 	mkdir -p "$src"
 	git -C "$root" archive "$rev" | tar -x -C "$src"
-	cargo build -q --manifest-path "$src/Cargo.toml" --target-dir "$cache/target"
+	cargo build -q --bin tk --manifest-path "$src/Cargo.toml" --target-dir "$cache/target"
 	find "$cache" -mindepth 1 -maxdepth 1 -name 'tk-*' -delete
 	cp "$cache/target/debug/tk" "$bin"
 	rm -rf "$src"

@@ -2813,7 +2813,7 @@ mod tests {
                 through_display_ids: vec!["tk-3".into()],
             }]
         );
-        assert!(blocking_ids(&conn, "t2").is_empty());
+        assert_eq!(blocking_ids(&conn, "t2"), [] as [std::string::String; 0]);
         let title: String = conn
             .query_row("select title from items where id = 't2'", [], |row| {
                 row.get(0)

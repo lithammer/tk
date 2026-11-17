@@ -1,6 +1,6 @@
 //! Real-Git CLI scenarios through the command dependency seam (ADR-0053).
 //!
-//! Each command runs in a child test process with an isolated data root.
+//! Each command runs through tk-test-helper with an isolated data root.
 //! Environment changes stay per-child; Store IDs and dates are redacted only
 //! where their values are outside the rendered contract.
 
@@ -33,7 +33,7 @@ fn stderr_diagnostics_honor_forced_color_and_no_color() {
     ] {
         let out = support::run(&repo.cwd, &repo.root, &args, &env);
         assert_eq!(out.status.code(), Some(1));
-        assert!(out.stdout.is_empty());
+        assert_eq!(out.stdout, [] as [u8; 0]);
         assert_eq!(out.stderr, expected.as_bytes(), "env={env:?}");
     }
 }

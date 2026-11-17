@@ -433,9 +433,12 @@ mod tests {
             run(&mut conn, &mut fake),
             Err(RunSyncError::ApplyingMutation(7))
         ));
-        assert!(fake.captured_pull_keys.is_empty());
-        assert!(fake.captured_edits.is_empty());
-        assert!(fake.captured_creates.is_empty());
+        assert_eq!(
+            fake.captured_pull_keys,
+            [] as [std::vec::Vec<std::string::String>; 0]
+        );
+        assert_eq!(fake.captured_edits, []);
+        assert_eq!(fake.captured_creates, []);
     }
 
     #[test]
@@ -474,8 +477,11 @@ mod tests {
                 crate::store::sync::BackendCohortError::MultipleBackendKinds
             ))
         ));
-        assert!(fake.captured_pull_keys.is_empty());
-        assert!(fake.captured_edits.is_empty());
+        assert_eq!(
+            fake.captured_pull_keys,
+            [] as [std::vec::Vec<std::string::String>; 0]
+        );
+        assert_eq!(fake.captured_edits, []);
     }
 
     #[test]
@@ -516,8 +522,11 @@ mod tests {
                 }
             ))
         ));
-        assert!(fake.captured_pull_keys.is_empty());
-        assert!(fake.captured_edits.is_empty());
+        assert_eq!(
+            fake.captured_pull_keys,
+            [] as [std::vec::Vec<std::string::String>; 0]
+        );
+        assert_eq!(fake.captured_edits, []);
     }
 
     #[test]
@@ -834,7 +843,7 @@ mod tests {
         }
 
         // Apply never invoked; row still pending.
-        assert!(fake.captured_edits.is_empty());
+        assert_eq!(fake.captured_edits, []);
         assert_eq!(
             fake.captured_pull_keys,
             [vec!["1".to_string(), "2".to_string()]]
@@ -1156,7 +1165,7 @@ mod tests {
             assert_eq!(origin, "local");
             assert_eq!(key, None);
             assert_eq!(fake.captured_creates.len(), 1);
-            assert!(fake.captured_edits.is_empty());
+            assert_eq!(fake.captured_edits, []);
             assert_eq!(state_of(&conn, 2).unwrap(), MutationState::Pending);
         }
     }

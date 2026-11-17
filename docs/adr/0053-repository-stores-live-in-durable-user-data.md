@@ -154,12 +154,15 @@ files and failed migrations. Association, data-root, collision, legacy, and
 recovery refusals add literal message bodies. Other command messages stay
 unchanged. Prime still succeeds silently on any Store-open failure (ADR-0020).
 
-The scenario and concurrency tests run `cli::run_argv` in a child test process
-with real Git and an injected data root. This amends ADR-0031's built-binary
-requirement for those tests: Windows resolves LocalAppData through a known-folder
-API, so an environment override cannot isolate it. Test-only root and RNG inputs
-exist in the test harness, never in the shipped binary. Release smoke tests
-continue to exercise the production process shim on native CI runners.
+The scenario and concurrency tests run `cli::run_argv` through a separate
+`tk-test-helper` executable with real Git and an injected data root. This amends
+ADR-0031's built-binary requirement for those tests: Windows resolves LocalAppData
+through a known-folder API, so an environment override cannot isolate it.
+The helper accepts command arguments and writes directly to stdout and stderr;
+it is not a test entry point. Root, RNG, and fault inputs stay in the helper,
+never in the shipped `tk` binary. Production builds select `--bin tk` to exclude
+the helper. Release smoke tests continue to exercise the production process
+shim on native CI runners.
 
 ## Legacy migration protocol
 

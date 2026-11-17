@@ -14,7 +14,7 @@ scratch="$root/target/dev-tk"
 
 mkdir -p "$scratch/repo"
 [ -d "$scratch/repo/.git" ] || git init -q "$scratch/repo"
-cargo build -q --manifest-path "$root/Cargo.toml"
+cargo build -q --bin tk --manifest-path "$root/Cargo.toml"
 
 cd "$scratch/repo"
 XDG_DATA_HOME="$scratch/xdg" exec "$root/target/debug/tk" "$@"

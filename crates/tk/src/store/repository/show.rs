@@ -413,10 +413,10 @@ mod tests {
         assert_eq!(item.selection_state, Some(SelectionState::Accepted));
         assert_eq!(item.status, ItemStatus::Open);
         assert!(item.parent.is_none());
-        assert!(item.children.is_empty());
-        assert!(item.blocked_by.is_empty());
-        assert!(item.blocking.is_empty());
-        assert!(item.external_blockers.is_empty());
+        assert_eq!(item.children, []);
+        assert_eq!(item.blocked_by, []);
+        assert_eq!(item.blocking, []);
+        assert_eq!(item.external_blockers, []);
     }
 
     #[test]

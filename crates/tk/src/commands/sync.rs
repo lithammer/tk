@@ -615,7 +615,7 @@ mod tests {
         let code = run(h.deps(), &["sync"]);
 
         assert_eq!(code, Exit::Failure);
-        assert!(h.stderr.is_empty());
+        assert_eq!(h.stderr, [] as [u8; 0]);
         assert_eq!(
             String::from_utf8(h.stdout).unwrap(),
             "Sync complete: 0 pulled, 0 applied, stopped at 1.\n"
@@ -955,7 +955,7 @@ mod tests {
         let code = run(h.deps(), &["sync", "--skip", "1"]);
 
         assert_eq!(code, Exit::Failure);
-        assert!(h.stdout.is_empty());
+        assert_eq!(h.stdout, [] as [u8; 0]);
         assert_eq!(
             h.err(),
             "tk sync: failed to read Repository Store\nno such table: mutations\n"

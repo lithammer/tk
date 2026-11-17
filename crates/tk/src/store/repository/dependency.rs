@@ -792,6 +792,9 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(mutation_types(&store.conn).unwrap().is_empty());
+        assert_eq!(
+            mutation_types(&store.conn).unwrap(),
+            [] as [std::string::String; 0]
+        );
     }
 }

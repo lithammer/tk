@@ -250,7 +250,7 @@ mod tests {
 
         1 remaining · 0/1 done
         ");
-        assert!(h.err().is_empty());
+        assert_eq!(h.err(), "");
     }
 
     #[test]
