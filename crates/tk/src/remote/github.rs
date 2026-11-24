@@ -443,20 +443,13 @@ impl GithubAdapter<'_> {
             field_values,
         );
         match graphql::execute(self.graphql.as_ref(), &operation) {
-            GraphqlObservation::NotStarted(failure) => BackendCreateOutcome::Rejected(Failure {
-                detail: format!("GraphQL request did not start: {}", failure.detail()),
-                class: FailureClass::Unknown,
-                retry_after_s: None,
-            }),
-            GraphqlObservation::OutcomeUnobserved(detail) => {
-                BackendCreateOutcome::Indeterminate(Failure {
-                    detail: format!(
-                        "GraphQL request started, but its outcome is unknown: {detail}"
-                    ),
-                    class: FailureClass::Unknown,
-                    retry_after_s: None,
-                })
-            }
+            GraphqlObservation::NotStarted(failure) => BackendCreateOutcome::rejected(format!(
+                "GraphQL request did not start: {}",
+                failure.detail()
+            )),
+            GraphqlObservation::OutcomeUnobserved(detail) => BackendCreateOutcome::indeterminate(
+                format!("GraphQL request started, but its outcome is unknown: {detail}"),
+            ),
             GraphqlObservation::Completed { exchange, envelope } => {
                 Self::classify_creation(&exchange, envelope)
             }
@@ -1263,36 +1256,27 @@ impl<'a> GithubIssueAddress<'a> {
     }
 }
 
-/// Classify a non-zero `gh` failure into a [`FailureClass`] (ADR-0016).
-///
-/// A conservative, spike-grounded set of mechanical anchors; everything
-/// unmatched stays `Unknown` (the honest common case, since the GraphQL-backed
-/// `gh issue` subcommands surface most failures as `GraphQL: <message>` with no
-/// stable `HTTP <code>:` prefix). Precedence matters: a 403 collides between
-/// auth and rate-limit, so the rate-limit anchors are tested first.
-///
-/// Exit status does not enter classification: `gh` exits 1 for almost
-/// everything and even exit-4-for-auth is unreliable (cli/cli#9338). The
-/// classification therefore gates on diagnostic text alone. `retry_after_s`
-/// stays `None` because gh discards the rate-limit reset header from stderr.
-fn classify(stderr: &str) -> FailureClass {
-    let s = stderr.to_ascii_lowercase();
-    if s.contains("rate limit exceeded") || s.contains("secondary rate limit") {
+/// GitHub reports issue validation in HTTP 200 GraphQL responses.
+/// Rate-limit messages take precedence over auth hints in the same diagnostic.
+fn classify(detail: &str) -> FailureClass {
+    let detail = detail.to_ascii_lowercase();
+    if detail.contains("rate limit exceeded") || detail.contains("secondary rate limit") {
         FailureClass::RateLimited
-    } else if s.contains("http 401") || s.contains("bad credentials") || s.contains("gh auth login")
+    } else if detail.contains("http 401")
+        || detail.contains("bad credentials")
+        || detail.contains("gh auth login")
     {
         FailureClass::Auth
-    } else if s.contains("http 422") {
-        FailureClass::Validation
-    } else if s.contains("http 502") || s.contains("http 503") || s.contains("http 504") {
+    } else if detail.contains("http 502")
+        || detail.contains("http 503")
+        || detail.contains("http 504")
+    {
         FailureClass::Transient
     } else {
         FailureClass::Unknown
     }
 }
 
-/// Trim the captured stderr to a single clean diagnostic line for the failure
-/// detail / `AdapterReadError::Failed` payload.
 fn stderr_string(output: &RunOutput) -> String {
     String::from_utf8_lossy(&output.stderr).trim().to_string()
 }
@@ -2615,29 +2599,28 @@ mod tests {
     }
 
     #[test]
-    fn apply_non_zero_is_classified_rejection() {
+    fn apply_title_validation_keeps_the_graphql_diagnostic() {
+        // The CLI spike saw GitHub accept 1,024 characters and reject 70,000.
+        let title = "x".repeat(70_000);
+        let detail = "GraphQL: Title is too long (maximum is 256 characters) (updateIssue)";
         let runner = FakeRunner::new();
         runner.expect_exact(
-            &["gh", "issue", "edit", "42", "--title", "T", "--body", ""],
-            fail(1, "HTTP 422: Validation Failed"),
+            &["gh", "issue", "edit", "42", "--title", &title, "--body", ""],
+            fail(1, detail),
         );
         let mut adapter = GithubAdapter::new(&runner, cwd());
         let v = edit(
             MutationType::UpdateTicket,
             MutationPayload::UpdateTitleBody(TitleBody {
-                title: "T".into(),
+                title,
                 body: String::new(),
             }),
             "42",
         );
-        match adapter.apply_edit(&v).unwrap() {
-            BackendEditOutcome::Rejected(f) => {
-                assert_eq!(f.class, FailureClass::Validation);
-                assert_eq!(f.detail, "HTTP 422: Validation Failed");
-                assert_eq!(f.retry_after_s, None);
-            }
-            BackendEditOutcome::Acknowledged => panic!("expected rejection"),
-        }
+        assert_eq!(
+            adapter.apply_edit(&v).unwrap(),
+            BackendEditOutcome::rejected(detail)
+        );
         runner.assert_all_consumed();
     }
 
@@ -3427,17 +3410,12 @@ mod tests {
             FailureClass::Auth
         );
         assert_eq!(
-            classify("HTTP 422: Validation Failed"),
-            FailureClass::Validation
-        );
-        assert_eq!(
             classify("HTTP 503: Service Unavailable"),
             FailureClass::Transient
         );
         assert_eq!(classify("some unrecognised error"), FailureClass::Unknown);
-        // A 403 collides between auth and rate-limit; rate-limit wins.
         assert_eq!(
-            classify("HTTP 403: API rate limit exceeded"),
+            classify("HTTP 403: API rate limit exceeded\nTry authenticating with: gh auth login"),
             FailureClass::RateLimited
         );
         // Verbatim gh outputs observed in the tk-gh-playground spike
