@@ -55,9 +55,7 @@ in a global "last failure" record or a separate failures table.
 
 ## Considered Options
 
-A typed discriminated-union failure (`rate_limited | validation |
-sync_conflict | auth | transient`) was rejected for v1 because subprocess
-CLIs like `gh` and `acli` collapse causes into "non-zero exit + stderr
-text," making classification from stderr brittle. ADR-0016 amends this ADR
-to specify the flat-classified-record shape the first concrete Backend
-Adapter populates from real exit codes.
+A tagged union would carry data specific to each failure class. CLIs such as
+`gh` and `acli` often report failures as a diagnostic and an exit status.
+[ADR-0016](./0016-mutation-failure-is-a-flat-classified-record.md) defines the
+flat record and the rules for choosing a class.

@@ -4,15 +4,10 @@
 > fallback and the typeless Epic path described below are gone: Bug and Epic
 > Promotion require native Issue Types. This spike keeps its history.
 
-Behaviour of the `gh issue` subcommands the GitHub Backend Adapter
-(`crates/tk/src/remote/github.rs`) drives, so the adapter's `FakeRunner`
-fixtures and the `FailureClass` classifier rest on evidence rather than on
-what tk's own code assumes (ADR-0016: the classifier must be spike-grounded,
-not designed from imagination). Two kinds of evidence appear here and each
-claim says which it is: behaviour captured against a real authenticated `gh`,
-and — where one observation cannot settle what is *possible* — `gh`'s own
-source, which is open. Both beat inferring gh's behaviour from tk's
-expectations of it.
+The GitHub Backend Adapter's fixtures and failure classifier draw on live
+`gh` probes and the source for the versions named below. The rule for using
+that evidence is in
+[ADR-0016](../adr/0016-mutation-failure-is-a-flat-classified-record.md).
 
 - **Base probe gh version:** 2.94.0 (2026-06-10)
 - **Bug Promotion probe gh version:** 2.98.0 (2026-08-20)
@@ -221,39 +216,37 @@ Epic-membership flags alone.
 
 ## Failure modes — the `FailureClass` classifier
 
-### The two error shapes, read from gh's source
+### Error shapes in `gh issue`
 
-`gh` renders an API failure in one of exactly two shapes, and which one a caller
-sees is decided by the transport, not by the kind of mistake. Read at cli/cli
-`v2.97.0` with `go-gh` `v2.13.0` (`pkg/api/errors.go`,
-`pkg/api/graphql_client.go`):
+The HTTP status determines how `gh issue` renders an API error. This is the
+behaviour in gh v2.97.0 with go-gh v2.13.0 (`pkg/api/errors.go` and
+`pkg/api/graphql_client.go`).
 
 - A **non-2xx** response becomes `HTTPError`, rendered
   `HTTP <code>: <message> (<url>)`.
-- A **2xx response carrying an `errors` array** becomes `GraphQLError`, rendered
-  `GraphQL: <message> (<path>)`, with no status code anywhere in it.
+- An **HTTP 200 response with GraphQL errors** becomes `GraphQLError`. Its
+  text starts with `GraphQL: <message>` and includes the path when present.
 
-GitHub reports GraphQL validation failures with HTTP 200 and an `errors` array,
-so they always take the second shape. Every issue operation this Adapter drives
-is a GraphQL mutation — `createIssue`, `updateIssue`, `AddSubIssue`,
-`RemoveSubIssue`, `AddBlockedBy`, `RemoveBlockedBy`, `IssueClose` — and there are
-no REST calls in gh's issue command tree at that tag.
-
-⇒ An anchor keyed on an `HTTP <code>:` prefix can only ever match a failure that
-happened at the transport layer. An anchor keyed on message text matches in
-either shape. The table below rests on that distinction.
+GitHub reports issue validation failures in a GraphQL `errors` array at
+HTTP 200.
 
 | class | status | evidence |
 |---|---|---|
 | `auth` | ✅ | bad `GH_TOKEN` → exit 1, stderr `HTTP 401: Bad credentials (https://api.github.com/graphql)` + `Try authenticating with:  gh auth login -h github.com`. All three anchors (`HTTP 401`, `Bad credentials`, `gh auth login`) present. |
 | not-found | ✅ (→ `unknown` by design) | `gh issue view 999999` → exit 1, stderr `GraphQL: Could not resolve to an issue or pull request with the number of 999999. (repository.issue)`. Note the **lowercase** "an issue or pull request" — this *validates* dropping `sync_conflict`: the classifier deliberately does not match this brittle, variable string, so a deleted Adopted issue → `unknown`. |
 | `rate_limited` | ❌ unobserved, anchor sound | The anchors match message text (`rate limit exceeded` / `secondary rate limit`), so they fire in either shape. GitHub reports a primary GraphQL rate limit as 200-with-errors and a secondary one as 403; the anchors are indifferent to which. |
-| `validation` | ⛔ **structurally unreachable** | Provoked 2026-08-18 (tk-142): an over-long title on `createIssue` → exit 1, stderr `GraphQL: Title is too long (maximum is 256 characters) (createIssue)`, which matches no anchor and classifies `unknown`. Per the shapes above a validation failure is reported at HTTP 200, so the `HTTP 422` anchor can never fire for any operation the Adapter performs. Tracked in tk-148. |
+| Title validation | ✅ (→ `unknown`) | On 2026-08-18, an overlong title produced exit 1 and `GraphQL: Title is too long (maximum is 256 characters) (createIssue)`. The title edit fixture uses the observed `updateIssue` diagnostic. |
 | `transient` | ❌ unobserved, anchor sound | 502/503/504 are transport-level, so they arrive HTTP-shaped and the `HTTP 502/503/504` anchors can fire. |
 
-Every observed `gh` error exited **1** (never a discriminating code), confirming
-the classifier correctly gates on stderr substrings, not the exit code (exit-4
-for auth is unreliable — cli/cli#9338).
+Each failed command in the `gh issue` probe exited **1**. The Adapter
+classifies the diagnostic text.
+
+The `gh issue` GraphQL error format also holds in gh v2.105.0.
+[go-gh v2.17.0 formatter](https://github.com/cli/go-gh/blob/v2.17.0/pkg/api/errors.go#L59)
+
+tk also reads GraphQL error messages from the response body that
+`gh api graphql` writes to stdout.
+[gh v2.105.0 response handling](https://github.com/cli/cli/blob/v2.105.0/pkg/cmd/api/api.go#L484)
 
 ## Reconciliation with tk-34
 
@@ -266,14 +259,5 @@ for auth is unreliable — cli/cli#9338).
   provokable here. Re-probe against an org repo with issue types, or when those
   failure modes occur in the wild — the `tk-gh-playground` repo is kept for
   exactly this.
-- Corrected 2026-08-18, first by canary (tk-142) and then from gh's source: the
-  Dependency flags are observed rather than inferred, and `validation` is
-  structurally unreachable rather than merely unobserved.
-- **Fixture defect, tracked in tk-148**: the `FakeRunner` and classifier cases in
-  `remote/github.rs` that assert `HTTP 422: …` for `createIssue` and for the
-  `--parent` edit encode a shape gh cannot emit for those mutations. ADR-0016
-  requires fixtures rest on observation, so an invented shape there is a defect
-  rather than untidiness. The `HTTP 422` strings elsewhere in the tree are opaque
-  detail payloads in persistence and rendering tests and make no claim about gh.
 - tk's own Promotion Operation behaviour is recorded separately in
   [promotion-operation-canary.md](./promotion-operation-canary.md).
