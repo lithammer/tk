@@ -38,9 +38,8 @@ use crate::store::sync::{
 /// Summary of one sync run for the calling command to render.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncReport {
-    /// Number of Backend Items fetched during Pull. An Item still counts when
-    /// unresolved local content intent preserves its title and body while
-    /// Pull updates Backend Lifecycle and Ticket Kind (ADR-0044).
+    /// Number of Backend Items fetched during Pull, regardless of which
+    /// fields the Store merges.
     pub pulled_count: usize,
     /// Relationships the Backend lists that Pull left out because tk refuses
     /// each one (ADR-0056, ADR-0057). The caller warns about each one.
@@ -665,10 +664,10 @@ mod tests {
 
         // Fake saw the decoded payload.
         assert_eq!(fake.captured_edits.len(), 1);
-        let BackendEdit::UpdateTicket { snapshot, .. } = &fake.captured_edits[0] else {
+        let BackendEdit::UpdateTicket { content, .. } = &fake.captured_edits[0] else {
             panic!("expected ticket update")
         };
-        assert_eq!(snapshot.title, "New");
+        assert_eq!(content.title(), Some("New"));
     }
 
     #[test]

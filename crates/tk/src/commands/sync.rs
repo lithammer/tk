@@ -626,9 +626,8 @@ mod tests {
 
     #[test]
     fn sync_github_drives_gh_through_the_factory() {
-        // End-to-end wiring: command -> factory -> real GithubAdapter -> gh via
-        // the same FakeRunner. An Adopted item with a pending update_ticket
-        // refreshes the working set, then applies through gh.
+        // When the Backend reports a nonempty body, Apply must still send
+        // the queued empty body to clear it.
         let store = TmpStore::new("repo");
         let conn = seed_store(&store);
         insert_fixture_remote(
@@ -658,8 +657,18 @@ mod tests {
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
         expect_github_pull(&h, "o", "r", 1, "Backend", "B", Lifecycle::Open);
-        h.runner.expect(
-            &["gh", "issue", "edit", backend_key],
+        h.runner.expect_exact_with_stdin(
+            &[
+                "gh",
+                "issue",
+                "edit",
+                backend_key,
+                "--title",
+                "New Title",
+                "--body-file",
+                "-",
+            ],
+            b"",
             RunOutput {
                 exit_code: 0,
                 stdout: Vec::new(),

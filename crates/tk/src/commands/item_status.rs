@@ -228,10 +228,7 @@ mod tests {
 
     #[test]
     fn done_with_reason_heals_a_behind_version_store_then_writes_closing_reason() {
-        // End-to-end tk-110 regression: an upgraded binary opening a store
-        // written before migration 3 (no `closing_reason` column) must heal
-        // the schema on open so `tk done -m` succeeds rather than failing with
-        // `no such column: closing_reason`.
+        // The opener must add `closing_reason` before `done -m` writes it.
         let store = TmpStore::new("repo");
         let conn = seed_store_at_version(&store, 2);
         // Seed a v2-shaped Ticket directly: at migration 2 the items table has
@@ -262,6 +259,7 @@ mod tests {
         let cwd_path = cwd();
         let mut h = Harness::new(&cwd_path, &store);
         expect_git(&h, &store);
+        crate::store::testing::expect_pointer_reads(&h.runner, 2);
         let code = run_rendered(
             &mut h,
             "done",

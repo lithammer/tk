@@ -282,6 +282,14 @@ pub const MIGRATION_22: Migration = Migration {
     foreign_keys: ForeignKeys::Off,
 };
 
+/// Keep binaries that require both fields from opening a Store that can
+/// contain one-field content payloads. No rows need a rewrite (ADR-0058).
+pub const MIGRATION_23: Migration = Migration {
+    version: 23,
+    sql: "",
+    foreign_keys: ForeignKeys::On,
+};
+
 /// Ordered migration list applied by [`apply_all`].
 pub const ALL_MIGRATIONS: &[Migration] = &[
     MIGRATION_1,
@@ -306,13 +314,14 @@ pub const ALL_MIGRATIONS: &[Migration] = &[
     MIGRATION_20,
     MIGRATION_21,
     MIGRATION_22,
+    MIGRATION_23,
 ];
 
 /// Highest schema version this binary can apply. Named so future migrations
 /// surface the threshold to `grep` instead of hiding it behind `.last()`.
 /// Adding a migration is a two-line patch: append to `ALL_MIGRATIONS`, bump
 /// this constant, with a debug_assert below catching the drift.
-pub const MAX_KNOWN_VERSION: u32 = MIGRATION_22.version;
+pub const MAX_KNOWN_VERSION: u32 = MIGRATION_23.version;
 
 /// Errors returned while applying migrations.
 ///
@@ -395,12 +404,7 @@ fn apply_one(conn: &mut Connection, mig: &Migration, now_iso: &str) -> Result<()
 
 fn apply_one_txn(conn: &mut Connection, mig: &Migration, now_iso: &str) -> Result<(), ApplyError> {
     let fk_off = mig.foreign_keys == ForeignKeys::Off;
-    // The write lock is taken at transaction start, so a second migrator
-    // (auto-migrate-on-open, tk-110) waits on `busy_timeout` rather than
-    // racing. Re-read the version *inside* the lock: the recorded version
-    // [`apply_all`] sampled before the loop may be stale — the lock winner can
-    // have applied this migration in the window. Skipping a since-applied
-    // version closes the TOCTOU that would otherwise throw `duplicate column`.
+    // Check the version under the SQLite write lock before running any DDL.
     let tx = crate::store::write_transaction(conn)?;
     if i64::from(mig.version) <= current_version(&tx)? {
         return Ok(());

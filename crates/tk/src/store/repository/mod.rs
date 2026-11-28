@@ -100,7 +100,7 @@ pub struct Store {
     pub(crate) conn: Connection,
     tk_dir: PathBuf,
     // Fields drop in order: close SQLite before releasing Store ownership.
-    pub(super) association_guard: Option<File>,
+    _association_guard: Option<File>,
 }
 
 /// Exclusive ownership of one repository's remote-changing workflow.
@@ -197,7 +197,7 @@ impl Store {
         Self {
             conn,
             tk_dir: PathBuf::new(),
-            association_guard: None,
+            _association_guard: None,
         }
     }
 }
@@ -228,6 +228,8 @@ pub enum OpenError {
     /// The store records a higher schema version than this binary knows.
     #[error("Repository Store was created by a newer tk version")]
     FromFutureVersion,
+    #[error("Repository Store is in use; let other tk commands finish, then retry the upgrade")]
+    UpgradeBusy,
     /// A forward migration applied at open failed; the inner SQLite error is
     /// rendered after this line (see `resolver::open_error`) so the
     /// underlying cause is not lost. Kept distinct from [`OpenError::Sqlite`]
@@ -257,12 +259,8 @@ pub enum OpenError {
 /// `schema_migrations.version` are inspected before any pragma mutation so
 /// foreign files are refused without rewriting their headers.
 ///
-/// "Schema is current" is an invariant of holding a [`Store`] (tk-110): the
-/// version gate is symmetric here. A future-version store is refused
-/// fail-closed; a behind-version store is healed in place by applying the
-/// pending forward migrations, so no command ever observes a stale schema.
-/// `clock` stamps `schema_migrations.applied_at` for any migration applied;
-/// the current-version fast path takes no write lock.
+/// Return a Store at this binary's version (ADR-0024). Upgrades take the
+/// exclusive association lock to keep older processes out.
 pub fn open_existing<R: ProcRunner + ?Sized>(
     runner: &R,
     cwd: &Path,
@@ -277,24 +275,64 @@ pub fn open_existing<R: ProcRunner + ?Sized>(
         super::association::refuse_legacy(&common)?;
     }
     let id = pointer.ok_or(OpenError::StoreMissing)?;
-    let guard = super::association::lock_store(&root.join(id.text()), false)?;
-    if super::association::pointer(runner, cwd)?.as_ref() != Some(&id) {
-        return Err(super::association::Error::Recovery.into());
-    }
-    let db_path = super::association::validate(&root, &id, &common)?;
-    super::relocation::access(&root, &common, &id)?;
-    let mut store = open_database(&db_path, clock)?;
-    store.association_guard = Some(guard);
-    Ok(store)
+    let dir = root.join(id.text());
+    let guard = super::association::lock_store(&dir, false)?;
+    open_associated(&dir, guard, clock, || {
+        if super::association::pointer(runner, cwd)?.as_ref() != Some(&id) {
+            return Err(super::association::Error::Recovery.into());
+        }
+        let db_path = super::association::validate(&root, &id, &common)?;
+        super::relocation::access(&root, &common, &id)?;
+        Ok(db_path)
+    })
 }
 
-/// Open a validated Store database, preserving the migration and backup contracts.
-pub(super) fn open_database(db_path: &Path, clock: &dyn Clock) -> Result<Store, OpenError> {
+/// Start with a shared guard and take an exclusive guard only to upgrade.
+/// Before switching guards, close SQLite. Once locked again, recheck the
+/// association and Store version before using the database.
+pub(super) fn open_associated(
+    dir: &Path,
+    mut guard: File,
+    clock: &dyn Clock,
+    validate: impl Fn() -> Result<PathBuf, OpenError>,
+) -> Result<Store, OpenError> {
+    let supported = i64::from(migrations::MAX_KNOWN_VERSION);
+    let mut exclusive = false;
+    loop {
+        let mut conn = connect_database(&validate()?)?;
+        let current = migrations::current_version(&conn)?;
+        if current > supported {
+            return Err(OpenError::FromFutureVersion);
+        }
+        if !exclusive && current == supported {
+            return Ok(Store {
+                conn,
+                tk_dir: dir.to_path_buf(),
+                _association_guard: Some(guard),
+            });
+        }
+        if exclusive && current < supported {
+            migrations::apply_all(&mut conn, &clock.now_iso())?;
+        }
+        drop(conn);
+        drop(guard);
+        exclusive = !exclusive;
+        guard = super::association::lock_store(dir, exclusive).map_err(|error| {
+            if exclusive && matches!(error, super::association::Error::Busy) {
+                OpenError::UpgradeBusy
+            } else {
+                error.into()
+            }
+        })?;
+    }
+}
+
+fn connect_database(db_path: &Path) -> Result<Connection, OpenError> {
     if !db_path.exists() {
         return Err(OpenError::StoreMissing);
     }
 
-    let mut conn = Connection::open_with_flags(
+    let conn = Connection::open_with_flags(
         db_path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
@@ -309,26 +347,10 @@ pub(super) fn open_database(db_path: &Path, clock: &dyn Clock) -> Result<Store, 
         return Err(OpenError::NotRepositoryStore);
     }
 
-    let version = migrations::current_version(&conn)?;
-    if version > i64::from(migrations::MAX_KNOWN_VERSION) {
-        return Err(OpenError::FromFutureVersion);
-    }
-    if version < i64::from(migrations::MAX_KNOWN_VERSION) {
-        migrations::apply_all(&mut conn, &clock.now_iso()).map_err(OpenError::from)?;
-    }
-
-    Ok(Store {
-        conn,
-        tk_dir: db_path.parent().unwrap().to_path_buf(),
-        association_guard: None,
-    })
+    Ok(conn)
 }
 
 impl From<migrations::ApplyError> for OpenError {
-    /// Map an open-time migration failure onto the open taxonomy. The
-    /// future-version arm is unreachable here — [`open_existing`] guards it
-    /// before calling `apply_all` — but is mapped defensively to the same
-    /// fail-closed refusal rather than a generic fault.
     fn from(err: migrations::ApplyError) -> Self {
         match err {
             migrations::ApplyError::StoreFromFutureVersion => OpenError::FromFutureVersion,
@@ -752,13 +774,11 @@ mod tests {
 
     #[test]
     fn open_existing_migrates_a_behind_version_store_to_max() {
-        // The tk-110 regression: a store frozen at an older schema (here v2,
-        // missing migration 3's `closing_reason` column) must be healed to
-        // MAX_KNOWN_VERSION at the open chokepoint, not left to surface a
-        // later `no such column` fault.
+        // Commands must never get a handle to the old schema.
         let store = TmpStore::new("repo");
         seed_tk_db_at_version(&store, 2);
         let runner = fake_runner_for(&store);
+        crate::store::testing::expect_pointer_reads(&runner, 2);
         let clock = fixed_clock();
 
         let opened = match open_existing(&runner, &cwd(), &clock, Some(&store.data_root)) {
@@ -773,10 +793,8 @@ mod tests {
 
     #[test]
     fn open_existing_maps_a_failed_open_migration_to_migration_failed() {
-        // A forward migration that errors at open must surface as the distinct
-        // MigrationFailed arm (rendered with its SQLite cause), not the generic
-        // Sqlite read arm. Pre-adding migration 3's `closing_reason` column to a
-        // v2 store makes its `ALTER TABLE` fail with `duplicate column`.
+        // Plant the column migration 3 adds so the upgrade fails rather
+        // than the open itself.
         let store = TmpStore::new("repo");
         seed_tk_db_at_version(&store, 2);
         let conn = Connection::open(store.db_path()).unwrap();
@@ -785,6 +803,7 @@ mod tests {
         drop(conn);
 
         let runner = fake_runner_for(&store);
+        crate::store::testing::expect_pointer_reads(&runner, 1);
         assert!(matches!(
             open_existing(&runner, &cwd(), &fixed_clock(), Some(&store.data_root)),
             Err(OpenError::MigrationFailed(_))

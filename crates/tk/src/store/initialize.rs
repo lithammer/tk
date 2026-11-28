@@ -65,16 +65,17 @@ pub fn initialize(
     let pointer = association::parse_pointer(&pointers);
     if let Ok(Some(id)) = &pointer {
         if association::validate(&root, id, &common).is_ok() {
-            let guard = association::lock_store(&root.join(id.text()), false)?;
+            let dir = root.join(id.text());
+            let guard = association::lock_store(&dir, false)?;
             let path = association::validate(&root, id, &common)?;
             if super::recovery::inspect_database(&path).is_ok() {
                 if !matches!(mode, Mode::Plain) {
                     return Err(association::Error::Healthy.into());
                 }
-                let store = repository::open_database(&path, clock)?;
+                let store = repository::open_associated(&dir, guard, clock, || {
+                    Ok(association::validate(&root, id, &common)?)
+                })?;
                 configure_repository_store(store.conn())?;
-                drop(store);
-                drop(guard);
                 return Ok(Initialized::Existing(path));
             }
         }

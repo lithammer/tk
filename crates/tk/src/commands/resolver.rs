@@ -89,6 +89,7 @@ pub fn open_error(err: &OpenError) -> CommandError {
         | OpenError::StoreMissing
         | OpenError::NotRepositoryStore
         | OpenError::FromFutureVersion
+        | OpenError::UpgradeBusy
         | OpenError::MigrationForeignKeyCheck(_) => CommandError::failure(format!("{err}")),
     }
 }

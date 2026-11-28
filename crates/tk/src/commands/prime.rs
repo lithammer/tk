@@ -216,7 +216,7 @@ mod tests {
 
     #[test]
     fn prime_against_a_behind_version_store_migrates_and_prints_the_briefing() {
-        // ADR-0020 preserves migration on open, including for global hooks.
+        // A hook using Prime gets the same upgrade-on-open as other commands (ADR-0024).
         let store = TmpStore::new("repo");
         std::fs::create_dir_all(store.tk_dir()).unwrap();
         let mut conn = Connection::open(store.db_path()).unwrap();
@@ -234,7 +234,7 @@ mod tests {
                 stderr: Vec::new(),
             },
         );
-        crate::store::testing::expect_pointer(&runner);
+        crate::store::testing::expect_pointer_reads(&runner, 4);
         let clock = FakeClock::new(1_778_284_800_000);
         let mut rng = StdRng::seed_from_u64(0);
         let mut stdout = Vec::new();
