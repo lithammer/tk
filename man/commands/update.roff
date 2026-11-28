@@ -20,8 +20,10 @@ for Tickets, in any Selection State.
 .B \-\-no\-priority
 clears Priority without changing Selection State.
 .B \-\-no\-effort
-clears the Effort. All requested edits and their Mutations commit together in
-the Repository Store. Backend delivery uses complete title/body snapshots,
-separate Priority and Effort Mutations, and separate relationship Mutations.
-An Effort edit queues a Mutation only on a Backend that shares it (GitHub). On Jira,
-Effort stays local through edits, Pull, and Promotion.
+clears Effort.
+.PP
+The Repository Store commits the edits and queues their Mutations together.
+A title-only edit leaves the Backend body alone. A body-only edit leaves the
+Backend title alone. Sync sends a supplied title or body even when it matches
+the Store. Priority, Effort, and relationship edits sync separately. Effort syncs
+on GitHub and stays local on Jira.

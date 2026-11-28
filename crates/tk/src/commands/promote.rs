@@ -1944,11 +1944,11 @@ mod tests {
 
         assert_eq!(code, Exit::Ok, "{}", h.err());
         assert_eq!(h.out(), "Promoted Ticket: tk-1 -> gh-42\n");
-        let BackendEdit::UpdateTicket { snapshot, .. } = &fake.captured_edits[0] else {
+        let BackendEdit::UpdateTicket { content, .. } = &fake.captured_edits[0] else {
             panic!("forced convergence must append a Ticket update")
         };
-        assert_eq!(snapshot.title, "Current local");
-        assert_eq!(snapshot.body, "Current body");
+        assert_eq!(content.title(), Some("Current local"));
+        assert_eq!(content.body(), Some("Current body"));
         let operations: Vec<String> = {
             let mut stmt = conn
                 .prepare("select promotion_operation_id from mutations order by sequence")

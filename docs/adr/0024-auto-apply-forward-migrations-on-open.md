@@ -1,12 +1,12 @@
 # Auto-apply forward migrations on open; refuse future-version stores
 
-The Repository Store opens through one production constructor,
-`open_existing`; every command reaches it through `resolver::open_for_command`.
-This path makes **"schema is current" an invariant of holding a `Store`**. It
-refuses a store recorded *newer* than the binary (`FromFutureVersion`). It
-applies pending forward migrations to a store recorded *behind*
-`MAX_KNOWN_VERSION` before returning the handle. Commands do not perform
-migration themselves; opening the store does.
+When an ordinary command or `tk init` opens an existing Repository Store,
+tk checks the Store version first. It refuses a Store from a newer binary
+(`FromFutureVersion`) and upgrades an older Store before the command uses it.
+An upgrade needs the exclusive association lock: an older process that has
+already opened the Store could otherwise read data in the new format. If
+the Store is in use, let the other tk commands finish, then retry.
+Current-version opens take the association lock in shared mode.
 
 Migrations previously ran only in `tk init`. A newer binary opening an older
 on-disk store therefore fell through the gate and surfaced a cryptic `no such
@@ -29,11 +29,9 @@ on-disk version must refuse to operate rather than guess.
 - **Add an explicit `tk migrate` command.** Diesel, sqlx, Django, and EF Core
   migrate on an explicit command and fail closed on unknown versions. Those
   tools serve multi-instance server apps pointed at a shared, separately
-  administered database, where an unexpected
-  schema write under load is the hazard. tk's store has none of those
-  properties — single owner, opened by one short-lived process at a time — so
-  the same risk does not apply. `open` plus `init` already cover create and
-  upgrade; a standalone command would add no otherwise unreachable operation.
+  administered database, where a schema write under load is the hazard.
+  tk's Store has one owner, and the Store lock can exclude other tk processes
+  for the upgrade. `open` plus `init` already cover create and upgrade.
 - **Lazy / on-demand migration (apply a column when a query first needs it).**
   Rejected: scatters schema knowledge across the read/write paths and defeats
   the single-entry-point invariant. The version gate is one place; keep it one
@@ -41,22 +39,15 @@ on-disk version must refuse to operate rather than guess.
 
 ## Consequences
 
-- **Reads can write.** Opening a behind-version store with `tk list` or
-  `tk next` performs an `ALTER TABLE`. Accepted as the cost of the invariant.
-  The `version == MAX_KNOWN_VERSION` fast path takes no write lock, so the
-  common case is unaffected.
+- **Reads can write.** Even `tk list` or `tk next` can upgrade an older Store.
 - **`tk prime` migrates like any other open.** A passive prime hook against a
   behind-version store silently upgrades it and still prints the briefing,
   consistent with "tk owns its format"; ADR-0020 keeps prime silent on
   failure. Whether prime specifically should get a no-migrate path is tracked
   by tk-112, not reopened here.
-- **Concurrency.** Two processes can both read the behind version and race to
-  `ALTER TABLE`, which would otherwise throw `duplicate column`. `apply_one`
-  opens its transaction with `BEGIN IMMEDIATE` (taking the write lock up front,
-  so a second migrator waits on the existing 5s `busy_timeout`) and re-reads
-  the recorded version *inside* the lock, skipping a migration the winner
-  already applied. This closes the read-then-write TOCTOU and also hardens
-  `tk init`.
+- **Concurrency.** tk checks the version again under the exclusive lock.
+  After upgrading it reopens under a shared lock, so the command that
+  triggered the upgrade doesn't block other current-version commands.
 - **Forward-only.** Down-migrations and rollback remain out of scope; the
   migration list only grows. Because an upgrade on open is unprompted and
   cannot be undone, ADR-0048 has the runner write a Store Backup before
@@ -65,8 +56,5 @@ on-disk version must refuse to operate rather than guess.
   `OpenError::MigrationFailed` rendered as `failed to apply pending migrations
   to the Repository Store` followed by the underlying SQLite cause, rather than
   folding into the generic storage arm.
-- **Migrations run with `foreign_keys = on`.** Fine for every current
-  migration (`ADD COLUMN`, `CREATE TRIGGER`). A future table-rebuild migration
-  (the SQLite 12-step `ALTER`) needs foreign keys *off*, which cannot be
-  toggled inside a transaction — that migration will have to arrange its own
-  pragma handling outside the per-migration transaction.
+- **Table rebuilds.** [ADR-0028](./0028-schema-check-changes-use-a-foreign-keys-off-table-rebuild.md)
+  describes when a migration turns off foreign key checks.

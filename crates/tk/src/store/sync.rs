@@ -31,10 +31,7 @@ use crate::domain::binding_display_provenance::BindingDisplayProvenance;
 use crate::domain::effort::{BackendEffort, Effort};
 use crate::domain::item_class::ItemClass;
 use crate::domain::lifecycle::Lifecycle;
-use crate::domain::mutation_payload::{
-    ContainerRef, DependencyRef, EffortChange, LifecycleChange, MutationPayload, PriorityChange,
-    Promotion, TitleBody,
-};
+use crate::domain::mutation_payload::{MutationPayload, Promotion, TitleBody};
 use crate::domain::mutation_state::MutationState;
 use crate::domain::mutation_type::MutationType;
 use crate::domain::origin::Origin;
@@ -142,8 +139,7 @@ pub enum RefreshStoreError {
     BackendCohort(#[from] BackendCohortError),
     #[error("Mutation {0} has an indeterminate Backend creation outcome")]
     ApplyingMutation(i64),
-    /// An unresolved Dependency Mutation's payload does not decode, so Pull
-    /// cannot tell which edge it shields.
+    /// Pull cannot tell which fields or edges an unresolved Mutation shields.
     #[error("mutation {sequence} ({mutation_type}) has malformed payload_json: {source}")]
     PayloadJson {
         sequence: i64,
@@ -683,7 +679,21 @@ pub fn load_applicable_mutations(
 
         let mutation_type = MutationType::from_str(&type_text)
             .map_err(|_| LoadApplicableError::UnknownMutationType(type_text))?;
-        let payload = decode_mutation_payload(sequence, mutation_type, &payload_text)?;
+        let payload =
+            mutations::decode_payload(mutation_type, &payload_text).map_err(
+                |error| match error {
+                    mutations::DecodePayloadError::Json(source) => {
+                        LoadApplicableError::PayloadJson {
+                            sequence,
+                            mutation_type,
+                            source,
+                        }
+                    }
+                    mutations::DecodePayloadError::Unsupported => {
+                        LoadApplicableError::PayloadVariantMissing(mutation_type)
+                    }
+                },
+            )?;
 
         out.push(ApplicableMutationRow {
             sequence,
@@ -726,22 +736,22 @@ pub fn resolve_backend_operation(
     };
 
     let operation = match (mutation_type, payload) {
-        (MutationType::UpdateTicket, MutationPayload::UpdateTitleBody(snapshot)) => {
+        (MutationType::UpdateTicket, MutationPayload::ContentEdit(content)) => {
             if item_class != ItemClass::Ticket {
                 return Err(shape_error());
             }
             BackendOperation::Edit(BackendEdit::UpdateTicket {
                 ticket: target()?,
-                snapshot,
+                content,
             })
         }
-        (MutationType::UpdateEpic, MutationPayload::UpdateTitleBody(snapshot)) => {
+        (MutationType::UpdateEpic, MutationPayload::ContentEdit(content)) => {
             if item_class != ItemClass::Epic {
                 return Err(shape_error());
             }
             BackendOperation::Edit(BackendEdit::UpdateEpic {
                 epic: target()?,
-                snapshot,
+                content,
             })
         }
         (MutationType::SetItemStatus, MutationPayload::Lifecycle(change)) => {
@@ -868,50 +878,6 @@ fn backend_address(
             mutation_type,
             item_id: item_id.to_owned(),
         })
-}
-
-/// Decode a `payload_json` text column into the [`MutationPayload`] variant the
-/// [`MutationType`] selects.
-fn decode_mutation_payload(
-    sequence: i64,
-    mutation_type: MutationType,
-    payload_text: &str,
-) -> Result<MutationPayload, LoadApplicableError> {
-    use MutationType as Mt;
-
-    // Built here rather than through a `From` impl: the row identity is what
-    // makes the failure actionable, and only this scope holds it.
-    let malformed = |source: serde_json::Error| LoadApplicableError::PayloadJson {
-        sequence,
-        mutation_type,
-        source,
-    };
-    Ok(match mutation_type {
-        Mt::UpdateTicket | Mt::UpdateEpic => MutationPayload::UpdateTitleBody(
-            serde_json::from_str::<TitleBody>(payload_text).map_err(malformed)?,
-        ),
-        Mt::SetTicketContainer | Mt::ClearTicketContainer => MutationPayload::ContainerRef(
-            serde_json::from_str::<ContainerRef>(payload_text).map_err(malformed)?,
-        ),
-        Mt::SetItemStatus => MutationPayload::Lifecycle(
-            serde_json::from_str::<LifecycleChange>(payload_text).map_err(malformed)?,
-        ),
-        Mt::SetTicketPriority => MutationPayload::Priority(
-            serde_json::from_str::<PriorityChange>(payload_text).map_err(malformed)?,
-        ),
-        Mt::SetTicketEffort => MutationPayload::Effort(
-            serde_json::from_str::<EffortChange>(payload_text).map_err(malformed)?,
-        ),
-        Mt::AddDependency | Mt::RemoveDependency => MutationPayload::DependencyRef(
-            serde_json::from_str::<DependencyRef>(payload_text).map_err(malformed)?,
-        ),
-        Mt::PromoteTicket | Mt::PromoteEpic => MutationPayload::Promotion(
-            serde_json::from_str::<Promotion>(payload_text).map_err(malformed)?,
-        ),
-        Mt::AddExternalBlocker | Mt::ResolveExternalBlocker => {
-            return Err(LoadApplicableError::PayloadVariantMissing(mutation_type));
-        }
-    })
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -1633,10 +1599,11 @@ pub fn merge_backend_refreshes(
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        let Some((item_id, item_class)) = existing else {
+        let Some(target) = existing else {
             continue;
         };
-        let preserve_content = shields.content.get(item_id.as_str()) == Some(&item_class);
+        let content_shield = shields.content.get(&target).copied().unwrap_or_default();
+        let (item_id, item_class) = target;
         let BackendItemRefresh {
             title,
             body,
@@ -1672,11 +1639,8 @@ pub fn merge_backend_refreshes(
         let effort_write = ticket_fields
             .and_then(|fields| fields.effort.shared())
             .filter(|_| !shields.effort.contains(item_id.as_str()));
-        let (title_write, body_write) = if preserve_content {
-            (None, None)
-        } else {
-            (Some(title.as_str()), Some(body.as_str()))
-        };
+        let title_write = (!content_shield.title).then_some(title.as_str());
+        let body_write = (!content_shield.body).then_some(body.as_str());
         let work_state_write: Option<WorkState> = match status {
             Lifecycle::Open => None,
             Lifecycle::Done => Some(WorkState::Idle),
@@ -1684,7 +1648,7 @@ pub fn merge_backend_refreshes(
         // Pull never imports Work State. A Backend close still clears it as a
         // local consequence, while an open refresh must not undo `tk start`
         // (ADR-0043, ADR-0021). Title/body shielding does not affect Lifecycle
-        // or Ticket Kind (ADR-0044). Only Tickets carry Priority and Effort;
+        // or Ticket Kind (ADR-0058). Only Tickets carry Priority and Effort;
         // Selection State does not constrain either field.
         tx.execute(
             "update items set title = coalesce(?2, title), body = coalesce(?3, body), updated_at = max(updated_at, ?5), \
@@ -1907,10 +1871,15 @@ fn add_backend_edges(
     Ok(skipped)
 }
 
-/// What unresolved local intent shields from a Backend Pull (ADR-0044).
+#[derive(Clone, Copy, Default)]
+struct ContentShield {
+    title: bool,
+    body: bool,
+}
+
+/// What unresolved local intent shields from a Backend Pull (ADR-0058).
 struct LocalShields {
-    /// Items whose unresolved content Mutation shields title and body.
-    content: HashMap<String, ItemClass>,
+    content: HashMap<(String, ItemClass), ContentShield>,
     /// Tickets whose unresolved Priority Mutation shields Priority.
     priority: HashSet<String>,
     /// Tickets whose unresolved Effort Mutation shields Effort.
@@ -1923,12 +1892,10 @@ struct LocalShields {
     containers: HashSet<String>,
 }
 
-/// Collect the exact Items whose unresolved Mutations shield Pull fields.
-///
-/// Decoding every unresolved Mutation row before the first write exposes
-/// unknown Mutation Type or Item Class spellings. The sets only add targets,
-/// so a Mutation of another kind cannot remove a shield added by an earlier
-/// row.
+/// Pool shields from all pending and failed Mutations: a later row cannot
+/// remove an earlier shield. Only content and Dependency shields depend on
+/// payloads; an unreadable one stops Pull before it can overwrite a field or
+/// edge the Mutation meant to keep.
 fn local_shields(conn: &Connection) -> Result<LocalShields, RefreshStoreError> {
     let mut stmt = conn.prepare(
         "select item_id, item_class, mutation_type, sequence, payload_json from mutations \
@@ -1946,9 +1913,19 @@ fn local_shields(conn: &Connection) -> Result<LocalShields, RefreshStoreError> {
         let item_id: String = row.get(0)?;
         let item_class: ItemClass = row.get(1)?;
         let mutation_type: MutationType = row.get(2)?;
+        let sequence = row.get(3)?;
+        let malformed = |source| RefreshStoreError::PayloadJson {
+            sequence,
+            mutation_type,
+            source,
+        };
         match mutation_type {
             MutationType::UpdateTicket | MutationType::UpdateEpic => {
-                shields.content.insert(item_id, item_class);
+                let payload: String = row.get(4)?;
+                let content = mutations::decode_content_edit(&payload).map_err(malformed)?;
+                let shield = shields.content.entry((item_id, item_class)).or_default();
+                shield.title |= content.title().is_some();
+                shield.body |= content.body().is_some();
             }
             MutationType::SetTicketPriority => {
                 shields.priority.insert(item_id);
@@ -1957,14 +1934,9 @@ fn local_shields(conn: &Connection) -> Result<LocalShields, RefreshStoreError> {
                 shields.effort.insert(item_id);
             }
             MutationType::AddDependency | MutationType::RemoveDependency => {
-                let sequence: i64 = row.get(3)?;
                 let payload: String = row.get(4)?;
                 let blocking_id = mutations::addressed_counterpart_id(mutation_type, &payload)
-                    .map_err(|source| RefreshStoreError::PayloadJson {
-                        sequence,
-                        mutation_type,
-                        source,
-                    })?;
+                    .map_err(malformed)?;
                 if let Some(blocking_id) = blocking_id {
                     shields.dependencies.insert((item_id, blocking_id));
                 }
@@ -2420,6 +2392,7 @@ mod tests {
     use super::*;
     use crate::domain::backend_operation::BackendItemIdentity;
     use crate::domain::lifecycle::Lifecycle;
+    use crate::domain::mutation_payload::ContentEdit;
     use crate::domain::ticket_kind::TicketKind;
     use crate::domain::work_state::WorkState;
     use crate::store::migrations;
@@ -4418,7 +4391,7 @@ mod tests {
             mutation_type: MutationType::UpdateTicket,
             item_id: "epic".into(),
             item_class: ItemClass::Epic,
-            payload: MutationPayload::UpdateTitleBody(TitleBody {
+            payload: MutationPayload::ContentEdit(ContentEdit::Both {
                 title: "Renamed".into(),
                 body: String::new(),
             }),

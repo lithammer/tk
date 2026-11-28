@@ -177,21 +177,27 @@ impl Adapter for GithubAdapter<'_> {
         match edit {
             BackendEdit::UpdateTicket {
                 ticket: item,
-                snapshot,
+                content,
             }
             | BackendEdit::UpdateEpic {
                 epic: item,
-                snapshot,
-            } => self.run_edit(&[
-                "gh",
-                "issue",
-                "edit",
-                &item.backend_key,
-                "--title",
-                &snapshot.title,
-                "--body",
-                &snapshot.body,
-            ]),
+                content,
+            } => {
+                let mut argv = vec!["gh", "issue", "edit", &item.backend_key];
+                if let Some(title) = content.title() {
+                    argv.extend(["--title", title]);
+                }
+                // A body can exceed the OS limit for one argument.
+                if let Some(body) = content.body() {
+                    argv.extend(["--body-file", "-"]);
+                    let output = self
+                        .runner
+                        .run_with_stdin(&argv, self.cwd, body.as_bytes())?;
+                    Ok(edit_outcome(&output))
+                } else {
+                    self.run_edit(&argv)
+                }
+            }
             BackendEdit::SetTicketPriority { ticket, change } => {
                 self.set_ticket_field(&ticket.backend_key, change.priority)
             }
@@ -385,17 +391,9 @@ impl GithubAdapter<'_> {
         }
     }
 
-    /// Run one edit through `gh` and map its outcome.
-    ///
-    /// A zero exit code is success even when stderr is not empty. `gh issue
-    /// close` writes "is already closed" on a harmless repeat and exits zero.
-    /// A nonzero exit rejects the Mutation with the stderr text and class.
     fn run_edit(&self, argv: &[&str]) -> Result<BackendEditOutcome, ApplyError> {
         let output = self.runner.run(argv, self.cwd)?;
-        if output.succeeded() {
-            return Ok(BackendEditOutcome::Acknowledged);
-        }
-        Ok(rejected_edit(&output))
+        Ok(edit_outcome(&output))
     }
 
     /// Create the GitHub issue represented by either Promotion variant.
@@ -1281,7 +1279,11 @@ fn stderr_string(output: &RunOutput) -> String {
     String::from_utf8_lossy(&output.stderr).trim().to_string()
 }
 
-fn rejected_edit(output: &RunOutput) -> BackendEditOutcome {
+fn edit_outcome(output: &RunOutput) -> BackendEditOutcome {
+    // `gh issue close` can report "already closed" on stderr and still succeed.
+    if output.succeeded() {
+        return BackendEditOutcome::Acknowledged;
+    }
     let detail = stderr_string(output);
     BackendEditOutcome::Rejected(Failure {
         class: classify(&detail),
@@ -1296,10 +1298,7 @@ mod tests {
     use crate::domain::backend_operation::BackendItemAddress;
     use crate::domain::effort::BackendEffort;
     use crate::domain::item_class::ItemClass;
-    use crate::domain::mutation_payload::{
-        ContainerRef, EffortChange, LifecycleChange, MutationPayload, TitleBody,
-    };
-    use crate::domain::mutation_type::MutationType;
+    use crate::domain::mutation_payload::{ContentEdit, EffortChange, LifecycleChange, TitleBody};
     use crate::domain::priority::Priority;
     use crate::proc::{FakeRunner, ProcError, RunOutput};
     use crate::remote::github::fixtures::{
@@ -1779,40 +1778,6 @@ mod tests {
         )
     }
 
-    fn edit(mt: MutationType, payload: MutationPayload, key: &str) -> BackendEdit {
-        let target = address(key);
-        match (mt, payload) {
-            (MutationType::UpdateTicket, MutationPayload::UpdateTitleBody(snapshot)) => {
-                BackendEdit::UpdateTicket {
-                    ticket: target,
-                    snapshot,
-                }
-            }
-            (MutationType::UpdateEpic, MutationPayload::UpdateTitleBody(snapshot)) => {
-                BackendEdit::UpdateEpic {
-                    epic: target,
-                    snapshot,
-                }
-            }
-            (MutationType::SetItemStatus, MutationPayload::Lifecycle(change)) => {
-                BackendEdit::SetItemStatus {
-                    item: target,
-                    change,
-                }
-            }
-            (MutationType::SetTicketContainer, MutationPayload::ContainerRef(_)) => {
-                BackendEdit::SetTicketContainer {
-                    ticket: target,
-                    container: address("9"),
-                }
-            }
-            (MutationType::ClearTicketContainer, MutationPayload::ContainerRef(_)) => {
-                BackendEdit::ClearTicketContainer { ticket: target }
-            }
-            other => panic!("unsupported test edit: {other:?}"),
-        }
-    }
-
     fn address(key: &str) -> BackendItemAddress {
         BackendItemAddress {
             backend_key: key.into(),
@@ -2261,20 +2226,6 @@ mod tests {
         }
     }
 
-    fn dep_edit(mt: MutationType, blocked: &str, blocking: &str) -> BackendEdit {
-        match mt {
-            MutationType::AddDependency => BackendEdit::AddDependency {
-                blocked: address(blocked),
-                blocking: address(blocking),
-            },
-            MutationType::RemoveDependency => BackendEdit::RemoveDependency {
-                blocked: address(blocked),
-                blocking: address(blocking),
-            },
-            _ => panic!("not a dependency edit"),
-        }
-    }
-
     // ---- directional reads ---------------------------------------------
 
     #[test]
@@ -2508,22 +2459,31 @@ mod tests {
 
     #[test]
     fn apply_update_ticket_edits_title_and_body() {
+        // The body must not need to fit in one process argument.
+        let body = "Body é\r\n".repeat(32_768);
         let runner = FakeRunner::new();
-        runner.expect_exact(
+        runner.expect_exact_with_stdin(
             &[
-                "gh", "issue", "edit", "42", "--title", "New", "--body", "Body",
+                "gh",
+                "issue",
+                "edit",
+                "42",
+                "--title",
+                "New",
+                "--body-file",
+                "-",
             ],
+            body.as_bytes(),
             ok(""),
         );
         let mut adapter = GithubAdapter::new(&runner, cwd());
-        let v = edit(
-            MutationType::UpdateTicket,
-            MutationPayload::UpdateTitleBody(TitleBody {
+        let v = BackendEdit::UpdateTicket {
+            ticket: address("42"),
+            content: ContentEdit::Both {
                 title: "New".into(),
-                body: "Body".into(),
-            }),
-            "42",
-        );
+                body,
+            },
+        };
         assert!(matches!(
             adapter.apply_edit(&v).unwrap(),
             BackendEditOutcome::Acknowledged
@@ -2536,13 +2496,12 @@ mod tests {
         let runner = FakeRunner::new();
         runner.expect_exact(&["gh", "issue", "close", "42"], ok(""));
         let mut adapter = GithubAdapter::new(&runner, cwd());
-        let v = edit(
-            MutationType::SetItemStatus,
-            MutationPayload::Lifecycle(LifecycleChange {
+        let v = BackendEdit::SetItemStatus {
+            item: address("42"),
+            change: LifecycleChange {
                 status: Lifecycle::Done,
-            }),
-            "42",
-        );
+            },
+        };
         assert!(matches!(
             adapter.apply_edit(&v).unwrap(),
             BackendEditOutcome::Acknowledged
@@ -2554,13 +2513,12 @@ mod tests {
     fn apply_set_status_open_rejects_without_running_gh() {
         let runner = FakeRunner::new();
         let mut adapter = GithubAdapter::new(&runner, cwd());
-        let v = edit(
-            MutationType::SetItemStatus,
-            MutationPayload::Lifecycle(LifecycleChange {
+        let v = BackendEdit::SetItemStatus {
+            item: address("42"),
+            change: LifecycleChange {
                 status: Lifecycle::Open,
-            }),
-            "42",
-        );
+            },
+        };
         assert_eq!(
             adapter.apply_edit(&v).unwrap(),
             BackendEditOutcome::rejected(
@@ -2572,8 +2530,6 @@ mod tests {
 
     #[test]
     fn apply_exit_zero_with_stderr_is_accepted() {
-        // gh's idempotent "already closed" no-op exits 0 but prints to stderr.
-        // Success is judged by exit code, so this must be Acknowledged.
         let runner = FakeRunner::new();
         runner.expect_exact(
             &["gh", "issue", "close", "42"],
@@ -2584,13 +2540,12 @@ mod tests {
             },
         );
         let mut adapter = GithubAdapter::new(&runner, cwd());
-        let v = edit(
-            MutationType::SetItemStatus,
-            MutationPayload::Lifecycle(LifecycleChange {
+        let v = BackendEdit::SetItemStatus {
+            item: address("42"),
+            change: LifecycleChange {
                 status: Lifecycle::Done,
-            }),
-            "42",
-        );
+            },
+        };
         assert!(matches!(
             adapter.apply_edit(&v).unwrap(),
             BackendEditOutcome::Acknowledged
@@ -2600,23 +2555,31 @@ mod tests {
 
     #[test]
     fn apply_title_validation_keeps_the_graphql_diagnostic() {
-        // The CLI spike saw GitHub accept 1,024 characters and reject 70,000.
         let title = "x".repeat(70_000);
         let detail = "GraphQL: Title is too long (maximum is 256 characters) (updateIssue)";
         let runner = FakeRunner::new();
-        runner.expect_exact(
-            &["gh", "issue", "edit", "42", "--title", &title, "--body", ""],
+        runner.expect_exact_with_stdin(
+            &[
+                "gh",
+                "issue",
+                "edit",
+                "42",
+                "--title",
+                &title,
+                "--body-file",
+                "-",
+            ],
+            b"",
             fail(1, detail),
         );
         let mut adapter = GithubAdapter::new(&runner, cwd());
-        let v = edit(
-            MutationType::UpdateTicket,
-            MutationPayload::UpdateTitleBody(TitleBody {
+        let v = BackendEdit::UpdateTicket {
+            ticket: address("42"),
+            content: ContentEdit::Both {
                 title,
                 body: String::new(),
-            }),
-            "42",
-        );
+            },
+        };
         assert_eq!(
             adapter.apply_edit(&v).unwrap(),
             BackendEditOutcome::rejected(detail)
@@ -2629,13 +2592,12 @@ mod tests {
         let runner = FakeRunner::new();
         runner.expect_exact_error(&["gh", "issue", "close", "42"], ProcError::SpawnFailed);
         let mut adapter = GithubAdapter::new(&runner, cwd());
-        let v = edit(
-            MutationType::SetItemStatus,
-            MutationPayload::Lifecycle(LifecycleChange {
+        let v = BackendEdit::SetItemStatus {
+            item: address("42"),
+            change: LifecycleChange {
                 status: Lifecycle::Done,
-            }),
-            "42",
-        );
+            },
+        };
         assert!(matches!(
             adapter.apply_edit(&v),
             Err(ProcError::SpawnFailed)
@@ -2646,21 +2608,28 @@ mod tests {
     #[test]
     fn apply_update_epic_edits_title_and_body() {
         let runner = FakeRunner::new();
-        runner.expect_exact(
+        runner.expect_exact_with_stdin(
             &[
-                "gh", "issue", "edit", "42", "--title", "Epic", "--body", "Plan",
+                "gh",
+                "issue",
+                "edit",
+                "42",
+                "--title",
+                "Epic",
+                "--body-file",
+                "-",
             ],
+            b"Plan",
             ok(""),
         );
         let mut adapter = GithubAdapter::new(&runner, cwd());
-        let edit = edit(
-            MutationType::UpdateEpic,
-            MutationPayload::UpdateTitleBody(TitleBody {
+        let edit = BackendEdit::UpdateEpic {
+            epic: address("42"),
+            content: ContentEdit::Both {
                 title: "Epic".into(),
                 body: "Plan".into(),
-            }),
-            "42",
-        );
+            },
+        };
         assert_eq!(
             adapter.apply_edit(&edit).unwrap(),
             BackendEditOutcome::Acknowledged
@@ -2673,13 +2642,10 @@ mod tests {
         let runner = FakeRunner::new();
         runner.expect_exact(&["gh", "issue", "edit", "42", "--parent", "9"], ok(""));
         let mut adapter = GithubAdapter::new(&runner, cwd());
-        let edit = edit(
-            MutationType::SetTicketContainer,
-            MutationPayload::ContainerRef(ContainerRef {
-                container_id: "e".into(),
-            }),
-            "42",
-        );
+        let edit = BackendEdit::SetTicketContainer {
+            ticket: address("42"),
+            container: address("9"),
+        };
         assert_eq!(
             adapter.apply_edit(&edit).unwrap(),
             BackendEditOutcome::Acknowledged
@@ -2692,13 +2658,9 @@ mod tests {
         let runner = FakeRunner::new();
         runner.expect_exact(&["gh", "issue", "edit", "42", "--remove-parent"], ok(""));
         let mut adapter = GithubAdapter::new(&runner, cwd());
-        let edit = edit(
-            MutationType::ClearTicketContainer,
-            MutationPayload::ContainerRef(ContainerRef {
-                container_id: "e".into(),
-            }),
-            "42",
-        );
+        let edit = BackendEdit::ClearTicketContainer {
+            ticket: address("42"),
+        };
         assert_eq!(
             adapter.apply_edit(&edit).unwrap(),
             BackendEditOutcome::Acknowledged
@@ -2714,7 +2676,10 @@ mod tests {
             ok(""),
         );
         let mut adapter = GithubAdapter::new(&runner, cwd());
-        let v = dep_edit(MutationType::AddDependency, "5", "9");
+        let v = BackendEdit::AddDependency {
+            blocked: address("5"),
+            blocking: address("9"),
+        };
         assert!(matches!(
             adapter.apply_edit(&v).unwrap(),
             BackendEditOutcome::Acknowledged
@@ -2730,7 +2695,10 @@ mod tests {
             ok(""),
         );
         let mut adapter = GithubAdapter::new(&runner, cwd());
-        let v = dep_edit(MutationType::RemoveDependency, "5", "9");
+        let v = BackendEdit::RemoveDependency {
+            blocked: address("5"),
+            blocking: address("9"),
+        };
         assert!(matches!(
             adapter.apply_edit(&v).unwrap(),
             BackendEditOutcome::Acknowledged
@@ -2747,7 +2715,10 @@ mod tests {
             fail(1, "unknown flag: --add-blocked-by"),
         );
         let mut adapter = GithubAdapter::new(&runner, cwd());
-        let v = dep_edit(MutationType::AddDependency, "5", "9");
+        let v = BackendEdit::AddDependency {
+            blocked: address("5"),
+            blocking: address("9"),
+        };
         match adapter.apply_edit(&v).unwrap() {
             BackendEditOutcome::Rejected(f) => {
                 assert!(f.detail.contains("unknown flag"), "{}", f.detail);

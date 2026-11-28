@@ -7,7 +7,9 @@
 
 use super::effort::BackendEffort;
 use super::lifecycle::Lifecycle;
-use super::mutation_payload::{EffortChange, LifecycleChange, PriorityChange, TitleBody};
+use super::mutation_payload::{
+    ContentEdit, EffortChange, LifecycleChange, PriorityChange, TitleBody,
+};
 use super::priority::Priority;
 use super::ticket_kind::TicketKind;
 use thiserror::Error;
@@ -56,11 +58,11 @@ pub struct BackendItemAddress {
 pub enum BackendEdit {
     UpdateTicket {
         ticket: BackendItemAddress,
-        snapshot: TitleBody,
+        content: ContentEdit,
     },
     UpdateEpic {
         epic: BackendItemAddress,
-        snapshot: TitleBody,
+        content: ContentEdit,
     },
     SetItemStatus {
         item: BackendItemAddress,

@@ -41,7 +41,7 @@ use crate::domain::backend_operation::BackendItemIdentity;
 use crate::domain::binding_display_provenance::BindingDisplayProvenance;
 use crate::domain::dependency_rule::{self, DependencyClassification, DependencyRejection};
 use crate::domain::item_class::ItemClass;
-use crate::domain::mutation_payload::{MutationPayload, Promotion, TitleBody};
+use crate::domain::mutation_payload::{ContentEdit, MutationPayload, Promotion};
 use crate::domain::mutation_state::MutationState;
 use crate::domain::mutation_type::MutationType;
 use crate::domain::origin::Origin;
@@ -688,7 +688,7 @@ pub fn reconcile_promotion(
                 mutation_type,
                 item_id: &current.item_id,
                 item_class: current.item_class,
-                payload: &MutationPayload::UpdateTitleBody(TitleBody { title, body }),
+                payload: &MutationPayload::ContentEdit(ContentEdit::Both { title, body }),
                 promotion_operation_id: Some(&current.operation_id),
                 now_iso: now,
             },
@@ -1269,7 +1269,7 @@ mod tests {
     use crate::domain::item_class::ItemClass;
     use crate::domain::lifecycle::Lifecycle;
     use crate::domain::mutation_payload::{
-        ContainerRef, DependencyRef, MutationPayload, Promotion, TitleBody,
+        ContainerRef, DependencyRef, MutationPayload, Promotion,
     };
     use crate::domain::mutation_type::{AddressedCounterpart, MutationType};
     use crate::domain::promotion_plan::MutationDraft;
@@ -2038,10 +2038,10 @@ mod tests {
                 [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             ).unwrap();
             assert_eq!(update_row.0, update);
-            let payload: TitleBody = serde_json::from_str(&update_row.1).unwrap();
+            let payload: ContentEdit = serde_json::from_str(&update_row.1).unwrap();
             assert_eq!(
                 payload,
-                TitleBody {
+                ContentEdit::Both {
                     title: "Current title".into(),
                     body: "Current body".into(),
                 }
@@ -2891,7 +2891,7 @@ mod tests {
                 mutation_type: MutationType::UpdateTicket,
                 item_id: "existing",
                 item_class: ItemClass::Ticket,
-                payload: &MutationPayload::UpdateTitleBody(TitleBody {
+                payload: &MutationPayload::ContentEdit(ContentEdit::Both {
                     title: "Prior".into(),
                     body: String::new(),
                 }),

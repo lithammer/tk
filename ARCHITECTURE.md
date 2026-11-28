@@ -172,10 +172,12 @@ locks still require a writable per-Store directory in a sandbox; initialization
 and reassociation also write Git config and the data-root initialization lock.
 
 An opened `Store` retains a shared `association.lock` until its SQLite connection
-closes. Attachment requires the exclusive lock and publishes the manifest before
-replacing Git's pointer. All initializers also hold `init.lock` through pointer
-writes (ADR-0053). Automatic repair checks ownership and vacancy, including
-all retained Store Backups, under the exclusive Store lock before publication.
+closes. An on-open migration takes the exclusive lock before changing the
+Store version, then reopens under a shared lock. Attachment takes the exclusive
+lock and publishes the manifest before replacing Git's pointer. All
+initializers also hold `init.lock` through pointer writes (ADR-0053).
+Automatic repair checks ownership and vacancy, including all retained Store
+Backups, under the exclusive Store lock before publication.
 
 Migration SQL files are the source of truth for exact table columns and checks.
 Important stable contracts:
@@ -288,11 +290,14 @@ an item appends backend-applicable Mutations in the same transaction as the
 visible state change once it is backend-bound — already a Backend item, or a
 Local item whose Promotion is durable in the Mutation Log, whose later
 Mutations are therefore ordered behind that Promotion. A Local item with no
-Promotion intent updates current state only. A Priority change emits
-`set_ticket_priority` under the same gate. An Effort change emits
-`set_ticket_effort` only when that Backend shares Effort (GitHub). Jira Effort
-stays local: no Effort Mutation, no Promotion value, and no Pull overwrite
-(ADR-0054).
+Promotion intent updates current state only. A content Mutation from
+`tk update` carries only the supplied title and body fields, even if they
+match the Store. Pull keeps every field named by a pending or failed content
+Mutation ([ADR-0058](./docs/adr/0058-content-mutations-preserve-explicit-field-intent.md)).
+A Priority change emits `set_ticket_priority` under the same gate. An Effort
+change emits `set_ticket_effort` only when that Backend shares Effort (GitHub).
+Jira Effort stays local: no Effort Mutation, no Promotion value, and no Pull
+overwrite (ADR-0054).
 
 `done` is terminal in v1 per
 [ADR 0006](./docs/adr/0006-done-is-terminal-in-v1.md). `items.status` changes

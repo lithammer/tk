@@ -1,19 +1,13 @@
 # Backend Pull merge skips rows with pending or failed Mutations
 
-> **Amended by ADR-0044.** When a Pull snapshot matches an existing Item, an
-> unresolved `pending` or `failed` `UpdateTicket` or `UpdateEpic` Mutation for
-> its exact `(item_id, item_class)` preserves only `title` and `body`. Pull still
-> imports Lifecycle and a present Ticket Kind; `None` preserves the stored Kind.
-> A `done` Lifecycle clears Work State to `idle`, and a refresh keeps
-> `updated_at` at the later of the stored value and refresh time. All other
-> Mutation Types admit Backend title/body, including Promotion variants. An
-> `applying` Mutation remains the global Pull barrier.
+> [ADR-0044](./0044-backend-pull-shields-content-fields.md) replaced the
+> whole-row rule below. [ADR-0058](./0058-content-mutations-preserve-explicit-field-intent.md)
+> narrows the content shield to the fields each Mutation names.
 
 When a Pull snapshot matches an existing local row, the sync engine originally
 skipped the entire row's overwrite if any `pending` or `failed` Mutation
 targeted it; otherwise it overwrote `title`, `body`, `status`, and
-`updated_at` in one transaction. The historical whole-row rule is replaced by
-ADR-0044's field authority policy.
+`updated_at` in one transaction.
 
 ## Considered Options
 

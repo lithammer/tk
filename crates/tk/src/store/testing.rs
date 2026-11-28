@@ -111,7 +111,11 @@ impl TmpStore {
 
 /// Queue pointer selection and its check after the opener takes the Store lock.
 pub(crate) fn expect_pointer(runner: &crate::proc::FakeRunner) {
-    for _ in 0..2 {
+    expect_pointer_reads(runner, 2);
+}
+
+pub(crate) fn expect_pointer_reads(runner: &crate::proc::FakeRunner, count: usize) {
+    for _ in 0..count {
         runner.expect(
             &[
                 "git",

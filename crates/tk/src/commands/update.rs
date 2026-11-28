@@ -3,7 +3,8 @@
 //!
 //! ADR-0051: omitted fields keep their Repository Store values; an explicit
 //! body replaces the field, including empty input. Requested fields and their
-//! Mutations commit together. Epics reject Priority, Effort, and parent edits.
+//! Mutations commit together. Content Mutations retain only named fields
+//! (ADR-0058). Epics reject Priority, Effort, and parent edits.
 
 use clap::Args as ClapArgs;
 
@@ -11,6 +12,7 @@ use crate::cli::{CommandError, Deps, Exit};
 use crate::commands::resolver;
 use crate::domain::effort::Effort;
 use crate::domain::item_class::ItemClass;
+use crate::domain::mutation_payload::ContentEdit;
 use crate::domain::priority::Priority;
 use crate::store::repository::update::{self, FieldEdit, UpdateRequest};
 
@@ -161,11 +163,15 @@ pub fn run(deps: &mut Deps<'_>, args: Args) -> Result<Exit, CommandError> {
         (None, false) => FieldEdit::Unchanged,
     };
 
+    let content = match (title.map(str::to_owned), body) {
+        (Some(title), Some(body)) => Some(ContentEdit::Both { title, body }),
+        (Some(title), None) => Some(ContentEdit::Title { title }),
+        (None, Some(body)) => Some(ContentEdit::Body { body }),
+        (None, None) => None,
+    };
     let req = UpdateRequest {
         id: &resolved.id,
-        item_class: resolved.item_class,
-        title,
-        body: body.as_deref(),
+        content,
         priority,
         effort,
         parent: parent_op,
@@ -460,7 +466,7 @@ mod tests {
     }
 
     #[test]
-    fn title_only_cli_edit_preserves_body_in_store_and_mutation() {
+    fn title_only_cli_edit_preserves_local_body_and_omits_it_from_the_mutation() {
         let fixture = TmpStore::new("repo");
         let conn = seed_store(&fixture);
         insert_fixture_item(
@@ -499,7 +505,7 @@ mod tests {
         let mutation = crate::store::sync::show_mutation_log(&store.conn, 1).unwrap();
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&mutation.payload_json).unwrap(),
-            serde_json::json!({"title": "Corrected title", "body": "Steps and context\r\n"})
+            serde_json::json!({"title": "Corrected title"})
         );
     }
 

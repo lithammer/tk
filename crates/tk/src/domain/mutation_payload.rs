@@ -1,17 +1,9 @@
 //! Typed payload variants for Mutation Log entries.
 //!
-//! Each variant maps to one or more [`super::mutation_type::MutationType`]
-//! values. The Mutation Log outbox writes the *inner* struct to
-//! `mutations.payload_json` (a flat object per row), and Backend Adapters
-//! read the same shape back — keeping the on-disk schema independent of
-//! Rust's enum discriminator and friendly to the `json_valid()` CHECK
-//! constraint on the column.
-//!
-//! `Serialize`/`Deserialize` therefore live on the per-variant payload
-//! structs ([`TitleBody`], [`ContainerRef`], [`LifecycleChange`],
-//! [`PriorityChange`], [`EffortChange`], [`DependencyRef`], [`Promotion`])
-//! rather than on the outer enum: serializing the enum directly would produce externally-tagged JSON
-//! (`{"UpdateTitleBody":{…}}`) that breaks the flat row contract.
+//! The Repository Store writes each payload as a flat JSON object and uses
+//! the row's [`super::mutation_type::MutationType`] to decode it. Serialize
+//! the inner payload, not the outer enum: its tag is not part of the row
+//! contract.
 
 use serde::{Deserialize, Serialize};
 
@@ -23,9 +15,8 @@ use crate::domain::priority::Priority;
 /// the row's `mutation_type` discriminator.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MutationPayload {
-    /// Payload for `update_ticket` and `update_epic` — full title/body snapshot
-    /// of the current state after the edit.
-    UpdateTitleBody(TitleBody),
+    /// Payload for `update_ticket` and `update_epic`.
+    ContentEdit(ContentEdit),
     /// Payload for `set_ticket_container` and `clear_ticket_container` — the
     /// internal stable ID of the Container being referenced.
     ContainerRef(ContainerRef),
@@ -45,13 +36,11 @@ pub enum MutationPayload {
 }
 
 impl MutationPayload {
-    /// Serialize the inner per-variant struct to JSON for the
-    /// `mutations.payload_json` column. The flat-object shape matches the
-    /// CHECK constraint and the format Backend Adapters round-trip back out.
+    /// Serialize the flat object stored in `mutations.payload_json`.
     #[must_use]
     pub fn to_json_string(&self) -> String {
         match self {
-            Self::UpdateTitleBody(v) => serde_json::to_string(v),
+            Self::ContentEdit(v) => serde_json::to_string(v),
             Self::ContainerRef(v) => serde_json::to_string(v),
             Self::Lifecycle(v) => serde_json::to_string(v),
             Self::Priority(v) => serde_json::to_string(v),
@@ -59,12 +48,66 @@ impl MutationPayload {
             Self::DependencyRef(v) => serde_json::to_string(v),
             Self::Promotion(v) => serde_json::to_string(v),
         }
-        .expect("MutationPayload inner structs are infallible serializers")
+        .expect("MutationPayload inner types are infallible serializers")
     }
 }
 
-/// Full title/body snapshot used by `update_ticket` / `update_epic`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// At least one title or body replacement. Omission leaves a field alone;
+/// an empty body clears it. Older snapshots decode as `Both` even with
+/// extra keys; a one-field edit accepts only its own key (ADR-0058).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum ContentEdit {
+    Both { title: String, body: String },
+    Title { title: String },
+    Body { body: String },
+}
+
+impl ContentEdit {
+    #[must_use]
+    pub fn title(&self) -> Option<&str> {
+        match self {
+            Self::Both { title, .. } | Self::Title { title } => Some(title),
+            Self::Body { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub fn body(&self) -> Option<&str> {
+        match self {
+            Self::Both { body, .. } | Self::Body { body } => Some(body),
+            Self::Title { .. } => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ContentEdit {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Do not read a malformed full snapshot as a one-field edit.
+        #[derive(Deserialize)]
+        #[serde(untagged, deny_unknown_fields)]
+        enum Single {
+            Title { title: String },
+            Body { body: String },
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            Both { title: String, body: String },
+            Single(Single),
+        }
+
+        Ok(match Wire::deserialize(deserializer)? {
+            Wire::Both { title, body } => Self::Both { title, body },
+            Wire::Single(Single::Title { title }) => Self::Title { title },
+            Wire::Single(Single::Body { body }) => Self::Body { body },
+        })
+    }
+}
+
+/// Full content supplied when creating a Backend item through Promotion.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TitleBody {
     pub title: String,
     pub body: String,
@@ -142,13 +185,13 @@ mod tests {
                 r#"{"title":"Quote \" and backslash \\ and newline \n inside","body":""}"#,
             ),
         ] {
-            let original = TitleBody {
+            let original = ContentEdit::Both {
                 title: title.into(),
                 body: body.into(),
             };
-            let json = MutationPayload::UpdateTitleBody(original.clone()).to_json_string();
+            let json = MutationPayload::ContentEdit(original.clone()).to_json_string();
             assert_eq!(json, expected);
-            let restored: TitleBody = serde_json::from_str(&json).unwrap();
+            let restored: ContentEdit = serde_json::from_str(&json).unwrap();
             assert_eq!(restored, original);
         }
     }

@@ -233,14 +233,9 @@ _Avoid_: Facade, Provider, Connector
 
 **Backend Pull**:
 An all-or-nothing **Backend Adapter** operation that refreshes the exact set of **Adopted** **Backend** items not yet `done`, returning title, body, **Lifecycle**, optional **Ticket Kind**, **Priority**, **Effort**, **Blocking Item**, and **Container** values for the Repository Store to merge. It never mirrors, discovers, or changes item identity, **Origin**, **Display ID**, or **Item Class**. It never writes a Backend value to **Work State**; importing a `done` **Lifecycle** clears **Work State** to `idle` as a local consequence.
-When an Item has a `pending` or `failed` `UpdateTicket` or `UpdateEpic`
-**Mutation**, the Repository Store preserves its title and body; a `pending`
-or `failed` `set_ticket_priority` or `set_ticket_effort` **Mutation**
-preserves **Priority** or **Effort**, and a `pending` or `failed`
-`set_ticket_container` or `clear_ticket_container` **Mutation** preserves the
-**Ticket**'s **Container**. Pull still
-imports **Lifecycle** and a present **Ticket Kind**; `None` keeps the stored
-Kind. The merge keeps `updated_at` at the later of the stored value and refresh
+A `pending` or `failed` **Mutation** protects the stored title, body,
+**Priority**, **Effort**, or **Container** it changes. Pull still imports
+**Lifecycle**. It imports **Ticket Kind** when the Backend supplies one. The merge keeps `updated_at` at the later of the stored value and refresh
 time. The Repository Store, not the **Backend Adapter**, owns these field rules.
 _Avoid_: Fetch, Import, Mirror
 

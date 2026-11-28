@@ -13,9 +13,8 @@
 //! the Store invariant that an `applied` transition advances the Sync Cursor in
 //! the same transaction.
 //!
-//! The one read here, [`resolve_backend_binding`], answers the question the
-//! outbox itself defines: whether a Local Item is already Pending Promotion
-//! (ADR-0036).
+//! Pull and Apply share payload decoding here. Backend Binding includes
+//! Pending Promotion even before the Item has a Backend identity (ADR-0036).
 
 use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
@@ -23,7 +22,10 @@ use thiserror::Error;
 use crate::domain::backend_binding::BackendBinding;
 use crate::domain::backend_outcome::Failure;
 use crate::domain::item_class::ItemClass;
-use crate::domain::mutation_payload::{ContainerRef, DependencyRef, MutationPayload, Promotion};
+use crate::domain::mutation_payload::{
+    ContainerRef, ContentEdit, DependencyRef, EffortChange, LifecycleChange, MutationPayload,
+    PriorityChange, Promotion,
+};
 use crate::domain::mutation_state::MutationState;
 use crate::domain::mutation_type::{AddressedCounterpart, MutationType};
 use crate::domain::origin::Origin;
@@ -84,6 +86,56 @@ pub fn append(conn: &Connection, req: AppendRequest<'_>) -> Result<i64, AppendEr
         ],
     )?;
     Ok(sequence)
+}
+
+pub(crate) enum DecodePayloadError {
+    Json(serde_json::Error),
+    Unsupported,
+}
+
+impl From<serde_json::Error> for DecodePayloadError {
+    fn from(source: serde_json::Error) -> Self {
+        Self::Json(source)
+    }
+}
+
+/// Decode the flat payload selected by the row's Mutation Type.
+pub(crate) fn decode_payload(
+    mutation_type: MutationType,
+    payload_text: &str,
+) -> Result<MutationPayload, DecodePayloadError> {
+    use MutationType as Mt;
+
+    Ok(match mutation_type {
+        Mt::UpdateTicket | Mt::UpdateEpic => {
+            MutationPayload::ContentEdit(decode_content_edit(payload_text)?)
+        }
+        Mt::SetTicketContainer | Mt::ClearTicketContainer => {
+            MutationPayload::ContainerRef(serde_json::from_str::<ContainerRef>(payload_text)?)
+        }
+        Mt::SetItemStatus => {
+            MutationPayload::Lifecycle(serde_json::from_str::<LifecycleChange>(payload_text)?)
+        }
+        Mt::SetTicketPriority => {
+            MutationPayload::Priority(serde_json::from_str::<PriorityChange>(payload_text)?)
+        }
+        Mt::SetTicketEffort => {
+            MutationPayload::Effort(serde_json::from_str::<EffortChange>(payload_text)?)
+        }
+        Mt::AddDependency | Mt::RemoveDependency => {
+            MutationPayload::DependencyRef(serde_json::from_str::<DependencyRef>(payload_text)?)
+        }
+        Mt::PromoteTicket | Mt::PromoteEpic => {
+            MutationPayload::Promotion(serde_json::from_str::<Promotion>(payload_text)?)
+        }
+        Mt::AddExternalBlocker | Mt::ResolveExternalBlocker => {
+            return Err(DecodePayloadError::Unsupported);
+        }
+    })
+}
+
+pub(crate) fn decode_content_edit(payload_text: &str) -> Result<ContentEdit, serde_json::Error> {
+    serde_json::from_str(payload_text)
 }
 
 /// Decode the internal Item ID addressed as a Mutation's counterpart.
@@ -471,7 +523,7 @@ mod tests {
     use super::*;
     use crate::domain::backend_kind::BackendKind;
     use crate::domain::backend_outcome::FailureClass;
-    use crate::domain::mutation_payload::TitleBody;
+    use crate::domain::mutation_payload::ContentEdit;
     use crate::store::migrations;
     use crate::store::testing::{
         FixtureItem, FixtureMutation, FixtureRemote, insert_fixture_item, insert_fixture_mutation,
@@ -583,7 +635,7 @@ mod tests {
                     mutation_type: MutationType::UpdateTicket,
                     item_id: "t1",
                     item_class: ItemClass::Ticket,
-                    payload: &MutationPayload::UpdateTitleBody(TitleBody {
+                    payload: &MutationPayload::ContentEdit(ContentEdit::Both {
                         title: "New title".into(),
                         body: "New body".into(),
                     }),
@@ -643,7 +695,7 @@ mod tests {
                 mutation_type: MutationType::UpdateTicket,
                 item_id: "t1",
                 item_class: ItemClass::Ticket,
-                payload: &MutationPayload::UpdateTitleBody(TitleBody {
+                payload: &MutationPayload::ContentEdit(ContentEdit::Both {
                     title: "A".into(),
                     body: String::new(),
                 }),
@@ -658,7 +710,7 @@ mod tests {
                 mutation_type: MutationType::UpdateTicket,
                 item_id: "t1",
                 item_class: ItemClass::Ticket,
-                payload: &MutationPayload::UpdateTitleBody(TitleBody {
+                payload: &MutationPayload::ContentEdit(ContentEdit::Both {
                     title: "B".into(),
                     body: String::new(),
                 }),
@@ -673,7 +725,7 @@ mod tests {
                 mutation_type: MutationType::UpdateTicket,
                 item_id: "t1",
                 item_class: ItemClass::Ticket,
-                payload: &MutationPayload::UpdateTitleBody(TitleBody {
+                payload: &MutationPayload::ContentEdit(ContentEdit::Both {
                     title: "C".into(),
                     body: String::new(),
                 }),
@@ -923,7 +975,7 @@ mod tests {
                 backend_kind: "github".into(),
             })
         } else {
-            MutationPayload::UpdateTitleBody(TitleBody {
+            MutationPayload::ContentEdit(ContentEdit::Both {
                 title: "Local".into(),
                 body: String::new(),
             })

@@ -1,5 +1,9 @@
 # Backend Pull shields content fields
 
+[ADR-0058](./0058-content-mutations-preserve-explicit-field-intent.md) replaces
+the combined title/body shield below. This ADR still records why the
+Repository Store merges Lifecycle and Ticket Kind independently of content.
+
 A Backend Pull snapshot can pair an authoritative Lifecycle or Ticket Kind with
 a stale title and body. An unresolved local content Mutation must keep title
 and body visible without hiding those Backend values. The Backend Adapter

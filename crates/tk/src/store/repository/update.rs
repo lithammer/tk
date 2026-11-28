@@ -1,24 +1,17 @@
-//! `tk update` field-level write (title / body / priority / effort / parent
-//! move).
+//! Store writes for `tk update`.
 //!
-//! Diffs each requested field against the stored value inside the same
-//! `begin immediate` transaction the read used, writes only the changed
-//! columns. For a backend-bound Item, title/body edits emit one full snapshot;
-//! a parent change emits one `set_ticket_container` or `clear_ticket_container`,
+//! A content Mutation carries only the fields the caller named, even if they
+//! match the Store (ADR-0058). Local changes and queued Mutations commit
+//! together.
+//! A parent change emits one `set_ticket_container` or `clear_ticket_container`,
 //! never a pair (ADR-0055). Priority changes emit `set_ticket_priority`; Effort
 //! changes emit `set_ticket_effort` only where Effort is Shared (ADR-0054).
 //!
-//! Title/body names one Item, so the Ticket's own Backend Binding gates it. A
-//! Containment Mutation names two, so `set_ticket_container` is emitted only
-//! when Ticket and Container are backend-bound to the same Backend — the rule
-//! Promotion preflight and `tk block` apply to their own two-endpoint
-//! relationships. A move whose new Container the Backend cannot hold emits
-//! `clear_ticket_container`, so the Backend drops the parent tk no longer
-//! records.
+//! Content edits need only the Item's Backend Binding. A Containment set
+//! needs both Items bound to the same Backend. Moving to a Container that
+//! does not bind there clears the old Backend Containment, if any.
 //!
-//! `updated_at` is bumped only when at least one column actually changes;
-//! a request whose values all match the stored state commits a no-op
-//! transaction and returns the same snapshot the caller already had.
+//! A Mutation queued without a local field change leaves `updated_at` alone.
 
 use rusqlite::{OptionalExtension, params};
 
@@ -27,7 +20,7 @@ use crate::domain::backend_binding::BackendBinding;
 use crate::domain::effort::{BackendEffort, Effort};
 use crate::domain::item_class::ItemClass;
 use crate::domain::mutation_payload::{
-    ContainerRef, EffortChange, MutationPayload, PriorityChange, TitleBody,
+    ContainerRef, ContentEdit, EffortChange, MutationPayload, PriorityChange,
 };
 use crate::domain::mutation_type::MutationType;
 use crate::domain::priority::Priority;
@@ -69,22 +62,11 @@ impl<T: Copy + PartialEq> FieldEdit<T> {
     }
 }
 
-/// Input for [`update_item`].
-///
-/// `item_class` drives the `update_ticket` vs `update_epic` Mutation
-/// discriminator, so the [`Default`] impl picks [`ItemClass::Ticket`]
-/// (the dominant case) — callers updating an Epic MUST set this field
-/// explicitly. The command layer (tk-91) is the dedicated caller and is
-/// responsible for forwarding the resolved class through.
 #[derive(Debug, Clone, Default)]
 pub struct UpdateRequest<'a> {
     /// Internal stable `items.id` of the row to update.
     pub id: &'a str,
-    /// Item Class of the resolved row — drives the Mutation discriminator
-    /// for the title/body snapshot.
-    pub item_class: ItemClass,
-    pub title: Option<&'a str>,
-    pub body: Option<&'a str>,
+    pub content: Option<ContentEdit>,
     /// The caller keeps this unchanged on Epics; the schema rejects a value.
     pub priority: FieldEdit<Priority>,
     /// Like `priority`, the caller keeps this [`FieldEdit::Unchanged`] on an
@@ -124,21 +106,18 @@ pub enum UpdateError {
 }
 
 struct Current {
+    item_class: ItemClass,
     title: String,
-    body: String,
+    body_changed: bool,
     priority: Option<Priority>,
     effort: Option<Effort>,
     container_id: Option<String>,
     display_id: String,
 }
 
-/// The new column values for an item update, grouped so [`write_columns`]
-/// takes one parameter object instead of a row of positional scalars. Only
-/// built once a real change is detected, so `title`/`body` always carry the
-/// effective (possibly unchanged) value.
 struct ColumnWrites<'a> {
-    title: &'a str,
-    body: &'a str,
+    title: Option<&'a str>,
+    body: Option<&'a str>,
     priority: FieldEdit<Priority>,
     effort: FieldEdit<Effort>,
 }
@@ -151,20 +130,24 @@ pub fn update_item<C: Clock + ?Sized>(
 ) -> Result<UpdatedItem, UpdateError> {
     let now_iso = clock.now_iso();
     let tx = crate::store::write_transaction(&mut store.conn)?;
+    let content = req.content.as_ref();
+    let body = content.and_then(ContentEdit::body);
 
     let current = tx
         .query_row(
-            "select title, body, priority, container_id, display_value, effort \
+            "select title, case when ?2 is null then 0 else body is not ?2 end, \
+                    priority, container_id, display_value, effort, item_class \
                from items where id = ?1",
-            params![req.id],
+            params![req.id, body],
             |r| {
                 Ok(Current {
                     title: r.get(0)?,
-                    body: r.get(1)?,
+                    body_changed: r.get(1)?,
                     priority: r.get(2)?,
                     container_id: r.get(3)?,
                     display_id: r.get(4)?,
                     effort: r.get(5)?,
+                    item_class: r.get(6)?,
                 })
             },
         )
@@ -173,66 +156,55 @@ pub fn update_item<C: Clock + ?Sized>(
         return Err(UpdateError::NotFound);
     };
 
-    let new_title: Option<&str> = req
-        .title
-        .filter(|requested| *requested != current.title.as_str());
-    let new_body: Option<&str> = req
-        .body
-        .filter(|requested| *requested != current.body.as_str());
+    let new_title = content
+        .and_then(ContentEdit::title)
+        .filter(|title| *title != current.title);
+    let new_body = body.filter(|_| current.body_changed);
     let new_priority = req.priority.against(current.priority);
     let new_effort = req.effort.against(current.effort);
 
     let parent = req.parent.against(current.container_id.as_deref());
 
-    let title_or_body_changed = new_title.is_some() || new_body.is_some();
-    let any_change = title_or_body_changed
+    let changes_local_state = new_title.is_some()
+        || new_body.is_some()
         || new_priority != FieldEdit::Unchanged
         || new_effort != FieldEdit::Unchanged
         || parent != FieldEdit::Unchanged;
 
-    if !any_change {
-        tx.commit()?;
-        return Ok(UpdatedItem {
-            display_id: current.display_id,
-            title: current.title,
-            item_class: req.item_class,
-        });
+    if changes_local_state {
+        write_columns(
+            &tx,
+            req.id,
+            &ColumnWrites {
+                title: new_title,
+                body: new_body,
+                priority: new_priority,
+                effort: new_effort,
+            },
+            &now_iso,
+        )?;
     }
-
-    let effective_title: &str = new_title.unwrap_or(&current.title);
-    let effective_body: &str = new_body.unwrap_or(&current.body);
-
-    write_columns(
-        &tx,
-        req.id,
-        &ColumnWrites {
-            title: effective_title,
-            body: effective_body,
-            priority: new_priority,
-            effort: new_effort,
-        },
-        &now_iso,
-    )?;
     match parent {
         FieldEdit::Set(container_id) => containment::set(&tx, req.id, container_id)?,
         FieldEdit::Clear => containment::clear(&tx, req.id)?,
         FieldEdit::Unchanged => {}
     }
 
-    // Backend Binding, not Origin, decides whether the edit is also backend
-    // intent (ADR-0036): a title change made between `tk promote` and the next
-    // `tk sync` belongs in the Mutation Log, ordered behind the Promotion that
-    // will give the Item its backend identity.
-    let intent = mutations::resolve_backend_binding(&tx, req.id)?;
-    if let Some(backend) = intent.backend_kind() {
+    let title = new_title.map_or(current.title, str::to_owned);
+    // A Pending Promotion counts as bound: the edit waits behind the
+    // Mutation that will give the Item its Backend identity (ADR-0036).
+    if (changes_local_state || req.content.is_some())
+        && let binding = mutations::resolve_backend_binding(&tx, req.id)?
+        && let Some(backend) = binding.backend_kind()
+    {
         let container_mutation = match parent {
-            FieldEdit::Set(new_id) if containment_is_backend_intent(&tx, &intent, new_id)? => {
+            FieldEdit::Set(new_id) if containment_is_backend_intent(&tx, &binding, new_id)? => {
                 Some((MutationType::SetTicketContainer, new_id))
             }
             // Cleared, or moved to a Container the Backend cannot hold: the
             // Backend still has the parent tk just dropped.
             FieldEdit::Set(_) | FieldEdit::Clear => match current.container_id.as_deref() {
-                Some(old_id) if containment_is_backend_intent(&tx, &intent, old_id)? => {
+                Some(old_id) if containment_is_backend_intent(&tx, &binding, old_id)? => {
                     Some((MutationType::ClearTicketContainer, old_id))
                 }
                 _ => None,
@@ -245,7 +217,7 @@ pub fn update_item<C: Clock + ?Sized>(
                 mutations::AppendRequest {
                     mutation_type,
                     item_id: req.id,
-                    item_class: req.item_class,
+                    item_class: current.item_class,
                     payload: &MutationPayload::ContainerRef(ContainerRef {
                         container_id: container_id.to_owned(),
                     }),
@@ -254,17 +226,14 @@ pub fn update_item<C: Clock + ?Sized>(
                 },
             )?;
         }
-        if title_or_body_changed {
+        if let Some(content) = req.content {
             mutations::append(
                 &tx,
                 mutations::AppendRequest {
-                    mutation_type: req.item_class.update_mutation_type(),
+                    mutation_type: current.item_class.update_mutation_type(),
                     item_id: req.id,
-                    item_class: req.item_class,
-                    payload: &MutationPayload::UpdateTitleBody(TitleBody {
-                        title: effective_title.to_owned(),
-                        body: effective_body.to_owned(),
-                    }),
+                    item_class: current.item_class,
+                    payload: &MutationPayload::ContentEdit(content),
                     promotion_operation_id: None,
                     now_iso: &now_iso,
                 },
@@ -276,7 +245,7 @@ pub fn update_item<C: Clock + ?Sized>(
                 mutations::AppendRequest {
                     mutation_type: MutationType::SetTicketPriority,
                     item_id: req.id,
-                    item_class: req.item_class,
+                    item_class: current.item_class,
                     payload: &MutationPayload::Priority(PriorityChange { priority }),
                     promotion_operation_id: None,
                     now_iso: &now_iso,
@@ -292,7 +261,7 @@ pub fn update_item<C: Clock + ?Sized>(
                 mutations::AppendRequest {
                     mutation_type: MutationType::SetTicketEffort,
                     item_id: req.id,
-                    item_class: req.item_class,
+                    item_class: current.item_class,
                     payload: &MutationPayload::Effort(EffortChange { effort }),
                     promotion_operation_id: None,
                     now_iso: &now_iso,
@@ -304,8 +273,8 @@ pub fn update_item<C: Clock + ?Sized>(
     tx.commit()?;
     Ok(UpdatedItem {
         display_id: current.display_id,
-        title: effective_title.to_owned(),
-        item_class: req.item_class,
+        title,
+        item_class: current.item_class,
     })
 }
 
@@ -319,11 +288,12 @@ pub fn update_item<C: Clock + ?Sized>(
 /// and `dependency_rule` applies to an edge.
 fn containment_is_backend_intent(
     conn: &rusqlite::Connection,
-    ticket: &BackendBinding,
+    ticket_binding: &BackendBinding,
     container_id: &str,
 ) -> Result<bool, mutations::BackendBindingError> {
     let container = mutations::resolve_backend_binding(conn, container_id)?;
-    Ok(ticket.backend_kind().is_some() && ticket.backend_kind() == container.backend_kind())
+    Ok(ticket_binding.backend_kind().is_some()
+        && ticket_binding.backend_kind() == container.backend_kind())
 }
 
 fn write_columns(
@@ -335,7 +305,8 @@ fn write_columns(
     let (priority_changed, new_priority) = writes.priority.column();
     let (effort_changed, new_effort) = writes.effort.column();
     conn.execute(
-        "update items set title = ?2, body = ?3, priority = case when ?8 then ?4 else priority end, \
+        "update items set title = coalesce(?2, title), body = coalesce(?3, body), \
+                          priority = case when ?8 then ?4 else priority end, \
                           effort = case when ?5 then ?6 else effort end, \
                           updated_at = ?7 \
           where id = ?1",
@@ -478,9 +449,10 @@ mod tests {
             &FakeClock::new(1_900_000_000_000),
             UpdateRequest {
                 id: "t1",
-                item_class: ItemClass::Ticket,
-                title: Some("New title"),
-                body: Some("New body"),
+                content: Some(ContentEdit::Both {
+                    title: "New title".into(),
+                    body: "New body".into(),
+                }),
                 ..UpdateRequest::default()
             },
         )
@@ -520,8 +492,9 @@ mod tests {
             &clock(),
             UpdateRequest {
                 id: "t1",
-                item_class: ItemClass::Ticket,
-                title: Some("Renamed"),
+                content: Some(ContentEdit::Title {
+                    title: "Renamed".into(),
+                }),
                 ..UpdateRequest::default()
             },
         )
@@ -551,8 +524,9 @@ mod tests {
             &clock(),
             UpdateRequest {
                 id: "t1",
-                item_class: ItemClass::Ticket,
-                title: Some("Renamed while applying"),
+                content: Some(ContentEdit::Title {
+                    title: "Renamed while applying".into(),
+                }),
                 ..UpdateRequest::default()
             },
         )
@@ -578,8 +552,9 @@ mod tests {
             &clock(),
             UpdateRequest {
                 id: "t1",
-                item_class: ItemClass::Ticket,
-                title: Some("Renamed"),
+                content: Some(ContentEdit::Title {
+                    title: "Renamed".into(),
+                }),
                 ..UpdateRequest::default()
             },
         )
@@ -597,11 +572,11 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(payload, r#"{"title":"Renamed","body":"Body0"}"#);
+        assert_eq!(payload, r#"{"title":"Renamed"}"#);
     }
 
     #[test]
-    fn no_op_update_does_not_bump_updated_at() {
+    fn explicit_backend_content_edit_keeps_timestamp_when_local_values_match() {
         let mut store = open_seeded();
         seed_backend_ticket(&store, "t1", "tk-1", 1);
 
@@ -610,9 +585,10 @@ mod tests {
             &FakeClock::new(1_900_000_000_000),
             UpdateRequest {
                 id: "t1",
-                item_class: ItemClass::Ticket,
-                title: Some("Original"),
-                body: Some("Body0"),
+                content: Some(ContentEdit::Both {
+                    title: "Original".into(),
+                    body: "Body0".into(),
+                }),
                 ..UpdateRequest::default()
             },
         )
@@ -622,11 +598,11 @@ mod tests {
             .query_row("select updated_at from items", [], |r| r.get(0))
             .unwrap();
         assert_eq!(updated_at, "2026-05-09T00:00:00.000Z");
-        let mutations: i64 = store
+        let payload: String = store
             .conn
-            .query_row("select count(*) from mutations", [], |r| r.get(0))
+            .query_row("select payload_json from mutations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(mutations, 0);
+        assert_eq!(payload, r#"{"title":"Original","body":"Body0"}"#);
     }
 
     #[test]
@@ -639,7 +615,6 @@ mod tests {
             &clock(),
             UpdateRequest {
                 id: "t1",
-                item_class: ItemClass::Ticket,
                 priority: FieldEdit::Set(Priority::P0),
                 ..UpdateRequest::default()
             },
@@ -680,7 +655,6 @@ mod tests {
                 &clock(),
                 UpdateRequest {
                     id: "t1",
-                    item_class: ItemClass::Ticket,
                     effort,
                     ..UpdateRequest::default()
                 },
@@ -732,7 +706,6 @@ mod tests {
             &clock(),
             UpdateRequest {
                 id: "t1",
-                item_class: ItemClass::Ticket,
                 priority: FieldEdit::Set(Priority::P0),
                 ..UpdateRequest::default()
             },
@@ -763,7 +736,6 @@ mod tests {
             &clock(),
             UpdateRequest {
                 id: "t1",
-                item_class: ItemClass::Ticket,
                 parent: FieldEdit::Set("e-new"),
                 ..UpdateRequest::default()
             },
@@ -808,7 +780,6 @@ mod tests {
             &clock(),
             UpdateRequest {
                 id: "t1",
-                item_class: ItemClass::Ticket,
                 parent: FieldEdit::Clear,
                 ..UpdateRequest::default()
             },
@@ -836,8 +807,7 @@ mod tests {
             &clock(),
             UpdateRequest {
                 id: "missing",
-                item_class: ItemClass::Ticket,
-                title: Some("X"),
+                content: Some(ContentEdit::Title { title: "X".into() }),
                 ..UpdateRequest::default()
             },
         )
@@ -854,7 +824,6 @@ mod tests {
             &FakeClock::new(1_900_000_000_000),
             UpdateRequest {
                 id: "t1",
-                item_class: ItemClass::Ticket,
                 parent: FieldEdit::Clear,
                 ..UpdateRequest::default()
             },
@@ -898,8 +867,9 @@ mod tests {
             &clock(),
             UpdateRequest {
                 id: "t1",
-                item_class: ItemClass::Ticket,
-                title: Some("Renamed"),
+                content: Some(ContentEdit::Title {
+                    title: "Renamed".into(),
+                }),
                 parent: FieldEdit::Set("e-new"),
                 ..UpdateRequest::default()
             },
@@ -939,7 +909,6 @@ mod tests {
             &clock(),
             UpdateRequest {
                 id: "t1",
-                item_class: ItemClass::Ticket,
                 parent: FieldEdit::Set("e1"),
                 ..UpdateRequest::default()
             },
@@ -972,7 +941,6 @@ mod tests {
             &clock(),
             UpdateRequest {
                 id: "t1",
-                item_class: ItemClass::Ticket,
                 parent: FieldEdit::Set("e1"),
                 ..UpdateRequest::default()
             },
@@ -1020,7 +988,6 @@ mod tests {
             &clock(),
             UpdateRequest {
                 id: "t1",
-                item_class: ItemClass::Ticket,
                 parent: FieldEdit::Set("holder"),
                 ..UpdateRequest::default()
             },
@@ -1053,7 +1020,6 @@ mod tests {
             &clock(),
             UpdateRequest {
                 id: "t1",
-                item_class: ItemClass::Ticket,
                 parent: FieldEdit::Set("local"),
                 ..UpdateRequest::default()
             },
@@ -1081,10 +1047,11 @@ mod tests {
         seed_backend_ticket(&store, "a", "gh-1", 1);
         seed_backend_ticket(&store, "b", "gh-2", 2);
         seed_backend_ticket(&store, "c", "gh-3", 3);
-        let mv = |id, title, parent| UpdateRequest {
+        let mv = |id, title: Option<&str>, parent| UpdateRequest {
             id,
-            item_class: ItemClass::Ticket,
-            title,
+            content: title.map(|title| ContentEdit::Title {
+                title: title.into(),
+            }),
             parent,
             ..UpdateRequest::default()
         };
@@ -1147,9 +1114,10 @@ mod tests {
             &clock(),
             UpdateRequest {
                 id: "e1",
-                item_class: ItemClass::Epic,
-                title: Some("Updated Epic"),
-                body: Some(""),
+                content: Some(ContentEdit::Both {
+                    title: "Updated Epic".into(),
+                    body: String::new(),
+                }),
                 ..UpdateRequest::default()
             },
         )
