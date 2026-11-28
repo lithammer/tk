@@ -773,18 +773,31 @@ mod tests {
     }
 
     #[test]
-    fn open_existing_migrates_a_behind_version_store_to_max() {
-        // Commands must never get a handle to the old schema.
+    fn open_existing_upgrades_only_after_the_old_store_closes() {
         let store = TmpStore::new("repo");
-        seed_tk_db_at_version(&store, 2);
-        let runner = fake_runner_for(&store);
-        crate::store::testing::expect_pointer_reads(&runner, 2);
+        let old_version = migrations::MIGRATION_22.version;
+        seed_tk_db_at_version(&store, old_version);
+        let cwd = cwd();
         let clock = fixed_clock();
 
-        let opened = match open_existing(&runner, &cwd(), &clock, Some(&store.data_root)) {
-            Ok(s) => s,
-            Err(e) => panic!("expected Ok, got {e:?}"),
-        };
+        // An older opener holds this lock even while it waits on the Backend.
+        {
+            let _guard = super::super::association::lock_store(&store.tk_dir(), false).unwrap();
+            let conn = Connection::open(store.db_path()).unwrap();
+            let runner = fake_runner_for(&store);
+            assert!(matches!(
+                open_existing(&runner, &cwd, &clock, Some(&store.data_root)),
+                Err(OpenError::UpgradeBusy)
+            ));
+            assert_eq!(
+                migrations::current_version(&conn).unwrap(),
+                i64::from(old_version)
+            );
+        }
+
+        let runner = fake_runner_for(&store);
+        crate::store::testing::expect_pointer_reads(&runner, 2);
+        let opened = open_existing(&runner, &cwd, &clock, Some(&store.data_root)).unwrap();
         assert_eq!(
             migrations::current_version(opened.conn()).unwrap(),
             i64::from(migrations::MAX_KNOWN_VERSION)

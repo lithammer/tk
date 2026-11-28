@@ -40,6 +40,10 @@ CLI output, exit codes, SQL schema, and ADR-0017 messages are contracts.
 Change them deliberately. When a change revises a recorded decision,
 update its ADR in the same change.
 
+**Store formats.** For persisted payload changes, including JSON-only
+changes, check that the new binary reads old rows and that an already-open
+older binary cannot see the new format. See [ADR-0024](docs/adr/0024-auto-apply-forward-migrations-on-open.md).
+
 ## Tests
 
 Keep each contract's main proof at its owning boundary. A second layer needs
