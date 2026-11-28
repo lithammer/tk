@@ -63,7 +63,7 @@ thiserror = "1"
 # timezone resolution, no zoneinfo lookups. Trim the default `tz-*` /
 # `tzdb-*` features so we don't bundle hundreds of KB of IANA tzdb into the
 # static binary (ADR-0011 wants slim release artifacts).
-jiff = { version = "0.2", default-features = false, features = ["std"] }
+jiff = { version = "1", default-features = false, features = ["std"] }
 
 # RNG for Store IDs, Item IDs, Promotion Operations, and staged filenames.
 # The trait shape callers inherit is `&mut dyn Rng` (the dyn-compatible
